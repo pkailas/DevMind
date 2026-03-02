@@ -1,12 +1,14 @@
-// File: DevMindToolWindowControl.xaml.cs  v1.2
+// File: DevMindToolWindowControl.xaml.cs  v1.3
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
 using Microsoft.VisualStudio.Shell;
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Globalization;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
@@ -19,11 +21,12 @@ namespace DevMind
     /// <summary>
     /// WPF control for the DevMind chat tool window.
     /// Displays a scrollable message history, text input, and status bar.
+    /// AI responses are parsed for fenced code blocks and rendered as styled code boxes.
     /// </summary>
     public partial class DevMindToolWindowControl : UserControl
     {
         private readonly LlmClient _llmClient;
-        private readonly ObservableCollection<ChatMessageViewModel> _messages;
+        private readonly ObservableCollection<object> _messages;
         private CancellationTokenSource _cts;
         private bool _suppressSystemPromptSave;
 
@@ -36,7 +39,7 @@ namespace DevMind
             InitializeComponent();
             Themes.SetUseVsTheme(this, true);
             _llmClient = llmClient;
-            _messages = new ObservableCollection<ChatMessageViewModel>();
+            _messages = new ObservableCollection<object>();
             MessagesPanel.ItemsSource = _messages;
 
             LoadSystemPromptText();
@@ -47,10 +50,7 @@ namespace DevMind
         /// Updates the status bar text.
         /// </summary>
         /// <param name="status">The status text to display.</param>
-        public void SetStatus(string status)
-        {
-            StatusText.Text = status;
-        }
+        public void SetStatus(string status) => StatusText.Text = status;
 
         private void OnSettingsSaved(DevMindOptions options)
         {
@@ -96,7 +96,6 @@ namespace DevMind
             }
             else if (e.Key == Key.Enter && Keyboard.Modifiers.HasFlag(ModifierKeys.Shift))
             {
-                // Allow Shift+Enter to insert a newline
                 int caretIndex = InputTextBox.CaretIndex;
                 InputTextBox.Text = InputTextBox.Text.Insert(caretIndex, Environment.NewLine);
                 InputTextBox.CaretIndex = caretIndex + Environment.NewLine.Length;
@@ -104,10 +103,7 @@ namespace DevMind
             }
         }
 
-        private void SendButton_Click(object sender, RoutedEventArgs e)
-        {
-            SendMessage();
-        }
+        private void SendButton_Click(object sender, RoutedEventArgs e) => SendMessage();
 
         private void ClearButton_Click(object sender, RoutedEventArgs e)
         {
@@ -126,16 +122,13 @@ namespace DevMind
             InputTextBox.Text = "";
             SetInputEnabled(false);
 
-            // Add user message (right-aligned, blue bubble)
-            _messages.Add(ChatMessageViewModel.UserMessage(text));
+            _messages.Add(new UserMessageViewModel { Text = text });
             ScrollToBottom();
 
-            // Add placeholder for AI response (left-aligned, gray bubble)
-            var aiMessage = ChatMessageViewModel.AssistantMessage("");
+            var aiMessage = new AssistantMessageViewModel();
             _messages.Add(aiMessage);
 
             StatusText.Text = "Thinking...";
-
             _cts = new CancellationTokenSource();
 
 #pragma warning disable VSSDK007 // Fire-and-forget from UI event handler is intentional
@@ -149,7 +142,7 @@ namespace DevMind
                         ThreadHelper.JoinableTaskFactory.Run(async delegate
                         {
                             await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
-                            aiMessage.Text += token;
+                            aiMessage.AddToken(token);
                             ScrollToBottom();
                         });
                     },
@@ -168,7 +161,7 @@ namespace DevMind
                         ThreadHelper.JoinableTaskFactory.Run(async delegate
                         {
                             await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
-                            aiMessage.Text += $"\n[Error: {ex.Message}]";
+                            aiMessage.AddToken($"\n[Error: {ex.Message}]");
                             StatusText.Text = "Error";
                             SetInputEnabled(true);
                         });
@@ -183,10 +176,7 @@ namespace DevMind
             SendButton.IsEnabled = enabled;
         }
 
-        private void ScrollToBottom()
-        {
-            ChatScrollViewer.ScrollToEnd();
-        }
+        private void ScrollToBottom() => ChatScrollViewer.ScrollToEnd();
 
         private void TestConnectionInBackground()
         {
@@ -201,65 +191,223 @@ namespace DevMind
         }
     }
 
-    /// <summary>
-    /// View model for a single chat message displayed in the message history.
-    /// </summary>
-    public class ChatMessageViewModel : INotifyPropertyChanged
-    {
-        private string _text;
+    // ── Message view models ──────────────────────────────────────────────────
 
+    /// <summary>
+    /// View model for a user message displayed as a right-aligned blue bubble.
+    /// </summary>
+    public class UserMessageViewModel
+    {
         /// <summary>The message text content.</summary>
-        public string Text
+        public string Text { get; set; }
+    }
+
+    /// <summary>
+    /// View model for an AI assistant response. Accumulates streaming tokens and
+    /// re-parses the raw text into alternating text and code segments on each token.
+    /// </summary>
+    public class AssistantMessageViewModel
+    {
+        private string _rawText = "";
+
+        /// <summary>Ordered list of text and code segments parsed from the raw response.</summary>
+        public ObservableCollection<MessageSegmentViewModel> Segments { get; }
+            = new ObservableCollection<MessageSegmentViewModel>();
+
+        /// <summary>
+        /// Appends a streaming token to the raw text and re-parses segments.
+        /// Must be called on the UI thread.
+        /// </summary>
+        public void AddToken(string token)
         {
-            get => _text;
-            set
-            {
-                _text = value;
-                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Text)));
-            }
+            _rawText += token;
+            ReparseSegments();
         }
 
-        /// <summary>Horizontal alignment (Right for user, Left for assistant).</summary>
-        public HorizontalAlignment Alignment { get; set; }
+        private void ReparseSegments()
+        {
+            var parsed = ParseSegments(_rawText);
 
-        /// <summary>Background brush for the message bubble.</summary>
-        public Brush Background { get; set; }
+            for (int i = 0; i < parsed.Count; i++)
+            {
+                var (isCode, lang, content) = parsed[i];
 
-        /// <summary>Foreground brush for the message text.</summary>
-        public Brush Foreground { get; set; }
+                if (i < Segments.Count)
+                {
+                    // Update existing segment if the type still matches.
+                    if (isCode && Segments[i] is CodeSegmentViewModel csv)
+                    {
+                        csv.Language = lang;
+                        csv.Code = content;
+                    }
+                    else if (!isCode && Segments[i] is TextSegmentViewModel tsv)
+                    {
+                        tsv.Text = content;
+                    }
+                    else
+                    {
+                        // Type changed (e.g. partial fence resolved) — replace in place.
+                        Segments[i] = isCode
+                            ? (MessageSegmentViewModel)new CodeSegmentViewModel { Language = lang, Code = content }
+                            : new TextSegmentViewModel { Text = content };
+                    }
+                }
+                else
+                {
+                    Segments.Add(isCode
+                        ? (MessageSegmentViewModel)new CodeSegmentViewModel { Language = lang, Code = content }
+                        : new TextSegmentViewModel { Text = content });
+                }
+            }
 
+            // Trim segments that are no longer in the parsed result.
+            while (Segments.Count > parsed.Count)
+                Segments.RemoveAt(Segments.Count - 1);
+        }
+
+        /// <summary>
+        /// Parses <paramref name="raw"/> into alternating text/code segments.
+        /// An unclosed opening fence at the end of the string is treated as literal
+        /// text until the closing fence arrives in a subsequent token.
+        /// </summary>
+        private static List<(bool IsCode, string Language, string Content)> ParseSegments(string raw)
+        {
+            var result = new List<(bool, string, string)>();
+            int pos = 0;
+            bool inCode = false;
+            string currentLang = "";
+
+            while (pos <= raw.Length)
+            {
+                int idx = raw.IndexOf("```", pos);
+
+                if (idx < 0)
+                {
+                    // No more fences — emit the rest as the current segment type.
+                    string remaining = raw.Substring(pos);
+                    if (remaining.Length > 0)
+                        result.Add((inCode, currentLang, remaining));
+                    break;
+                }
+
+                // Emit content before the fence.
+                if (idx > pos)
+                    result.Add((inCode, currentLang, raw.Substring(pos, idx - pos)));
+
+                pos = idx + 3; // skip past ```
+
+                if (!inCode)
+                {
+                    // Opening fence — extract the language identifier (up to the first newline).
+                    int nlIdx = raw.IndexOf('\n', pos);
+                    if (nlIdx >= 0)
+                    {
+                        currentLang = raw.Substring(pos, nlIdx - pos).Trim();
+                        pos = nlIdx + 1;
+                        inCode = true;
+                    }
+                    else
+                    {
+                        // The language line hasn't arrived yet (still streaming).
+                        // Treat the ``` and partial language as literal text for now;
+                        // the next token will re-parse from scratch and resolve it.
+                        string partial = "```" + raw.Substring(pos);
+                        if (result.Count > 0 && !result[result.Count - 1].Item1)
+                        {
+                            var last = result[result.Count - 1];
+                            result[result.Count - 1] = (false, last.Item2, last.Item3 + partial);
+                        }
+                        else
+                        {
+                            result.Add((false, "", partial));
+                        }
+                        break;
+                    }
+                }
+                else
+                {
+                    // Closing fence.
+                    inCode = false;
+                    currentLang = "";
+                }
+            }
+
+            return result;
+        }
+    }
+
+    // ── Segment view models ──────────────────────────────────────────────────
+
+    /// <summary>Base class for message segments (text or code).</summary>
+    public abstract class MessageSegmentViewModel : INotifyPropertyChanged
+    {
         /// <inheritdoc/>
         public event PropertyChangedEventHandler PropertyChanged;
 
-        /// <summary>
-        /// Creates a view model for a user message (right-aligned, blue bubble).
-        /// </summary>
-        /// <param name="text">The message text.</param>
-        public static ChatMessageViewModel UserMessage(string text)
+        /// <summary>Raises <see cref="PropertyChanged"/> for the given property.</summary>
+        protected void OnPropertyChanged([CallerMemberName] string name = null)
+            => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+    }
+
+    /// <summary>A plain-text segment rendered as a styled bubble.</summary>
+    public class TextSegmentViewModel : MessageSegmentViewModel
+    {
+        private string _text;
+
+        /// <summary>The text content.</summary>
+        public string Text
         {
-            return new ChatMessageViewModel
-            {
-                Text = text,
-                Alignment = HorizontalAlignment.Right,
-                Background = new SolidColorBrush(Color.FromRgb(0, 122, 204)),
-                Foreground = Brushes.White
-            };
+            get => _text;
+            set { _text = value; OnPropertyChanged(); }
+        }
+    }
+
+    /// <summary>
+    /// A fenced code block segment rendered with a dark background, monospace font,
+    /// and a header bar that shows the language and a Copy button.
+    /// </summary>
+    public class CodeSegmentViewModel : MessageSegmentViewModel
+    {
+        private string _language;
+        private string _code;
+
+        /// <summary>The language identifier from the opening fence (may be empty).</summary>
+        public string Language
+        {
+            get => _language;
+            set { _language = value; OnPropertyChanged(); }
         }
 
-        /// <summary>
-        /// Creates a view model for an assistant message (left-aligned, gray bubble).
-        /// </summary>
-        /// <param name="text">The message text.</param>
-        public static ChatMessageViewModel AssistantMessage(string text)
+        /// <summary>The code content (without the backtick delimiters).</summary>
+        public string Code
         {
-            return new ChatMessageViewModel
-            {
-                Text = text,
-                Alignment = HorizontalAlignment.Left,
-                Background = new SolidColorBrush(Color.FromRgb(60, 60, 60)),
-                Foreground = new SolidColorBrush(Color.FromRgb(220, 220, 220))
-            };
+            get => _code;
+            set { _code = value; OnPropertyChanged(); }
         }
+
+        /// <summary>Copies <see cref="Code"/> to the system clipboard.</summary>
+        public ICommand CopyCommand { get; }
+
+        public CodeSegmentViewModel()
+        {
+            CopyCommand = new RelayCommand(() => Clipboard.SetText(_code ?? ""));
+        }
+    }
+
+    // ── Infrastructure ───────────────────────────────────────────────────────
+
+    /// <summary>Minimal synchronous relay command.</summary>
+    public class RelayCommand : ICommand
+    {
+        private readonly Action _execute;
+
+        public RelayCommand(Action execute) => _execute = execute;
+
+        public bool CanExecute(object parameter) => true;
+
+        public void Execute(object parameter) => _execute();
+
+        public event EventHandler CanExecuteChanged { add { } remove { } }
     }
 
     /// <summary>
@@ -279,8 +427,6 @@ namespace DevMind
         }
 
         public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
-        {
-            throw new NotImplementedException();
-        }
+            => throw new NotImplementedException();
     }
 }
