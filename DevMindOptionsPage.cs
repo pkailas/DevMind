@@ -1,8 +1,9 @@
-// File: DevMindOptionsPage.cs
+// File: DevMindOptionsPage.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
 using System.ComponentModel;
+using System.Drawing.Design;
 using System.Runtime.InteropServices;
 
 namespace DevMind
@@ -51,5 +52,15 @@ namespace DevMind
         [Description("The model name to use. Leave empty to use the server's default model.")]
         [DefaultValue("")]
         public string ModelName { get; set; } = "";
+
+        /// <summary>
+        /// The system prompt sent at the start of each conversation.
+        /// </summary>
+        [Category("Prompt")]
+        [DisplayName("System Prompt")]
+        [Description("The system prompt sent at the start of each conversation.")]
+        [DefaultValue("You are a helpful coding assistant. Be concise and precise.")]
+        [Editor(typeof(System.ComponentModel.Design.MultilineStringEditor), typeof(UITypeEditor))]
+        public string SystemPrompt { get; set; } = "You are a helpful coding assistant. Be concise and precise.";
     }
 }

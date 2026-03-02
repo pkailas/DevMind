@@ -1,4 +1,4 @@
-// File: LlmClient.cs
+// File: LlmClient.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -21,7 +21,7 @@ namespace DevMind
     {
         private readonly HttpClient _httpClient;
         private readonly List<ChatMessage> _conversationHistory;
-        private const string SystemPrompt = "You are a helpful coding assistant. Be concise and precise.";
+        private const string DefaultSystemPrompt = "You are a helpful coding assistant. Be concise and precise.";
         private string _baseUrl;
 
         /// <summary>
@@ -33,7 +33,7 @@ namespace DevMind
             _httpClient.Timeout = TimeSpan.FromMinutes(5);
             _conversationHistory = new List<ChatMessage>
             {
-                new ChatMessage("system", SystemPrompt)
+                new ChatMessage("system", GetSystemPrompt())
             };
         }
 
@@ -69,6 +69,7 @@ namespace DevMind
             Action<Exception> onError,
             CancellationToken cancellationToken = default)
         {
+            UpdateSystemPrompt();
             _conversationHistory.Add(new ChatMessage("user", userMessage));
 
             string modelName = DevMindOptions.Instance.ModelName;
@@ -153,7 +154,7 @@ namespace DevMind
         public void ClearHistory()
         {
             _conversationHistory.Clear();
-            _conversationHistory.Add(new ChatMessage("system", SystemPrompt));
+            _conversationHistory.Add(new ChatMessage("system", GetSystemPrompt()));
         }
 
         /// <summary>
@@ -162,6 +163,25 @@ namespace DevMind
         public void Dispose()
         {
             _httpClient?.Dispose();
+        }
+
+        private static string GetSystemPrompt()
+        {
+            string prompt = DevMindOptions.Instance.SystemPrompt;
+            return string.IsNullOrWhiteSpace(prompt) ? DefaultSystemPrompt : prompt;
+        }
+
+        private void UpdateSystemPrompt()
+        {
+            string prompt = GetSystemPrompt();
+            if (_conversationHistory.Count > 0 && _conversationHistory[0].Role == "system")
+            {
+                _conversationHistory[0] = new ChatMessage("system", prompt);
+            }
+            else
+            {
+                _conversationHistory.Insert(0, new ChatMessage("system", prompt));
+            }
         }
 
         private string BuildRequestJson(string modelName)

@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs
+// File: DevMindToolWindowControl.xaml.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -23,6 +23,7 @@ namespace DevMind
         private readonly LlmClient _llmClient;
         private readonly ObservableCollection<ChatMessageViewModel> _messages;
         private CancellationTokenSource _cts;
+        private bool _suppressSystemPromptSave;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="DevMindToolWindowControl"/> class.
@@ -36,6 +37,7 @@ namespace DevMind
             _messages = new ObservableCollection<ChatMessageViewModel>();
             MessagesPanel.ItemsSource = _messages;
 
+            LoadSystemPromptText();
             DevMindOptions.Saved += OnSettingsSaved;
         }
 
@@ -51,7 +53,36 @@ namespace DevMind
         private void OnSettingsSaved(DevMindOptions options)
         {
             _llmClient.Configure(options.EndpointUrl, options.ApiKey);
+            LoadSystemPromptText();
             TestConnectionInBackground();
+        }
+
+        private void LoadSystemPromptText()
+        {
+            _suppressSystemPromptSave = true;
+            SystemPromptTextBox.Text = DevMindOptions.Instance.SystemPrompt ?? "";
+            _suppressSystemPromptSave = false;
+        }
+
+        private void SystemPromptToggle_Checked(object sender, RoutedEventArgs e)
+        {
+            SystemPromptPanel.Visibility = Visibility.Visible;
+            SystemPromptToggle.Content = "System Prompt \u25B2";
+        }
+
+        private void SystemPromptToggle_Unchecked(object sender, RoutedEventArgs e)
+        {
+            SystemPromptPanel.Visibility = Visibility.Collapsed;
+            SystemPromptToggle.Content = "System Prompt \u25BC";
+        }
+
+        private void SystemPromptTextBox_TextChanged(object sender, TextChangedEventArgs e)
+        {
+            if (_suppressSystemPromptSave)
+                return;
+
+            DevMindOptions.Instance.SystemPrompt = SystemPromptTextBox.Text;
+            DevMindOptions.Instance.Save();
         }
 
         private void InputTextBox_KeyDown(object sender, KeyEventArgs e)
