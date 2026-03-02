@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- File: DevMindCommandTable.vsct -->
+<!-- Copyright (c) iOnline Consulting LLC. All rights reserved. -->
+<CommandTable xmlns="http://schemas.microsoft.com/VisualStudio/2005-10-18/CommandTable"
+              xmlns:xs="http://www.w3.org/2001/XMLSchema">
+
+  <Extern href="stdidcmd.h" />
+  <Extern href="vsshlids.h" />
+  <Include href="KnownImageIds.vsct" />
+
+  <Commands package="guidDevMindPackage">
+    <Groups>
+      <!-- Place in View > Other Windows menu -->
+      <Group guid="guidDevMindCmdSet" id="DevMindMenuGroup" priority="0x0600">
+        <Parent guid="guidSHLMainMenu" id="IDM_VS_CSCD_WINDOWS" />
+      </Group>
+    </Groups>
+
+    <Buttons>
+      <Button guid="guidDevMindCmdSet" id="ShowToolWindow" priority="0x0100" type="Button">
+        <Parent guid="guidDevMindCmdSet" id="DevMindMenuGroup" />
+        <Icon guid="ImageCatalogGuid" id="StatusInformation" />
+        <CommandFlag>IconIsMoniker</CommandFlag>
+        <Strings>
+          <ButtonText>Dev&amp;Mind</ButtonText>
+          <LocCanonicalName>.View.DevMind</LocCanonicalName>
+        </Strings>
+      </Button>
+    </Buttons>
+  </Commands>
+
+  <KeyBindings>
+    <KeyBinding guid="guidDevMindCmdSet" id="ShowToolWindow"
+                editor="guidVSStd97"
+                key1="D" mod1="Control Alt" />
+  </KeyBindings>
+
+  <Symbols>
+    <GuidSymbol name="guidDevMindPackage" value="{e05eada1-21cb-451b-9626-e30e9e6344ae}" />
+    <GuidSymbol name="guidDevMindCmdSet" value="{e05eada1-21cb-451b-9626-e30e9e6344ae}">
+      <IDSymbol name="DevMindMenuGroup" value="0x1020" />
+      <IDSymbol name="ShowToolWindow" value="0x0100" />
+    </GuidSymbol>
+  </Symbols>
+
+</CommandTable>
