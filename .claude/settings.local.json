@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh auth:*)",
+      "Bash(gh api:*)",
+      "WebSearch",
+      "WebFetch(domain:www.vsixcookbook.com)",
+      "WebFetch(domain:github.com)",
+      "Bash(nuget restore:*)",
+      "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Enterprise/MSBuild/Current/Bin/MSBuild.exe\":*)",
+      "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Professional/MSBuild/Current/Bin/MSBuild.exe\":*)",
+      "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Professional/Common7/IDE/ildasm.exe\":*)",
+      "Bash(rm:*)",
+      "Bash(python3:*)",
+      "Bash(python:*)",
+      "Bash(node:*)"
+    ]
+  }
+}
