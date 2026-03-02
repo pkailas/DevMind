@@ -1,4 +1,4 @@
-<!-- File: DevMindToolWindowControl.xaml  v1.3 -->
+<!-- File: DevMindToolWindowControl.xaml  v1.4 -->
 <!-- Copyright (c) iOnline Consulting LLC. All rights reserved. -->
 <UserControl x:Class="DevMind.DevMindToolWindowControl"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -6,6 +6,7 @@
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:local="clr-namespace:DevMind"
+             xmlns:mdxaml="clr-namespace:MdXaml;assembly=MdXaml"
              mc:Ignorable="d"
              d:DesignHeight="600" d:DesignWidth="350">
     <UserControl.Resources>
@@ -106,7 +107,7 @@
 
                             <ItemsControl.Resources>
 
-                                <!-- Text segment: gray bubble matching previous style -->
+                                <!-- Text segment: gray bubble with markdown rendering -->
                                 <DataTemplate DataType="{x:Type local:TextSegmentViewModel}">
                                     <Border Padding="8,6"
                                             Margin="0,2"
@@ -117,16 +118,15 @@
                                                        RelativeSource={RelativeSource AncestorType=ScrollViewer},
                                                        Converter={StaticResource WidthPctConverter},
                                                        ConverterParameter=0.9}">
-                                        <TextBox Text="{Binding Text, Mode=OneWay}"
-                                                 TextWrapping="Wrap"
+                                        <mdxaml:MarkdownScrollViewer
+                                                 Markdown="{Binding Text, Mode=OneWay}"
                                                  Foreground="#FFDCDCDC"
                                                  Background="Transparent"
                                                  BorderThickness="0"
-                                                 IsReadOnly="True"
-                                                 IsReadOnlyCaretVisible="False"
                                                  Padding="0"
                                                  FontSize="12"
-                                                 Cursor="Arrow" />
+                                                 VerticalScrollBarVisibility="Disabled"
+                                                 HorizontalScrollBarVisibility="Disabled" />
                                     </Border>
                                 </DataTemplate>
 
