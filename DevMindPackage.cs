@@ -15,7 +15,7 @@ namespace DevMind
     /// options page, and menu commands with the Visual Studio shell.
     /// </summary>
     [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
-    [InstalledProductRegistration("DevMind", "Local LLM coding assistant for Visual Studio", "1.0.0")]
+    [InstalledProductRegistration("DevMind", "Local LLM coding assistant for Visual Studio", "1.2.0")]
     [ProvideToolWindow(typeof(DevMindToolWindow.Pane), Style = VsDockStyle.Tabbed, Window = EnvDTE.Constants.vsWindowKindSolutionExplorer)]
     [ProvideOptionPage(typeof(OptionsProvider.DevMindOptionsPage), "DevMind", "General", 0, 0, true, SupportsProfiles = true)]
     [ProvideMenuResource("Menus.ctmenu", 1)]

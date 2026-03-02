@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v1.1
+// File: LlmClient.cs  v1.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;

@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v1.1
+// File: DevMindToolWindowControl.xaml.cs  v1.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -6,9 +6,11 @@ using Microsoft.VisualStudio.Shell;
 using System;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Globalization;
 using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
 
@@ -257,6 +259,28 @@ namespace DevMind
                 Background = new SolidColorBrush(Color.FromRgb(60, 60, 60)),
                 Foreground = new SolidColorBrush(Color.FromRgb(220, 220, 220))
             };
+        }
+    }
+
+    /// <summary>
+    /// Converts a width value to a percentage of that width.
+    /// ConverterParameter specifies the fraction (e.g., 0.9 for 90%).
+    /// </summary>
+    public class WidthPercentageConverter : IValueConverter
+    {
+        public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+        {
+            if (value is double width && parameter != null
+                && double.TryParse(parameter.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out double pct))
+            {
+                return width * pct;
+            }
+            return value;
+        }
+
+        public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+        {
+            throw new NotImplementedException();
         }
     }
 }

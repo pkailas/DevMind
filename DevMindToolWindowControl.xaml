@@ -3,8 +3,12 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:local="clr-namespace:DevMind"
              mc:Ignorable="d"
              d:DesignHeight="600" d:DesignWidth="350">
+    <UserControl.Resources>
+        <local:WidthPercentageConverter x:Key="WidthPctConverter" />
+    </UserControl.Resources>
     <Grid Margin="0">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
@@ -57,11 +61,17 @@
                                 CornerRadius="6"
                                 HorizontalAlignment="{Binding Alignment}"
                                 Background="{Binding Background}"
-                                MaxWidth="300">
-                            <TextBlock Text="{Binding Text}"
-                                       TextWrapping="Wrap"
-                                       Foreground="{Binding Foreground}"
-                                       FontSize="12" />
+                                MaxWidth="{Binding ActualWidth, ElementName=ChatScrollViewer, Converter={StaticResource WidthPctConverter}, ConverterParameter=0.9}">
+                            <TextBox Text="{Binding Text, Mode=OneWay}"
+                                     TextWrapping="Wrap"
+                                     Foreground="{Binding Foreground}"
+                                     Background="Transparent"
+                                     BorderThickness="0"
+                                     IsReadOnly="True"
+                                     IsReadOnlyCaretVisible="False"
+                                     Padding="0"
+                                     FontSize="12"
+                                     Cursor="Arrow" />
                         </Border>
                     </DataTemplate>
                 </ItemsControl.ItemTemplate>
