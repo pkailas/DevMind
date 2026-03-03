@@ -35,7 +35,6 @@
     <PackageReference Include="Community.VisualStudio.Toolkit.17" Version="17.0.549" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.1" />
     <PackageReference Include="Microsoft.Extensions.Http" Version="2.2.0" />
-    <PackageReference Include="MdXaml" Version="1.27.0" />
   </ItemGroup>
 
   <ItemGroup>

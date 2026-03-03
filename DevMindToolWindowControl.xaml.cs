@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v1.3
+// File: DevMindToolWindowControl.xaml.cs  v1.4
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -9,10 +9,12 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Globalization;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
+using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
 
@@ -428,5 +430,261 @@ namespace DevMind
 
         public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
             => throw new NotImplementedException();
+    }
+
+    // ── Markdown rendering ───────────────────────────────────────────────────
+
+    /// <summary>
+    /// A lightweight <see cref="ContentControl"/> that renders a markdown string
+    /// as a WPF visual tree using only standard WPF primitives — no external libraries.
+    /// Responds to binding updates by regenerating its content on each change.
+    /// </summary>
+    public class MarkdownPanel : ContentControl
+    {
+        /// <summary>Dependency property for the markdown source text.</summary>
+        public static readonly DependencyProperty MarkdownTextProperty =
+            DependencyProperty.Register(
+                nameof(MarkdownText),
+                typeof(string),
+                typeof(MarkdownPanel),
+                new PropertyMetadata(null, OnMarkdownTextChanged));
+
+        /// <summary>The markdown text to render.</summary>
+        public string MarkdownText
+        {
+            get => (string)GetValue(MarkdownTextProperty);
+            set => SetValue(MarkdownTextProperty, value);
+        }
+
+        public MarkdownPanel()
+        {
+            HorizontalContentAlignment = HorizontalAlignment.Stretch;
+        }
+
+        private static void OnMarkdownTextChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+            => ((MarkdownPanel)d).Content = MarkdownRenderer.BuildPanel((string)e.NewValue ?? "");
+    }
+
+    /// <summary>
+    /// Parses a markdown string and produces a WPF <see cref="StackPanel"/>
+    /// containing styled <see cref="TextBlock"/> elements and separators.
+    /// Supports: ## h2, ### h3, **bold**, *italic*, `inline code`,
+    /// - / * bullet lists, 1. numbered lists, --- horizontal rules, plain text.
+    /// </summary>
+    internal static class MarkdownRenderer
+    {
+        internal static StackPanel BuildPanel(string markdown)
+        {
+            var panel = new StackPanel();
+            foreach (var line in markdown.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+                panel.Children.Add(BuildLine(line));
+            return panel;
+        }
+
+        private static FrameworkElement BuildLine(string line)
+        {
+            // ### Heading 3 — check before ## to avoid prefix collision
+            if (line.StartsWith("### ", StringComparison.Ordinal))
+            {
+                var tb = new TextBlock
+                {
+                    FontSize = 14,
+                    FontWeight = FontWeights.Bold,
+                    TextWrapping = TextWrapping.Wrap,
+                    Margin = new Thickness(0, 4, 0, 2)
+                };
+                AddInlines(tb.Inlines, line.Substring(4));
+                return tb;
+            }
+
+            // ## Heading 2
+            if (line.StartsWith("## ", StringComparison.Ordinal))
+            {
+                var tb = new TextBlock
+                {
+                    FontSize = 16,
+                    FontWeight = FontWeights.Bold,
+                    TextWrapping = TextWrapping.Wrap,
+                    Margin = new Thickness(0, 6, 0, 2)
+                };
+                AddInlines(tb.Inlines, line.Substring(3));
+                return tb;
+            }
+
+            // Horizontal rule: three or more dashes and nothing else
+            if (line.Length >= 3 && IsAllDashes(line))
+            {
+                return new Border
+                {
+                    Height = 1,
+                    Background = new SolidColorBrush(Color.FromRgb(0x60, 0x60, 0x60)),
+                    Margin = new Thickness(0, 4, 0, 4),
+                    HorizontalAlignment = HorizontalAlignment.Stretch
+                };
+            }
+
+            // Bullet list: "- text" or "* text"
+            if (line.StartsWith("- ", StringComparison.Ordinal) ||
+                line.StartsWith("* ", StringComparison.Ordinal))
+            {
+                var tb = new TextBlock
+                {
+                    TextWrapping = TextWrapping.Wrap,
+                    Margin = new Thickness(16, 1, 0, 1)
+                };
+                tb.Inlines.Add(new Run("\u2022 "));
+                AddInlines(tb.Inlines, line.Substring(2));
+                return tb;
+            }
+
+            // Numbered list: "1. text", "12. text", etc.
+            if (TryParseNumberedList(line, out string numPrefix, out string numContent))
+            {
+                var tb = new TextBlock
+                {
+                    TextWrapping = TextWrapping.Wrap,
+                    Margin = new Thickness(16, 1, 0, 1)
+                };
+                tb.Inlines.Add(new Run(numPrefix));
+                AddInlines(tb.Inlines, numContent);
+                return tb;
+            }
+
+            // Empty line → small vertical spacer
+            if (line.Length == 0)
+                return new Border { Height = 4 };
+
+            // Plain paragraph
+            var plain = new TextBlock { TextWrapping = TextWrapping.Wrap };
+            AddInlines(plain.Inlines, line);
+            return plain;
+        }
+
+        private static bool IsAllDashes(string line)
+        {
+            foreach (char c in line)
+                if (c != '-') return false;
+            return true;
+        }
+
+        private static bool TryParseNumberedList(string line, out string prefix, out string content)
+        {
+            int dot = line.IndexOf(". ", StringComparison.Ordinal);
+            if (dot > 0 && dot <= 3)
+            {
+                bool allDigits = true;
+                for (int i = 0; i < dot; i++)
+                    if (!char.IsDigit(line[i])) { allDigits = false; break; }
+
+                if (allDigits)
+                {
+                    prefix = line.Substring(0, dot + 2);
+                    content = line.Substring(dot + 2);
+                    return true;
+                }
+            }
+            prefix = content = null;
+            return false;
+        }
+
+        /// <summary>
+        /// Parses inline markdown (**bold**, *italic*, `code`) and appends
+        /// <see cref="Inline"/> elements to <paramref name="inlines"/>.
+        /// </summary>
+        private static void AddInlines(InlineCollection inlines, string text)
+        {
+            int pos = 0;
+            var sb = new StringBuilder();
+
+            while (pos < text.Length)
+            {
+                char c = text[pos];
+
+                // **bold**
+                if (c == '*' && pos + 1 < text.Length && text[pos + 1] == '*')
+                {
+                    FlushPlain(inlines, sb);
+                    int end = text.IndexOf("**", pos + 2, StringComparison.Ordinal);
+                    if (end >= 0)
+                    {
+                        inlines.Add(new Bold(new Run(text.Substring(pos + 2, end - pos - 2))));
+                        pos = end + 2;
+                    }
+                    else
+                    {
+                        sb.Append("**");
+                        pos += 2;
+                    }
+                    continue;
+                }
+
+                // *italic* (single *, not part of **)
+                if (c == '*')
+                {
+                    FlushPlain(inlines, sb);
+                    int end = FindSingleAsterisk(text, pos + 1);
+                    if (end >= 0)
+                    {
+                        inlines.Add(new Italic(new Run(text.Substring(pos + 1, end - pos - 1))));
+                        pos = end + 1;
+                    }
+                    else
+                    {
+                        sb.Append('*');
+                        pos++;
+                    }
+                    continue;
+                }
+
+                // `inline code`
+                if (c == '`')
+                {
+                    FlushPlain(inlines, sb);
+                    int end = text.IndexOf('`', pos + 1);
+                    if (end >= 0)
+                    {
+                        inlines.Add(new Run(text.Substring(pos + 1, end - pos - 1))
+                        {
+                            FontFamily = new FontFamily("Consolas"),
+                            Background = new SolidColorBrush(Color.FromArgb(0x55, 0xCE, 0x91, 0x78))
+                        });
+                        pos = end + 1;
+                    }
+                    else
+                    {
+                        sb.Append('`');
+                        pos++;
+                    }
+                    continue;
+                }
+
+                sb.Append(c);
+                pos++;
+            }
+
+            FlushPlain(inlines, sb);
+        }
+
+        private static void FlushPlain(InlineCollection inlines, StringBuilder sb)
+        {
+            if (sb.Length == 0) return;
+            inlines.Add(new Run(sb.ToString()));
+            sb.Clear();
+        }
+
+        /// <summary>
+        /// Returns the index of a <c>*</c> character that is not part of <c>**</c>,
+        /// searching from <paramref name="start"/>. Returns -1 if none found.
+        /// </summary>
+        private static int FindSingleAsterisk(string text, int start)
+        {
+            for (int i = start; i < text.Length; i++)
+            {
+                if (text[i] != '*') continue;
+                if (i + 1 < text.Length && text[i + 1] == '*') { i++; continue; }
+                return i;
+            }
+            return -1;
+        }
     }
 }
