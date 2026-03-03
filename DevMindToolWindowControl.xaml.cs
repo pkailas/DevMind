@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v1.4
+// File: DevMindToolWindowControl.xaml.cs  v1.7
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -10,6 +10,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
@@ -226,9 +227,20 @@ namespace DevMind
             ReparseSegments();
         }
 
+        private static string StripThinkBlocks(string text)
+        {
+            // Remove complete <think>...</think> blocks (including any content / newlines).
+            var result = Regex.Replace(text, @"<think>[\s\S]*?</think>", "", RegexOptions.IgnoreCase);
+            // Remove a partial/unclosed <think> block that is still streaming.
+            int openIdx = result.IndexOf("<think>", StringComparison.OrdinalIgnoreCase);
+            if (openIdx >= 0)
+                result = result.Substring(0, openIdx);
+            return result;
+        }
+
         private void ReparseSegments()
         {
-            var parsed = ParseSegments(_rawText);
+            var parsed = ParseSegments(StripThinkBlocks(_rawText));
 
             for (int i = 0; i < parsed.Count; i++)
             {
@@ -435,18 +447,19 @@ namespace DevMind
     // ── Markdown rendering ───────────────────────────────────────────────────
 
     /// <summary>
-    /// A lightweight <see cref="ContentControl"/> that renders a markdown string
-    /// as a WPF visual tree using only standard WPF primitives — no external libraries.
-    /// Responds to binding updates by regenerating its content on each change.
+    /// A read-only <see cref="RichTextBox"/> that renders a markdown string as a
+    /// WPF <see cref="FlowDocument"/> using only standard WPF primitives — no external
+    /// libraries. Text is fully selectable. Responds to binding updates by regenerating
+    /// its <see cref="FlowDocument"/> on each change.
     /// </summary>
-    public class MarkdownPanel : ContentControl
+    public class MarkdownRichTextBox : RichTextBox
     {
         /// <summary>Dependency property for the markdown source text.</summary>
         public static readonly DependencyProperty MarkdownTextProperty =
             DependencyProperty.Register(
                 nameof(MarkdownText),
                 typeof(string),
-                typeof(MarkdownPanel),
+                typeof(MarkdownRichTextBox),
                 new PropertyMetadata(null, OnMarkdownTextChanged));
 
         /// <summary>The markdown text to render.</summary>
@@ -456,106 +469,91 @@ namespace DevMind
             set => SetValue(MarkdownTextProperty, value);
         }
 
-        public MarkdownPanel()
+        public MarkdownRichTextBox()
         {
-            HorizontalContentAlignment = HorizontalAlignment.Stretch;
+            IsReadOnly = true;
+            IsReadOnlyCaretVisible = false;
+            BorderThickness = new Thickness(0);
+            Background = Brushes.Transparent;
+            Padding = new Thickness(0);
         }
 
         private static void OnMarkdownTextChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
-            => ((MarkdownPanel)d).Content = MarkdownRenderer.BuildPanel((string)e.NewValue ?? "");
+            => ((MarkdownRichTextBox)d).Document = MarkdownRenderer.BuildDocument((string)e.NewValue ?? "");
     }
 
     /// <summary>
-    /// Parses a markdown string and produces a WPF <see cref="StackPanel"/>
-    /// containing styled <see cref="TextBlock"/> elements and separators.
+    /// Parses a markdown string and produces a WPF <see cref="FlowDocument"/>
+    /// containing <see cref="Paragraph"/> blocks with inline <see cref="Run"/>,
+    /// <see cref="Bold"/>, <see cref="Italic"/>, and <see cref="Span"/> elements.
     /// Supports: ## h2, ### h3, **bold**, *italic*, `inline code`,
     /// - / * bullet lists, 1. numbered lists, --- horizontal rules, plain text.
     /// </summary>
     internal static class MarkdownRenderer
     {
-        internal static StackPanel BuildPanel(string markdown)
+        internal static FlowDocument BuildDocument(string markdown)
         {
-            var panel = new StackPanel();
+            var doc = new FlowDocument { PagePadding = new Thickness(0) };
             foreach (var line in markdown.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
-                panel.Children.Add(BuildLine(line));
-            return panel;
+                doc.Blocks.Add(BuildBlock(line));
+            return doc;
         }
 
-        private static FrameworkElement BuildLine(string line)
+        private static Block BuildBlock(string line)
         {
             // ### Heading 3 — check before ## to avoid prefix collision
             if (line.StartsWith("### ", StringComparison.Ordinal))
             {
-                var tb = new TextBlock
-                {
-                    FontSize = 14,
-                    FontWeight = FontWeights.Bold,
-                    TextWrapping = TextWrapping.Wrap,
-                    Margin = new Thickness(0, 4, 0, 2)
-                };
-                AddInlines(tb.Inlines, line.Substring(4));
-                return tb;
+                var p = new Paragraph { FontSize = 14, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 4, 0, 2) };
+                AddInlines(p.Inlines, line.Substring(4));
+                return p;
             }
 
             // ## Heading 2
             if (line.StartsWith("## ", StringComparison.Ordinal))
             {
-                var tb = new TextBlock
-                {
-                    FontSize = 16,
-                    FontWeight = FontWeights.Bold,
-                    TextWrapping = TextWrapping.Wrap,
-                    Margin = new Thickness(0, 6, 0, 2)
-                };
-                AddInlines(tb.Inlines, line.Substring(3));
-                return tb;
+                var p = new Paragraph { FontSize = 16, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 6, 0, 2) };
+                AddInlines(p.Inlines, line.Substring(3));
+                return p;
             }
 
             // Horizontal rule: three or more dashes and nothing else
             if (line.Length >= 3 && IsAllDashes(line))
             {
-                return new Border
+                return new BlockUIContainer(new Border
                 {
                     Height = 1,
                     Background = new SolidColorBrush(Color.FromRgb(0x60, 0x60, 0x60)),
                     Margin = new Thickness(0, 4, 0, 4),
                     HorizontalAlignment = HorizontalAlignment.Stretch
-                };
+                });
             }
 
             // Bullet list: "- text" or "* text"
             if (line.StartsWith("- ", StringComparison.Ordinal) ||
                 line.StartsWith("* ", StringComparison.Ordinal))
             {
-                var tb = new TextBlock
-                {
-                    TextWrapping = TextWrapping.Wrap,
-                    Margin = new Thickness(16, 1, 0, 1)
-                };
-                tb.Inlines.Add(new Run("\u2022 "));
-                AddInlines(tb.Inlines, line.Substring(2));
-                return tb;
+                var p = new Paragraph { Margin = new Thickness(16, 0, 0, 0) };
+                p.Inlines.Add(new Run("\u2022 "));
+                AddInlines(p.Inlines, line.Substring(2));
+                return p;
             }
 
             // Numbered list: "1. text", "12. text", etc.
             if (TryParseNumberedList(line, out string numPrefix, out string numContent))
             {
-                var tb = new TextBlock
-                {
-                    TextWrapping = TextWrapping.Wrap,
-                    Margin = new Thickness(16, 1, 0, 1)
-                };
-                tb.Inlines.Add(new Run(numPrefix));
-                AddInlines(tb.Inlines, numContent);
-                return tb;
+                var p = new Paragraph { Margin = new Thickness(16, 0, 0, 0) };
+                p.Inlines.Add(new Run(numPrefix));
+                AddInlines(p.Inlines, numContent);
+                return p;
             }
 
-            // Empty line → small vertical spacer
+            // Empty line → compact spacer paragraph
             if (line.Length == 0)
-                return new Border { Height = 4 };
+                return new Paragraph { Margin = new Thickness(0), LineHeight = 6 };
 
             // Plain paragraph
-            var plain = new TextBlock { TextWrapping = TextWrapping.Wrap };
+            var plain = new Paragraph { Margin = new Thickness(0) };
             AddInlines(plain.Inlines, line);
             return plain;
         }

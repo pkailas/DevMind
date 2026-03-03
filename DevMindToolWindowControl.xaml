@@ -1,4 +1,4 @@
-<!-- File: DevMindToolWindowControl.xaml  v1.5 -->
+<!-- File: DevMindToolWindowControl.xaml  v1.7 -->
 <!-- Copyright (c) iOnline Consulting LLC. All rights reserved. -->
 <UserControl x:Class="DevMind.DevMindToolWindowControl"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -106,7 +106,7 @@
 
                             <ItemsControl.Resources>
 
-                                <!-- Text segment: gray bubble with markdown rendering -->
+                                <!-- Text segment: gray bubble with selectable markdown rendering -->
                                 <DataTemplate DataType="{x:Type local:TextSegmentViewModel}">
                                     <Border Padding="8,6"
                                             Margin="0,2"
@@ -117,7 +117,7 @@
                                                        RelativeSource={RelativeSource AncestorType=ScrollViewer},
                                                        Converter={StaticResource WidthPctConverter},
                                                        ConverterParameter=0.9}">
-                                        <local:MarkdownPanel
+                                        <local:MarkdownRichTextBox
                                                  MarkdownText="{Binding Text, Mode=OneWay}"
                                                  Foreground="#FFDCDCDC"
                                                  Background="Transparent"
