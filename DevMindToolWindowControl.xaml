@@ -1,4 +1,4 @@
-<!-- File: DevMindToolWindowControl.xaml  v3.7 -->
+<!-- File: DevMindToolWindowControl.xaml  v4.1 -->
 <!-- Copyright (c) iOnline Consulting LLC. All rights reserved. -->
 <UserControl x:Class="DevMind.DevMindToolWindowControl"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -50,7 +50,7 @@
         <!-- Row 1: Input area -->
         <Border Grid.Row="1"
                 BorderThickness="1"
-                BorderBrush="{DynamicResource {x:Static SystemColors.ActiveBorderBrushKey}}"
+                BorderBrush="#FF3E3E3E"
                 Margin="4,4,4,0">
             <TextBox x:Name="InputTextBox"
                      TextWrapping="Wrap"
@@ -60,6 +60,7 @@
                      Padding="6,4"
                      AcceptsReturn="True"
                      FontSize="12"
+                     Background="#FFF5F5F5"
                      PreviewKeyDown="InputTextBox_KeyDown" />
         </Border>
 
@@ -96,19 +97,50 @@
                        Text="Ready" />
         </Grid>
 
-        <!-- Row 3: Output stream -->
-        <RichTextBox x:Name="OutputBox"
-                     Grid.Row="3"
-                     IsReadOnly="True"
-                     IsReadOnlyCaretVisible="True"
-                     VerticalScrollBarVisibility="Auto"
-                     HorizontalScrollBarVisibility="Auto"
-                     FontFamily="Consolas"
-                     FontSize="12"
-                     Background="#FF1E1E1E"
-                     Foreground="#FFCCCCCC"
-                     BorderThickness="0"
-                     Padding="6,4"
-                     Margin="4,2,4,2" />
+        <!-- Row 3: Output stream + terminal strip -->
+        <DockPanel Grid.Row="3" LastChildFill="True">
+            <Border DockPanel.Dock="Bottom"
+                    Background="#FF1E1E1E"
+                    BorderThickness="0,2,0,0"
+                    BorderBrush="#FF569CD6"
+                    Padding="6,6,6,6">
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="&gt;"
+                               Foreground="#FFCCCCCC"
+                               FontFamily="Consolas"
+                               FontSize="13"
+                               VerticalAlignment="Center"
+                               Margin="6,0,6,0" />
+                    <TextBox x:Name="TerminalInputBox"
+                             BorderThickness="0"
+                             Background="Transparent"
+                             Foreground="#FFCCCCCC"
+                             FontFamily="Consolas"
+                             FontSize="13"
+                             VerticalAlignment="Center"
+                             VerticalContentAlignment="Center"
+                             MinHeight="28"
+                             Padding="0"
+                             AcceptsReturn="False"
+                             PreviewKeyDown="TerminalInputBox_KeyDown"
+                             HorizontalAlignment="Stretch"
+                             MinWidth="200" />
+                </StackPanel>
+            </Border>
+            <RichTextBox x:Name="OutputBox"
+                         DockPanel.Dock="Top"
+                         IsReadOnly="True"
+                         IsReadOnlyCaretVisible="True"
+                         VerticalScrollBarVisibility="Auto"
+                         HorizontalScrollBarVisibility="Auto"
+                         FontFamily="Consolas"
+                         FontSize="12"
+                         Background="#FF1E1E1E"
+                         Foreground="#FFCCCCCC"
+                         BorderThickness="0,0,0,1"
+                         BorderBrush="#FF569CD6"
+                         Padding="6,4"
+                         Margin="4,2,4,0" />
+        </DockPanel>
     </Grid>
 </UserControl>

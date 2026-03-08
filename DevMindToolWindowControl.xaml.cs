@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v4.5.1
+// File: DevMindToolWindowControl.xaml.cs  v4.7.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -29,6 +29,7 @@ namespace DevMind
     {
         private readonly LlmClient _llmClient;
         private CancellationTokenSource _cts;
+        private (string fullPath, Encoding fileEncoding, string fileName, string content, List<(int origStart, int origEnd, string replaceText)> resolvedBlocks)? _pendingFuzzyPatch;
         private bool _suppressSystemPromptSave;
         private string _terminalWorkingDir;
         private readonly List<string> _terminalHistory = new List<string>();
@@ -42,11 +43,14 @@ namespace DevMind
         private readonly StringBuilder _thinkBuffer = new StringBuilder();
         private readonly Stack<(string originalPath, string backupPath)> _patchBackupStack = new Stack<(string, string)>();
         private const int PatchBackupStackLimit = 10;
+        private Paragraph _spacerParagraph;
 
         public DevMindToolWindowControl(LlmClient llmClient)
         {
             InitializeComponent();
             Themes.SetUseVsTheme(this, true);
+            OutputBox.Document.PagePadding = new Thickness(0);
+            InitOutputDocument();
             _llmClient = llmClient;
             _terminalWorkingDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
@@ -66,18 +70,43 @@ namespace DevMind
 
             LoadSystemPromptText();
             DevMindOptions.Saved += OnSettingsSaved;
+            // Defer banner until after first layout pass so ViewportHeight is known for spacer calc
+            Dispatcher.BeginInvoke(new Action(AppendBanner), System.Windows.Threading.DispatcherPriority.Loaded);
+        }
+
+        private void AppendBanner()
+        {
             var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
             string versionStr = $"{version.Major}.{version.Minor}.{version.Build}";
             AppendOutput($"DevMind v{versionStr} — local LLM assistant\nType a message and click Ask, or a shell command and click Run.\n", OutputColor.Dim);
+            // Explicit spacer recalc after banner text is committed to layout
+            OutputBox.Dispatcher.BeginInvoke(new Action(() =>
+            {
+                double viewportH = OutputBox.ViewportHeight;
+                double contentH  = OutputBox.ExtentHeight - _spacerParagraph.Margin.Top;
+                double newTop    = Math.Max(0, viewportH - contentH);
+                if (Math.Abs(newTop - _spacerParagraph.Margin.Top) > 1.0)
+                    _spacerParagraph.Margin = new Thickness(0, newTop, 0, 0);
+                OutputBox.ScrollToEnd();
+            }), System.Windows.Threading.DispatcherPriority.Background);
         }
 
         // ── Output color ──────────────────────────────────────────────────────
 
         private enum OutputColor { Normal, Dim, Input, Error, Success }
 
+        private void InitOutputDocument()
+        {
+            OutputBox.Document.Blocks.Clear();
+            _spacerParagraph = new Paragraph { LineHeight = 1.0, Margin = new Thickness(0, 2000, 0, 0) };
+            OutputBox.Document.Blocks.Add(_spacerParagraph);
+            OutputBox.Document.Blocks.Add(new Paragraph { Margin = new Thickness(0) });
+        }
+
         private void AppendOutput(string text, OutputColor color = OutputColor.Normal)
         {
-            if (!(OutputBox.Document.Blocks.LastBlock is Paragraph para))
+            // Never append into the spacer — ensure there is always a real content paragraph last
+            if (!(OutputBox.Document.Blocks.LastBlock is Paragraph para) || para == _spacerParagraph)
             {
                 para = new Paragraph { Margin = new Thickness(0) };
                 OutputBox.Document.Blocks.Add(para);
@@ -95,7 +124,16 @@ namespace DevMind
                 }
             };
             para.Inlines.Add(run);
-            OutputBox.ScrollToEnd();
+            OutputBox.CaretPosition = OutputBox.Document.ContentEnd;
+            OutputBox.Dispatcher.BeginInvoke(new Action(() =>
+            {
+                double viewportH = OutputBox.ViewportHeight;
+                double contentH  = OutputBox.ExtentHeight - _spacerParagraph.Margin.Top;
+                double newTop    = Math.Max(0, viewportH - contentH);
+                if (Math.Abs(newTop - _spacerParagraph.Margin.Top) > 1.0)
+                    _spacerParagraph.Margin = new Thickness(0, newTop, 0, 0);
+                OutputBox.ScrollToEnd();
+            }), System.Windows.Threading.DispatcherPriority.Background);
         }
 
         private void AppendNewLine()
@@ -170,7 +208,9 @@ namespace DevMind
                 if (ctrl)
                 {
                     e.Handled = true;
-                    RunShellCommand();
+                    string cmd = InputTextBox.Text?.Trim();
+                    if (!string.IsNullOrEmpty(cmd)) InputTextBox.Text = "";
+                    RunShellCommand(cmd);
                 }
                 else if (!shift)
                 {
@@ -201,15 +241,19 @@ namespace DevMind
 
         private void AskButton_Click(object sender, RoutedEventArgs e) => SendToLlm();
 
-        private void RunButton_Click(object sender, RoutedEventArgs e) => RunShellCommand();
+        private void RunButton_Click(object sender, RoutedEventArgs e)
+        {
+            string cmd = InputTextBox.Text?.Trim();
+            if (!string.IsNullOrEmpty(cmd)) InputTextBox.Text = "";
+            RunShellCommand(cmd);
+        }
 
         private void StopButton_Click(object sender, RoutedEventArgs e) => _cts?.Cancel();
 
         private void RestartButton_Click(object sender, RoutedEventArgs e)
         {
             // Clear output
-            OutputBox.Document.Blocks.Clear();
-            OutputBox.Document.Blocks.Add(new Paragraph());
+            InitOutputDocument();
 
             // Reset think filter state
             _inThinkBlock = false;
@@ -231,6 +275,9 @@ namespace DevMind
             // Clear any READ-loaded file context
             _readContext = null;
 
+            // Discard pending fuzzy confirmation
+            _pendingFuzzyPatch = null;
+
             // Discard all PATCH backups and clean up temp files
             while (_patchBackupStack.Count > 0)
             {
@@ -250,7 +297,7 @@ namespace DevMind
         private void ClearButton_Click(object sender, RoutedEventArgs e)
         {
             _cts?.Cancel();
-            OutputBox.Document.Blocks.Clear();
+            InitOutputDocument();
             _llmClient.ClearHistory();
             StatusText.Text = "Cleared";
         }
@@ -314,6 +361,15 @@ namespace DevMind
         {
             string text = InputTextBox.Text?.Trim();
             if (string.IsNullOrEmpty(text)) return;
+
+            // Single-line /command → route to shell, stripping the leading /
+            if (text.StartsWith("/") && !text.Contains('\n'))
+            {
+                string cmd = text.Substring(1);
+                InputTextBox.Text = "";
+                RunShellCommand(cmd);
+                return;
+            }
 
             if (text.StartsWith("PATCH ", StringComparison.OrdinalIgnoreCase))
             {
@@ -643,14 +699,96 @@ namespace DevMind
         }
 
 
+        // ── Terminal strip ────────────────────────────────────────────────────
+
+        private void TerminalInputBox_KeyDown(object sender, KeyEventArgs e)
+        {
+            // Single-keypress fuzzy confirmation — no Enter required
+            if (_pendingFuzzyPatch.HasValue)
+            {
+                if (e.Key == Key.D1 || e.Key == Key.NumPad1)
+                {
+                    e.Handled = true;
+                    TerminalInputBox.Text = "";
+                    AppendOutput("\n> 1\n", OutputColor.Input);
+                    var pending = _pendingFuzzyPatch.Value;
+                    _pendingFuzzyPatch = null;
+                    ApplyPendingFuzzyPatch(pending);
+                    return;
+                }
+                if (e.Key == Key.D2 || e.Key == Key.NumPad2)
+                {
+                    e.Handled = true;
+                    TerminalInputBox.Text = "";
+                    AppendOutput("\n> 2\n", OutputColor.Input);
+                    _pendingFuzzyPatch = null;
+                    AppendOutput("[PATCH] Fuzzy match cancelled.\n", OutputColor.Dim);
+                    return;
+                }
+                // All other keys pass through — user can still type
+                return;
+            }
+
+            if (e.Key == Key.Enter)
+            {
+                e.Handled = true;
+                ExecuteTerminalInput();
+            }
+            else if (e.Key == Key.Up)
+            {
+                if (_terminalHistory.Count == 0) return;
+                _terminalHistoryIndex = Math.Max(0, _terminalHistoryIndex - 1);
+                TerminalInputBox.Text = _terminalHistory[_terminalHistoryIndex];
+                TerminalInputBox.CaretIndex = TerminalInputBox.Text.Length;
+                e.Handled = true;
+            }
+            else if (e.Key == Key.Down)
+            {
+                if (_terminalHistory.Count == 0) return;
+                _terminalHistoryIndex = Math.Min(_terminalHistory.Count, _terminalHistoryIndex + 1);
+                TerminalInputBox.Text = _terminalHistoryIndex < _terminalHistory.Count
+                    ? _terminalHistory[_terminalHistoryIndex]
+                    : "";
+                TerminalInputBox.CaretIndex = TerminalInputBox.Text.Length;
+                e.Handled = true;
+            }
+        }
+
+        private void ExecuteTerminalInput()
+        {
+            string command = TerminalInputBox.Text?.Trim();
+            if (string.IsNullOrEmpty(command)) return;
+            TerminalInputBox.Text = "";
+            RunShellCommand(command);
+        }
+
         // ── Shell ─────────────────────────────────────────────────────────────
 
-        private void RunShellCommand()
+        private void RunShellCommand(string command)
         {
-            string command = InputTextBox.Text?.Trim();
             if (string.IsNullOrEmpty(command)) return;
 
-            InputTextBox.Text = "";
+            // Fuzzy confirmation intercept — must be handled before any other routing
+            if (_pendingFuzzyPatch.HasValue)
+            {
+                AppendOutput($"\n> {command}\n", OutputColor.Input);
+                if (command == "1")
+                {
+                    var pending = _pendingFuzzyPatch.Value;
+                    _pendingFuzzyPatch = null;
+                    ApplyPendingFuzzyPatch(pending);
+                }
+                else if (command == "2")
+                {
+                    _pendingFuzzyPatch = null;
+                    AppendOutput("[PATCH] Fuzzy match cancelled.\n", OutputColor.Dim);
+                }
+                else
+                {
+                    AppendOutput("[FUZZY] Pending confirmation — type 1 to apply or 2 to cancel.\n", OutputColor.Dim);
+                }
+                return;
+            }
 
             _terminalHistory.RemoveAll(h => h == command);
             _terminalHistory.Add(command);
@@ -1249,9 +1387,19 @@ namespace DevMind
                             return;
                         }
                         int fuzzyLine = content.Substring(0, fuzzy.Value.origStart).Count(c => c == '\n') + 1;
-                        AppendOutput($"[PATCH] Block {i + 1}: Fuzzy match at line {fuzzyLine} ({fuzzy.Value.similarity:P0} similarity) — applying.\n", OutputColor.Dim);
-                        origStart = fuzzy.Value.origStart;
-                        origEnd   = fuzzy.Value.origEnd;
+                        string matchedText = content.Substring(fuzzy.Value.origStart, fuzzy.Value.origEnd - fuzzy.Value.origStart).Trim();
+                        string fuzzyPreview = matchedText.Length > 120 ? matchedText.Substring(0, 120) + "…" : matchedText;
+                        AppendOutput($"[PATCH] Block {i + 1}: Fuzzy match at line {fuzzyLine} ({fuzzy.Value.similarity:P0} similarity).\n", OutputColor.Dim);
+                        AppendOutput($"  Matched text: {fuzzyPreview}\n", OutputColor.Dim);
+                        // Resolve line endings for the fuzzy block and add to prior resolved blocks
+                        string fuzzyNormReplace = replaceText.Replace("\r\n", "\n");
+                        string fuzzyFinalReplace = fileUsesCrlf ? fuzzyNormReplace.Replace("\n", "\r\n") : fuzzyNormReplace;
+                        resolvedBlocks.Add((fuzzy.Value.origStart, fuzzy.Value.origEnd, fuzzyFinalReplace));
+                        // Suspend — keyboard confirmation required
+                        _pendingFuzzyPatch = (fullPath, fileEncoding, fileName, content, resolvedBlocks);
+                        AppendOutput("\n[FUZZY] Fuzzy match — press 1 to apply or 2 to cancel.\n", OutputColor.Dim);
+                        TerminalInputBox.Focus();
+                        return;
                     }
                     else
                     {
@@ -1319,6 +1467,45 @@ namespace DevMind
                 AppendOutput($"[PATCH] Applied to {fullPath} (undo depth: {undosAvailable})\n", OutputColor.Success);
                 if (clearInput)
                     InputTextBox.Text = "";
+            }
+            catch (Exception ex)
+            {
+                AppendOutput($"[PATCH] Error: {ex.Message}\n", OutputColor.Error);
+            }
+        }
+
+        private void ApplyPendingFuzzyPatch(
+            (string fullPath, Encoding fileEncoding, string fileName, string content, List<(int origStart, int origEnd, string replaceText)> resolvedBlocks) pending)
+        {
+            try
+            {
+                pending.resolvedBlocks.Sort((a, b) => b.origStart.CompareTo(a.origStart));
+                var updated = pending.content;
+                foreach (var (origStart, origEnd, finalReplace) in pending.resolvedBlocks)
+                    updated = updated.Substring(0, origStart) + finalReplace + updated.Substring(origEnd);
+
+                try
+                {
+                    string backupDir = Path.Combine(Path.GetTempPath(), "DevMind");
+                    Directory.CreateDirectory(backupDir);
+                    string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
+                    string backupPath = Path.Combine(backupDir, $"{Path.GetFileName(pending.fullPath)}.{timestamp}.bak");
+                    File.Copy(pending.fullPath, backupPath, overwrite: true);
+                    if (_patchBackupStack.Count >= PatchBackupStackLimit)
+                    {
+                        var oldest = _patchBackupStack.ToArray().Last();
+                        try { File.Delete(oldest.backupPath); } catch { }
+                        var entries = _patchBackupStack.ToArray().Reverse().Skip(1).ToArray();
+                        _patchBackupStack.Clear();
+                        foreach (var e in entries) _patchBackupStack.Push(e);
+                    }
+                    _patchBackupStack.Push((pending.fullPath, backupPath));
+                }
+                catch { /* backup failure is non-fatal */ }
+
+                File.WriteAllText(pending.fullPath, updated, pending.fileEncoding);
+                int undosAvailable = _patchBackupStack.Count;
+                AppendOutput($"[PATCH] Applied to {pending.fullPath} (undo depth: {undosAvailable})\n", OutputColor.Success);
             }
             catch (Exception ex)
             {

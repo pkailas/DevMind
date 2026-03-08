@@ -36,7 +36,9 @@
       "Bash(find /c -name \"MSBuild.exe\" -maxdepth 8)",
       "Bash(\"C:\\\\Users\\\\pkailas.KAILAS\\\\source\\\\repos\\\\DevMind\\\\build.counter\":*)",
       "Bash('C:/Temp/search.ps1':*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)"
     ]
   }
 }
