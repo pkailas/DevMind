@@ -1,4 +1,4 @@
-// File: DevMindOptionsPage.cs  v1.2
+// File: DevMindOptionsPage.cs  v3.9
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -62,5 +62,14 @@ namespace DevMind
         [DefaultValue("You are a helpful coding assistant. Be concise and precise.")]
         [Editor(typeof(System.ComponentModel.Design.MultilineStringEditor), typeof(UITypeEditor))]
         public string SystemPrompt { get; set; } = "You are a helpful coding assistant. Be concise and precise.";
+
+        /// <summary>
+        /// Whether to automatically open generated files in the editor after creation.
+        /// </summary>
+        [Category("File Generation")]
+        [DisplayName("Open file after creation")]
+        [Description("Automatically open generated files in the editor after creation.")]
+        [DefaultValue(true)]
+        public bool OpenFileAfterGeneration { get; set; } = true;
     }
 }

@@ -16,7 +16,7 @@
     <UseCodebase>true</UseCodebase>
     <IncludeAssemblyInVSIXContainer>true</IncludeAssemblyInVSIXContainer>
     <IncludeDebugSymbolsInVSIXContainer>false</IncludeDebugSymbolsInVSIXContainer>
-    <IncludeDebugSymbolsInLocalVSIXDeployment>false</IncludeDebugSymbolsInLocalVSIXDeployment>
+    <IncludeDebugSymbolsInLocalVSIXDeployment>true</IncludeDebugSymbolsInLocalVSIXDeployment>
     <CopyBuildOutputToOutputDirectory>true</CopyBuildOutputToOutputDirectory>
     <CopyOutputSymbolsToOutputDirectory>true</CopyOutputSymbolsToOutputDirectory>
     <StartAction>Program</StartAction>
@@ -56,5 +56,17 @@
 
   <!-- Import VSSDK targets AFTER SDK targets so VSIX properties resolve correctly -->
   <Import Project="$(VSToolsPath)\VSSDK\Microsoft.VsSDK.targets" Condition="'$(VSToolsPath)' != ''" />
+
+  <!-- Stamp the vsixmanifest with a timestamp-based version before every build -->
+  <Target Name="StampVsixVersion" BeforeTargets="BeforeBuild">
+    <PropertyGroup>
+      <VsixVersion>4.4.$([System.DateTime]::Now.ToString("HHmmss"))</VsixVersion>
+    </PropertyGroup>
+    <XmlPoke XmlInputPath="$(MSBuildProjectDirectory)\source.extension.vsixmanifest"
+             Namespaces="&lt;Namespace Prefix='vs' Uri='http://schemas.microsoft.com/developer/vsx-schema/2011'/&gt;"
+             Query="/vs:PackageManifest/vs:Metadata/vs:Identity/@Version"
+             Value="$(VsixVersion)" />
+    <Message Text="VSIX version stamped: $(VsixVersion)" Importance="high" />
+  </Target>
 
 </Project>

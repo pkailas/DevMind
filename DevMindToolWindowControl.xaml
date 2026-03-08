@@ -1,4 +1,4 @@
-<!-- File: DevMindToolWindowControl.xaml  v1.7 -->
+<!-- File: DevMindToolWindowControl.xaml  v3.5 -->
 <!-- Copyright (c) iOnline Consulting LLC. All rights reserved. -->
 <UserControl x:Class="DevMind.DevMindToolWindowControl"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -8,18 +8,15 @@
              xmlns:local="clr-namespace:DevMind"
              mc:Ignorable="d"
              d:DesignHeight="600" d:DesignWidth="350">
-    <UserControl.Resources>
-        <local:WidthPercentageConverter x:Key="WidthPctConverter" />
-    </UserControl.Resources>
     <Grid Margin="0">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="*" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />   <!-- Row 0: System prompt collapsible -->
+            <RowDefinition Height="Auto" />   <!-- Row 1: Input area -->
+            <RowDefinition Height="Auto" />   <!-- Row 2: Toolbar -->
+            <RowDefinition Height="*" />      <!-- Row 3: Output stream -->
         </Grid.RowDefinitions>
 
-        <!-- Collapsible system prompt panel -->
+        <!-- Row 0: Collapsible system prompt panel -->
         <StackPanel Grid.Row="0">
             <ToggleButton x:Name="SystemPromptToggle"
                           Content="System Prompt &#x25BC;"
@@ -34,6 +31,7 @@
                           Unchecked="SystemPromptToggle_Unchecked" />
             <Border x:Name="SystemPromptPanel"
                     Visibility="Collapsed"
+                    MaxHeight="150"
                     Padding="4"
                     BorderThickness="0,0,0,1"
                     BorderBrush="{DynamicResource {x:Static SystemColors.ActiveBorderBrushKey}}">
@@ -49,183 +47,66 @@
             </Border>
         </StackPanel>
 
-        <!-- Scrollable chat message history -->
-        <ScrollViewer Grid.Row="1"
-                      x:Name="ChatScrollViewer"
-                      VerticalScrollBarVisibility="Auto"
-                      HorizontalScrollBarVisibility="Disabled"
-                      Padding="4">
-            <ItemsControl x:Name="MessagesPanel">
-                <!-- Stretch each item so assistant messages can span the full width -->
-                <ItemsControl.ItemContainerStyle>
-                    <Style TargetType="ContentPresenter">
-                        <Setter Property="HorizontalAlignment" Value="Stretch" />
-                    </Style>
-                </ItemsControl.ItemContainerStyle>
+        <!-- Row 1: Input area -->
+        <Border Grid.Row="1"
+                BorderThickness="1"
+                BorderBrush="{DynamicResource {x:Static SystemColors.ActiveBorderBrushKey}}"
+                Margin="4,4,4,0">
+            <TextBox x:Name="InputTextBox"
+                     TextWrapping="Wrap"
+                     MinHeight="80"
+                     MaxHeight="160"
+                     VerticalScrollBarVisibility="Auto"
+                     Padding="6,4"
+                     AcceptsReturn="True"
+                     FontSize="12"
+                     PreviewKeyDown="InputTextBox_KeyDown" />
+        </Border>
 
-                <ItemsControl.Resources>
-
-                    <!-- ── User message: right-aligned blue bubble ── -->
-                    <DataTemplate DataType="{x:Type local:UserMessageViewModel}">
-                        <Border Padding="8,6"
-                                Margin="4,3"
-                                CornerRadius="6"
-                                HorizontalAlignment="Right"
-                                Background="#FF007ACC"
-                                MaxWidth="{Binding ActualWidth,
-                                           RelativeSource={RelativeSource AncestorType=ScrollViewer},
-                                           Converter={StaticResource WidthPctConverter},
-                                           ConverterParameter=0.9}">
-                            <TextBox Text="{Binding Text, Mode=OneWay}"
-                                     TextWrapping="Wrap"
-                                     Foreground="White"
-                                     Background="Transparent"
-                                     BorderThickness="0"
-                                     IsReadOnly="True"
-                                     IsReadOnlyCaretVisible="False"
-                                     Padding="0"
-                                     FontSize="12"
-                                     Cursor="Arrow" />
-                        </Border>
-                    </DataTemplate>
-
-                    <!-- ── Assistant message: vertical stack of text / code segments ── -->
-                    <DataTemplate DataType="{x:Type local:AssistantMessageViewModel}">
-                        <ItemsControl ItemsSource="{Binding Segments}"
-                                      Margin="4,3"
-                                      HorizontalAlignment="Left"
-                                      MaxWidth="{Binding ActualWidth,
-                                                 RelativeSource={RelativeSource AncestorType=ScrollViewer},
-                                                 Converter={StaticResource WidthPctConverter},
-                                                 ConverterParameter=0.95}">
-                            <ItemsControl.ItemContainerStyle>
-                                <Style TargetType="ContentPresenter">
-                                    <Setter Property="HorizontalAlignment" Value="Stretch" />
-                                </Style>
-                            </ItemsControl.ItemContainerStyle>
-
-                            <ItemsControl.Resources>
-
-                                <!-- Text segment: gray bubble with selectable markdown rendering -->
-                                <DataTemplate DataType="{x:Type local:TextSegmentViewModel}">
-                                    <Border Padding="8,6"
-                                            Margin="0,2"
-                                            CornerRadius="6"
-                                            HorizontalAlignment="Left"
-                                            Background="#FF3C3C3C"
-                                            MaxWidth="{Binding ActualWidth,
-                                                       RelativeSource={RelativeSource AncestorType=ScrollViewer},
-                                                       Converter={StaticResource WidthPctConverter},
-                                                       ConverterParameter=0.9}">
-                                        <local:MarkdownRichTextBox
-                                                 MarkdownText="{Binding Text, Mode=OneWay}"
-                                                 Foreground="#FFDCDCDC"
-                                                 Background="Transparent"
-                                                 BorderThickness="0"
-                                                 Padding="0"
-                                                 FontSize="12" />
-                                    </Border>
-                                </DataTemplate>
-
-                                <!-- Code segment: dark VS Code-style code box -->
-                                <DataTemplate DataType="{x:Type local:CodeSegmentViewModel}">
-                                    <Border Margin="0,2"
-                                            BorderThickness="1"
-                                            BorderBrush="#FF3E3E3E"
-                                            HorizontalAlignment="Stretch">
-                                        <StackPanel>
-
-                                            <!-- Header bar: language label + Copy button -->
-                                            <Border Background="#FF2D2D2D" Padding="8,4">
-                                                <Grid>
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="*" />
-                                                        <ColumnDefinition Width="Auto" />
-                                                    </Grid.ColumnDefinitions>
-                                                    <TextBlock Grid.Column="0"
-                                                               Text="{Binding Language}"
-                                                               Foreground="#FF9CDCFE"
-                                                               FontFamily="Consolas"
-                                                               FontSize="11"
-                                                               VerticalAlignment="Center" />
-                                                    <Button Grid.Column="1"
-                                                            Content="Copy"
-                                                            Command="{Binding CopyCommand}"
-                                                            Padding="8,2"
-                                                            FontSize="11"
-                                                            Cursor="Hand" />
-                                                </Grid>
-                                            </Border>
-
-                                            <!-- Code content: monospace, dark background, selectable -->
-                                            <TextBox Text="{Binding Code, Mode=OneWay}"
-                                                     Background="#FF1E1E1E"
-                                                     Foreground="#FFD4D4D4"
-                                                     FontFamily="Consolas"
-                                                     FontSize="12"
-                                                     IsReadOnly="True"
-                                                     IsReadOnlyCaretVisible="False"
-                                                     BorderThickness="0"
-                                                     Padding="8,6"
-                                                     TextWrapping="NoWrap"
-                                                     HorizontalScrollBarVisibility="Auto"
-                                                     VerticalScrollBarVisibility="Disabled"
-                                                     AcceptsReturn="True"
-                                                     Cursor="Arrow" />
-                                        </StackPanel>
-                                    </Border>
-                                </DataTemplate>
-
-                            </ItemsControl.Resources>
-                        </ItemsControl>
-                    </DataTemplate>
-
-                </ItemsControl.Resources>
-            </ItemsControl>
-        </ScrollViewer>
-
-        <!-- Input area with Send and Clear buttons -->
-        <Grid Grid.Row="2" Margin="4,2,4,4">
+        <!-- Row 2: Toolbar -->
+        <Grid Grid.Row="2" Margin="4,2,4,2">
             <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
-                <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
-            <TextBox Grid.Column="0"
-                     x:Name="InputTextBox"
-                     AcceptsReturn="False"
-                     TextWrapping="Wrap"
-                     MaxHeight="100"
-                     MinHeight="28"
-                     VerticalScrollBarVisibility="Auto"
-                     VerticalContentAlignment="Center"
-                     Padding="4,2"
-                     KeyDown="InputTextBox_KeyDown" />
-            <Button Grid.Column="1"
-                    x:Name="SendButton"
-                    Content="Send"
-                    Width="54"
-                    MinHeight="28"
-                    Margin="4,0,0,0"
-                    Click="SendButton_Click" />
-            <Button Grid.Column="2"
-                    x:Name="ClearButton"
-                    Content="Clear"
-                    Width="54"
-                    MinHeight="28"
-                    Margin="4,0,0,0"
-                    Click="ClearButton_Click" />
+            <Button x:Name="AskButton" Grid.Column="0" Content="Ask" MinWidth="50" Margin="0,0,4,0" Click="AskButton_Click" />
+            <Button x:Name="RunButton" Grid.Column="1" Content="Run" MinWidth="50" Margin="0,0,4,0" Click="RunButton_Click" />
+            <Button x:Name="StopButton" Grid.Column="2" Content="&#x25A0; Stop" MinWidth="50" Margin="0,0,4,0" IsEnabled="False" Click="StopButton_Click" />
+            <Button x:Name="RestartButton" Grid.Column="3" Content="Restart" MinWidth="55" Margin="0,0,4,0" Click="RestartButton_Click" />
+            <Button x:Name="ClearButton" Grid.Column="4" Content="Clear" MinWidth="50" Margin="0,0,4,0" Click="ClearButton_Click" />
+            <TextBlock x:Name="ContextIndicator"
+                       Grid.Column="5"
+                       VerticalAlignment="Center"
+                       Padding="4,0"
+                       FontSize="10"
+                       Foreground="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"
+                       Text="" />
+            <TextBlock x:Name="StatusText"
+                       Grid.Column="6"
+                       VerticalAlignment="Center"
+                       Padding="4,0"
+                       FontSize="10"
+                       Text="Ready" />
         </Grid>
 
-        <!-- Status bar -->
-        <Border Grid.Row="3"
-                Padding="6,3"
-                BorderThickness="0,1,0,0"
-                BorderBrush="{DynamicResource {x:Static SystemColors.ActiveBorderBrushKey}}">
-            <TextBlock x:Name="StatusText"
-                       Text="Disconnected"
-                       FontSize="11"
-                       Opacity="0.8" />
-        </Border>
+        <!-- Row 3: Output stream -->
+        <RichTextBox x:Name="OutputBox"
+                     Grid.Row="3"
+                     IsReadOnly="True"
+                     IsReadOnlyCaretVisible="True"
+                     VerticalScrollBarVisibility="Auto"
+                     HorizontalScrollBarVisibility="Auto"
+                     FontFamily="Consolas"
+                     FontSize="12"
+                     Background="#FF1E1E1E"
+                     Foreground="#FFCCCCCC"
+                     BorderThickness="0"
+                     Padding="6,4"
+                     Margin="4,2,4,2" />
     </Grid>
 </UserControl>
