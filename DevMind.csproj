@@ -57,16 +57,110 @@
   <!-- Import VSSDK targets AFTER SDK targets so VSIX properties resolve correctly -->
   <Import Project="$(VSToolsPath)\VSSDK\Microsoft.VsSDK.targets" Condition="'$(VSToolsPath)' != ''" />
 
-  <!-- Stamp the vsixmanifest with a timestamp-based version before every build -->
-  <Target Name="StampVsixVersion" BeforeTargets="BeforeBuild">
+  <!-- 1. Increment build counter, stamp AssemblyInfo and manifests before compile -->
+  <Target Name="IncrementBuildCounter" BeforeTargets="BeforeBuild">
     <PropertyGroup>
-      <VsixVersion>4.4.$([System.DateTime]::Now.ToString("HHmmss"))</VsixVersion>
+      <BuildCounterFile>$(MSBuildProjectDirectory)\build.counter</BuildCounterFile>
+    </PropertyGroup>
+    <ReadLinesFromFile File="$(BuildCounterFile)" Condition="Exists('$(BuildCounterFile)')">
+      <Output TaskParameter="Lines" ItemName="CounterLines" />
+    </ReadLinesFromFile>
+    <PropertyGroup>
+      <CurrentCounter Condition="'@(CounterLines)' != ''">@(CounterLines)</CurrentCounter>
+      <CurrentCounter Condition="'$(CurrentCounter)' == ''">0</CurrentCounter>
+      <NextCounter>$([MSBuild]::Add($(CurrentCounter), 1))</NextCounter>
+      <NextCounter Condition="'$([System.Convert]::ToInt32($(NextCounter)))' &gt; '65535'">1</NextCounter>
+      <VsixVersion>4.6.$(NextCounter)</VsixVersion>
+    </PropertyGroup>
+    <WriteLinesToFile File="$(BuildCounterFile)" Lines="$(NextCounter)" Overwrite="true" />
+    <XmlPoke XmlInputPath="$(MSBuildProjectDirectory)\source.extension.vsixmanifest"
+             Namespaces="&lt;Namespace Prefix='vs' Uri='http://schemas.microsoft.com/developer/vsx-schema/2011'/&gt;"
+             Query="/vs:PackageManifest/vs:Metadata/vs:Identity/@Version"
+             Value="$(VsixVersion)" />
+    <XmlPoke XmlInputPath="$(MSBuildProjectDirectory)\extension.vsixmanifest"
+             Namespaces="&lt;Namespace Prefix='vs' Uri='http://schemas.microsoft.com/developer/vsx-schema/2011'/&gt;"
+             Query="/vs:PackageManifest/vs:Metadata/vs:Identity/@Version"
+             Value="$(VsixVersion)" />
+    <XmlPoke XmlInputPath="$(OutputPath)extension.vsixmanifest"
+             Namespaces="&lt;Namespace Prefix='vs' Uri='http://schemas.microsoft.com/developer/vsx-schema/2011'/&gt;"
+             Query="/vs:PackageManifest/vs:Metadata/vs:Identity/@Version"
+             Value="$(VsixVersion)"
+             Condition="Exists('$(OutputPath)extension.vsixmanifest')" />
+    <XmlPoke XmlInputPath="$(IntermediateOutputPath)extension.vsixmanifest"
+             Namespaces="&lt;Namespace Prefix='vs' Uri='http://schemas.microsoft.com/developer/vsx-schema/2011'/&gt;"
+             Query="/vs:PackageManifest/vs:Metadata/vs:Identity/@Version"
+             Value="$(VsixVersion)"
+             Condition="Exists('$(IntermediateOutputPath)extension.vsixmanifest')" />
+    <!-- Stamp AssemblyInfo.cs: replace AssemblyVersion / AssemblyFileVersion lines -->
+    <PropertyGroup>
+      <AssemblyInfoFile>$(MSBuildProjectDirectory)\Properties\AssemblyInfo.cs</AssemblyInfoFile>
+      <AssemblyVersionFull>$(VsixVersion).0</AssemblyVersionFull>
+    </PropertyGroup>
+    <ReadLinesFromFile File="$(AssemblyInfoFile)">
+      <Output TaskParameter="Lines" ItemName="AssemblyInfoLines" />
+    </ReadLinesFromFile>
+    <ItemGroup>
+      <AssemblyInfoLinesUpdated Include="@(AssemblyInfoLines)">
+        <Line>$([System.Text.RegularExpressions.Regex]::Replace('%(AssemblyInfoLines.Identity)', 'AssemblyVersion\("[\d\.]+"\)', 'AssemblyVersion("$(AssemblyVersionFull)")'))</Line>
+      </AssemblyInfoLinesUpdated>
+      <AssemblyInfoLinesUpdated2 Include="@(AssemblyInfoLinesUpdated)">
+        <Line>$([System.Text.RegularExpressions.Regex]::Replace('%(AssemblyInfoLinesUpdated.Line)', 'AssemblyFileVersion\("[\d\.]+"\)', 'AssemblyFileVersion("$(AssemblyVersionFull)")'))</Line>
+      </AssemblyInfoLinesUpdated2>
+    </ItemGroup>
+    <WriteLinesToFile File="$(AssemblyInfoFile)" Lines="@(AssemblyInfoLinesUpdated2->'%(Line)')" Overwrite="true" />
+    <Message Text="AssemblyInfo version stamped: $(AssemblyVersionFull)" Importance="high" />
+    <Message Text="VSIX version stamped: $(VsixVersion)" Importance="high" />
+  </Target>
+
+  <!-- 2. Re-apply manifest version just before VSIX packaging (no counter increment) -->
+  <Target Name="StampVsixManifests" BeforeTargets="CreateVsixContainer">
+    <PropertyGroup>
+      <BuildCounterFile>$(MSBuildProjectDirectory)\build.counter</BuildCounterFile>
+    </PropertyGroup>
+    <ReadLinesFromFile File="$(BuildCounterFile)" Condition="Exists('$(BuildCounterFile)')">
+      <Output TaskParameter="Lines" ItemName="ManifestCounterLines" />
+    </ReadLinesFromFile>
+    <PropertyGroup>
+      <ManifestCounter Condition="'@(ManifestCounterLines)' != ''">@(ManifestCounterLines)</ManifestCounter>
+      <ManifestCounter Condition="'$(ManifestCounter)' == ''">0</ManifestCounter>
+      <VsixVersion Condition="'$(VsixVersion)' == ''">4.6.$(ManifestCounter)</VsixVersion>
     </PropertyGroup>
     <XmlPoke XmlInputPath="$(MSBuildProjectDirectory)\source.extension.vsixmanifest"
              Namespaces="&lt;Namespace Prefix='vs' Uri='http://schemas.microsoft.com/developer/vsx-schema/2011'/&gt;"
              Query="/vs:PackageManifest/vs:Metadata/vs:Identity/@Version"
              Value="$(VsixVersion)" />
-    <Message Text="VSIX version stamped: $(VsixVersion)" Importance="high" />
+    <XmlPoke XmlInputPath="$(MSBuildProjectDirectory)\extension.vsixmanifest"
+             Namespaces="&lt;Namespace Prefix='vs' Uri='http://schemas.microsoft.com/developer/vsx-schema/2011'/&gt;"
+             Query="/vs:PackageManifest/vs:Metadata/vs:Identity/@Version"
+             Value="$(VsixVersion)" />
+    <XmlPoke XmlInputPath="$(OutputPath)extension.vsixmanifest"
+             Namespaces="&lt;Namespace Prefix='vs' Uri='http://schemas.microsoft.com/developer/vsx-schema/2011'/&gt;"
+             Query="/vs:PackageManifest/vs:Metadata/vs:Identity/@Version"
+             Value="$(VsixVersion)"
+             Condition="Exists('$(OutputPath)extension.vsixmanifest')" />
+    <XmlPoke XmlInputPath="$(IntermediateOutputPath)extension.vsixmanifest"
+             Namespaces="&lt;Namespace Prefix='vs' Uri='http://schemas.microsoft.com/developer/vsx-schema/2011'/&gt;"
+             Query="/vs:PackageManifest/vs:Metadata/vs:Identity/@Version"
+             Value="$(VsixVersion)"
+             Condition="Exists('$(IntermediateOutputPath)extension.vsixmanifest')" />
+    <!-- Stamp manifest.json in the intermediate output folder -->
+    <PropertyGroup>
+      <ManifestJsonFile>$(IntermediateOutputPath)manifest.json</ManifestJsonFile>
+    </PropertyGroup>
+    <ReadLinesFromFile File="$(ManifestJsonFile)" Condition="Exists('$(ManifestJsonFile)')">
+      <Output TaskParameter="Lines" ItemName="ManifestJsonLines" />
+    </ReadLinesFromFile>
+    <ItemGroup>
+      <ManifestJsonLinesUpdated Include="@(ManifestJsonLines)">
+        <Line>$([System.Text.RegularExpressions.Regex]::Replace('%(ManifestJsonLines.Identity)', '"version"\s*:\s*"[\d\.]+"', '"version":"$(VsixVersion)"'))</Line>
+      </ManifestJsonLinesUpdated>
+    </ItemGroup>
+    <WriteLinesToFile File="$(ManifestJsonFile)"
+                     Lines="@(ManifestJsonLinesUpdated->'%(Line)')"
+                     Overwrite="true"
+                     Condition="Exists('$(ManifestJsonFile)')" />
+    <Message Text="manifest.json version stamped: $(VsixVersion)" Importance="high" />
+    <Message Text="VSIX manifests re-stamped for packaging: $(VsixVersion)" Importance="high" />
   </Target>
 
 </Project>

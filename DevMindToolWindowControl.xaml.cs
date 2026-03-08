@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v4.4.4
+// File: DevMindToolWindowControl.xaml.cs  v4.5.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -40,6 +40,8 @@ namespace DevMind
         private int _generatingTokenCount;
         private bool _inThinkBlock;
         private readonly StringBuilder _thinkBuffer = new StringBuilder();
+        private readonly Stack<(string originalPath, string backupPath)> _patchBackupStack = new Stack<(string, string)>();
+        private const int PatchBackupStackLimit = 10;
 
         public DevMindToolWindowControl(LlmClient llmClient)
         {
@@ -64,7 +66,9 @@ namespace DevMind
 
             LoadSystemPromptText();
             DevMindOptions.Saved += OnSettingsSaved;
-            AppendOutput("DevMind v3.0 — local LLM assistant\nType a message and click Ask, or a shell command and click Run.\n", OutputColor.Dim);
+            var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
+            string versionStr = $"{version.Major}.{version.Minor}.{version.Build}";
+            AppendOutput($"DevMind v{versionStr} — local LLM assistant\nType a message and click Ask, or a shell command and click Run.\n", OutputColor.Dim);
         }
 
         // ── Output color ──────────────────────────────────────────────────────
@@ -218,10 +222,29 @@ namespace DevMind
             _terminalHistory.Clear();
             _terminalHistoryIndex = 0;
 
+            // Clear LLM conversation history
+            _llmClient.ClearHistory();
+
             // Force DevMind.md reload on next Ask
             _devMindContext = null;
 
+            // Clear any READ-loaded file context
+            _readContext = null;
+
+            // Discard all PATCH backups and clean up temp files
+            while (_patchBackupStack.Count > 0)
+            {
+                var (_, backupPath) = _patchBackupStack.Pop();
+                try { File.Delete(backupPath); } catch { }
+            }
+
             AppendOutput("DevMind restarted.\n", OutputColor.Dim);
+        }
+
+        private void ClearPromptButton_Click(object sender, RoutedEventArgs e)
+        {
+            InputTextBox.Text = "";
+            InputTextBox.Focus();
         }
 
         private void ClearButton_Click(object sender, RoutedEventArgs e)
@@ -298,10 +321,33 @@ namespace DevMind
                 return;
             }
 
-            if (text.StartsWith("READ ", StringComparison.OrdinalIgnoreCase))
+            if (text.Equals("UNDO", StringComparison.OrdinalIgnoreCase))
             {
-                await ApplyReadCommandAsync(text);
+                await ApplyUndoAsync();
                 return;
+            }
+
+            // Process consecutive READ lines from the top of the input
+            {
+                var allLines = text.Split('\n');
+                int readLineCount = 0;
+                while (readLineCount < allLines.Length &&
+                       allLines[readLineCount].TrimEnd('\r').StartsWith("READ ", StringComparison.OrdinalIgnoreCase))
+                {
+                    readLineCount++;
+                }
+
+                if (readLineCount > 0)
+                {
+                    string readBlock = string.Join("\n", allLines, 0, readLineCount);
+                    await ApplyReadCommandAsync(readBlock);
+
+                    string remaining = string.Join("\n", allLines, readLineCount, allLines.Length - readLineCount).Trim();
+                    if (string.IsNullOrEmpty(remaining))
+                        return;
+
+                    text = remaining;
+                }
             }
 
             _inThinkBlock = false;
@@ -336,7 +382,7 @@ namespace DevMind
             if (!string.IsNullOrEmpty(_readContext))
             {
                 contextualMessage = _readContext + contextualMessage;
-                _readContext = null;
+                // _readContext intentionally kept alive — persists until /reload or Restart clears it
             }
 
             // File generation detection
@@ -397,6 +443,7 @@ namespace DevMind
             _cts = new CancellationTokenSource();
 
             Run streamRun = null;
+            var responseBuffer = new StringBuilder();
             if (!isFileGeneration)
             {
                 var streamPara = new Paragraph { Margin = new Thickness(0) };
@@ -443,6 +490,7 @@ namespace DevMind
                                     if (!string.IsNullOrEmpty(visible))
                                     {
                                         streamRun.Text += visible;
+                                        responseBuffer.Append(visible);
                                         OutputBox.ScrollToEnd();
                                     }
                                 }
@@ -454,9 +502,19 @@ namespace DevMind
                             {
                                 await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
                                 if (isFileGeneration)
+                                {
                                     await SaveGeneratedFileAsync(targetFileName, fileGenBuffer.ToString());
+                                }
                                 else
+                                {
                                     AppendNewLine();
+                                    var patchBlocks = ParsePatchBlocks(responseBuffer.ToString());
+                                    if (patchBlocks.Count > 0)
+                                    {
+                                        AppendOutput($"[AUTO-PATCH] Detected {patchBlocks.Count} PATCH block(s) — executing...\n", OutputColor.Dim);
+                                        await AutoExecutePatchAsync(responseBuffer.ToString());
+                                    }
+                                }
                                 StatusText.Text = "Ready";
                                 ContextIndicator.Text = "";
                                 SetInputEnabled(true);
@@ -505,6 +563,42 @@ namespace DevMind
 #pragma warning restore VSSDK007
         }
 
+        private static readonly HashSet<string> _noisePathSegments = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            { "bin", "obj", ".vs", ".git", "node_modules", "packages", ".idea" };
+
+        private static bool IsNoisePath(string fullPath) =>
+            fullPath.Replace('\\', '/').Split('/')
+                .Any(seg => _noisePathSegments.Contains(seg));
+
+        /// <summary>
+        /// Recursively enumerates files matching a pattern, silently skipping
+        /// any directories that are inaccessible (permission errors, symlink loops, etc.).
+        /// </summary>
+        private static IEnumerable<string> SafeEnumerateFiles(string root, string pattern)
+        {
+            // Strip glob characters the LLM might accidentally include in a filename
+            string safePattern = pattern.Replace("*", "").Replace("?", "");
+            if (string.IsNullOrWhiteSpace(safePattern)) yield break;
+
+            var queue = new Queue<string>();
+            queue.Enqueue(root);
+            while (queue.Count > 0)
+            {
+                string dir = queue.Dequeue();
+                IEnumerable<string> files = Enumerable.Empty<string>();
+                try { files = Directory.EnumerateFiles(dir, safePattern); } catch { }
+                foreach (var f in files) yield return f;
+
+                IEnumerable<string> subdirs = Enumerable.Empty<string>();
+                try { subdirs = Directory.EnumerateDirectories(dir); } catch { }
+                foreach (var sub in subdirs)
+                {
+                    if (!_noisePathSegments.Contains(Path.GetFileName(sub)))
+                        queue.Enqueue(sub);
+                }
+            }
+        }
+
         private async Task<string> FindFileInSolutionAsync(string fileName, string hint = null)
         {
             try
@@ -514,20 +608,33 @@ namespace DevMind
                 if (dte?.Solution?.FileName == null) return null;
                 var solutionDir = Path.GetDirectoryName(dte.Solution.FileName);
                 if (string.IsNullOrEmpty(solutionDir)) return null;
-                var matches = Directory.GetFiles(solutionDir, fileName, SearchOption.AllDirectories);
 
-                // If hint contains a path separator, filter matches where the full path contains the hint
+                // Exclude output/tooling folders that could contain stale compiled copies.
+                // Use safe recursive enumeration — Directory.GetFiles(AllDirectories) throws
+                // on any inaccessible subdirectory (symlinks, ACL-denied folders, etc.)
+                var matches = SafeEnumerateFiles(solutionDir, fileName)
+                    .Where(m => !IsNoisePath(m))
+                    .ToArray();
+
+                // If hint contains a path separator, prefer matches whose path contains the hint
                 if (!string.IsNullOrEmpty(hint) && (hint.Contains('/') || hint.Contains('\\')))
                 {
                     string normalizedHint = hint.Replace('\\', '/');
                     var hintMatches = matches
                         .Where(m => m.Replace('\\', '/').IndexOf(normalizedHint, StringComparison.OrdinalIgnoreCase) >= 0)
+                        .Where(File.Exists)
                         .ToArray();
+                    if (hintMatches.Length > 1)
+                        AppendOutput($"[FIND] Warning: {hintMatches.Length} matches for '{fileName}' after hint filtering — using first: {hintMatches[0]}\n", OutputColor.Dim);
                     if (hintMatches.Length > 0)
-                        return hintMatches.FirstOrDefault(File.Exists);
+                        return hintMatches[0];
                 }
 
-                return matches.FirstOrDefault(File.Exists);
+                var existingMatches = matches.Where(File.Exists).ToArray();
+                if (existingMatches.Length > 1)
+                    AppendOutput($"[FIND] Warning: {existingMatches.Length} matches for '{fileName}' — using first: {existingMatches[0]}\n", OutputColor.Dim);
+
+                return existingMatches.FirstOrDefault();
             }
             catch
             {
@@ -535,23 +642,6 @@ namespace DevMind
             }
         }
 
-        private static string FindFileInProject(EnvDTE.ProjectItems items, string fileName)
-        {
-            ThreadHelper.ThrowIfNotOnUIThread();
-            if (items == null) return null;
-            foreach (EnvDTE.ProjectItem item in items)
-            {
-                for (short i = 1; i <= item.FileCount; i++)
-                {
-                    var path = item.FileNames[i];
-                    if (Path.GetFileName(path).Equals(fileName, StringComparison.OrdinalIgnoreCase))
-                        return path;
-                }
-                var sub = FindFileInProject(item.ProjectItems, fileName);
-                if (sub != null) return sub;
-            }
-            return null;
-        }
 
         // ── Shell ─────────────────────────────────────────────────────────────
 
@@ -573,6 +663,36 @@ namespace DevMind
             {
                 _devMindContext = null;
                 AppendOutput("DevMind.md context cleared — will reload on next Ask.\n", OutputColor.Dim);
+                return;
+            }
+
+            // /context — show or clear READ-loaded file context
+            if (command.Equals("/context", StringComparison.OrdinalIgnoreCase))
+            {
+                if (string.IsNullOrEmpty(_readContext))
+                {
+                    AppendOutput("No READ context loaded.\n", OutputColor.Dim);
+                }
+                else
+                {
+                    // Extract filenames from the context headers
+                    var contextFiles = System.Text.RegularExpressions.Regex
+                        .Matches(_readContext, @"The following files have been loaded for context:\r?\n\r?\n(.+?)\r?\n")
+                        .Cast<System.Text.RegularExpressions.Match>()
+                        .Select(m => m.Groups[1].Value.Trim())
+                        .ToList();
+                    AppendOutput($"READ context: {contextFiles.Count} file(s) loaded:\n", OutputColor.Dim);
+                    foreach (var f in contextFiles)
+                        AppendOutput($"  • {f}\n", OutputColor.Dim);
+                    AppendOutput("Type /context clear to remove.\n", OutputColor.Dim);
+                }
+                return;
+            }
+
+            if (command.Equals("/context clear", StringComparison.OrdinalIgnoreCase))
+            {
+                _readContext = null;
+                AppendOutput("READ context cleared.\n", OutputColor.Dim);
                 return;
             }
 
@@ -871,6 +991,37 @@ namespace DevMind
             }
         }
 
+        // ── UNDO command ──────────────────────────────────────────────────────
+
+        private Task ApplyUndoAsync()
+        {
+            if (_patchBackupStack.Count == 0)
+            {
+                AppendOutput("[UNDO] Nothing to undo.\n", OutputColor.Error);
+                return Task.CompletedTask;
+            }
+
+            var (originalPath, backupPath) = _patchBackupStack.Pop();
+            try
+            {
+                if (!File.Exists(backupPath))
+                {
+                    AppendOutput($"[UNDO] Backup file missing: {backupPath}\n", OutputColor.Error);
+                    return Task.CompletedTask;
+                }
+                File.Copy(backupPath, originalPath, overwrite: true);
+                try { File.Delete(backupPath); } catch { }
+                int remaining = _patchBackupStack.Count;
+                AppendOutput($"[UNDO] Restored {Path.GetFileName(originalPath)} (undo depth remaining: {remaining})\n", OutputColor.Success);
+                InputTextBox.Text = "";
+            }
+            catch (Exception ex)
+            {
+                AppendOutput($"[UNDO] Failed: {ex.Message}\n", OutputColor.Error);
+            }
+            return Task.CompletedTask;
+        }
+
         // ── PATCH command ─────────────────────────────────────────────────────
 
         /// <summary>
@@ -904,7 +1055,138 @@ namespace DevMind
             return (sb.ToString(), map.ToArray());
         }
 
-        private async Task ApplyPatchAsync(string input)
+        /// <summary>
+        /// Reads a file detecting and preserving its BOM/encoding.
+        /// Returns the text content and the encoding to use when writing back.
+        /// </summary>
+        private static (string content, Encoding encoding) ReadFilePreservingEncoding(string path)
+        {
+            byte[] bytes = File.ReadAllBytes(path);
+
+            if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
+                return (new UTF8Encoding(true).GetString(bytes, 3, bytes.Length - 3), new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+            if (bytes.Length >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE)
+                return (Encoding.Unicode.GetString(bytes, 2, bytes.Length - 2), Encoding.Unicode);
+            if (bytes.Length >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF)
+                return (Encoding.BigEndianUnicode.GetString(bytes, 2, bytes.Length - 2), Encoding.BigEndianUnicode);
+
+            return (Encoding.UTF8.GetString(bytes), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+        }
+
+        /// <summary>
+        /// Standard dynamic-programming Levenshtein edit distance.
+        /// </summary>
+        private static int LevenshteinDistance(string a, string b)
+        {
+            if (a.Length == 0) return b.Length;
+            if (b.Length == 0) return a.Length;
+            var d = new int[a.Length + 1, b.Length + 1];
+            for (int i = 0; i <= a.Length; i++) d[i, 0] = i;
+            for (int j = 0; j <= b.Length; j++) d[0, j] = j;
+            for (int i = 1; i <= a.Length; i++)
+                for (int j = 1; j <= b.Length; j++)
+                    d[i, j] = a[i - 1] == b[j - 1]
+                        ? d[i - 1, j - 1]
+                        : 1 + Math.Min(d[i - 1, j - 1], Math.Min(d[i - 1, j], d[i, j - 1]));
+            return d[a.Length, b.Length];
+        }
+
+        /// <summary>
+        /// Slides an N-line window over content (N = line count of findText) and scores
+        /// each window against normFind using Levenshtein similarity.
+        /// Returns the best match only when it exceeds the threshold AND is unambiguous.
+        /// </summary>
+        private static (int origStart, int origEnd, double similarity)? FindFuzzyMatch(
+            string content, string findText, string normFind, double threshold = 0.85)
+        {
+            int windowSize = findText.Split('\n').Length;
+
+            // Build line list with absolute char offsets
+            var lines = new List<(int start, int end)>();
+            int pos = 0;
+            while (pos < content.Length)
+            {
+                int nl = content.IndexOf('\n', pos);
+                int end = nl >= 0 ? nl + 1 : content.Length;
+                lines.Add((pos, end));
+                pos = end;
+                if (nl < 0) break;
+            }
+
+            double bestSim = -1, secondSim = -1;
+            int bestStart = -1, bestEnd = -1;
+
+            for (int i = 0; i <= lines.Count - windowSize; i++)
+            {
+                int wStart = lines[i].start;
+                int wEnd   = lines[i + windowSize - 1].end;
+                string window     = content.Substring(wStart, wEnd - wStart);
+                string normWindow = Regex.Replace(window, @"\s+", " ").Trim();
+
+                int maxLen = Math.Max(normFind.Length, normWindow.Length);
+                if (maxLen == 0) continue;
+                double sim = 1.0 - (double)LevenshteinDistance(normFind, normWindow) / maxLen;
+
+                if (sim > bestSim)
+                {
+                    secondSim = bestSim;
+                    bestSim   = sim;
+                    bestStart = wStart;
+                    bestEnd   = wEnd;
+                }
+                else if (sim > secondSim)
+                {
+                    secondSim = sim;
+                }
+            }
+
+            if (bestSim < threshold) return null;
+            // Require a meaningful gap over the runner-up to avoid ambiguous fuzzy matches.
+            // Gap of 0.05 (5 percentage points) means the best must clearly outrank second-best.
+            if (bestSim - secondSim < 0.05) return null;
+
+            return (bestStart, bestEnd, bestSim);
+        }
+
+        private static List<(string findText, string replaceText)> ParsePatchBlocks(string input)
+        {
+            var results = new List<(string, string)>();
+            // Skip first line (PATCH <filename>)
+            int cursor = input.IndexOf('\n');
+            if (cursor < 0) return results;
+            cursor++;
+
+            while (cursor < input.Length)
+            {
+                int findIdx = input.IndexOf("FIND:", cursor, StringComparison.OrdinalIgnoreCase);
+                if (findIdx < 0) break;
+
+                int replaceIdx = input.IndexOf("REPLACE:", findIdx, StringComparison.OrdinalIgnoreCase);
+                if (replaceIdx < 0) break;
+
+                int findContentStart = input.IndexOf('\n', findIdx) + 1;
+                string findText = input.Substring(findContentStart, replaceIdx - findContentStart);
+                if (findText.EndsWith("\r\n")) findText = findText.Substring(0, findText.Length - 2);
+                else if (findText.EndsWith("\n")) findText = findText.Substring(0, findText.Length - 1);
+
+                int replaceContentStart = input.IndexOf('\n', replaceIdx) + 1;
+
+                // Next FIND: or end of string marks the end of this REPLACE block
+                int nextFindIdx = input.IndexOf("FIND:", replaceContentStart, StringComparison.OrdinalIgnoreCase);
+                string replaceText = nextFindIdx >= 0
+                    ? input.Substring(replaceContentStart, nextFindIdx - replaceContentStart)
+                    : input.Substring(replaceContentStart);
+
+                if (replaceText.EndsWith("\r\n")) replaceText = replaceText.Substring(0, replaceText.Length - 2);
+                else if (replaceText.EndsWith("\n")) replaceText = replaceText.Substring(0, replaceText.Length - 1);
+
+                results.Add((findText, replaceText));
+                cursor = nextFindIdx >= 0 ? nextFindIdx : input.Length;
+            }
+            return results;
+        }
+
+        private async Task ApplyPatchAsync(string input, bool clearInput = true)
         {
             try
             {
@@ -917,45 +1199,19 @@ namespace DevMind
                     return;
                 }
 
-                // Extract FIND: and REPLACE: blocks
-                string joined = input;
-                int findIdx = joined.IndexOf("FIND:", StringComparison.OrdinalIgnoreCase);
-                int replaceIdx = joined.IndexOf("REPLACE:", StringComparison.OrdinalIgnoreCase);
-                if (findIdx < 0 || replaceIdx < 0 || replaceIdx <= findIdx)
+                // Parse all FIND/REPLACE pairs — supports multi-block patches
+                var blocks = ParsePatchBlocks(input);
+                if (blocks.Count == 0)
                 {
-                    AppendOutput("[PATCH] Invalid syntax — must contain FIND: and REPLACE: markers.\n", OutputColor.Error);
+                    AppendOutput("[PATCH] Invalid syntax — must contain at least one FIND: and REPLACE: pair.\n", OutputColor.Error);
                     return;
                 }
 
-                // Text between "FIND:\n" and "REPLACE:"
-                int findContentStart = joined.IndexOf('\n', findIdx) + 1;
-                string findText = joined.Substring(findContentStart, replaceIdx - findContentStart);
-                // Strip trailing newline that separates FIND block from REPLACE:
-                if (findText.EndsWith("\r\n")) findText = findText.Substring(0, findText.Length - 2);
-                else if (findText.EndsWith("\n")) findText = findText.Substring(0, findText.Length - 1);
-
-                // Text after "REPLACE:\n"
-                int replaceContentStart = joined.IndexOf('\n', replaceIdx) + 1;
-                string replaceText = replaceContentStart > 0 && replaceContentStart <= joined.Length
-                    ? joined.Substring(replaceContentStart)
-                    : "";
-
-                // Resolve file path — search solution for matching filename
-                string fullPath = null;
-                try
-                {
-                    await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
-                    var dte = await VS.GetServiceAsync<EnvDTE.DTE, EnvDTE.DTE>();
-                    string solutionDir = System.IO.Path.GetDirectoryName(dte?.Solution?.FullName);
-                    if (!string.IsNullOrEmpty(solutionDir))
-                    {
-                        var matches = Directory.GetFiles(solutionDir, fileName, SearchOption.AllDirectories);
-                        fullPath = matches.FirstOrDefault();
-                    }
-                }
-                catch { }
-
-                fullPath ??= Path.Combine(_terminalWorkingDir, fileName);
+                // Resolve file path — support partial path hints (e.g. "Services/Foo.cs")
+                string normalizedFileName = fileName.Replace('\\', '/');
+                string fileNameOnly = Path.GetFileName(normalizedFileName);
+                string fullPath = await FindFileInSolutionAsync(fileNameOnly, normalizedFileName)
+                    ?? Path.Combine(_terminalWorkingDir, fileNameOnly);
 
                 if (!File.Exists(fullPath))
                 {
@@ -963,34 +1219,125 @@ namespace DevMind
                     return;
                 }
 
-                string content = File.ReadAllText(fullPath);
+                var (content, fileEncoding) = ReadFilePreservingEncoding(fullPath);
+                bool fileUsesCrlf = content.Contains("\r\n");
 
-                // Whitespace-normalized matching: collapse all whitespace runs to single space,
-                // then map the match position back to the original content for replacement.
+                // Validate ALL blocks first — all-or-nothing semantics
                 var (normContent, normToOrig) = NormalizeWithMap(content);
-                string normFind = Regex.Replace(findText, @"\s+", " ").Trim();
-                AppendOutput($"[PATCH-DEBUG] normFind: {normFind}\n", OutputColor.Dim);
-                AppendOutput($"[PATCH-DEBUG] normContent (first 500): {normContent.Substring(0, Math.Min(500, normContent.Length))}\n", OutputColor.Dim);
-                int normIdx = normContent.IndexOf(normFind, StringComparison.Ordinal);
-                if (normIdx < 0)
+                var resolvedBlocks = new List<(int origStart, int origEnd, string replaceText)>();
+
+                for (int i = 0; i < blocks.Count; i++)
                 {
-                    AppendOutput($"[PATCH] FIND text not found in {fileName} — no changes made.\n", OutputColor.Error);
-                    return;
+                    var (findText, replaceText) = blocks[i];
+                    string normFind = Regex.Replace(findText, @"\s+", " ").Trim();
+                    if (string.IsNullOrEmpty(normFind))
+                    {
+                        AppendOutput($"[PATCH] Block {i + 1}: FIND is empty — no changes made.\n", OutputColor.Error);
+                        return;
+                    }
+
+                    int normIdx = normContent.IndexOf(normFind, StringComparison.Ordinal);
+                    int origStart, origEnd;
+
+                    if (normIdx < 0)
+                    {
+                        // Exact normalized match failed — try fuzzy line-window fallback
+                        var fuzzy = FindFuzzyMatch(content, findText, normFind);
+                        if (fuzzy == null)
+                        {
+                            AppendOutput($"[PATCH] Block {i + 1}: FIND text not found in {fileName} — no changes made.\n", OutputColor.Error);
+                            return;
+                        }
+                        int fuzzyLine = content.Substring(0, fuzzy.Value.origStart).Count(c => c == '\n') + 1;
+                        AppendOutput($"[PATCH] Block {i + 1}: Fuzzy match at line {fuzzyLine} ({fuzzy.Value.similarity:P0} similarity) — applying.\n", OutputColor.Dim);
+                        origStart = fuzzy.Value.origStart;
+                        origEnd   = fuzzy.Value.origEnd;
+                    }
+                    else
+                    {
+                        // Ambiguity check on exact match
+                        int secondNormIdx = normContent.IndexOf(normFind, normIdx + 1, StringComparison.Ordinal);
+                        if (secondNormIdx >= 0)
+                        {
+                            int line1 = content.Substring(0, normToOrig[normIdx]).Count(c => c == '\n') + 1;
+                            int line2 = content.Substring(0, normToOrig[secondNormIdx]).Count(c => c == '\n') + 1;
+                            AppendOutput(
+                                $"[PATCH] Block {i + 1}: Ambiguous FIND — matched at line {line1} and line {line2} in {fileName}. " +
+                                $"Add more surrounding context to make the match unique.\n",
+                                OutputColor.Error);
+                            return;
+                        }
+                        origStart = normToOrig[normIdx];
+                        // Walk back to include leading indentation on the same line,
+                        // otherwise the indentation from content and from finalReplace double up
+                        while (origStart > 0 && content[origStart - 1] != '\n')
+                            origStart--;
+                        origEnd   = (normIdx + normFind.Length < normToOrig.Length)
+                            ? normToOrig[normIdx + normFind.Length]
+                            : content.Length;
+                    }
+
+                    // Normalize line endings to match file
+                    string normalizedReplace = replaceText.Replace("\r\n", "\n");
+                    string finalReplace = fileUsesCrlf
+                        ? normalizedReplace.Replace("\n", "\r\n")
+                        : normalizedReplace;
+
+                    resolvedBlocks.Add((origStart, origEnd, finalReplace));
                 }
 
-                // Map normalized positions back to original content positions
-                int origStart = normToOrig[normIdx];
-                int origEnd = (normIdx + normFind.Length < normToOrig.Length)
-                    ? normToOrig[normIdx + normFind.Length]
-                    : content.Length;
+                // Apply in reverse order so earlier positions aren't shifted by later edits
+                resolvedBlocks.Sort((a, b) => b.origStart.CompareTo(a.origStart));
+                var updated = content;
+                foreach (var (origStart, origEnd, finalReplace) in resolvedBlocks)
+                    updated = updated.Substring(0, origStart) + finalReplace + updated.Substring(origEnd);
 
-                var updated = content.Substring(0, origStart) + replaceText + content.Substring(origEnd);
-                File.WriteAllText(fullPath, updated, Encoding.UTF8);
-                AppendOutput($"[PATCH] Applied to {fullPath}\n", OutputColor.Success);
+                // Back up original before writing — enables UNDO
+                try
+                {
+                    string backupDir = Path.Combine(Path.GetTempPath(), "DevMind");
+                    Directory.CreateDirectory(backupDir);
+                    string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
+                    string backupPath = Path.Combine(backupDir, $"{Path.GetFileName(fullPath)}.{timestamp}.bak");
+                    File.Copy(fullPath, backupPath, overwrite: true);
+                    if (_patchBackupStack.Count >= PatchBackupStackLimit)
+                    {
+                        // Discard oldest backup file to keep temp storage bounded
+                        var oldest = _patchBackupStack.ToArray().Last();
+                        try { File.Delete(oldest.backupPath); } catch { }
+                        // Rebuild stack without the oldest entry
+                        var entries = _patchBackupStack.ToArray().Reverse().Skip(1).ToArray();
+                        _patchBackupStack.Clear();
+                        foreach (var e in entries) _patchBackupStack.Push(e);
+                    }
+                    _patchBackupStack.Push((fullPath, backupPath));
+                }
+                catch { /* backup failure is non-fatal — patch still applies */ }
+
+                File.WriteAllText(fullPath, updated, fileEncoding);
+                int undosAvailable = _patchBackupStack.Count;
+                AppendOutput($"[PATCH] Applied to {fullPath} (undo depth: {undosAvailable})\n", OutputColor.Success);
+                if (clearInput)
+                    InputTextBox.Text = "";
             }
             catch (Exception ex)
             {
                 AppendOutput($"[PATCH] Error: {ex.Message}\n", OutputColor.Error);
+            }
+        }
+
+        // ── AUTO-PATCH ────────────────────────────────────────────────────────
+
+        private async Task AutoExecutePatchAsync(string llmResponse)
+        {
+            var patchStartPattern = new Regex(@"^PATCH\s+\S+", RegexOptions.Multiline | RegexOptions.IgnoreCase);
+            var matches = patchStartPattern.Matches(llmResponse);
+            for (int i = 0; i < matches.Count; i++)
+            {
+                int start = matches[i].Index;
+                int end = i + 1 < matches.Count ? matches[i + 1].Index : llmResponse.Length;
+                string block = llmResponse.Substring(start, end - start).TrimEnd();
+                await ApplyPatchAsync(block, clearInput: false);
             }
         }
 
@@ -1028,7 +1375,7 @@ namespace DevMind
                         continue;
                     }
 
-                    string content = File.ReadAllText(fullPath);
+                    var (content, _) = ReadFilePreservingEncoding(fullPath);
                     int lineCount = content.Split('\n').Length;
 
                     _readContext = (_readContext ?? "") +

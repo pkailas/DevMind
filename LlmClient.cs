@@ -199,7 +199,11 @@ namespace DevMind
             var request = new JObject
             {
                 ["messages"] = messages,
-                ["stream"] = true
+                ["stream"] = true,
+                ["thinking"] = new JObject
+                {
+                    ["type"] = "disabled"
+                }
             };
 
             if (!string.IsNullOrWhiteSpace(modelName))

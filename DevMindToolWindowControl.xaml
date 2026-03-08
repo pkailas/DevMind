@@ -1,4 +1,4 @@
-<!-- File: DevMindToolWindowControl.xaml  v3.5 -->
+<!-- File: DevMindToolWindowControl.xaml  v3.7 -->
 <!-- Copyright (c) iOnline Consulting LLC. All rights reserved. -->
 <UserControl x:Class="DevMind.DevMindToolWindowControl"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -54,8 +54,8 @@
                 Margin="4,4,4,0">
             <TextBox x:Name="InputTextBox"
                      TextWrapping="Wrap"
-                     MinHeight="80"
-                     MaxHeight="160"
+                     MinHeight="120"
+                     MaxHeight="200"
                      VerticalScrollBarVisibility="Auto"
                      Padding="6,4"
                      AcceptsReturn="True"
@@ -71,6 +71,7 @@
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
@@ -79,15 +80,16 @@
             <Button x:Name="StopButton" Grid.Column="2" Content="&#x25A0; Stop" MinWidth="50" Margin="0,0,4,0" IsEnabled="False" Click="StopButton_Click" />
             <Button x:Name="RestartButton" Grid.Column="3" Content="Restart" MinWidth="55" Margin="0,0,4,0" Click="RestartButton_Click" />
             <Button x:Name="ClearButton" Grid.Column="4" Content="Clear" MinWidth="50" Margin="0,0,4,0" Click="ClearButton_Click" />
+            <Button x:Name="ClearPromptButton" Grid.Column="5" Content="⌫" MinWidth="28" Margin="0,0,4,0" Click="ClearPromptButton_Click" ToolTip="Clear prompt" />
             <TextBlock x:Name="ContextIndicator"
-                       Grid.Column="5"
+                       Grid.Column="6"
                        VerticalAlignment="Center"
                        Padding="4,0"
                        FontSize="10"
                        Foreground="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"
                        Text="" />
             <TextBlock x:Name="StatusText"
-                       Grid.Column="6"
+                       Grid.Column="7"
                        VerticalAlignment="Center"
                        Padding="4,0"
                        FontSize="10"

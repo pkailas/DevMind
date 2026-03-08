@@ -33,7 +33,10 @@
       "Read(//c/Program Files/Microsoft Visual Studio/2022//**)",
       "Read(//c/Program Files/Microsoft Visual Studio/2022/**)",
       "Read(//c/Program Files \\(x86\\)/Microsoft Visual Studio/**)",
-      "Bash(find /c -name \"MSBuild.exe\" -maxdepth 8)"
+      "Bash(find /c -name \"MSBuild.exe\" -maxdepth 8)",
+      "Bash(\"C:\\\\Users\\\\pkailas.KAILAS\\\\source\\\\repos\\\\DevMind\\\\build.counter\":*)",
+      "Bash('C:/Temp/search.ps1':*)",
+      "Bash(git add:*)"
     ]
   }
 }
