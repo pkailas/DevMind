@@ -23,7 +23,7 @@ DevMind is a Visual Studio extension (VSIX) that provides local LLM assistance d
 - `RunShellCommand()` — handles Run button and Ctrl+Enter; intercepts `/reload` command
 - `GetEditorContextAsync()` — reads active VS editor selection and/or full file (≤300 lines)
 - `BuildMessageWithContext()` — prepends fenced code block to LLM message if context exists
-- `ExtractFileName(prompt)` — scans prompt for words ending in known code extensions
+- `ResponseParser.Parse(response)` — converts full LLM response string into ordered `List<ResponseBlock>`
 - `SaveGeneratedFileAsync(fileName, code)` — strips `<think>` blocks, resolves active project dir via DTE, writes file, calls `ProjectItems.AddFromFile()`
 - `StartGeneratingAnimation(fileName)` / `StopGeneratingAnimation()` — animated dots in OutputBox during file gen
 - `LoadDevMindContextAsync()` — reads DevMind.md from solution root; cached in `_devMindContext`
@@ -33,14 +33,17 @@ DevMind is a Visual Studio extension (VSIX) that provides local LLM assistance d
 - Current model: Qwen3.5 27B on RTX 4000 SFF Ada (20GB VRAM)
 - Models may produce `<think>...</think>` blocks — these are always stripped before display and before file writes
 
-## File Generation Behavior
-When a prompt contains a filename with a known code extension (.cs, .ts, .js, .py, .xml, .json, .sql, .html, .css, .xaml, .cpp, .h, .vb, .fs):
-1. LLM is instructed to respond with raw source only (no fences, no preamble)
-2. Tokens accumulate silently; animated dots show in OutputBox
-3. VS status bar shows live token count: `DevMind: Generating X.cs... (N tokens)`
-4. File saves to active project directory; added to project via `ProjectItems.AddFromFile()`
-5. Active project's `DefaultNamespace` is injected into the instruction
-6. File opens in VS editor if `OpenFileAfterGeneration` option is true (default)
+## File Creation (FILE: directive)
+To create a new file, the model uses the `FILE:` / `END_FILE` directive:
+```
+FILE: <filename>
+<raw source code — no fences, no explanation>
+END_FILE
+```
+1. `FILE:` boundary detected mid-stream; tokens accumulate silently in `_fileCaptureBuffer`
+2. Animated dots and token count show in OutputBox during capture
+3. On `END_FILE`, file is saved to the terminal working directory and added to the VS project
+4. File opens in VS editor after saving
 
 ## Options (Tools > Options > DevMind)
 - **General**: SystemPrompt (string), ModelUrl (string)
@@ -51,7 +54,41 @@ When a prompt contains a filename with a known code extension (.cs, .ts, .js, .p
 - Example: `git commit -am "msg"; git push`
 - `dotnet build` works directly: `dotnet build C:\path\to\Solution.slnx`
 
-## PATCH Command
+## LLM Directives
+The model can use four directives in any combination within a single response:
+
+### FILE: / END_FILE — Create a new file
+```
+FILE: <filename>
+<raw source code>
+END_FILE
+```
+
+### PATCH — Edit an existing file
+```
+PATCH <filename>
+FIND:
+<exact text from the file>
+REPLACE:
+<replacement text>
+```
+- Uses whitespace-normalized matching — CRLF and indentation differences ignored
+- Supports path hints to disambiguate same-named files: `PATCH VLink.PDFSanitizerService/Program.cs`
+- Multiple FIND/REPLACE pairs per PATCH block are supported
+
+### SHELL: — Run a shell command
+```
+SHELL: dotnet build
+```
+- Output is captured and fed back into the agentic loop context
+
+### READ — Request file context before editing
+```
+READ <filename>
+```
+- Triggers auto-READ resubmit: file is loaded and original prompt resubmitted automatically
+
+## PATCH Command (user-typed)
 - Syntax: `PATCH <filename> / FIND: / <text> / REPLACE: / <text>`
 - Bypasses LLM entirely — instant local file edit, no tokens consumed
 - Uses whitespace-normalized matching — CRLF and indentation differences ignored

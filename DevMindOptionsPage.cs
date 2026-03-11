@@ -1,4 +1,4 @@
-// File: DevMindOptionsPage.cs  v3.9
+// File: DevMindOptionsPage.cs  v5.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -71,5 +71,15 @@ namespace DevMind
         [Description("Automatically open generated files in the editor after creation.")]
         [DefaultValue(true)]
         public bool OpenFileAfterGeneration { get; set; } = true;
+
+        /// <summary>
+        /// Maximum number of autonomous agentic loop iterations before stopping.
+        /// Set to 0 to disable the agentic loop entirely.
+        /// </summary>
+        [Category("Agentic Loop")]
+        [DisplayName("Max Agentic Depth")]
+        [Description("Maximum number of autonomous loop iterations after the initial response (0 = disabled).")]
+        [DefaultValue(5)]
+        public int AgenticLoopMaxDepth { get; set; } = 5;
     }
 }
