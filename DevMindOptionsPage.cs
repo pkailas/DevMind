@@ -1,4 +1,4 @@
-// File: DevMindOptionsPage.cs  v5.0
+// File: DevMindOptionsPage.cs  v5.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -81,5 +81,14 @@ namespace DevMind
         [Description("Maximum number of autonomous loop iterations after the initial response (0 = disabled).")]
         [DefaultValue(5)]
         public int AgenticLoopMaxDepth { get; set; } = 5;
+
+        /// <summary>
+        /// Whether to display the context budget line after every LLM response.
+        /// </summary>
+        [Category("Context Management")]
+        [DisplayName("Show Context Budget")]
+        [Description("Display a color-coded context budget line after every LLM response.")]
+        [DefaultValue(true)]
+        public bool ShowContextBudget { get; set; } = true;
     }
 }

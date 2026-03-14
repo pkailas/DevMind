@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v5.0.2
+// File: DevMindToolWindowControl.xaml.cs  v5.0.5
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -52,6 +52,9 @@ namespace DevMind
         private bool _inFileCapture;
         private string _fileCaptureFileName;
         private StringBuilder _fileCaptureBuffer;
+        private int _patchCount = 0;
+        private int _undoCount = 0;
+        private int _readFileCount = 0;
 
         public DevMindToolWindowControl(LlmClient llmClient)
         {
@@ -289,6 +292,7 @@ namespace DevMind
             // Clear any READ-loaded file context
             _readContext = null;
             _pendingResubmitPrompt = null;
+            _readFileCount = 0;
 
             // Discard pending fuzzy confirmation
             _pendingFuzzyPatch = null;
@@ -299,6 +303,10 @@ namespace DevMind
                 var (_, backupPath) = _patchBackupStack.Pop();
                 try { File.Delete(backupPath); } catch { }
             }
+
+            // Reset stats counters
+            _patchCount = 0;
+            _undoCount = 0;
 
             AppendOutput("DevMind restarted.\n", OutputColor.Dim);
         }
@@ -380,6 +388,14 @@ namespace DevMind
             // Reset agentic depth for user-initiated calls; preserve it for agentic re-triggers
             if (!_shellLoopPending)
                 _agenticDepth = 0;
+
+            // Known /command handlers — must be checked before the generic shell router below
+            if (text.Equals("/stats", StringComparison.OrdinalIgnoreCase))
+            {
+                InputTextBox.Text = "";
+                await DisplayStatsAsync();
+                return;
+            }
 
             // Single-line /command → route to shell, stripping the leading /
             if (text.StartsWith("/") && !text.Contains('\n'))
@@ -672,7 +688,8 @@ namespace DevMind
                                             var (output, exitCode) = await RunShellCommandCaptureAsync(block.Command);
                                             _lastShellExitCode = exitCode;
                                             AppendOutput(output + "\n", OutputColor.Normal);
-                                            shellOutputs.AppendLine($"Shell command: {block.Command}\nOutput:\n{output}\n---");
+                                            string shellTag = block.Command.Length > 60 ? block.Command.Substring(0, 60) : block.Command;
+                                            shellOutputs.AppendLine($"[SHELL-RESULT:{shellTag}]\nShell command: {block.Command}\nOutput:\n{output}\n---");
                                             ranShell = true;
                                             break;
 
@@ -732,6 +749,20 @@ namespace DevMind
                                     else
                                     {
                                         _agenticDepth++;
+                                        {
+                                            int agTokens = _llmClient.EstimateHistoryTokens();
+                                            int agBudget = _llmClient.MaxPromptTokens;
+                                            int agPct = agBudget > 0 ? (int)((agTokens * 100.0) / agBudget) : 0;
+                                            AppendOutput($"[AGENTIC] Iteration {_agenticDepth}/{maxDepth} — context: {agTokens}/{agBudget} tokens ({agPct}%).\n", OutputColor.Dim);
+                                            if (DevMindOptions.Instance.ShowContextBudget)
+                                            {
+                                                int cbPct = _llmClient.ContextBudgetPercent;
+                                                OutputColor cbColor = cbPct < 60 ? OutputColor.Dim
+                                                                    : cbPct < 80 ? OutputColor.Normal
+                                                                    : OutputColor.Error;
+                                                AppendOutput($"[CONTEXT] {agTokens} / {agBudget} tokens ({cbPct}%)\n", cbColor);
+                                            }
+                                        }
                                         var agenticContext = new StringBuilder();
                                         agenticContext.AppendLine($"[AGENTIC LOOP — iteration {_agenticDepth} of {maxDepth}]");
 
@@ -746,7 +777,7 @@ namespace DevMind
                                             try
                                             {
                                                 string content = File.ReadAllText(pp);
-                                                agenticContext.AppendLine($"\n[Current state — {Path.GetFileName(pp)}]\n{content}");
+                                                agenticContext.AppendLine($"\n[PATCH-RESULT:{Path.GetFileName(pp)}]\n[Current state — {Path.GetFileName(pp)}]\n{content}");
                                             }
                                             catch { }
                                         }
@@ -809,6 +840,17 @@ namespace DevMind
                                 }
 
                                 // ── Completion ────────────────────────────────────────────────
+
+                                if (DevMindOptions.Instance.ShowContextBudget)
+                                {
+                                    int cbUsed   = _llmClient.EstimateHistoryTokens();
+                                    int cbBudget = _llmClient.MaxPromptTokens;
+                                    int cbPct    = _llmClient.ContextBudgetPercent;
+                                    OutputColor cbColor = cbPct < 60 ? OutputColor.Dim
+                                                        : cbPct < 80 ? OutputColor.Normal
+                                                        : OutputColor.Error;
+                                    AppendOutput($"[CONTEXT] {cbUsed} / {cbBudget} tokens ({cbPct}%)\n", cbColor);
+                                }
 
                                 _agenticDepth = 0;
                                 _pendingResubmitPrompt = null;
@@ -969,6 +1011,22 @@ namespace DevMind
             _generatingTimer?.Stop();
             _generatingTimer = null;
             _generatingRun = null;
+        }
+
+        private async Task DisplayStatsAsync()
+        {
+            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+
+            int historyTokens = _llmClient.EstimateHistoryTokens();
+            int budgetPct    = _llmClient.ContextBudgetPercent;
+
+            AppendOutput("\n", OutputColor.Dim);
+            AppendOutput("─────────────────────────────────────────\n", OutputColor.Dim);
+            AppendOutput($"PATCH operations this session: {_patchCount}\n", OutputColor.Normal);
+            AppendOutput($"UNDO operations this session:  {_undoCount}\n", OutputColor.Normal);
+            AppendOutput($"Files in READ context:         {_readFileCount}\n", OutputColor.Normal);
+            AppendOutput($"Context budget:                ~{historyTokens} tokens ({budgetPct}% of {_llmClient.MaxPromptTokens})\n", OutputColor.Normal);
+            AppendOutput("─────────────────────────────────────────\n", OutputColor.Dim);
         }
 
         private async Task SaveGeneratedFileAsync(string fileName, string code)

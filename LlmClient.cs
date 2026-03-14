@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v5.0
+// File: LlmClient.cs  v5.6
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -8,6 +8,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Net.Http;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -23,6 +24,34 @@ namespace DevMind
         private readonly List<ChatMessage> _conversationHistory;
         private const string DefaultSystemPrompt = "You are a helpful coding assistant. Be concise and precise.";
         private string _baseUrl;
+        private readonly int _contextSize = 16716;
+        private const int MaxConversationTurns = 4;
+
+        public int MaxPromptTokens => (int)(_contextSize * 0.80);
+
+        private static int EstimateTokens(string text) => (text?.Length ?? 0) / 4 + 4;
+
+        public int EstimateHistoryTokens()
+        {
+            int total = 0;
+            foreach (var msg in _conversationHistory)
+                total += EstimateTokens(msg.Content);
+            return total;
+        }
+
+        /// <summary>
+        /// Current estimated prompt token usage as a percentage of MaxPromptTokens, clamped 0–100.
+        /// </summary>
+        public int ContextBudgetPercent
+        {
+            get
+            {
+                int budget = MaxPromptTokens;
+                if (budget <= 0) return 100;
+                int pct = (int)(EstimateHistoryTokens() * 100.0 / budget);
+                return pct < 0 ? 0 : pct > 100 ? 100 : pct;
+            }
+        }
 
         /// <summary>
         /// Initializes a new instance of the <see cref="LlmClient"/> class.
@@ -71,6 +100,44 @@ namespace DevMind
         {
             UpdateSystemPrompt();
             _conversationHistory.Add(new ChatMessage("user", userMessage));
+
+            // Phase 4: squeeze PATCH, SHELL, and READ blocks before trim (order matters: PATCH first)
+            int patchCount = SqueezePatchResults();
+            int shellCount = SqueezeShellResults();
+            int readCount  = SqueezeReadContent();
+            int totalSqueezed = patchCount + shellCount + readCount;
+            if (totalSqueezed > 0)
+                onToken($"\n[CONTEXT] Squeezed {totalSqueezed} block(s) — {patchCount} PATCH, {shellCount} SHELL, {readCount} READ.\n");
+
+            // Phase 2: sliding window trim — runs before budget guard so token count reflects trimmed history
+            int trimmed = TrimConversationHistory(MaxConversationTurns);
+            if (trimmed > 0)
+            {
+                // history is 0-indexed: [system] + pairs + [current user]
+                int kept = (_conversationHistory.Count - 2) / 2; // user/assistant pairs retained
+                onToken($"\n[CONTEXT] History trimmed to {kept} turns (removed {trimmed} messages).\n");
+            }
+
+            // Phase 3 (Level 3) budget guard — truncate current-turn READ content if still over budget
+            string level3Msg = ApplyBudgetGuardLevel3();
+            if (level3Msg != null)
+                onToken(level3Msg);
+
+            // Token count log
+            int totalTokens = 0;
+            foreach (var msg in _conversationHistory)
+                totalTokens += EstimateTokens(msg.Content);
+
+            int budget = MaxPromptTokens;
+            if (totalTokens > budget)
+            {
+                onToken($"\n[CONTEXT] WARNING: Budget exceeded after truncation. Response quality may be reduced.\n");
+            }
+            else
+            {
+                int pct = budget > 0 ? (int)((totalTokens * 100.0) / budget) : 0;
+                onToken($"\n[CONTEXT] {totalTokens} / {budget} tokens ({pct}%)\n");
+            }
 
             string modelName = DevMindOptions.Instance.ModelName;
             string requestJson = BuildRequestJson(modelName);
@@ -182,6 +249,292 @@ namespace DevMind
             {
                 _conversationHistory.Insert(0, new ChatMessage("system", prompt));
             }
+        }
+
+        private static readonly Regex _reWarnings = new Regex(@"(\d+)\s+Warning", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        /// <summary>
+        /// Replaces old PATCH result blocks in non-current user messages with compact summaries.
+        /// Returns the number of messages squeezed.
+        /// </summary>
+        private int SqueezePatchResults()
+        {
+            int count = 0;
+            int lastIndex = _conversationHistory.Count - 1;
+
+            for (int i = 1; i < lastIndex; i++)
+            {
+                var msg = _conversationHistory[i];
+                if (msg.Role != "user") continue;
+                if (!msg.Content.Contains("[PATCH-RESULT:")) continue;
+                if (msg.Content.StartsWith("[SQUEEZED]", StringComparison.Ordinal)) continue;
+
+                string original = msg.Content;
+
+                int tagStart = original.IndexOf("[PATCH-RESULT:", StringComparison.Ordinal);
+                int tagEnd   = original.IndexOf(']', tagStart);
+                string filename = tagStart >= 0 && tagEnd > tagStart
+                    ? original.Substring(tagStart + 14, tagEnd - tagStart - 14)
+                    : "unknown";
+
+                string squeezed;
+                if (original.IndexOf("Applied", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    original.IndexOf("succeeded", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    string replaceSnippet = "changes applied";
+                    int replaceIdx = original.IndexOf("REPLACE:", StringComparison.OrdinalIgnoreCase);
+                    if (replaceIdx >= 0)
+                    {
+                        int contentStart = original.IndexOf('\n', replaceIdx);
+                        if (contentStart >= 0 && contentStart < original.Length - 1)
+                        {
+                            string raw = original.Substring(contentStart + 1).TrimStart();
+                            replaceSnippet = (raw.Length > 80 ? raw.Substring(0, 80) : raw)
+                                .Replace('\n', ' ').Trim();
+                        }
+                    }
+                    squeezed = $"[SQUEEZED][PATCH] Applied to {filename} — {replaceSnippet}.";
+                }
+                else if (original.IndexOf("FAILED", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                         original.IndexOf("error", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    string errorLine = "(unknown error)";
+                    foreach (var line in original.Split('\n'))
+                    {
+                        if (line.IndexOf("error", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                            line.IndexOf("FAILED", StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            errorLine = line.Trim();
+                            if (errorLine.Length > 120) errorLine = errorLine.Substring(0, 120);
+                            break;
+                        }
+                    }
+                    squeezed = $"[SQUEEZED][PATCH] FAILED on {filename}: {errorLine}.";
+                }
+                else
+                {
+                    squeezed = $"[SQUEEZED][PATCH] Applied to {filename} — changes applied.";
+                }
+
+                _conversationHistory[i] = new ChatMessage(msg.Role, squeezed);
+                count++;
+            }
+
+            return count;
+        }
+
+        /// <summary>
+        /// Replaces old SHELL result blocks in non-current user messages with compact summaries.
+        /// Returns the number of messages squeezed.
+        /// </summary>
+        private int SqueezeShellResults()
+        {
+            int count = 0;
+            int lastIndex = _conversationHistory.Count - 1;
+
+            for (int i = 1; i < lastIndex; i++)
+            {
+                var msg = _conversationHistory[i];
+                if (msg.Role != "user") continue;
+                if (!msg.Content.Contains("[SHELL-RESULT:")) continue;
+                if (msg.Content.StartsWith("[SQUEEZED]", StringComparison.Ordinal)) continue;
+
+                string original = msg.Content;
+
+                int tagStart = original.IndexOf("[SHELL-RESULT:", StringComparison.Ordinal);
+                int tagEnd   = original.IndexOf(']', tagStart);
+                string command = tagStart >= 0 && tagEnd > tagStart
+                    ? original.Substring(tagStart + 14, tagEnd - tagStart - 14)
+                    : "unknown";
+
+                string squeezed;
+                if (original.IndexOf("Build succeeded", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    original.IndexOf("0 Error(s)", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    var warnMatch = _reWarnings.Match(original);
+                    int warnings = warnMatch.Success ? int.Parse(warnMatch.Groups[1].Value) : 0;
+                    squeezed = $"[SQUEEZED][SHELL] {command} → succeeded, {warnings} warnings, 0 errors.";
+                }
+                else if (original.IndexOf("error", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                         original.IndexOf("FAILED", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    var errorLines = new List<string>();
+                    foreach (var line in original.Split('\n'))
+                    {
+                        if (line.IndexOf("error", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                            line.IndexOf("warning", StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            errorLines.Add(line.Trim());
+                            if (errorLines.Count >= 5) break;
+                        }
+                    }
+                    string detail = errorLines.Count > 0 ? "\n" + string.Join("\n", errorLines) : "";
+                    squeezed = $"[SQUEEZED][SHELL] {command} → FAILED:{detail}";
+                }
+                else
+                {
+                    int lineCount = original.Split('\n').Length;
+                    squeezed = $"[SQUEEZED][SHELL] {command} → completed ({lineCount} lines of output).";
+                }
+
+                _conversationHistory[i] = new ChatMessage(msg.Role, squeezed);
+                count++;
+            }
+
+            return count;
+        }
+
+        private static readonly Regex _reClass  = new Regex(@"class\s+(\w+)",                                              RegexOptions.Compiled);
+        private static readonly Regex _reMethod = new Regex(@"(?:private|public|protected|internal)\s+\S+\s+(\w+)\s*\(", RegexOptions.Compiled);
+
+        /// <summary>
+        /// Replaces old READ file blocks in non-current user messages with compact summaries.
+        /// Returns the number of messages squeezed.
+        /// </summary>
+        private int SqueezeReadContent()
+        {
+            int count = 0;
+            int lastIndex = _conversationHistory.Count - 1;
+
+            for (int i = 1; i < lastIndex; i++)
+            {
+                var msg = _conversationHistory[i];
+                if (msg.Role != "user") continue;
+                if (!msg.Content.Contains("[READ:")) continue;
+                if (msg.Content.StartsWith("[SQUEEZED]", StringComparison.Ordinal)) continue;
+
+                string original = msg.Content;
+
+                // Extract filename from first [READ:...] tag
+                int tagStart = original.IndexOf("[READ:", StringComparison.Ordinal);
+                int tagEnd   = original.IndexOf(']', tagStart);
+                string filename = tagStart >= 0 && tagEnd > tagStart
+                    ? original.Substring(tagStart + 6, tagEnd - tagStart - 6)
+                    : "unknown";
+
+                int lineCount   = original.Split('\n').Length;
+                int tokenCount  = EstimateTokens(original);
+
+                // Collect up to 10 unique class + method names
+                var names = new List<string>();
+                foreach (Match m in _reClass.Matches(original))
+                {
+                    string n = m.Groups[1].Value;
+                    if (!names.Contains(n)) names.Add(n);
+                    if (names.Count >= 10) break;
+                }
+                if (names.Count < 10)
+                {
+                    foreach (Match m in _reMethod.Matches(original))
+                    {
+                        string n = m.Groups[1].Value;
+                        if (!names.Contains(n)) names.Add(n);
+                        if (names.Count >= 10) break;
+                    }
+                }
+
+                string detected = names.Count > 0 ? string.Join(", ", names) : "(none)";
+                string squeezed = $"[SQUEEZED][READ:{filename}] {lineCount} lines, ~{tokenCount} tokens. Detected: {detected}. Re-READ if needed.";
+
+                _conversationHistory[i] = new ChatMessage(msg.Role, squeezed);
+                count++;
+            }
+
+            return count;
+        }
+
+        private const int BudgetGuardKeepHead = 200;
+        private const int BudgetGuardKeepTail = 50;
+
+        /// <summary>
+        /// Budget Guard Level 3: if total estimated tokens still exceed MaxPromptTokens after
+        /// squeezing and trimming, truncates [READ:] file content in the current user message
+        /// (last entry in _conversationHistory) to head+tail lines.
+        /// Returns a notification string to emit via onToken, or null if no action was taken.
+        /// </summary>
+        private string ApplyBudgetGuardLevel3()
+        {
+            int totalTokens = 0;
+            foreach (var msg in _conversationHistory)
+                totalTokens += EstimateTokens(msg.Content);
+
+            if (totalTokens <= MaxPromptTokens)
+                return null;
+
+            int lastIndex = _conversationHistory.Count - 1;
+            var currentMsg = _conversationHistory[lastIndex];
+            if (currentMsg.Role != "user") return null;
+
+            string content = currentMsg.Content;
+            int readTagStart = content.IndexOf("[READ:", StringComparison.Ordinal);
+            if (readTagStart < 0) return null;
+
+            int readTagEnd = content.IndexOf(']', readTagStart);
+            string filename = readTagStart >= 0 && readTagEnd > readTagStart
+                ? content.Substring(readTagStart + 6, readTagEnd - readTagStart - 6)
+                : "unknown";
+
+            // Find the file content: everything after the [READ:...] tag line up to next tag or end
+            int contentStart = readTagEnd + 1;
+            if (contentStart < content.Length && content[contentStart] == '\n')
+                contentStart++;
+
+            // Find where READ content ends (next [tag] or end of string)
+            int nextTag = content.IndexOf("\n[", contentStart, StringComparison.Ordinal);
+            string fileContent = nextTag >= 0
+                ? content.Substring(contentStart, nextTag - contentStart)
+                : content.Substring(contentStart);
+
+            string[] lines = fileContent.Split('\n');
+            int originalLines = lines.Length;
+
+            if (originalLines <= BudgetGuardKeepHead + BudgetGuardKeepTail)
+                return null; // nothing to cut
+
+            var headLines = new string[BudgetGuardKeepHead];
+            var tailLines = new string[BudgetGuardKeepTail];
+            Array.Copy(lines, 0, headLines, 0, BudgetGuardKeepHead);
+            Array.Copy(lines, originalLines - BudgetGuardKeepTail, tailLines, 0, BudgetGuardKeepTail);
+
+            int omitted = originalLines - BudgetGuardKeepHead - BudgetGuardKeepTail;
+            string truncated = string.Join("\n", headLines)
+                + $"\n[... {omitted} lines omitted by budget guard ...]\n"
+                + string.Join("\n", tailLines);
+
+            string newContent = nextTag >= 0
+                ? content.Substring(0, contentStart) + truncated + content.Substring(nextTag)
+                : content.Substring(0, contentStart) + truncated;
+
+            _conversationHistory[lastIndex] = new ChatMessage(currentMsg.Role, newContent);
+
+            int newTotal = 0;
+            foreach (var msg in _conversationHistory)
+                newTotal += EstimateTokens(msg.Content);
+
+            return $"\n[CONTEXT] Level 3: Truncated {filename} from {originalLines} to {BudgetGuardKeepHead + BudgetGuardKeepTail} lines to fit budget.\n";
+        }
+
+        /// <summary>
+        /// Removes the oldest user/assistant pairs from history, keeping at most <paramref name="maxTurns"/> pairs.
+        /// Always preserves index 0 (system) and the last entry (pending user message).
+        /// Returns the number of messages removed.
+        /// </summary>
+        private int TrimConversationHistory(int maxTurns)
+        {
+            // Layout: [0]=system, [1..Count-2]=prior turns (user/assistant pairs), [Count-1]=current user
+            // Prior turn count (complete pairs only — last entry is the not-yet-answered user message)
+            int priorMessages = _conversationHistory.Count - 2; // excludes system and current user
+            if (priorMessages <= 0)
+                return 0;
+
+            int priorPairs = priorMessages / 2;
+            if (priorPairs <= maxTurns)
+                return 0;
+
+            int pairsToRemove = priorPairs - maxTurns;
+            int messagesToRemove = pairsToRemove * 2;
+            _conversationHistory.RemoveRange(1, messagesToRemove);
+            return messagesToRemove;
         }
 
         private string BuildRequestJson(string modelName)

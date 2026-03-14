@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.Context.cs  v5.1
+// File: DevMindToolWindowControl.Context.cs  v5.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -246,7 +246,7 @@ namespace DevMind
                     int lineCount = content.Split('\n').Length;
 
                     _readContext = (_readContext ?? "") +
-                        $"The following files have been loaded for context:\n\n{fileNameOnly}\n```\n{content}\n```\n\n";
+                        $"[READ:{fileNameOnly}]\nThe following files have been loaded for context:\n\n{fileNameOnly}\n```\n{content}\n```\n\n";
 
                     AppendOutput($"[READ] Loaded {fullPath} ({lineCount} lines)\n", OutputColor.Success);
 

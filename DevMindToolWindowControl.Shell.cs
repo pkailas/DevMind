@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.Shell.cs  v5.0
+// File: DevMindToolWindowControl.Shell.cs  v5.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
