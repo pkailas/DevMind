@@ -1,4 +1,4 @@
-// File: DevMindOptionsPage.cs  v5.1
+// File: DevMindOptionsPage.cs  v5.3
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -8,6 +8,19 @@ using System.Runtime.InteropServices;
 
 namespace DevMind
 {
+    /// <summary>
+    /// Identifies the type of LLM server for context-size detection.
+    /// </summary>
+    public enum LlmServerType
+    {
+        [Description("llama-server")]
+        LlamaServer,
+        [Description("LM Studio")]
+        LmStudio,
+        [Description("Custom")]
+        Custom
+    }
+
     /// <summary>
     /// Provider class that hosts the options page in the Tools > Options dialog.
     /// </summary>
@@ -43,6 +56,25 @@ namespace DevMind
         [Description("API key for authentication. Use 'lm-studio' for LM Studio default.")]
         [DefaultValue("lm-studio")]
         public string ApiKey { get; set; } = "lm-studio";
+
+        /// <summary>
+        /// The LLM server type — determines which endpoint is used for context-size detection.
+        /// </summary>
+        [Category("Connection")]
+        [DisplayName("LLM Server Type")]
+        [Description("Server type for context-size detection. llama-server uses /props; LM Studio uses /api/v0/models; Custom uses the endpoint you specify below.")]
+        [DefaultValue(LlmServerType.LlamaServer)]
+        public LlmServerType ServerType { get; set; } = LlmServerType.LlamaServer;
+
+        /// <summary>
+        /// Custom endpoint path used for context-size detection when Server Type is "Custom".
+        /// Relative to the server root (e.g., /api/info) or absolute URL.
+        /// </summary>
+        [Category("Connection")]
+        [DisplayName("Custom Context Endpoint")]
+        [Description("Endpoint path for context-size detection when Server Type is Custom (e.g., /api/info). Must return JSON with n_ctx at root or in default_generation_settings.")]
+        [DefaultValue("")]
+        public string CustomContextEndpoint { get; set; } = "";
 
         /// <summary>
         /// The model name to use. Leave empty to use the server's default model.
@@ -90,5 +122,16 @@ namespace DevMind
         [Description("Display a color-coded context budget line after every LLM response.")]
         [DefaultValue(true)]
         public bool ShowContextBudget { get; set; } = true;
+
+        /// <summary>
+        /// Whether to display LLM thinking tokens (&lt;think&gt;...&lt;/think&gt;) in the output.
+        /// When false (default), thinking tokens are suppressed entirely.
+        /// When true, they are shown with a [THINKING] prefix in a muted color.
+        /// </summary>
+        [Category("Display")]
+        [DisplayName("Show LLM Thinking")]
+        [Description("When enabled, tokens inside <think>...</think> blocks are shown with a [THINKING] prefix. When disabled (default), they are suppressed.")]
+        [DefaultValue(false)]
+        public bool ShowLlmThinking { get; set; } = false;
     }
 }

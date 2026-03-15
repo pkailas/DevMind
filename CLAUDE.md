@@ -6,7 +6,7 @@
 
 - **Product**: DevMind
 - **Brand**: iOnline Consulting LLC
-- **Current Version**: v5.0
+- **Current Version**: v5.2
 - **Platform**: Visual Studio 2022+ (VSIX), .NET Framework (VSSDK requirement)
 - **Language**: C# with WPF UI
 
@@ -26,7 +26,8 @@
 | `DevMindToolWindowControl.Shell.cs` | Shell execution — `RunShellCommand`, `RunShellCommandCaptureAsync`, `ParseShellDirectives` |
 | `ResponseParser.cs` | Parses complete LLM responses into typed blocks (File, Patch, Shell, ReadRequest, Text) |
 | `LlmClient.cs` | HTTP client — SSE streaming to OpenAI-compatible `/v1/chat/completions` |
-| `DevMindOptionsPage.cs` | VS Tools > Options settings — EndpointUrl, ApiKey, ModelName, SystemPrompt, AgenticLoopMaxDepth |
+| `DevMindOptionsPage.cs` | VS Tools > Options settings — EndpointUrl, ApiKey, ModelName, ServerType, CustomContextEndpoint, SystemPrompt, AgenticLoopMaxDepth, ShowLlmThinking |
+| `FileContentCache.cs` | In-memory line-indexed file cache — powers `READ filename:start-end` line-range access |
 
 ### Data Flow
 
@@ -48,10 +49,11 @@ ResponseBlock
 ├── FileBlock        — FILE:/END_FILE content → SaveGeneratedFileAsync()
 ├── PatchBlock       — PATCH directive → ApplyPatchAsync()
 ├── ShellBlock       — SHELL: directive → RunShellCommandCaptureAsync()
-└── ReadRequest      — model asking to READ a file → ApplyReadCommandAsync()
+├── ReadRequest      — model asking to READ a file → ApplyReadCommandAsync() / ApplyReadRangeAsync()
+└── Scratchpad       — SCRATCHPAD: block → LlmClient.UpdateScratchpad()
 ```
 
-A single LLM response can contain any combination of FILE:, PATCH, SHELL:, and READ directives. They execute in the order they appear.
+A single LLM response can contain any combination of FILE:, PATCH, SHELL:, READ, and SCRATCHPAD directives. They execute in the order they appear.
 
 ### UI Layout
 
@@ -67,11 +69,12 @@ Row 3  Height="*"      — OutputBox (RichTextBox, dark theme, Consolas, read-on
 All output is appended to a single `RichTextBox` (`OutputBox`) using `AppendOutput(text, OutputColor)`. There are no view models, DataTemplates, or bubble UI. Each call appends a `Run` with a color-coded `Foreground` to the last `Paragraph` in the `FlowDocument`.
 
 ```
-OutputColor.Normal  — #CCCCCC  (LLM response text, shell stdout)
-OutputColor.Dim     — #888888  (startup banner, status messages, [Stopped] notice)
-OutputColor.Input   — #569CD6  (echoed user input lines prefixed with "> ")
-OutputColor.Error   — #F44747  (shell stderr, LLM errors, build failures)
-OutputColor.Success — #4EC94E  (PATCH applied, file created, build succeeded)
+OutputColor.Normal   — #CCCCCC  (LLM response text, shell stdout)
+OutputColor.Dim      — #888888  (startup banner, status messages, [Stopped] notice)
+OutputColor.Input    — #569CD6  (echoed user input lines prefixed with "> ")
+OutputColor.Error    — #F44747  (shell stderr, LLM errors, build failures)
+OutputColor.Success  — #4EC94E  (PATCH applied, file created, build succeeded)
+OutputColor.Thinking — #6A6A8A  (LLM thinking tokens when ShowLlmThinking is enabled)
 ```
 
 LLM streaming tokens are appended directly to a pre-allocated `Run` (`streamRun.Text += token`) to avoid creating a new `Run` per token.
@@ -93,19 +96,19 @@ Prior to v5.0, DevMind pre-committed to a response strategy by scanning the user
 v5.0 eliminates this. All tokens stream into a single buffer. `ResponseParser.Parse()` classifies the complete response after streaming. File creation is triggered by an explicit `FILE:` directive from the LLM, not by guessing from the prompt.
 
 ### Shell Command Handling
-`_terminalWorkingDir` tracks the current working directory. `cd` is intercepted before spawning a process — relative and absolute paths resolved via `Path.GetFullPath`, `~` / bare `cd` reset to user profile. Commands run via `powershell.exe` (standard Windows path) or fall back to `cmd.exe`. History maintained in `_terminalHistory` (deduped, appended) with `_terminalHistoryIndex` for Up/Down navigation in InputTextBox. stdout and stderr are read concurrently to prevent deadlocks.
+`_terminalWorkingDir` tracks the current working directory. `cd` is intercepted before spawning a process — relative and absolute paths resolved via `Path.GetFullPath`, `~` / bare `cd` reset to user profile. Commands run via `powershell.exe` (standard Windows path) or fall back to `cmd.exe`. History maintained in `_terminalHistory` (deduped, appended) with `_terminalHistoryIndex` for Up/Down navigation in InputTextBox. stdout and stderr are read concurrently to prevent deadlocks. A **120-second hard timeout** kills the process and reports a timeout error; both interactive and captured variants share this logic.
 
 ### Cancellation
 `_cts` (`CancellationTokenSource`) is created fresh in `SendToLlm()` and passed to `LlmClient.SendMessageAsync()`. `OperationCanceledException` is swallowed silently in `LlmClient` — cancellation is not treated as an error. Stop button is enabled (`IsEnabled`) during generation; Ask/Run are disabled. Cancellation is checked before agentic re-triggers to prevent frozen loops.
 
 ### Thread Model
-All UI updates must be dispatched via `ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync()`. The `onToken`, `onComplete`, and `onError` callbacks from `LlmClient` all switch to the main thread before touching UI elements. VSSDK007 pragma suppresses fire-and-forget warnings for intentional patterns.
+All UI updates must be dispatched to the main thread. The `onToken`, `onComplete`, and `onError` callbacks from `LlmClient` use `Dispatcher.BeginInvoke` (FIFO queue) rather than `ThreadHelper.JoinableTaskFactory.Run` to avoid blocking the SSE streaming reader and to guarantee FIFO token ordering. VSSDK007/VSTHRD001/VSTHRD110 pragmas suppress fire-and-forget and dispatcher warnings for these intentional patterns.
 
 ---
 
 ## LLM Directives
 
-The model communicates actions through four directives, all injected into the system prompt at runtime:
+The model communicates actions through five directives, all injected into the system prompt at runtime:
 
 ### FILE: / END_FILE — Create New Files
 ```
@@ -145,9 +148,28 @@ SHELL: dotnet build
 ### READ — Request File Context
 ```
 READ Program.cs
+READ Program.cs:100-150    — targeted line range (1-based, inclusive)
+READ! Program.cs           — force full content (bypasses outline-first for large files)
 ```
+- Files ≥ 100 lines receive an **outline** (class/method/property declarations) instead of full content by default, to conserve tokens.
+- `READ!` bypasses the threshold and forces full content.
+- Line-range reads use `FileContentCache` (keyed by filename); the cache is populated on first READ and updated after each PATCH.
 - When the model responds with only READ requests (no PATCH/SHELL/FILE), DevMind auto-loads the files and resubmits the original prompt.
 - `_pendingResubmitPrompt` stores the original prompt; cleared after use or on cancel.
+
+### SCRATCHPAD — Model State Tracking
+```
+SCRATCHPAD:
+Goal: <task>
+Files: <file> (lines N-M)
+Status: PLANNING|PATCHING|BUILDING|DONE
+Last: <last action>
+Next: <next step>
+END_SCRATCHPAD
+```
+- Terminated by `END_SCRATCHPAD` on its own line.
+- Stored in `LlmClient._taskScratchpad`; injected into context on subsequent turns (≤200 tokens).
+- Helps the model track multi-step task state across turns without repeating context.
 
 ---
 
@@ -156,10 +178,12 @@ READ Program.cs
 After `onComplete` processes all directive blocks, DevMind decides whether to re-trigger:
 
 1. **Build succeeded** (`SHELL:` ran, exit code 0) → stop, display "Build succeeded — task complete."
-2. **Build failed or PATCH-only** → increment `_agenticDepth`, inject shell output + current file state into context, re-trigger `SendToLlm()`.
+2. **Build failed or PATCH-only** → increment `_agenticDepth`, inject shell output + **PATCH diff view** (±3 lines context, `>>> CHANGED:`/`>>> ADDED:` markers) into context, re-trigger `SendToLlm()`. Full file is no longer re-injected — the diff-only view keeps tokens lean.
 3. **Auto-READ resubmit** — response was only a READ request → load files, resubmit original prompt.
 4. **Bare code block** — response had fenced code but no directives → retry once with correction prompt.
 5. **Depth cap** (`AgenticLoopMaxDepth`, default 5) → stop, suggest UNDO.
+
+**Post-turn READ compression**: After each agentic turn, `CompressLastUserReadBlocks()` replaces full READ file content in the completed user message with an outline, so the LLM had full content during its turn but history stays lean for the next iteration.
 
 State fields: `_agenticDepth`, `_shellLoopPending`, `_lastShellExitCode`, `_pendingShellContext`, `_pendingResubmitPrompt`.
 
@@ -185,10 +209,13 @@ Fields: `_inFileCapture`, `_fileCaptureFileName`, `_fileCaptureBuffer`.
 |----------|---------|-------------|
 | `EndpointUrl` | `http://127.0.0.1:1234/v1` | Base URL for OpenAI-compatible API |
 | `ApiKey` | `lm-studio` | Bearer token (use `lm-studio` for LM Studio default) |
+| `ServerType` | `LlamaServer` | LLM server type for context-size detection (`LlamaServer`, `LmStudio`, `Custom`) |
+| `CustomContextEndpoint` | `` | Endpoint path for context-size detection when `ServerType` is `Custom` |
 | `ModelName` | `` (empty) | Model name sent in request; empty = server default |
 | `SystemPrompt` | `You are a helpful coding assistant. Be concise and precise.` | Injected as first message in every conversation |
 | `OpenFileAfterGeneration` | `true` | Auto-open generated files in VS editor |
 | `AgenticLoopMaxDepth` | `5` | Max autonomous iterations (0 = disabled) |
+| `ShowLlmThinking` | `false` | Show `<think>` tokens with `[THINKING]` prefix in muted color when `true` |
 
 Settings are accessed via `DevMindOptions.Instance` (synchronous) or `GetLiveInstanceAsync()` (async). The `DevMindOptions.Saved` event fires when the user saves options, triggering `LlmClient.Configure()` and a background connection test.
 
@@ -229,6 +256,28 @@ void ClearHistory()
 ```
 
 ---
+
+## Batch Input ([WAIT] separator)
+
+Multi-block input can be typed into the input box using `[WAIT]` as a separator line (case-insensitive). Each block is processed sequentially:
+- `READ filename` / `SHELL: cmd` / `PATCH file` blocks are executed directly without the LLM.
+- All other blocks are sent to the LLM; execution pauses until `onComplete` fires before sending the next block.
+- Implemented via `ProcessBatchInputAsync()`, signaled by `_batchOnComplete` TaskCompletionSource callback.
+
+## Context Budget (ContextBudget class)
+
+`ContextBudget` divides the detected context window into named buckets:
+
+| Bucket | % of context | Purpose |
+|--------|-------------|---------|
+| SystemPrompt | 25% | System prompt allocation |
+| ResponseHeadroom | 15% | Hard reservation for LLM response generation |
+| ProtectedTurns | 15% | Last 2 user/assistant pairs — never trimmed |
+| WorkingHistory | 45% | All other history — trimmed on soft/hard triggers |
+
+- Context size is auto-detected at startup via `DetectContextSizeAsync()` using server-specific endpoints.
+- Detection is awaited (up to 5 seconds) before the first `SendMessageAsync` call.
+- `HistoryHardLimit = TotalLimit - ResponseHeadroomLimit` — history must never exceed this.
 
 ## Shell Shortcuts
 

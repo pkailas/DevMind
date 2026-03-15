@@ -1,4 +1,4 @@
-// File: ResponseParser.cs  v5.0.1
+// File: ResponseParser.cs  v5.0.6
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -8,7 +8,7 @@ using System.Text.RegularExpressions;
 
 namespace DevMind
 {
-    public enum BlockType { Text, File, Patch, Shell, ReadRequest }
+    public enum BlockType { Text, File, Patch, Shell, ReadRequest, Scratchpad }
 
     public class ResponseBlock
     {
@@ -16,6 +16,9 @@ namespace DevMind
         public string Content { get; set; }   // raw text, file source, or full PATCH text
         public string FileName { get; set; }  // for File, Patch, ReadRequest
         public string Command { get; set; }   // for Shell
+        public int  RangeStart    { get; set; }  // for ReadRequest line-range (0 = full read)
+        public int  RangeEnd      { get; set; }  // for ReadRequest line-range (0 = full read)
+        public bool ForceFullRead { get; set; }  // READ! — bypass outline-first behavior
     }
 
     public static class ResponseParser
@@ -28,10 +31,16 @@ namespace DevMind
         private static readonly Regex _patchStart  = new Regex(@"^PATCH\s+(\S+\.\S+)",        RegexOptions.Compiled | RegexOptions.IgnoreCase);
         // Matches SHELL: command
         private static readonly Regex _shellLine   = new Regex(@"^\s*SHELL:\s*(.+)",          RegexOptions.Compiled | RegexOptions.IgnoreCase);
-        // Matches READ filename (only used when no PATCH/FILE present)
-        private static readonly Regex _readLine    = new Regex(@"^READ\s+(\S+\.\S+)",         RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        // Matches READ filename, READ filename:start-end, or READ filename:line (only used when no PATCH/FILE present)
+        private static readonly Regex _readLine       = new Regex(@"^READ\s+(\S+\.\S+?)(?::(\d+)(?:-(\d+))?)?\s*$",  RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        // Matches READ! filename — force full content regardless of file size
+        private static readonly Regex _forceReadLine  = new Regex(@"^READ!\s+(\S+\.\S+?)\s*$",                        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        // Matches SCRATCHPAD: block start (must be on its own line)
+        private static readonly Regex _scratchpadStart = new Regex(@"^SCRATCHPAD:\s*$",  RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        // Matches END_SCRATCHPAD terminator used to close a SCRATCHPAD block
+        private static readonly Regex _scratchpadEnd   = new Regex(@"^\s*END_SCRATCHPAD\s*$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
         // Markdown fence: ```lang or ```
-        private static readonly Regex _mdFence     = new Regex(@"^```",                       RegexOptions.Compiled);
+        private static readonly Regex _mdFence         = new Regex(@"^```",              RegexOptions.Compiled);
 
         public static List<ResponseBlock> Parse(string response)
         {
@@ -132,6 +141,21 @@ namespace DevMind
                     continue;
                 }
 
+                // READ! line — force full content (checked before plain READ)
+                Match forceReadMatch = _forceReadLine.Match(line);
+                if (forceReadMatch.Success && !hasActionableBlocks)
+                {
+                    FlushText(blocks, textBuf);
+                    blocks.Add(new ResponseBlock
+                    {
+                        Type          = BlockType.ReadRequest,
+                        FileName      = forceReadMatch.Groups[1].Value,
+                        ForceFullRead = true
+                    });
+                    i++;
+                    continue;
+                }
+
                 // READ line
                 Match readMatch = _readLine.Match(line);
                 if (readMatch.Success)
@@ -139,15 +163,45 @@ namespace DevMind
                     if (!hasActionableBlocks)
                     {
                         FlushText(blocks, textBuf);
+                        int rangeStart = 0, rangeEnd = 0;
+                        if (readMatch.Groups[2].Success)
+                        {
+                            int.TryParse(readMatch.Groups[2].Value, out rangeStart);
+                            // Group 3 present → explicit end line; absent → single-line read (start == end)
+                            rangeEnd = readMatch.Groups[3].Success
+                                ? (int.TryParse(readMatch.Groups[3].Value, out int re) ? re : rangeStart)
+                                : rangeStart;
+                        }
                         blocks.Add(new ResponseBlock
                         {
-                            Type = BlockType.ReadRequest,
-                            FileName = readMatch.Groups[1].Value
+                            Type       = BlockType.ReadRequest,
+                            FileName   = readMatch.Groups[1].Value,
+                            RangeStart = rangeStart,
+                            RangeEnd   = rangeEnd
                         });
                         i++;
                         continue;
                     }
                     // else fall through to text
+                }
+
+                // SCRATCHPAD: block — always parsed regardless of actionable blocks
+                if (_scratchpadStart.IsMatch(line))
+                {
+                    FlushText(blocks, textBuf);
+                    var scratchBuf = new StringBuilder();
+                    i++;
+                    while (i < lines.Length && !_scratchpadEnd.IsMatch(lines[i]))
+                    {
+                        scratchBuf.AppendLine(lines[i]);
+                        i++;
+                    }
+                    if (i < lines.Length && _scratchpadEnd.IsMatch(lines[i]))
+                        i++; // consume the --- terminator
+                    string scratchContent = scratchBuf.ToString().TrimEnd('\r', '\n', ' ');
+                    if (!string.IsNullOrWhiteSpace(scratchContent))
+                        blocks.Add(new ResponseBlock { Type = BlockType.Scratchpad, Content = scratchContent });
+                    continue;
                 }
 
                 // Plain text

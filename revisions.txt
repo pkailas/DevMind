@@ -1,0 +1,88 @@
+DevMind Revision History
+========================
+
+v5.2 (2026-03-15)
+-----------------
+Context & Budget
+  - ContextBudget class: named token buckets (SystemPrompt 25%, ResponseHeadroom 15%,
+    ProtectedTurns 15%, WorkingHistory 45%) — ResponseHeadroom is a hard reservation
+  - Auto-detect context window size at startup via DetectContextSizeAsync():
+      llama-server  → GET /props → default_generation_settings.n_ctx
+      LM Studio     → GET /api/v0/models → loaded_context_length for loaded model
+      Custom        → configurable endpoint path (relative or absolute URL)
+  - Detection awaited up to 5 seconds before first SendMessageAsync; fallback = 13372 tokens
+  - ResponseHeadroomTokens property exposed for display in agentic status lines
+  - Post-turn READ compression: CompressLastUserReadBlocks() outlines READ file content
+    in completed user messages so history stays lean across agentic turns
+
+READ Enhancements
+  - FileContentCache (new file): in-memory line-indexed cache; populated on first READ,
+    updated after each PATCH
+  - READ filename:start-end — targeted line-range reads with 1-based line numbers and
+    line-number prefix in output; clamped/clamped-notified when range exceeds file length
+  - READ! filename — force full content regardless of file size (bypasses outline threshold)
+  - Outline-first READ: files ≥100 lines receive a C# outline (class/method/property
+    declarations) instead of full content; saves tokens for large files
+  - ApplyReadRangeAsync() handles range reads via FileContentCache
+
+SCRATCHPAD Directive
+  - New BlockType.Scratchpad in ResponseParser; terminated by "---" on its own line
+  - LlmClient.UpdateScratchpad() stores content (capped at ~200 tokens); injected into
+    next turn via _taskScratchpad field
+  - Directive added to runtime llmDirective system prompt injection
+  - Helps model track multi-step task state (Goal/Files/Status/Last/Next) across turns
+
+PATCH Diff View
+  - BuildPatchDiffView(): compact ±3 line context diff with >>> CHANGED:/>>> ADDED: markers
+  - _patchDiffCache (Dictionary<string, string>): populated by ApplyPatchAsync,
+    consumed by agentic PATCH-RESULT injector
+  - Agentic loop now injects diff view instead of full file content after each PATCH
+
+[WAIT] Batch Input
+  - ProcessBatchInputAsync(): splits input on [WAIT] separator lines (case-insensitive)
+  - READ/SHELL:/PATCH blocks execute directly without LLM; all other blocks sent
+    sequentially to LLM, waiting for onComplete before sending next block
+  - _batchOnComplete: Action callback wired from onComplete/onError to TaskCompletionSource
+
+LLM Thinking Display
+  - ShowLlmThinking option (default: false): when true, <think> tokens shown with
+    [THINKING] prefix in muted OutputColor.Thinking (#6A6A8A) color
+  - thinkRun: dedicated Run in stream paragraph for thinking output
+  - FilterChunk() sets _pendingThinkText for routing to thinkRun vs. streamRun
+
+Active Project Context
+  - GetActiveProjectPathAsync(): resolves active document's containing .csproj via DTE
+  - [ACTIVE PROJECT: path] injected into every message context
+  - Build command in llmDirective uses resolved project path:
+      dotnet build "path/to/project.csproj"
+    Falls back to msbuild solution command if no project resolved
+
+Settings (DevMindOptionsPage)
+  - ServerType (LlmServerType enum): LlamaServer | LmStudio | Custom
+  - CustomContextEndpoint: path for context-size detection when ServerType=Custom
+  - ShowLlmThinking: bool, default false
+
+Shell Hardening
+  - 120-second hard timeout on both RunShellCommand and RunShellCommandCaptureAsync
+  - Process killed on timeout; streams drained with 5-second secondary window
+  - Exit code returns -1 on timeout; "(no output)" suppressed on timeout
+
+Threading
+  - onToken/onComplete/onError callbacks changed from ThreadHelper.JoinableTaskFactory.Run
+    to Dispatcher.BeginInvoke for FIFO ordering and non-blocking streaming reader
+
+Misc
+  - DetectContextSizeAsync() re-triggered on Restart button click
+  - Path.GetFileName wrapped in try/catch for PATCH blocks with invalid chars (diagnostic)
+  - PATCH block trailing "---" separator stripped (models using --- between PATCH blocks)
+  - Agentic status line now shows Response headroom reserved alongside working token count
+  - System prompt restore moved to finally block (guard against synchronous exceptions)
+
+v5.1 (prior)
+------------
+  - Context management: sliding window trim, block squeezing, budget guard, /stats command
+
+v5.0 (prior)
+------------
+  - ResponseDispatcher refactor: post-hoc classification, partial file splitting
+  - New Context/Patch/Shell partial class modules

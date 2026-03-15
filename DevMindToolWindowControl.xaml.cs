@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v5.0.5
+// File: DevMindToolWindowControl.xaml.cs  v5.0.24
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -45,10 +45,12 @@ namespace DevMind
         private int _generatingTokenCount;
         private bool _inThinkBlock;
         private readonly StringBuilder _thinkBuffer = new StringBuilder();
+        private string _pendingThinkText;   // set by FilterChunk when ShowLlmThinking is true
         private readonly Stack<(string originalPath, string backupPath)> _patchBackupStack = new Stack<(string, string)>();
         private const int PatchBackupStackLimit = 10;
         private Paragraph _spacerParagraph;
         private string _pendingResubmitPrompt;
+        private Action _batchOnComplete;
         private bool _inFileCapture;
         private string _fileCaptureFileName;
         private StringBuilder _fileCaptureBuffer;
@@ -108,7 +110,7 @@ namespace DevMind
 
         // ── Output color ──────────────────────────────────────────────────────
 
-        private enum OutputColor { Normal, Dim, Input, Error, Success }
+        private enum OutputColor { Normal, Dim, Input, Error, Success, Thinking }
 
         private void InitOutputDocument()
         {
@@ -131,11 +133,12 @@ namespace DevMind
             {
                 Foreground = color switch
                 {
-                    OutputColor.Dim     => new SolidColorBrush(Color.FromRgb(0x88, 0x88, 0x88)),
-                    OutputColor.Input   => new SolidColorBrush(Color.FromRgb(0x56, 0x9C, 0xD6)),
-                    OutputColor.Error   => new SolidColorBrush(Color.FromRgb(0xF4, 0x48, 0x47)),
-                    OutputColor.Success => new SolidColorBrush(Color.FromRgb(0x4E, 0xC9, 0x4E)),
-                    _                   => new SolidColorBrush(Color.FromRgb(0xCC, 0xCC, 0xCC)),
+                    OutputColor.Dim      => new SolidColorBrush(Color.FromRgb(0x88, 0x88, 0x88)),
+                    OutputColor.Input    => new SolidColorBrush(Color.FromRgb(0x56, 0x9C, 0xD6)),
+                    OutputColor.Error    => new SolidColorBrush(Color.FromRgb(0xF4, 0x48, 0x47)),
+                    OutputColor.Success  => new SolidColorBrush(Color.FromRgb(0x4E, 0xC9, 0x4E)),
+                    OutputColor.Thinking => new SolidColorBrush(Color.FromRgb(0x6A, 0x6A, 0x8A)),
+                    _                    => new SolidColorBrush(Color.FromRgb(0xCC, 0xCC, 0xCC)),
                 }
             };
             para.Inlines.Add(run);
@@ -304,11 +307,16 @@ namespace DevMind
                 try { File.Delete(backupPath); } catch { }
             }
 
-            // Reset stats counters
+    // Reset stats counters
             _patchCount = 0;
             _undoCount = 0;
 
             AppendOutput("DevMind restarted.\n", OutputColor.Dim);
+
+            // Re-detect context size after restart/reconnect
+#pragma warning disable VSSDK007 // Fire-and-forget is intentional for background detection
+            _ = _llmClient.DetectContextSizeAsync();
+#pragma warning restore VSSDK007
         }
 
         private void ClearPromptButton_Click(object sender, RoutedEventArgs e)
@@ -337,17 +345,27 @@ namespace DevMind
 
         private string FilterChunk(string chunk)
         {
+            _pendingThinkText = null;
+            bool showThinking = DevMindOptions.Instance.ShowLlmThinking;
+
             if (_inThinkBlock)
             {
                 _thinkBuffer.Append(chunk);
-                int closeIdx = _thinkBuffer.ToString().IndexOf("</think>", StringComparison.OrdinalIgnoreCase);
+                string bufStr = _thinkBuffer.ToString();
+                int closeIdx = bufStr.IndexOf("</think>", StringComparison.OrdinalIgnoreCase);
                 if (closeIdx >= 0)
                 {
-                    string after = _thinkBuffer.ToString().Substring(closeIdx + "</think>".Length);
+                    string after = bufStr.Substring(closeIdx + "</think>".Length);
                     _inThinkBlock = false;
+                    // Show only the portion of the current chunk that falls before </think>
+                    int chunkCloseIdx = chunk.IndexOf("</think>", StringComparison.OrdinalIgnoreCase);
+                    if (showThinking && chunkCloseIdx > 0)
+                        _pendingThinkText = chunk.Substring(0, chunkCloseIdx);
                     _thinkBuffer.Clear();
                     return after;
                 }
+                if (showThinking)
+                    _pendingThinkText = chunk;
                 return string.Empty;
             }
 
@@ -360,14 +378,19 @@ namespace DevMind
                 _thinkBuffer.Clear();
                 _thinkBuffer.Append(rest);
 
-                int closeIdx = _thinkBuffer.ToString().IndexOf("</think>", StringComparison.OrdinalIgnoreCase);
+                int closeIdx = rest.IndexOf("</think>", StringComparison.OrdinalIgnoreCase);
                 if (closeIdx >= 0)
                 {
-                    string after = _thinkBuffer.ToString().Substring(closeIdx + "</think>".Length);
+                    string thinkContent = rest.Substring(0, closeIdx);
+                    string after = rest.Substring(closeIdx + "</think>".Length);
                     _inThinkBlock = false;
                     _thinkBuffer.Clear();
+                    if (showThinking && !string.IsNullOrEmpty(thinkContent))
+                        _pendingThinkText = "[THINKING] " + thinkContent;
                     return before + after;
                 }
+                if (showThinking && !string.IsNullOrEmpty(rest))
+                    _pendingThinkText = "[THINKING] " + rest;
                 return before;
             }
 
@@ -384,6 +407,14 @@ namespace DevMind
         {
             string text = InputTextBox.Text?.Trim();
             if (string.IsNullOrEmpty(text)) return;
+
+            // [WAIT] batch: if the input contains a line that is exactly "[WAIT]" (case-insensitive),
+            // split into blocks and send each block sequentially, waiting for completion between them.
+            if (!_shellLoopPending && ContainsWaitSeparator(text))
+            {
+                await ProcessBatchInputAsync(text);
+                return;
+            }
 
             // Reset agentic depth for user-initiated calls; preserve it for agentic re-triggers
             if (!_shellLoopPending)
@@ -473,7 +504,8 @@ namespace DevMind
                 ContextIndicator.Text = "";
             }
 
-            string contextualMessage = BuildMessageWithContext(text, selectedText, fileName, fullContent);
+            string activeProjectPath = await GetActiveProjectPathAsync();
+            string contextualMessage = BuildMessageWithContext(text, selectedText, fileName, fullContent, activeProjectPath);
 
             if (!string.IsNullOrEmpty(_readContext))
             {
@@ -517,6 +549,8 @@ namespace DevMind
 
             var streamPara = new Paragraph { Margin = new Thickness(0) };
             OutputBox.Document.Blocks.Add(streamPara);
+            var thinkRun = new Run { Foreground = new SolidColorBrush(Color.FromRgb(0x6A, 0x6A, 0x8A)) };
+            streamPara.Inlines.Add(thinkRun);
             var streamRun = new Run { Foreground = new SolidColorBrush(Color.FromRgb(0xCC, 0xCC, 0xCC)) };
             streamPara.Inlines.Add(streamRun);
             var responseBuffer = new StringBuilder();
@@ -541,17 +575,30 @@ namespace DevMind
             }
             catch { }
 
-            string llmDirective = "To create new files, wrap content in FILE: / END_FILE markers:\n" +
-                "FILE: <filename>\n<raw source code>\nEND_FILE\n\n" +
-                "To edit existing files, use PATCH blocks:\n" +
-                "PATCH <filename>\nFIND:\n<exact text>\nREPLACE:\n<replacement text>\n\n" +
-                "To run commands: SHELL: <command>\n" +
-                "To read files before editing: READ <filename>\n\n" +
-                "Rules:\n" +
-                "- You may combine FILE, PATCH, SHELL in a single response.\n" +
-                "- After ANY code change, always emit SHELL: dotnet build to verify.\n" +
-                "- Never output raw code blocks. Use FILE: for new files, PATCH for edits.\n" +
-                "- If you need to see a file before editing, say READ <filename>.";
+            string buildCommand = activeProjectPath != null
+                ? $"dotnet build \"{activeProjectPath}\""
+                : "msbuild \"C:\\Users\\pkailas.KAILAS\\source\\repos\\DevMind\\DevMind.slnx\" /p:DeployExtension=false /verbosity:minimal";
+
+            string llmDirective =
+                "## Directives\n" +
+                "FILE: <filename>\n<raw source>\nEND_FILE\n\n" +
+                "PATCH <filename>\nFIND:\n<exact text>\nREPLACE:\n<replacement>\n\n" +
+                "SHELL: <command>\n\n" +
+                "READ <filename>  — full if <100 lines, outline otherwise\n" +
+                "READ <filename>:<start>-<end>  — targeted line range (1-based)\n" +
+                "READ! <filename>  — force full content (expensive)\n\n" +
+                "## Build Verification\n" +
+                $"After ANY code change emit: SHELL: {buildCommand}\n\n" +
+                "## After PATCH\n" +
+                "You receive [PATCH-RESULT:filename] with ±3 lines of context and >>> CHANGED:/>>> ADDED: markers.\n" +
+                "Full file is cached — use READ filename:start-end for more context.\n\n" +
+                "## Before PATCH\n" +
+                "Never output raw code blocks. Use FILE: for new files, PATCH for edits.\n" +
+                "READ the file first if you have not seen it. You may combine FILE, PATCH, SHELL in one response.\n" +
+                "FIND text must be copied verbatim from READ output — never reconstructed from memory.\n\n" +
+                "## Scratchpad\n" +
+                "Emit a SCRATCHPAD: block (end with END_SCRATCHPAD on its own line) to track state across turns:\n" +
+                "SCRATCHPAD:\nGoal: <task>\nFiles: <file> (lines N-M)\nStatus: <PLANNING|PATCHING|BUILDING|DONE>\nLast: <action>\nNext: <step>\nEND_SCRATCHPAD";
             if (!string.IsNullOrEmpty(projectNamespace))
                 llmDirective += $"\n- When creating new files, use the namespace '{projectNamespace}'.";
             string combined = $"{originalSystemPrompt}\n\n{llmDirective}";
@@ -559,6 +606,10 @@ namespace DevMind
                 combined += $"\n\n--- Project Context (DevMind.md) ---\n{_devMindContext}\n---";
             DevMindOptions.Instance.SystemPrompt = combined;
 
+            // Guard: always restore the original system prompt, even if RunAsync throws
+            // synchronously or an exception propagates before RunAsync returns.
+            try
+            {
 #pragma warning disable VSSDK007
 #pragma warning disable VSTHRD100
             _ = ThreadHelper.JoinableTaskFactory.RunAsync(async delegate
@@ -569,10 +620,22 @@ namespace DevMind
                         contextualMessage,
                         onToken: token =>
                         {
-                            ThreadHelper.JoinableTaskFactory.Run(async delegate
+                            // Fire-and-forget UI dispatch is intentional — streaming reader must not block on UI thread.
+                            // BeginInvoke queues work items in FIFO order so tokens are always rendered in arrival order.
+#pragma warning disable VSTHRD001, VSTHRD110
+                            Dispatcher.BeginInvoke(new Action(() =>
                             {
-                                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+#pragma warning restore VSTHRD001, VSTHRD110
+                                if (_cts?.IsCancellationRequested == true) return;
                                 var visible = FilterChunk(token);
+
+                                // Route thinking tokens to the dim think run
+                                if (_pendingThinkText != null)
+                                {
+                                    thinkRun.Text += _pendingThinkText;
+                                    OutputBox.ScrollToEnd();
+                                }
+
                                 if (string.IsNullOrEmpty(visible)) return;
 
                                 responseBuffer.Append(visible);
@@ -614,11 +677,18 @@ namespace DevMind
 
                                 streamRun.Text += visible;
                                 OutputBox.ScrollToEnd();
-                            });
+                            }));
                         },
                         onComplete: () =>
                         {
-                            ThreadHelper.JoinableTaskFactory.Run(async delegate
+                            // Fire-and-forget dispatch to ensure FIFO ordering after all onToken dispatches.
+                            // BeginInvoke guarantees responseBuffer is fully populated before the completion logic reads it.
+#pragma warning disable VSTHRD001, VSTHRD110
+                            Dispatcher.BeginInvoke(new Action(() =>
+                            {
+#pragma warning restore VSTHRD001, VSTHRD110
+#pragma warning disable VSSDK007, VSTHRD110
+                            _ = ThreadHelper.JoinableTaskFactory.RunAsync(async delegate
                             {
                                 try
                                 {
@@ -666,7 +736,17 @@ namespace DevMind
                                         case BlockType.Patch:
                                             AppendOutput($"[AUTO-PATCH] Executing PATCH {block.FileName}...\n", OutputColor.Dim);
                                             // Auto-READ the target file if not already in context
-                                            string patchFileOnly = Path.GetFileName(block.FileName.Replace('\\', '/'));
+                                            string patchFileOnly;
+                                            try
+                                            {
+                                                patchFileOnly = Path.GetFileName(block.FileName.Replace('\\', '/'));
+                                            }
+                                            catch (ArgumentException diagEx)
+                                            {
+                                                AppendOutput($"[DEBUG] Path operation failed on string: \"{block.FileName}\"\n", OutputColor.Error);
+                                                AppendOutput($"[onComplete error: {diagEx.Message}]\n", OutputColor.Error);
+                                                break;
+                                            }
                                             if (!string.IsNullOrEmpty(patchFileOnly))
                                             {
                                                 string resolvedPath = await FindFileInSolutionAsync(patchFileOnly, block.FileName.Replace('\\', '/'))
@@ -695,8 +775,22 @@ namespace DevMind
 
                                         case BlockType.ReadRequest:
                                             hadReadRequest = true;
-                                            await ApplyReadCommandAsync("READ " + block.FileName);
+                                            if (block.RangeStart > 0)
+                                                await ApplyReadRangeAsync(block.FileName, block.RangeStart, block.RangeEnd);
+                                            else if (block.ForceFullRead)
+                                                await ApplyReadCommandAsync("READ! " + block.FileName, showOutline: true);
+                                            else
+                                                await ApplyReadCommandAsync("READ " + block.FileName, showOutline: true);
                                             break;
+
+                                        case BlockType.Scratchpad:
+                                        {
+                                            string trimLog = _llmClient.UpdateScratchpad(block.Content);
+                                            if (trimLog != null)
+                                                AppendOutput(trimLog, OutputColor.Dim);
+                                            AppendOutput("[SCRATCHPAD] Updated\n", OutputColor.Dim);
+                                            break;
+                                        }
 
                                         case BlockType.Text:
                                             // Already displayed during streaming
@@ -752,15 +846,16 @@ namespace DevMind
                                         {
                                             int agTokens = _llmClient.EstimateHistoryTokens();
                                             int agBudget = _llmClient.MaxPromptTokens;
+                                            int agHeadroom = _llmClient.ResponseHeadroomTokens;
                                             int agPct = agBudget > 0 ? (int)((agTokens * 100.0) / agBudget) : 0;
-                                            AppendOutput($"[AGENTIC] Iteration {_agenticDepth}/{maxDepth} — context: {agTokens}/{agBudget} tokens ({agPct}%).\n", OutputColor.Dim);
+                                            AppendOutput($"[AGENTIC] Iteration {_agenticDepth}/{maxDepth} — Working: {agTokens:N0} / {agBudget:N0} ({agPct}%) | Response headroom: {agHeadroom:N0} reserved\n", OutputColor.Dim);
                                             if (DevMindOptions.Instance.ShowContextBudget)
                                             {
                                                 int cbPct = _llmClient.ContextBudgetPercent;
                                                 OutputColor cbColor = cbPct < 60 ? OutputColor.Dim
                                                                     : cbPct < 80 ? OutputColor.Normal
                                                                     : OutputColor.Error;
-                                                AppendOutput($"[CONTEXT] {agTokens} / {agBudget} tokens ({cbPct}%)\n", cbColor);
+                                                AppendOutput($"[CONTEXT] Working: {agTokens:N0} / {agBudget:N0} ({cbPct}%) | Response headroom: {agHeadroom:N0} reserved\n", cbColor);
                                             }
                                         }
                                         var agenticContext = new StringBuilder();
@@ -771,13 +866,18 @@ namespace DevMind
 
                                         agenticContext.Append(shellOutputs);
 
-                                        // Inject current file state for patched files
+                                        // Inject diff-only PATCH-RESULT (changed region ± context lines)
                                         foreach (var pp in patchedPaths)
                                         {
                                             try
                                             {
-                                                string content = File.ReadAllText(pp);
-                                                agenticContext.AppendLine($"\n[PATCH-RESULT:{Path.GetFileName(pp)}]\n[Current state — {Path.GetFileName(pp)}]\n{content}");
+                                                string fn = Path.GetFileName(pp);
+                                                int undoDepth = _patchBackupStack.Count;
+                                                string diffView = _patchDiffCache.TryGetValue(pp, out string dv) ? dv : null;
+                                                if (diffView != null)
+                                                    agenticContext.AppendLine($"\n[PATCH-RESULT:{fn}] Applied successfully (undo depth: {undoDepth})\n{diffView}");
+                                                else
+                                                    agenticContext.AppendLine($"\n[PATCH-RESULT:{fn}] Applied successfully (undo depth: {undoDepth})");
                                             }
                                             catch { }
                                         }
@@ -790,6 +890,12 @@ namespace DevMind
                                             : hasActions && !ranShell
                                                 ? "Continue with remaining steps (modify other files, run builds). If done, respond with DONE."
                                                 : "Continue with remaining steps.";
+
+                                        // Post-turn: outline-compress READ blocks in the just-completed user message
+                                        // so the LLM had full content this turn but history stays lean next turn.
+                                        string postTurnMsg = _llmClient.CompressLastUserReadBlocks();
+                                        if (postTurnMsg != null)
+                                            AppendOutput(postTurnMsg, OutputColor.Dim);
 
                                         // Check cancellation before re-triggering
                                         if (_cts.IsCancellationRequested)
@@ -832,6 +938,9 @@ namespace DevMind
                                             "You MUST use FILE: for new files, PATCH for edits, and SHELL: for commands. " +
                                             "Re-attempt the task now using the correct format.";
                                         InputTextBox.Text = saved;
+                                        string fmtPostTurnMsg = _llmClient.CompressLastUserReadBlocks();
+                                        if (fmtPostTurnMsg != null)
+                                            AppendOutput(fmtPostTurnMsg, OutputColor.Dim);
                                         _shellLoopPending = true;
                                         _agenticDepth = 1;
                                         SendToLlm();
@@ -843,13 +952,14 @@ namespace DevMind
 
                                 if (DevMindOptions.Instance.ShowContextBudget)
                                 {
-                                    int cbUsed   = _llmClient.EstimateHistoryTokens();
-                                    int cbBudget = _llmClient.MaxPromptTokens;
-                                    int cbPct    = _llmClient.ContextBudgetPercent;
+                                    int cbUsed     = _llmClient.EstimateHistoryTokens();
+                                    int cbBudget   = _llmClient.MaxPromptTokens;
+                                    int cbHeadroom = _llmClient.ResponseHeadroomTokens;
+                                    int cbPct      = _llmClient.ContextBudgetPercent;
                                     OutputColor cbColor = cbPct < 60 ? OutputColor.Dim
                                                         : cbPct < 80 ? OutputColor.Normal
                                                         : OutputColor.Error;
-                                    AppendOutput($"[CONTEXT] {cbUsed} / {cbBudget} tokens ({cbPct}%)\n", cbColor);
+                                    AppendOutput($"[CONTEXT] Working: {cbUsed:N0} / {cbBudget:N0} ({cbPct}%) | Response headroom: {cbHeadroom:N0} reserved\n", cbColor);
                                 }
 
                                 _agenticDepth = 0;
@@ -858,6 +968,8 @@ namespace DevMind
                                 ContextIndicator.Text = "";
                                 SetInputEnabled(true);
                                 InputTextBox.Focus();
+                                _batchOnComplete?.Invoke();
+                                _batchOnComplete = null;
                                 }
                                 catch (Exception onCompleteEx) when (!(onCompleteEx is OperationCanceledException))
                                 {
@@ -868,12 +980,16 @@ namespace DevMind
                                     SetInputEnabled(true);
                                 }
                             });
+#pragma warning restore VSSDK007, VSTHRD110
+                            }));
                         },
                         onError: ex =>
                         {
-                            ThreadHelper.JoinableTaskFactory.Run(async delegate
+                            // Fire-and-forget UI cleanup is intentional — error callback must not block the streaming reader.
+#pragma warning disable VSTHRD001, VSTHRD110
+                            Dispatcher.BeginInvoke(new Action(() =>
                             {
-                                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+#pragma warning restore VSTHRD001, VSTHRD110
                                 StopGeneratingAnimation();
                                 _shellLoopPending = false;
                                 _agenticDepth = 0;
@@ -881,7 +997,9 @@ namespace DevMind
                                 AppendOutput($"\n[Error: {ex.Message}]\n", OutputColor.Error);
                                 StatusText.Text = "Error";
                                 SetInputEnabled(true);
-                            });
+                                _batchOnComplete?.Invoke();
+                                _batchOnComplete = null;
+                            }));
                         },
                         _cts.Token);
                 }
@@ -909,11 +1027,16 @@ namespace DevMind
                     _shellLoopPending = false;
                 }
             });
-            // Restore original system prompt now that UpdateSystemPrompt() has already
-            // captured the combined value into conversation history.
-            DevMindOptions.Instance.SystemPrompt = originalSystemPrompt;
 #pragma warning restore VSTHRD100
 #pragma warning restore VSSDK007
+            }
+            finally
+            {
+                // Restore original system prompt now that RunAsync has started and
+                // UpdateSystemPrompt() has captured the combined value synchronously
+                // before the first await in SendMessageAsync.
+                DevMindOptions.Instance.SystemPrompt = originalSystemPrompt;
+            }
         }
 
         // ── Terminal strip ────────────────────────────────────────────────────
@@ -1027,6 +1150,109 @@ namespace DevMind
             AppendOutput($"Files in READ context:         {_readFileCount}\n", OutputColor.Normal);
             AppendOutput($"Context budget:                ~{historyTokens} tokens ({budgetPct}% of {_llmClient.MaxPromptTokens})\n", OutputColor.Normal);
             AppendOutput("─────────────────────────────────────────\n", OutputColor.Dim);
+        }
+
+        private static bool ContainsWaitSeparator(string text)
+        {
+            foreach (var line in text.Split('\n'))
+            {
+                if (line.Trim('\r').Trim().Equals("[WAIT]", StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return false;
+        }
+
+#pragma warning disable VSSDK007 // async void UI event handler is intentional
+#pragma warning disable VSTHRD100
+        private async Task ProcessBatchInputAsync(string text)
+#pragma warning restore VSTHRD100
+#pragma warning restore VSSDK007
+        {
+            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+
+            // Split on lines that are exactly "[WAIT]" (case-insensitive, trims CR)
+            var allLines = text.Split('\n');
+            var blocks = new List<string>();
+            var current = new StringBuilder();
+
+            foreach (var raw in allLines)
+            {
+                string line = raw.TrimEnd('\r');
+                if (line.Trim().Equals("[WAIT]", StringComparison.OrdinalIgnoreCase))
+                {
+                    string block = current.ToString().Trim();
+                    if (!string.IsNullOrEmpty(block))
+                        blocks.Add(block);
+                    current.Clear();
+                }
+                else
+                {
+                    current.AppendLine(line);
+                }
+            }
+            // Capture any trailing block after the last [WAIT]
+            {
+                string trailing = current.ToString().Trim();
+                if (!string.IsNullOrEmpty(trailing))
+                    blocks.Add(trailing);
+            }
+
+            if (blocks.Count == 0)
+            {
+                InputTextBox.Text = "";
+                return;
+            }
+
+            AppendOutput($"\n[BATCH] {blocks.Count} block(s) queued.\n", OutputColor.Dim);
+
+            for (int i = 0; i < blocks.Count; i++)
+            {
+                string block = blocks[i];
+                AppendOutput($"[BATCH] Block {i + 1}/{blocks.Count}\n", OutputColor.Dim);
+
+                // Direct commands bypass LLM — execute immediately
+                if (block.StartsWith("READ ", StringComparison.OrdinalIgnoreCase))
+                {
+                    AppendOutput($"[BATCH] Direct execute: {block.Split('\n')[0].Trim()}\n", OutputColor.Dim);
+                    string readArg = block.Substring("READ ".Length).Trim();
+                    await ApplyReadCommandAsync(readArg);
+                }
+                else if (block.StartsWith("SHELL:", StringComparison.OrdinalIgnoreCase))
+                {
+                    string cmd = block.Substring("SHELL:".Length).Trim();
+                    AppendOutput($"[BATCH] Direct execute: SHELL: {cmd}\n", OutputColor.Dim);
+                    var (output, exitCode) = await RunShellCommandCaptureAsync(cmd);
+                    if (!string.IsNullOrEmpty(output))
+                        AppendOutput(output, exitCode == 0 ? OutputColor.Normal : OutputColor.Error);
+                }
+                else if (block.StartsWith("PATCH ", StringComparison.OrdinalIgnoreCase) &&
+                         block.IndexOf("FIND:", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                         block.IndexOf("REPLACE:", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    string patchFile = block.Split('\n')[0].Substring("PATCH ".Length).Trim();
+                    AppendOutput($"[BATCH] Direct execute: PATCH {patchFile}\n", OutputColor.Dim);
+                    await ApplyPatchAsync(block, clearInput: false);
+                }
+                else
+                {
+                    AppendOutput("[BATCH] Sending to LLM...\n", OutputColor.Dim);
+                    var tcs = new TaskCompletionSource<bool>();
+                    _batchOnComplete = () => tcs.TrySetResult(true);
+
+                    InputTextBox.Text = block;
+                    SendToLlm();
+
+                    // Wait for onComplete (or onError) to fire the callback
+                    await tcs.Task;
+                }
+
+                // Brief pause to let UI settle before next block
+                await System.Threading.Tasks.Task.Delay(300);
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+            }
+
+            AppendOutput("[BATCH] All blocks sent.\n", OutputColor.Dim);
+            InputTextBox.Text = "";
         }
 
         private async Task SaveGeneratedFileAsync(string fileName, string code)

@@ -38,7 +38,26 @@
       "Bash('C:/Temp/search.ps1':*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Enterprise/MSBuild/Current/Bin/MSBuild.exe\" \"C:/Users/pkailas.KAILAS/source/repos/DevMind/DevMind.slnx\" /p:DeployExtension=false /verbosity:minimal 2>&1 | tail -20)",
+      "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Enterprise/MSBuild/Current/Bin/MSBuild.exe\" \"C:/Users/pkailas.KAILAS/source/repos/DevMind/DevMind.csproj\" /p:Configuration=Release /v:minimal 2>&1)",
+      "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Professional/MSBuild/Current/Bin/MSBuild.exe\" \"C:/Users/pkailas.KAILAS/source/repos/DevMind/DevMind.csproj\" /p:Configuration=Release /v:minimal 2>&1)",
+      "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Enterprise/MSBuild/Current/Bin/MSBuild.exe\" DevMind.slnx /p:DeployExtension=false /verbosity:minimal 2>&1 | tail -20)",
+      "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Enterprise/MSBuild/Current/Bin/MSBuild.exe\" \"C:/Users/pkailas.KAILAS/source/repos/DevMind/DevMind.slnx\" /p:DeployExtension=false /verbosity:minimal 2>&1)",
+      "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Professional/MSBuild/Current/Bin/MSBuild.exe\" \"C:/Users/pkailas.KAILAS/source/repos/DevMind/DevMind.slnx\" /p:DeployExtension=false /verbosity:minimal 2>&1)",
+      "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Professional/MSBuild/Current/Bin/MSBuild.exe\" \"C:\\\\Users\\\\pkailas.KAILAS\\\\source\\\\repos\\\\DevMind\\\\DevMind.slnx\" /p:DeployExtension=false /verbosity:minimal 2>&1)",
+      "Bash(cmd /c \"\\\\\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Enterprise\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\\\\\" C:\\\\Users\\\\pkailas.KAILAS\\\\source\\\\repos\\\\DevMind\\\\DevMind.csproj /p:Configuration=Release /t:Build /v:minimal\" 2>&1; echo \"EXIT:$?\")",
+      "Bash(powershell -Command \"& 'C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Enterprise\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe' 'C:\\\\Users\\\\pkailas.KAILAS\\\\source\\\\repos\\\\DevMind\\\\DevMind.csproj' /p:Configuration=Release /t:Build /v:minimal 2>&1\" ; Write-Host \"EXIT:$LASTEXITCODE\")",
+      "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Professional/MSBuild/Current/Bin/MSBuild.exe\" \"C:/Users/pkailas.KAILAS/source/repos/DevMind/DevMind.csproj\" /p:Configuration=Release /t:Build /v:minimal 2>&1; echo \"EXIT:$?\")",
+      "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Professional/MSBuild/Current/Bin/MSBuild.exe\" \"C:/Users/pkailas.KAILAS/source/repos/DevMind/DevMind.csproj\" \"/p:Configuration=Release\" \"/t:Build\" \"/v:minimal\" 2>&1; echo \"EXIT:$?\")",
+      "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Professional/MSBuild/Current/Bin/MSBuild.exe\" /noautoresponse \"C:/Users/pkailas.KAILAS/source/repos/DevMind/DevMind.csproj\" /p:Configuration=Release /t:Build /v:minimal 2>&1; echo \"EXIT:$?\")",
+      "Bash(MSBUILD=\"/c/Program Files/Microsoft Visual Studio/2022/Professional/MSBuild/Current/Bin/MSBuild.exe\"\n\"$MSBUILD\" --version 2>&1 | head -3)",
+      "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Enterprise/MSBuild/Current/Bin/MSBuild.exe\" \"C:\\\\Users\\\\pkailas.KAILAS\\\\source\\\\repos\\\\DevMind\\\\DevMind.csproj\" /p:Configuration=Release /t:Build /v:minimal 2>&1 | tail -20)",
+      "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Enterprise/MSBuild/Current/Bin/MSBuild.exe\" \"C:/Users/pkailas.KAILAS/source/repos/DevMind/DevMind.slnx\" /p:Configuration=Release /p:DeployExtension=false /verbosity:minimal 2>&1)",
+      "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Enterprise/MSBuild/Current/Bin/MSBuild.exe\" \"C:/Users/pkailas.KAILAS/source/repos/DevMind/DevMind.csproj\" /p:Configuration=Release /t:Build /v:minimal 2>&1 | tail -20)",
+      "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Professional/MSBuild/Current/Bin/MSBuild.exe\" \"C:/Users/pkailas.KAILAS/source/repos/DevMind/DevMind.csproj\" /p:Configuration=Release /t:Build /v:minimal 2>&1 | tail -20)",
+      "Bash(cd:*)",
+      "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Professional/MSBuild/Current/Bin/MSBuild.exe\" \"C:/Users/pkailas.KAILAS/source/repos/DevMind/DevMind.csproj\" \"/p:Configuration=Release\" \"/t:Build\" \"/v:minimal\" 2>&1 | tail -20)"
     ]
   }
 }

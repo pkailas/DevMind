@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.Patch.cs  v5.1
+// File: DevMindToolWindowControl.Patch.cs  v5.6
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -23,6 +23,9 @@ namespace DevMind
 {
     public partial class DevMindToolWindowControl : UserControl
     {
+        // Keyed by full path — populated by ApplyPatchAsync/ApplyPendingFuzzyPatch, consumed by PATCH-RESULT injector in xaml.cs
+        private readonly Dictionary<string, string> _patchDiffCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
         // ── UNDO command ──────────────────────────────────────────────────────
 
         private Task ApplyUndoAsync()
@@ -234,13 +237,45 @@ namespace DevMind
                 if (rawReplace.EndsWith("\r\n")) rawReplace = rawReplace.Substring(0, rawReplace.Length - 2);
                 else if (rawReplace.EndsWith("\n")) rawReplace = rawReplace.Substring(0, rawReplace.Length - 1);
 
-                // Collect REPLACE lines, stopping at a bare closing fence (```) —
-                // handles DeepSeek/other models that wrap the whole PATCH block in ```lang ... ```.
+                // Collect REPLACE lines, stopping at:
+                //   • a bare closing fence (```)
+                //   • a SHELL: directive
+                //   • a "---" line that is followed only by empty lines or directive lines
+                //     (SHELL:/PATCH /FILE:/READ /READ! ) — i.e. a block separator, not YAML content.
+                //
+                // AutoExecutePatchAsync strips trailing "---" only when it is the last line of the
+                // block. When SHELL: directives follow the last PATCH block, "---" is NOT the last
+                // line, so it arrives here and must be detected as a terminator contextually.
+                var splitReplaceLines = rawReplace.Split('\n');
                 var replaceLines = new List<string>();
-                foreach (var rl in rawReplace.Split('\n'))
+                for (int ri = 0; ri < splitReplaceLines.Length; ri++)
                 {
+                    var rl = splitReplaceLines[ri];
                     if (Regex.IsMatch(rl, @"^\s*```\s*$")) break;
                     if (rl.TrimStart().StartsWith("SHELL:", StringComparison.OrdinalIgnoreCase)) break;
+                    if (rl.Trim() == "---")
+                    {
+                        // Peek ahead: treat "---" as a terminator only when every non-empty
+                        // remaining line is a known directive keyword.
+                        bool isTerminator = true;
+                        for (int rj = ri + 1; rj < splitReplaceLines.Length; rj++)
+                        {
+                            string rest = splitReplaceLines[rj].Trim();
+                            if (rest.Length == 0) continue;
+                            // Case-sensitive: LLM directives are always uppercase; lowercase
+                            // variants (e.g. bash "read", makefile "shell") must not trigger.
+                            if (rest.StartsWith("SHELL:")      ||
+                                rest.StartsWith("PATCH ")      ||
+                                rest.StartsWith("FILE:")       ||
+                                rest.StartsWith("READ! ")      ||
+                                rest.StartsWith("READ ")       ||
+                                rest.StartsWith("SCRATCHPAD:"))
+                                continue;
+                            isTerminator = false;
+                            break;
+                        }
+                        if (isTerminator) break;
+                    }
                     replaceLines.Add(rl);
                 }
                 string replaceText = string.Join("\n", replaceLines);
@@ -291,7 +326,17 @@ namespace DevMind
 
                 // Resolve file path — support partial path hints (e.g. "Services/Foo.cs")
                 string normalizedFileName = fileName.Replace('\\', '/');
-                string fileNameOnly = Path.GetFileName(normalizedFileName);
+                string fileNameOnly;
+                try
+                {
+                    fileNameOnly = Path.GetFileName(normalizedFileName);
+                }
+                catch (ArgumentException diagEx)
+                {
+                    AppendOutput($"[DEBUG] Path operation failed on string: \"{normalizedFileName}\"\n", OutputColor.Error);
+                    AppendOutput($"[PATCH error: {diagEx.Message}]\n", OutputColor.Error);
+                    return null;
+                }
                 string fullPath = await FindFileInSolutionAsync(fileNameOnly, normalizedFileName)
                     ?? Path.Combine(_terminalWorkingDir, fileNameOnly);
 
@@ -425,6 +470,12 @@ namespace DevMind
 
                 File.WriteAllText(fullPath, updated, fileEncoding);
 
+                // Store updated content in cache (replaces invalidation — no disk re-read needed)
+                _llmClient._fileCache.Store(Path.GetFileName(fullPath), updated);
+
+                // Build diff view for PATCH-RESULT injection (sorted ascending for display)
+                _patchDiffCache[fullPath] = BuildPatchDiffView(content, updated, resolvedBlocks);
+
                 // Refresh _readContext so the agentic loop reasons from the current file state.
                 if (_readContext != null)
                 {
@@ -436,9 +487,8 @@ namespace DevMind
                         if (blockEnd >= 0)
                         {
                             _readContext = _readContext.Remove(entryStart, blockEnd + "\n```\n\n".Length - entryStart);
-                            var (freshContent, _) = ReadFilePreservingEncoding(fullPath);
-                            _readContext += $"The following files have been loaded for context:\n\n{patchedFileName}\n```\n{freshContent}\n```\n\n";
-                            int lineCount = freshContent.Split('\n').Length;
+                            int lineCount = updated.Split('\n').Length;
+                            _readContext += $"The following files have been loaded for context:\n\n{patchedFileName}\n```\n{updated}\n```\n\n";
                             AppendOutput($"[PATCH] Context refreshed: {patchedFileName} ({lineCount} lines)\n", OutputColor.Dim);
                         }
                     }
@@ -488,6 +538,12 @@ namespace DevMind
 
                 File.WriteAllText(pending.fullPath, updated, pending.fileEncoding);
 
+                // Store updated content in cache (replaces invalidation — no disk re-read needed)
+                _llmClient._fileCache.Store(Path.GetFileName(pending.fullPath), updated);
+
+                // Build diff view for PATCH-RESULT injection
+                _patchDiffCache[pending.fullPath] = BuildPatchDiffView(pending.content, updated, pending.resolvedBlocks);
+
                 // Refresh _readContext so the agentic loop reasons from the current file state.
                 if (_readContext != null)
                 {
@@ -499,9 +555,8 @@ namespace DevMind
                         if (blockEnd >= 0)
                         {
                             _readContext = _readContext.Remove(entryStart, blockEnd + "\n```\n\n".Length - entryStart);
-                            var (freshContent, _) = ReadFilePreservingEncoding(pending.fullPath);
-                            _readContext += $"The following files have been loaded for context:\n\n{patchedFileName}\n```\n{freshContent}\n```\n\n";
-                            int lineCount = freshContent.Split('\n').Length;
+                            int lineCount = updated.Split('\n').Length;
+                            _readContext += $"The following files have been loaded for context:\n\n{patchedFileName}\n```\n{updated}\n```\n\n";
                             AppendOutput($"[PATCH] Context refreshed: {patchedFileName} ({lineCount} lines)\n", OutputColor.Dim);
                         }
                     }
@@ -514,6 +569,75 @@ namespace DevMind
             {
                 AppendOutput($"[PATCH] Error: {ex.Message}\n", OutputColor.Error);
             }
+        }
+
+        // ── PATCH diff view ──────────────────────────────────────────────────
+
+        /// <summary>
+        /// Builds a compact diff-context view of what changed: ±3 lines of surrounding context
+        /// plus the replaced region with >>> CHANGED: / >>> ADDED: markers.
+        /// Line numbers reflect positions in the new (post-patch) file.
+        /// </summary>
+        private static string BuildPatchDiffView(
+            string oldContent,
+            string updatedContent,
+            List<(int origStart, int origEnd, string replaceText)> resolvedBlocks,
+            int contextLines = 3)
+        {
+            // Normalize to LF for consistent line counting and display
+            string oldNorm = oldContent.Replace("\r\n", "\n").Replace("\r", "\n");
+            string newNorm = updatedContent.Replace("\r\n", "\n").Replace("\r", "\n");
+            string[] newLines = newNorm.Split('\n');
+
+            var sb = new StringBuilder();
+
+            // Sort ascending by origStart for display (blocks were applied in descending order)
+            var sorted = resolvedBlocks.OrderBy(b => b.origStart).ToList();
+            int cumDelta = 0;  // cumulative char-level shift from earlier (lower origStart) replacements
+
+            foreach (var (origStart, origEnd, replaceText) in sorted)
+            {
+                string replaceNorm  = replaceText.Replace("\r\n", "\n").Replace("\r", "\n");
+                string[] replaceLines = replaceNorm.Split('\n');
+
+                // Char position of this block's start in the new content
+                int newStartChar = origStart + cumDelta;
+                newStartChar = Math.Min(newStartChar, newNorm.Length);
+
+                // 1-based line number in new file where replacement starts
+                int newLineNum = newNorm.Substring(0, newStartChar).Count(c => c == '\n') + 1;
+                int newEndLine = newLineNum + replaceLines.Length - 1;
+
+                // How many lines the old block spanned (for CHANGED vs ADDED labelling)
+                int safeLen    = Math.Min(origEnd - origStart, oldNorm.Length - origStart);
+                string oldBlock = safeLen > 0 ? oldNorm.Substring(origStart, safeLen) : string.Empty;
+                int oldLineCount = oldBlock.Length > 0 ? oldBlock.Split('\n').Length : 0;
+
+                sb.AppendLine($"--- Changed region (lines {newLineNum}-{newEndLine}) ---");
+
+                // Pre-context lines (from new file)
+                int preStart = Math.Max(0, newLineNum - 1 - contextLines);
+                for (int i = preStart; i < newLineNum - 1 && i < newLines.Length; i++)
+                    sb.AppendLine($"{i + 1}:     {newLines[i]}");
+
+                // Replacement lines with change markers
+                for (int i = 0; i < replaceLines.Length; i++)
+                {
+                    int lineNum = newLineNum + i;
+                    string marker = i < oldLineCount ? ">>> CHANGED:" : ">>> ADDED:  ";
+                    sb.AppendLine($"{lineNum}: {marker} {replaceLines[i]}");
+                }
+
+                // Post-context lines (from new file)
+                for (int i = newEndLine; i < newEndLine + contextLines && i < newLines.Length; i++)
+                    sb.AppendLine($"{i + 1}:     {newLines[i]}");
+
+                sb.AppendLine("--- End of changes ---");
+
+                cumDelta += replaceText.Length - (origEnd - origStart);
+            }
+
+            return sb.ToString().TrimEnd('\r', '\n');
         }
 
         // ── AUTO-PATCH ────────────────────────────────────────────────────────
@@ -530,10 +654,13 @@ namespace DevMind
                 int end = i + 1 < matches.Count ? matches[i + 1].Index : llmResponse.Length;
                 string block = llmResponse.Substring(start, end - start).TrimEnd();
 
-                // Strip any trailing bare markdown fence (```) that wraps the PATCH block.
-                // These appear when models like DeepSeek emit ```lang PATCH ... ``` around their output.
+                // Strip any trailing bare markdown fence (```) or "---" separator that wraps/follows the PATCH block.
+                // Fences appear when models like DeepSeek emit ```lang PATCH ... ``` around their output.
+                // "---" appears when models separate consecutive PATCH blocks with a horizontal rule.
                 var blockLines = block.Split('\n').ToList();
-                while (blockLines.Count > 0 && Regex.IsMatch(blockLines[blockLines.Count - 1], @"^\s*```\s*$"))
+                while (blockLines.Count > 0 && (
+                    Regex.IsMatch(blockLines[blockLines.Count - 1], @"^\s*```\s*$") ||
+                    blockLines[blockLines.Count - 1].Trim() == "---"))
                     blockLines.RemoveAt(blockLines.Count - 1);
                 block = string.Join("\n", blockLines);
 

@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.Shell.cs  v5.1
+// File: DevMindToolWindowControl.Shell.cs  v5.3
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -143,19 +143,35 @@ namespace DevMind
                     };
 
                     using var proc = System.Diagnostics.Process.Start(psi);
-                    var stdoutTask = Task.Run(() => proc.StandardOutput.ReadToEnd());
-                    var stderrTask = Task.Run(() => proc.StandardError.ReadToEnd());
-                    string stdout = await stdoutTask;
-                    string stderr = await stderrTask;
-                    await Task.Run(() => proc.WaitForExit());
+                    var stdoutTask   = Task.Run(() => proc.StandardOutput.ReadToEnd());
+                    var stderrTask   = Task.Run(() => proc.StandardError.ReadToEnd());
+                    var readBothTask = Task.WhenAll(stdoutTask, stderrTask);
+
+                    // 120-second hard timeout — kill and report if exceeded.
+                    bool timedOut = await Task.WhenAny(readBothTask, Task.Delay(120_000)) != readBothTask;
+                    if (timedOut)
+                    {
+                        try { proc.Kill(); } catch { }
+                        // Brief window for stream readers to drain now that the process is dead.
+                        await Task.WhenAny(readBothTask, Task.Delay(5_000));
+                    }
+
+                    // Tasks are confirmed completed — .Result will not block.
+#pragma warning disable VSTHRD002, VSTHRD103
+                    string stdout = stdoutTask.IsCompleted ? stdoutTask.Result : "";
+                    string stderr  = stderrTask.IsCompleted ? stderrTask.Result : "";
+#pragma warning restore VSTHRD002, VSTHRD103
+                    await Task.Run(() => proc.WaitForExit(10_000));
 
                     await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
 
+                    if (timedOut)
+                        AppendOutput("[SHELL] Command timed out after 120 seconds.\n", OutputColor.Error);
                     if (!string.IsNullOrEmpty(stdout))
                         AppendOutput(stdout.TrimEnd() + "\n", OutputColor.Normal);
                     if (!string.IsNullOrEmpty(stderr))
                         AppendOutput(stderr.TrimEnd() + "\n", OutputColor.Error);
-                    if (string.IsNullOrEmpty(stdout) && string.IsNullOrEmpty(stderr))
+                    if (!timedOut && string.IsNullOrEmpty(stdout) && string.IsNullOrEmpty(stderr))
                         AppendOutput("(no output)\n", OutputColor.Dim);
                 }
                 catch (Exception ex)
@@ -205,14 +221,30 @@ namespace DevMind
                 };
 
                 using var proc = System.Diagnostics.Process.Start(psi);
-                var stdoutTask = Task.Run(() => proc.StandardOutput.ReadToEnd());
-                var stderrTask = Task.Run(() => proc.StandardError.ReadToEnd());
-                string stdout = await stdoutTask;
-                string stderr = await stderrTask;
-                await Task.Run(() => proc.WaitForExit());
-                int exitCode = proc.ExitCode;
+                var stdoutTask   = Task.Run(() => proc.StandardOutput.ReadToEnd());
+                var stderrTask   = Task.Run(() => proc.StandardError.ReadToEnd());
+                var readBothTask = Task.WhenAll(stdoutTask, stderrTask);
+
+                // 120-second hard timeout — kill and report if exceeded.
+                bool timedOut = await Task.WhenAny(readBothTask, Task.Delay(120_000)) != readBothTask;
+                if (timedOut)
+                {
+                    try { proc.Kill(); } catch { }
+                    // Brief window for stream readers to drain now that the process is dead.
+                    await Task.WhenAny(readBothTask, Task.Delay(5_000));
+                }
+
+                // Tasks are confirmed completed — .Result will not block.
+#pragma warning disable VSTHRD002, VSTHRD103
+                string stdout  = stdoutTask.IsCompleted ? stdoutTask.Result : "";
+                string stderr  = stderrTask.IsCompleted ? stderrTask.Result : "";
+#pragma warning restore VSTHRD002, VSTHRD103
+                await Task.Run(() => proc.WaitForExit(10_000));
+                int exitCode   = timedOut ? -1 : proc.ExitCode;
 
                 var result = new StringBuilder();
+                if (timedOut)
+                    result.AppendLine("[SHELL] Command timed out after 120 seconds.");
                 if (!string.IsNullOrEmpty(stdout)) result.AppendLine(stdout.TrimEnd());
                 if (!string.IsNullOrEmpty(stderr)) result.AppendLine(stderr.TrimEnd());
                 string output = result.Length > 0 ? result.ToString().TrimEnd() : "(no output)";
