@@ -6,7 +6,7 @@
 
 - **Product**: DevMind
 - **Brand**: iOnline Consulting LLC
-- **Current Version**: v5.2
+- **Current Version**: v5.30
 - **Platform**: Visual Studio 2022+ (VSIX), .NET Framework (VSSDK requirement)
 - **Language**: C# with WPF UI
 
@@ -39,7 +39,7 @@ User types → InputTextBox
   Ctrl+Enter → RunShellCommand() → powershell.exe / cmd.exe → stdout/stderr → AppendOutput()
 ```
 
-### Response Dispatcher (v5.0)
+### Response Dispatcher (v5.0+)
 
 The LLM response is classified AFTER it arrives, not before. All tokens stream into a single `responseBuffer`. After streaming completes, `ResponseParser.Parse()` splits the response into typed blocks which are executed in order:
 
@@ -50,7 +50,8 @@ ResponseBlock
 ├── PatchBlock       — PATCH directive → ApplyPatchAsync()
 ├── ShellBlock       — SHELL: directive → RunShellCommandCaptureAsync()
 ├── ReadRequest      — model asking to READ a file → ApplyReadCommandAsync() / ApplyReadRangeAsync()
-└── Scratchpad       — SCRATCHPAD: block → LlmClient.UpdateScratchpad()
+├── Scratchpad       — SCRATCHPAD: block → LlmClient.UpdateScratchpad()
+└── DoneBlock        — DONE directive → explicit task completion signal, stops agentic loop
 ```
 
 A single LLM response can contain any combination of FILE:, PATCH, SHELL:, READ, and SCRATCHPAD directives. They execute in the order they appear.
@@ -157,6 +158,14 @@ READ! Program.cs           — force full content (bypasses outline-first for la
 - When the model responds with only READ requests (no PATCH/SHELL/FILE), DevMind auto-loads the files and resubmits the original prompt.
 - `_pendingResubmitPrompt` stores the original prompt; cleared after use or on cancel.
 
+### DONE — Explicit Task Completion
+```
+DONE
+```
+- Emitted by the model when a multi-step task is fully complete.
+- Stops the agentic loop immediately; no further re-triggers.
+- Preferred over relying on build exit codes alone for tasks that don't involve a build step.
+
 ### SCRATCHPAD — Model State Tracking
 ```
 SCRATCHPAD:
@@ -177,15 +186,20 @@ END_SCRATCHPAD
 
 After `onComplete` processes all directive blocks, DevMind decides whether to re-trigger:
 
-1. **Build succeeded** (`SHELL:` ran, exit code 0) → stop, display "Build succeeded — task complete."
-2. **Build failed or PATCH-only** → increment `_agenticDepth`, inject shell output + **PATCH diff view** (±3 lines context, `>>> CHANGED:`/`>>> ADDED:` markers) into context, re-trigger `SendToLlm()`. Full file is no longer re-injected — the diff-only view keeps tokens lean.
-3. **Auto-READ resubmit** — response was only a READ request → load files, resubmit original prompt.
-4. **Bare code block** — response had fenced code but no directives → retry once with correction prompt.
-5. **Depth cap** (`AgenticLoopMaxDepth`, default 5) → stop, suggest UNDO.
+1. **DONE directive** — model emitted `DONE` → stop immediately, task complete.
+2. **Build succeeded** (`SHELL:` ran, exit code 0) → inject success prompt, re-trigger once so model can confirm or continue (replaces prior auto-stop).
+3. **Run/exec command** (`IsRunOrExecCommand` — `dotnet run`, `start`, etc.) → clean stop after output; no re-trigger.
+4. **Build failed or PATCH-only** → increment `_agenticDepth`, inject shell output + **PATCH diff view** (±3 lines context, `>>> CHANGED:`/`>>> ADDED:` markers) into context, re-trigger `SendToLlm()`. Full file is no longer re-injected — the diff-only view keeps tokens lean.
+5. **PATCH-FAILED** — failed patch injects `PATCH-FAILED:` error into `shellOutputs` so model sees the failure on next turn.
+6. **Auto-READ resubmit** — response was only a READ request → load files, resubmit original prompt (works at depth 0 and depth > 0).
+7. **Bare code block** — response had fenced code but no directives → retry once with correction prompt.
+8. **Depth cap** (`AgenticLoopMaxDepth`, default 5) → stop, suggest UNDO.
 
 **Post-turn READ compression**: After each agentic turn, `CompressLastUserReadBlocks()` replaces full READ file content in the completed user message with an outline, so the LLM had full content during its turn but history stays lean for the next iteration.
 
 State fields: `_agenticDepth`, `_shellLoopPending`, `_lastShellExitCode`, `_pendingShellContext`, `_pendingResubmitPrompt`.
+
+**File reloading**: After applying a PATCH, `ReloadDocData` is used to refresh open VS editor buffers — replaces prior `VS.Documents.OpenAsync` to avoid spurious "file changed on disk" dialogs.
 
 Error recovery: `onError` and `finally` both reset `_agenticDepth` and `_shellLoopPending` unconditionally when no re-trigger is active, preventing permanent UI freezes.
 
@@ -225,9 +239,10 @@ Settings are accessed via `DevMindOptions.Instance` (synchronous) or `GetLiveIns
 
 At the start of each `SendToLlm()` call, DevMind temporarily injects into the system prompt:
 
-1. **LLM directives** — FILE:/END_FILE, PATCH, SHELL:, READ syntax and rules.
+1. **LLM directives** — FILE:/END_FILE, PATCH, SHELL:, READ, DONE syntax and rules.
 2. **DefaultNamespace** — the active project's namespace (e.g. "When creating new files, use the namespace 'DevMindTestBed'").
-3. **DevMind.md** — project-specific context from solution root (lazy-loaded, cached until `/reload`).
+3. **Active project path** — DTE walks active document → containing `.csproj`; path injected so the model knows which project to target for builds and file creation.
+4. **DevMind.md** — project-specific context from solution root (lazy-loaded, cached until `/reload`).
 
 The original system prompt is restored immediately after `RunAsync()` returns (safe because `UpdateSystemPrompt()` in LlmClient runs synchronously before the first await).
 
@@ -252,7 +267,11 @@ Task SendMessageAsync(
 Task<bool> TestConnectionAsync()
 
 // Reset conversation history to system prompt only
-void ClearHistory()
+// preserveScratchpad: if true, retains SCRATCHPAD state across reset
+void ClearHistory(bool preserveScratchpad = false)
+
+// Connection health check — gated by idle time to avoid hammering the server
+Task<bool> CheckConnectionHealthAsync()
 ```
 
 ---
@@ -263,6 +282,20 @@ Multi-block input can be typed into the input box using `[WAIT]` as a separator 
 - `READ filename` / `SHELL: cmd` / `PATCH file` blocks are executed directly without the LLM.
 - All other blocks are sent to the LLM; execution pauses until `onComplete` fires before sending the next block.
 - Implemented via `ProcessBatchInputAsync()`, signaled by `_batchOnComplete` TaskCompletionSource callback.
+
+## Squeeze Algorithm (LlmClient — v5.25+)
+
+Before trimming history by token count, `LlmClient` runs a **squeeze pass** to structurally compress history without losing semantic content:
+
+| Pass | What it does |
+|------|-------------|
+| READ deduplication | Collapses repeated reads of the same file into the most recent copy |
+| Patch chain collapse | Merges sequential PATCH results to the same file into a single diff summary |
+| Eager shell compression | Compresses verbose shell output (build logs, stack traces) early, not just on overflow |
+| Outline collapse | Strips doc comments from outline blocks; retains signatures only |
+| Compression metadata | Injects steering signals (e.g. `[COMPRESSED]` markers) so the LLM knows history was trimmed |
+
+Squeeze runs before the hard-trim (`TrimHistoryToFit`) and after each agentic turn via `RunDeferredCompression`. During active agentic iterations, full content is preserved for the current turn; compression is deferred to `onComplete` to keep tokens lean for the next iteration.
 
 ## Context Budget (ContextBudget class)
 
@@ -275,7 +308,10 @@ Multi-block input can be typed into the input box using `[WAIT]` as a separator 
 | ProtectedTurns | 15% | Last 2 user/assistant pairs — never trimmed |
 | WorkingHistory | 45% | All other history — trimmed on soft/hard triggers |
 
-- Context size is auto-detected at startup via `DetectContextSizeAsync()` using server-specific endpoints.
+- Context size is auto-detected at startup via `DetectContextSizeAsync()` using server-specific endpoints:
+  - **LmStudio**: queries `/api/v0/models`, reads `loaded_context_length` from the model with `state=loaded`.
+  - **LlamaServer**: queries `/props` for `n_ctx`.
+  - **Custom**: uses `CustomContextEndpoint` from settings.
 - Detection is awaited (up to 5 seconds) before the first `SendMessageAsync` call.
 - `HistoryHardLimit = TotalLimit - ResponseHeadroomLimit` — history must never exceed this.
 

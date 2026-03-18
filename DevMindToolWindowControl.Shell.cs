@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.Shell.cs  v5.3
+// File: DevMindToolWindowControl.Shell.cs  v5.4
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -37,7 +37,9 @@ namespace DevMind
                 {
                     var pending = _pendingFuzzyPatch.Value;
                     _pendingFuzzyPatch = null;
-                    ApplyPendingFuzzyPatch(pending);
+#pragma warning disable VSSDK007
+                    _ = ApplyPendingFuzzyPatchAsync(pending);
+#pragma warning restore VSSDK007
                 }
                 else if (command == "2")
                 {

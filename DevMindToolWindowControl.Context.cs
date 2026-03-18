@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.Context.cs  v5.8
+// File: DevMindToolWindowControl.Context.cs  v5.10
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -461,6 +461,113 @@ namespace DevMind
             catch
             {
                 return null;
+            }
+        }
+
+        // ── Auto-read referenced files ────────────────────────────────────────
+
+        /// <summary>
+        /// Scans a user prompt for file/class references and auto-reads up to 3
+        /// files that are not already present in _readContext.
+        /// </summary>
+        private async Task AutoReadReferencedFilesAsync(string prompt)
+        {
+            try
+            {
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                var dte = await VS.GetServiceAsync<DTE, DTE>();
+                if (dte?.Solution?.FileName == null) return;
+                string solutionDir = Path.GetDirectoryName(dte.Solution.FileName);
+                if (string.IsNullOrEmpty(solutionDir)) return;
+
+                var candidates = new LinkedList<string>(); // ordered, deduped by name
+                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                // 1. Explicit *.cs filenames mentioned in the prompt
+                foreach (Match m in Regex.Matches(prompt, @"\b([\w]+\.cs)\b", RegexOptions.IgnoreCase))
+                {
+                    string name = m.Groups[1].Value;
+                    if (seen.Add(name)) candidates.AddLast(name);
+                }
+
+                // 2. PascalCase words → try <Word>.cs (avoid common non-file words)
+                var skipWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    "I", "The", "This", "That", "When", "Where", "What", "How",
+                    "Add", "Fix", "Use", "Get", "Set", "Run", "Can", "Does", "Make",
+                    "Please", "Also", "Now", "Just", "Note", "PATCH", "READ", "FILE",
+                    "SHELL", "UNDO", "Wait", "True", "False", "Null"
+                };
+                foreach (Match m in Regex.Matches(prompt, @"\b([A-Z][a-zA-Z0-9]{2,})\b"))
+                {
+                    string word = m.Groups[1].Value;
+                    if (skipWords.Contains(word)) continue;
+                    string name = word + ".cs";
+                    if (seen.Add(name)) candidates.AddLast(name);
+                }
+
+                // 3. "test" / "tests" keyword → find *Test*.cs files in solution
+                if (Regex.IsMatch(prompt, @"\btests?\b", RegexOptions.IgnoreCase))
+                {
+                    var testFiles = SafeEnumerateFilesGlob(solutionDir, "*.cs")
+                        .Where(f => !IsNoisePath(f))
+                        .Where(f => Path.GetFileNameWithoutExtension(f)
+                                        .IndexOf("Test", StringComparison.OrdinalIgnoreCase) >= 0)
+                        .Select(f => Path.GetFileName(f))
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .Take(3);
+                    foreach (string tf in testFiles)
+                        if (seen.Add(tf)) candidates.AddLast(tf); // append so tests fill remaining slots
+                }
+
+                int autoReadCount = 0;
+                const int MaxAutoReads = 3;
+
+                foreach (string candidate in candidates)
+                {
+                    if (autoReadCount >= MaxAutoReads) break;
+
+                    // Skip if already loaded into context
+                    string tag = $"[READ:{candidate}]";
+                    if (_readContext != null && _readContext.IndexOf(tag, StringComparison.OrdinalIgnoreCase) >= 0)
+                        continue;
+
+                    string fullPath = await FindFileInSolutionAsync(candidate);
+                    if (fullPath == null || !File.Exists(fullPath)) continue;
+
+                    // Re-use ApplyReadCommandAsync to load the file consistently
+                    await ApplyReadCommandAsync($"READ {candidate}", showOutline: false);
+                    autoReadCount++;
+                }
+
+                if (autoReadCount > 0)
+                    AppendOutput($"[AUTO-READ] Pre-loaded {autoReadCount} referenced file(s).\n", OutputColor.Dim);
+            }
+            catch
+            {
+                // Auto-read is best-effort; never block the send
+            }
+        }
+
+        // ── SafeEnumerateFilesGlob — glob pattern with * allowed ─────────────
+
+        private static IEnumerable<string> SafeEnumerateFilesGlob(string root, string globPattern)
+        {
+            var queue = new Queue<string>();
+            queue.Enqueue(root);
+            while (queue.Count > 0)
+            {
+                string dir = queue.Dequeue();
+                IEnumerable<string> files = Enumerable.Empty<string>();
+                try { files = Directory.EnumerateFiles(dir, globPattern); } catch { }
+                foreach (var f in files) yield return f;
+                IEnumerable<string> subdirs = Enumerable.Empty<string>();
+                try { subdirs = Directory.EnumerateDirectories(dir); } catch { }
+                foreach (var sub in subdirs)
+                {
+                    if (!_noisePathSegments.Contains(Path.GetFileName(sub)))
+                        queue.Enqueue(sub);
+                }
             }
         }
 

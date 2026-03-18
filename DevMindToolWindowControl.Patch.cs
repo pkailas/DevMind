@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.Patch.cs  v5.6
+// File: DevMindToolWindowControl.Patch.cs  v5.11
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -23,8 +23,49 @@ namespace DevMind
 {
     public partial class DevMindToolWindowControl : UserControl
     {
-        // Keyed by full path — populated by ApplyPatchAsync/ApplyPendingFuzzyPatch, consumed by PATCH-RESULT injector in xaml.cs
+        // Keyed by full path — populated by ApplyPatchAsync/ApplyPendingFuzzyPatchAsync, consumed by PATCH-RESULT injector in xaml.cs
         private readonly Dictionary<string, string> _patchDiffCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        // ── VS document reload ────────────────────────────────────────────────
+
+        /// <summary>
+        /// Forces VS to reload the in-memory document buffer from disk without showing
+        /// the "file changed externally" prompt. Uses IVsPersistDocData.ReloadDocData,
+        /// the standard VSSDK pattern for programmatic file reload.
+        /// Must be called on the main thread (SwitchToMainThreadAsync before calling).
+        /// </summary>
+        private static void ReloadDocumentFromDisk(string fullPath)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var rdt = ServiceProvider.GlobalProvider.GetService(typeof(SVsRunningDocumentTable)) as IVsRunningDocumentTable;
+            if (rdt == null) return;
+
+            uint docCookie;
+            IVsHierarchy hierarchy;
+            uint itemId;
+            IntPtr docDataPtr;
+            int hr = rdt.FindAndLockDocument(
+                (uint)_VSRDTFLAGS.RDT_NoLock,
+                fullPath,
+                out hierarchy,
+                out itemId,
+                out docDataPtr,
+                out docCookie);
+
+            if (hr != Microsoft.VisualStudio.VSConstants.S_OK || docDataPtr == IntPtr.Zero)
+                return;
+
+            try
+            {
+                var docData = System.Runtime.InteropServices.Marshal.GetObjectForIUnknown(docDataPtr)
+                    as IVsPersistDocData;
+                docData?.ReloadDocData(0);
+            }
+            finally
+            {
+                System.Runtime.InteropServices.Marshal.Release(docDataPtr);
+            }
+        }
 
         // ── UNDO command ──────────────────────────────────────────────────────
 
@@ -193,6 +234,31 @@ namespace DevMind
             return string.Join("\n", kept);
         }
 
+        private static readonly string[] _hallucinatedTerminators =
+        {
+            "END_PATCH", "END_FILE", "END_REPLACE", "END_FIND", "END"
+        };
+
+        /// <summary>
+        /// Removes lines that are known LLM-hallucinated block terminators:
+        /// END_PATCH, END_FILE, END_REPLACE, END_FIND, END, or a line of three or more dashes.
+        /// </summary>
+        private static string StripHallucinatedTerminators(string text)
+        {
+            var lines = text.Split('\n');
+            var kept  = lines.Where(l =>
+            {
+                string t = l.Trim();
+                foreach (var term in _hallucinatedTerminators)
+                    if (t.Equals(term, StringComparison.OrdinalIgnoreCase))
+                        return false;
+                if (Regex.IsMatch(t, @"^-{3,}$"))
+                    return false;
+                return true;
+            });
+            return string.Join("\n", kept);
+        }
+
         private static List<(string findText, string replaceText)> ParsePatchBlocks(string input)
         {
             var results = new List<(string, string)>();
@@ -281,6 +347,12 @@ namespace DevMind
                 string replaceText = string.Join("\n", replaceLines);
                 if (replaceText.EndsWith("\r\n")) replaceText = replaceText.Substring(0, replaceText.Length - 2);
                 else if (replaceText.EndsWith("\n")) replaceText = replaceText.Substring(0, replaceText.Length - 1);
+
+                // Strip lines that are hallucinated block terminators — models sometimes emit
+                // END_PATCH / END_FILE / END_REPLACE / END_FIND / END / "---" as closers and
+                // they leak into FIND/REPLACE text, corrupting the file on write.
+                findText    = StripHallucinatedTerminators(findText);
+                replaceText = StripHallucinatedTerminators(replaceText);
 
                 findText    = StripMarkdownFenceLines(findText);
                 replaceText = StripMarkdownFenceLines(replaceText);
@@ -473,6 +545,16 @@ namespace DevMind
                 // Store updated content in cache (replaces invalidation — no disk re-read needed)
                 _llmClient._fileCache.Store(Path.GetFileName(fullPath), updated);
 
+                // Reload the document in VS to suppress the "file changed externally" dialog.
+                // IVsPersistDocData.ReloadDocData forces the in-memory buffer to sync from disk
+                // without prompting, even when the document is already open in an editor.
+                try
+                {
+                    await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                    ReloadDocumentFromDisk(fullPath);
+                }
+                catch { /* non-fatal — file was written, just not auto-reloaded */ }
+
                 // Build diff view for PATCH-RESULT injection (sorted ascending for display)
                 _patchDiffCache[fullPath] = BuildPatchDiffView(content, updated, resolvedBlocks);
 
@@ -507,7 +589,7 @@ namespace DevMind
             }
         }
 
-        private void ApplyPendingFuzzyPatch(
+        private async Task ApplyPendingFuzzyPatchAsync(
             (string fullPath, Encoding fileEncoding, string fileName, string content, List<(int origStart, int origEnd, string replaceText)> resolvedBlocks) pending)
         {
             try
@@ -540,6 +622,16 @@ namespace DevMind
 
                 // Store updated content in cache (replaces invalidation — no disk re-read needed)
                 _llmClient._fileCache.Store(Path.GetFileName(pending.fullPath), updated);
+
+                // Reload the document in VS to suppress the "file changed externally" dialog.
+                // IVsPersistDocData.ReloadDocData forces the in-memory buffer to sync from disk
+                // without prompting, even when the document is already open in an editor.
+                try
+                {
+                    await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                    ReloadDocumentFromDisk(pending.fullPath);
+                }
+                catch { /* non-fatal — file was written, just not auto-reloaded */ }
 
                 // Build diff view for PATCH-RESULT injection
                 _patchDiffCache[pending.fullPath] = BuildPatchDiffView(pending.content, updated, pending.resolvedBlocks);

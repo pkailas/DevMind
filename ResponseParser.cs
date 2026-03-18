@@ -1,4 +1,4 @@
-// File: ResponseParser.cs  v5.0.6
+// File: ResponseParser.cs  v5.0.10
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -8,7 +8,7 @@ using System.Text.RegularExpressions;
 
 namespace DevMind
 {
-    public enum BlockType { Text, File, Patch, Shell, ReadRequest, Scratchpad }
+    public enum BlockType { Text, File, Patch, Shell, ReadRequest, Scratchpad, Done }
 
     public class ResponseBlock
     {
@@ -39,6 +39,8 @@ namespace DevMind
         private static readonly Regex _scratchpadStart = new Regex(@"^SCRATCHPAD:\s*$",  RegexOptions.Compiled | RegexOptions.IgnoreCase);
         // Matches END_SCRATCHPAD terminator used to close a SCRATCHPAD block
         private static readonly Regex _scratchpadEnd   = new Regex(@"^\s*END_SCRATCHPAD\s*$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        // Matches a line that is exactly "DONE" (signals task completion)
+        private static readonly Regex _doneLine        = new Regex(@"^\s*DONE\s*$",       RegexOptions.Compiled | RegexOptions.IgnoreCase);
         // Markdown fence: ```lang or ```
         private static readonly Regex _mdFence         = new Regex(@"^```",              RegexOptions.Compiled);
 
@@ -60,6 +62,10 @@ namespace DevMind
             var blocks = new List<ResponseBlock>();
             var textBuf = new StringBuilder();
             string lastShellCommand = null;
+
+            System.Diagnostics.Debug.WriteLine($"[PARSER-DIAG] Parsing {lines.Length} lines (after fence strip), hasActionableBlocks={hasActionableBlocks}");
+            for (int dbgI = 0; dbgI < Math.Min(lines.Length, 30); dbgI++)
+                System.Diagnostics.Debug.WriteLine($"[PARSER-DIAG] line[{dbgI}]: \"{lines[dbgI]}\"");
 
             int i = 0;
             while (i < lines.Length)
@@ -193,7 +199,12 @@ namespace DevMind
                     i++;
                     while (i < lines.Length && !_scratchpadEnd.IsMatch(lines[i]))
                     {
-                        scratchBuf.AppendLine(lines[i]);
+                        // Break if the model started a directive without closing the scratchpad
+                        string sl = lines[i];
+                        if (_patchStart.IsMatch(sl) || _fileStart.IsMatch(sl) || _shellLine.IsMatch(sl)
+                            || (sl.StartsWith("READ ", StringComparison.Ordinal) && (_readLine.IsMatch(sl) || _forceReadLine.IsMatch(sl))))
+                            break;
+                        scratchBuf.AppendLine(sl);
                         i++;
                     }
                     if (i < lines.Length && _scratchpadEnd.IsMatch(lines[i]))
@@ -201,6 +212,15 @@ namespace DevMind
                     string scratchContent = scratchBuf.ToString().TrimEnd('\r', '\n', ' ');
                     if (!string.IsNullOrWhiteSpace(scratchContent))
                         blocks.Add(new ResponseBlock { Type = BlockType.Scratchpad, Content = scratchContent });
+                    continue;
+                }
+
+                // DONE — task-completion signal (only meaningful during agentic loop)
+                if (_doneLine.IsMatch(line))
+                {
+                    FlushText(blocks, textBuf);
+                    blocks.Add(new ResponseBlock { Type = BlockType.Done });
+                    i++;
                     continue;
                 }
 
@@ -256,6 +276,7 @@ namespace DevMind
                                        || lines[j].StartsWith("REPLACE:", StringComparison.OrdinalIgnoreCase);
                         break;
                     }
+                    System.Diagnostics.Debug.WriteLine($"[PARSER-DIAG] Fence at line {i}: \"{lines[i]}\" nextIsDirective={nextIsDirective} prevIsDirective={prevIsDirective} → {(nextIsDirective || prevIsDirective ? "DROPPED" : "KEPT")}");
                     if (nextIsDirective || prevIsDirective)
                         continue;  // drop fence
                 }
@@ -266,9 +287,16 @@ namespace DevMind
 
         private static bool HasActionableBlocks(string[] lines)
         {
+            bool inScratchpad = false;
             foreach (string line in lines)
             {
-                if (_patchStart.IsMatch(line) || _fileStart.IsMatch(line))
+                // Skip scratchpad content — directive-like lines inside SCRATCHPAD should not
+                // suppress READ parsing in the main pass.
+                if (_scratchpadStart.IsMatch(line)) { inScratchpad = true;  continue; }
+                if (_scratchpadEnd.IsMatch(line))   { inScratchpad = false; continue; }
+                if (inScratchpad) continue;
+
+                if (_patchStart.IsMatch(line) || _fileStart.IsMatch(line) || _shellLine.IsMatch(line))
                     return true;
             }
             return false;

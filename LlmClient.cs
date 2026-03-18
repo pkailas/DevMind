@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v5.36
+// File: LlmClient.cs  v5.43
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -28,11 +28,21 @@ namespace DevMind
         public const double ProtectedTurnsPct   = 0.15;
         public const double WorkingHistoryPct   = 0.45;
 
+        /// <summary>Maximum context window size in tokens.</summary>
         public int TotalLimit           { get; }
+        /// <summary>Token budget allocated for the system prompt.</summary>
+        /// <returns>System prompt token limit.</returns>
         public int SystemPromptLimit    => (int)(TotalLimit * SystemPromptPct);
+        /// <summary>Token budget reserved for LLM response generation.</summary>
+        /// <returns>Response headroom token limit.</returns>
         public int ResponseHeadroomLimit=> (int)(TotalLimit * ResponseHeadroomPct);
+        /// <summary>Token budget for protected conversation turns.</summary>
+        /// <returns>Protected turns token limit.</returns>
         public int ProtectedTurnsLimit  => (int)(TotalLimit * ProtectedTurnsPct);
+        /// <summary>Token budget for working conversation history.</summary>
+        /// <returns>Working history token limit.</returns>
         public int WorkingHistoryLimit  => (int)(TotalLimit * WorkingHistoryPct);
+
 
         // Hard ceiling for all history combined (system + turns + current).
         // History MUST NOT exceed this — the remainder is reserved for response generation.
@@ -96,7 +106,7 @@ namespace DevMind
     /// </summary>
     public sealed class LlmClient : IDisposable
     {
-        private readonly HttpClient _httpClient;
+        private HttpClient _httpClient;
         private readonly List<ChatMessage> _conversationHistory;
         private readonly List<string> _compressionLog = new List<string>();
         private const string DefaultSystemPrompt = "You are a helpful coding assistant. Be concise and precise.";
@@ -104,6 +114,7 @@ namespace DevMind
         private string _taskScratchpad = "";
         private const int ScratchpadMaxTokens = 200;
         private string _baseUrl;
+        private string _apiKey;
         private int _contextSize = 13372; // fallback default
         private ContextBudget _budget;
         private Task _contextDetectionTask; // awaited in SendMessageAsync to ensure accurate budget on first message
@@ -145,7 +156,11 @@ namespace DevMind
         /// </summary>
         public LlmClient()
         {
-            _httpClient = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
+            // Keep idle TCP connections alive for 10 minutes — prevents the pool from
+            // killing connections mid-request when the server is processing a large prompt
+            // (net48 equivalent of SocketsHttpHandler.PooledConnectionIdleTimeout).
+            System.Net.ServicePointManager.MaxServicePointIdleTime = 600_000;
+            _httpClient = new HttpClient { Timeout = TimeSpan.FromMinutes(DevMindOptions.Instance.RequestTimeoutMinutes) };
             _conversationHistory = new List<ChatMessage>
             {
                 new ChatMessage("system", GetSystemPrompt())
@@ -161,14 +176,74 @@ namespace DevMind
         public void Configure(string endpointUrl, string apiKey)
         {
             _baseUrl = endpointUrl?.TrimEnd('/') ?? "http://127.0.0.1:1234/v1";
-            _httpClient.DefaultRequestHeaders.Clear();
-            _httpClient.DefaultRequestHeaders.Add("Accept", "text/event-stream");
-            if (!string.IsNullOrEmpty(apiKey))
-            {
-                _httpClient.DefaultRequestHeaders.Authorization =
-                    new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
-            }
+            _apiKey  = apiKey;
+            ApplyHttpClientSettings(_httpClient);
             _contextDetectionTask = DetectContextSizeAsync();
+        }
+
+        /// <summary>
+        /// Applies endpoint-specific settings (timeout, headers) to the given HttpClient.
+        /// </summary>
+        private void ApplyHttpClientSettings(HttpClient client)
+        {
+            client.Timeout = TimeSpan.FromMinutes(DevMindOptions.Instance.RequestTimeoutMinutes);
+            client.DefaultRequestHeaders.Clear();
+            client.DefaultRequestHeaders.Add("Accept", "text/event-stream");
+            if (!string.IsNullOrEmpty(_apiKey))
+            {
+                client.DefaultRequestHeaders.Authorization =
+                    new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _apiKey);
+            }
+        }
+
+        /// <summary>
+        /// Disposes the current HttpClient and creates a fresh one with the same settings.
+        /// Called when a health check detects a stale TCP connection.
+        /// </summary>
+        private void RecreateHttpClient()
+        {
+            var old = _httpClient;
+            _httpClient = new HttpClient();
+            ApplyHttpClientSettings(_httpClient);
+            old?.Dispose();
+        }
+
+        /// <summary>
+        /// Sends a lightweight GET to /health (or /v1/models as fallback) with a 3-second timeout.
+        /// If the probe fails, the HttpClient is disposed and recreated with a fresh SocketsHttpHandler
+        /// so the subsequent chat request goes over a live TCP connection.
+        /// </summary>
+        private async Task EnsureConnectionHealthAsync(CancellationToken cancellationToken)
+        {
+            string serverRoot = _baseUrl.EndsWith("/v1", StringComparison.OrdinalIgnoreCase)
+                ? _baseUrl.Substring(0, _baseUrl.Length - 3)
+                : _baseUrl;
+
+            string[] probeUrls = { serverRoot + "/health", _baseUrl + "/models" };
+
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            cts.CancelAfter(TimeSpan.FromSeconds(3));
+
+            foreach (string probeUrl in probeUrls)
+            {
+                try
+                {
+                    var probe = await _httpClient.GetAsync(probeUrl, cts.Token).ConfigureAwait(false);
+                    // Any HTTP response (even 404) means the TCP connection is alive.
+                    return;
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    // 3-second probe timed out — stale connection; try next probe URL.
+                }
+                catch (HttpRequestException)
+                {
+                    // Network-level failure — stale connection; try next probe URL.
+                }
+            }
+
+            // All probes failed — recreate the HttpClient with a fresh connection pool.
+            RecreateHttpClient();
         }
 
         /// <summary>
@@ -291,12 +366,16 @@ namespace DevMind
         /// <param name="onToken">Called for each streamed token fragment.</param>
         /// <param name="onComplete">Called when the full response has been received.</param>
         /// <param name="onError">Called if an error occurs during the request.</param>
+        /// <param name="deferCompression">When true, all compression phases (0a, 0b, 0c, 4, 2) and
+        /// the Level 3 budget guard are skipped. Pass true during agentic iterations to preserve the
+        /// llama-server KV cache. Call RunDeferredCompression() after the loop completes.</param>
         /// <param name="cancellationToken">Cancellation token to abort the request.</param>
         public async Task SendMessageAsync(
             string userMessage,
             Action<string> onToken,
             Action onComplete,
             Action<Exception> onError,
+            bool deferCompression = false,
             CancellationToken cancellationToken = default)
         {
             // Ensure context-size detection has completed before computing budget math.
@@ -323,59 +402,62 @@ namespace DevMind
             // (CompressLastUserReadBlocks) outlines READ blocks AFTER the LLM responds.
             _conversationHistory.Add(new ChatMessage("user", userMessage));
 
-            // Phase 0a–0c: unconditional — always run regardless of budget state.
-            // These methods collapse stale/duplicate blocks that waste tokens with no value.
-
-            // Phase 0a: deduplicate stale READ copies — runs before all other compression
-            string dedupMsg = DeduplicateReadBlocks();
-            if (dedupMsg != null)
-                onToken(dedupMsg);
-
-            // Phase 0b: collapse stale PATCH snapshots for files patched multiple times
-            string chainMsg = CollapsePatchChains();
-            if (chainMsg != null)
-                onToken(chainMsg);
-
-            // Phase 0c: eagerly compress shell output older than 1 prior turn
-            var (shellMsg0c, _) = CompressStaleShellBlocks(includeRecentTurn: false);
-            if (shellMsg0c != null)
-                onToken(shellMsg0c);
-
-            // Assess budget after unconditional passes so squeeze/trim fire on actual pressure.
-            _budget.Assess(_conversationHistory, EstimateTokens);
-
-            // Phase 4: squeeze PATCH, SHELL, and READ blocks — fires on soft or hard pressure.
-            int patchCount = 0, shellCount = 0, readCount = 0;
-            if (_budget.IsWorkingHistoryOverSoft)
+            if (!deferCompression)
             {
-                patchCount = SqueezePatchResults();
-                var (_, shellCountPhase4) = CompressStaleShellBlocks(includeRecentTurn: true);
-                shellCount = shellCountPhase4;
-                readCount  = SqueezeReadContent();
-                int totalSqueezed = patchCount + shellCount + readCount;
-                if (totalSqueezed > 0)
-                    onToken($"\n[CONTEXT] Squeezed {totalSqueezed} block(s) — {patchCount} PATCH, {shellCount} SHELL, {readCount} READ.\n");
-            }
+                // Phase 0a–0c: unconditional — always run regardless of budget state.
+                // These methods collapse stale/duplicate blocks that waste tokens with no value.
 
-            // Phase 2: sliding window trim — fires on hard pressure or total history hard limit.
-            _budget.Assess(_conversationHistory, EstimateTokens);
-            int totalHistoryTokens = _budget.SystemPromptUsed + _budget.WorkingHistoryUsed + _budget.ProtectedTurnsUsed
-                + EstimateTokens(_conversationHistory[_conversationHistory.Count - 1].Content);
-            bool overHardLimit = totalHistoryTokens > _budget.HistoryHardLimit;
-            if (_budget.IsWorkingHistoryOverHard || overHardLimit)
-            {
-                int trimmed = TrimConversationHistory(MaxConversationTurns);
-                if (trimmed > 0)
+                // Phase 0a: deduplicate stale READ copies — runs before all other compression
+                string dedupMsg = DeduplicateReadBlocks();
+                if (dedupMsg != null)
+                    onToken(dedupMsg);
+
+                // Phase 0b: collapse stale PATCH snapshots for files patched multiple times
+                string chainMsg = CollapsePatchChains();
+                if (chainMsg != null)
+                    onToken(chainMsg);
+
+                // Phase 0c: eagerly compress shell output older than 1 prior turn
+                var (shellMsg0c, _) = CompressStaleShellBlocks(includeRecentTurn: false);
+                if (shellMsg0c != null)
+                    onToken(shellMsg0c);
+
+                // Assess budget after unconditional passes so squeeze/trim fire on actual pressure.
+                _budget.Assess(_conversationHistory, EstimateTokens);
+
+                // Phase 4: squeeze PATCH, SHELL, and READ blocks — fires on soft or hard pressure.
+                int patchCount = 0, shellCount = 0, readCount = 0;
+                if (_budget.IsWorkingHistoryOverSoft)
                 {
-                    int kept = (_conversationHistory.Count - 2) / 2;
-                    onToken($"\n[CONTEXT] History trimmed to {kept} turns (removed {trimmed} messages).\n");
+                    patchCount = SqueezePatchResults();
+                    var (_, shellCountPhase4) = CompressStaleShellBlocks(includeRecentTurn: true);
+                    shellCount = shellCountPhase4;
+                    readCount  = SqueezeReadContent();
+                    int totalSqueezed = patchCount + shellCount + readCount;
+                    if (totalSqueezed > 0)
+                        onToken($"\n[CONTEXT] Squeezed {totalSqueezed} block(s) — {patchCount} PATCH, {shellCount} SHELL, {readCount} READ.\n");
                 }
-            }
 
-            // Phase 3 (Level 3) budget guard — truncate current-turn READ content if still over hard limit.
-            string level3Msg = ApplyBudgetGuardLevel3();
-            if (level3Msg != null)
-                onToken(level3Msg);
+                // Phase 2: sliding window trim — fires on hard pressure or total history hard limit.
+                _budget.Assess(_conversationHistory, EstimateTokens);
+                int totalHistoryTokens = _budget.SystemPromptUsed + _budget.WorkingHistoryUsed + _budget.ProtectedTurnsUsed
+                    + EstimateTokens(_conversationHistory[_conversationHistory.Count - 1].Content);
+                bool overHardLimit = totalHistoryTokens > _budget.HistoryHardLimit;
+                if (_budget.IsWorkingHistoryOverHard || overHardLimit)
+                {
+                    int trimmed = TrimConversationHistory(MaxConversationTurns);
+                    if (trimmed > 0)
+                    {
+                        int kept = (_conversationHistory.Count - 2) / 2;
+                        onToken($"\n[CONTEXT] History trimmed to {kept} turns (removed {trimmed} messages).\n");
+                    }
+                }
+
+                // Phase 3 (Level 3) budget guard — truncate current-turn READ content if still over hard limit.
+                string level3Msg = ApplyBudgetGuardLevel3();
+                if (level3Msg != null)
+                    onToken(level3Msg);
+            }
 
             // Inject [CONTEXT NOTE] into current user message as LLM steering signal
             InjectContextNote();
@@ -401,6 +483,11 @@ namespace DevMind
             }
 
             onToken($"\n[CONTEXT] Working: {workingUsed:N0} / {workingLimit:N0} ({workingPct}%) | Response headroom: {headroomLimit:N0} reserved\n");
+
+            // Health check — probe the server with a cheap GET before committing the
+            // full chat payload. If the probe times out or fails, RecreateHttpClient()
+            // swaps in a fresh connection pool so the chat request goes over a live TCP connection.
+            await EnsureConnectionHealthAsync(cancellationToken).ConfigureAwait(false);
 
             string modelName = DevMindOptions.Instance.ModelName;
             string requestJson = BuildRequestJson(modelName);
@@ -477,14 +564,20 @@ namespace DevMind
             }
         }
 
+        /// <summary>Gets the current task scratchpad content.</summary>
+        public string TaskScratchpad => _taskScratchpad;
+
         /// <summary>
         /// Clears the conversation history and resets to the system prompt only.
         /// </summary>
-        public void ClearHistory()
+        /// <param name="preserveScratchpad">When true, the task scratchpad is preserved across the
+        /// reset so block-by-block step state survives the context clear between steps.</param>
+        public void ClearHistory(bool preserveScratchpad = false)
         {
             _conversationHistory.Clear();
             _conversationHistory.Add(new ChatMessage("system", GetSystemPrompt()));
-            _taskScratchpad = "";
+            if (!preserveScratchpad)
+                _taskScratchpad = "";
         }
 
         /// <summary>
@@ -544,6 +637,45 @@ namespace DevMind
         }
 
         private static readonly Regex _reWarnings = new Regex(@"(\d+)\s+Warning", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        /// <summary>
+        /// Runs all five compression phases (0a, 0b, 0c, 4, 2) against the current conversation
+        /// history. Call this after an agentic loop completes to keep history lean for the next
+        /// user-initiated turn, without invalidating the KV cache during agentic iterations.
+        /// Returns a log string summarising what was compressed, or null if nothing changed.
+        /// </summary>
+        public string RunDeferredCompression()
+        {
+            var log = new StringBuilder();
+
+            string dedupMsg = DeduplicateReadBlocks();
+            if (dedupMsg != null) log.Append(dedupMsg);
+
+            string chainMsg = CollapsePatchChains();
+            if (chainMsg != null) log.Append(chainMsg);
+
+            var (shellMsg0c, _) = CompressStaleShellBlocks(includeRecentTurn: false);
+            if (shellMsg0c != null) log.Append(shellMsg0c);
+
+            _budget.Assess(_conversationHistory, EstimateTokens);
+
+            if (_budget.IsWorkingHistoryOverSoft)
+            {
+                int patchCount = SqueezePatchResults();
+                var (_, shellCount) = CompressStaleShellBlocks(includeRecentTurn: true);
+                int readCount = SqueezeReadContent();
+                int totalSqueezed = patchCount + shellCount + readCount;
+                if (totalSqueezed > 0)
+                    log.Append($"\n[CONTEXT] Deferred squeeze: {totalSqueezed} block(s) — {patchCount} PATCH, {shellCount} SHELL, {readCount} READ.\n");
+            }
+
+            // Phase 2 (TrimConversationHistory) is intentionally skipped here because it assumes
+            // [Count-1] is a pending (unanswered) user message. After agentic loop completion,
+            // the last entry is an assistant response, so the index math would be incorrect.
+            // The trim will fire on the next SendMessageAsync call when the new user message is present.
+
+            return log.Length > 0 ? log.ToString() : null;
+        }
 
         /// <summary>
         /// Deduplicates [READ:filename] blocks across prior conversation history.
@@ -1572,6 +1704,11 @@ namespace DevMind
             for (int i = blocks.Count - 1; i >= 0; i--)
             {
                 var b = blocks[i];
+                // Bounds guard: positions were computed from the original string; after prior iterations
+                // modified sb at higher positions the lower-region should be unchanged, but guard
+                // defensively to prevent "Index was out of range" if any edge case shifts lengths.
+                if (b.blockStart < 0 || b.blockEnd > sb.Length || b.blockStart > b.blockEnd)
+                    continue;
                 int tokensBefore = EstimateTokens(original.Substring(b.blockStart, b.blockEnd - b.blockStart));
                 int tokensAfter  = EstimateTokens(b.outline);
                 string replacement = $"[SQUEEZED][READ:OUTLINE] {b.filename} ({b.lineCount} lines → outline)\n{b.outline}";

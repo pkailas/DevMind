@@ -1,4 +1,4 @@
-// File: DevMindOptionsPage.cs  v5.3
+// File: DevMindOptionsPage.cs  v5.5
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -20,6 +20,20 @@ namespace DevMind
         [Description("Custom")]
         Custom
     }
+
+    /// <summary>
+    /// Block-by-block mode setting for large file operations.
+    /// </summary>
+    public enum BlockByBlockModeType
+    {
+        [Description("Off")]
+        Off,
+        [Description("On")]
+        On,
+        [Description("Auto")]
+        Auto
+    }
+
 
     /// <summary>
     /// Provider class that hosts the options page in the Tools > Options dialog.
@@ -70,6 +84,15 @@ namespace DevMind
         /// Custom endpoint path used for context-size detection when Server Type is "Custom".
         /// Relative to the server root (e.g., /api/info) or absolute URL.
         /// </summary>
+        /// <summary>
+        /// Maximum time in minutes to wait for a complete LLM response.
+        /// </summary>
+        [Category("Connection")]
+        [DisplayName("Request Timeout (minutes)")]
+        [Description("Maximum time to wait for a complete LLM response including prompt processing and generation. Increase for large prompts on slower hardware.")]
+        [DefaultValue(10)]
+        public int RequestTimeoutMinutes { get; set; } = 10;
+
         [Category("Connection")]
         [DisplayName("Custom Context Endpoint")]
         [Description("Endpoint path for context-size detection when Server Type is Custom (e.g., /api/info). Must return JSON with n_ctx at root or in default_generation_settings.")]
@@ -133,5 +156,18 @@ namespace DevMind
         [Description("When enabled, tokens inside <think>...</think> blocks are shown with a [THINKING] prefix. When disabled (default), they are suppressed.")]
         [DefaultValue(false)]
         public bool ShowLlmThinking { get; set; } = false;
+
+        /// <summary>
+        /// Block-by-block mode setting for large file operations.
+        /// Off: Always use full context mode.
+        /// On: Always use block-by-block mode.
+        /// Auto: Automatically choose based on file size and model constraints.
+        /// </summary>
+        [Category("Agentic Loop")]
+        [DisplayName("Block-by-Block Mode")]
+        [Description("Off: Always use full context mode. On: Always use block-by-block mode. Auto: Automatically choose based on file size and model constraints.")]
+        [DefaultValue(DevMind.BlockByBlockModeType.Auto)]
+        public BlockByBlockModeType BlockByBlockMode { get; set; } = BlockByBlockModeType.Auto;
+
     }
 }

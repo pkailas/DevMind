@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v5.0.24
+// File: DevMindToolWindowControl.xaml.cs  v5.0.41
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -36,12 +36,17 @@ namespace DevMind
         private int _terminalHistoryIndex = -1;
         private System.Windows.Threading.DispatcherTimer _generatingTimer;
         private Run _generatingRun;
+        private System.Windows.Threading.DispatcherTimer _thinkingTimer;
+        private int _thinkingSeconds;
         private string _devMindContext;
         private string _readContext;
         private string _pendingShellContext;
         private bool _shellLoopPending;
         private int _agenticDepth;
+        private int _blockByBlockStep;   // current step number (1-based); 0 = not in block-by-block mode
+        private int _blockByBlockTotal;  // total step count for current block-by-block task
         private int _lastShellExitCode;
+        private string _lastShellCommand;
         private int _generatingTokenCount;
         private bool _inThinkBlock;
         private readonly StringBuilder _thinkBuffer = new StringBuilder();
@@ -504,6 +509,10 @@ namespace DevMind
                 ContextIndicator.Text = "";
             }
 
+            // Auto-read files referenced in the prompt (user-initiated turns only)
+            if (!_shellLoopPending)
+                await AutoReadReferencedFilesAsync(text);
+
             string activeProjectPath = await GetActiveProjectPathAsync();
             string contextualMessage = BuildMessageWithContext(text, selectedText, fileName, fullContent, activeProjectPath);
 
@@ -537,9 +546,25 @@ namespace DevMind
             AppendOutput($"\n> {text}\n", OutputColor.Input);
             AppendNewLine();
 
-            StatusText.Text = _agenticDepth > 0
-                ? $"Thinking... (agentic {_agenticDepth}/{DevMindOptions.Instance.AgenticLoopMaxDepth})"
-                : "Thinking...";
+            StatusText.Text = _blockByBlockStep > 0
+                ? $"Thinking... (step {_blockByBlockStep}/{_blockByBlockTotal})"
+                : _agenticDepth > 0
+                    ? $"Thinking... (agentic {_agenticDepth}/{DevMindOptions.Instance.AgenticLoopMaxDepth})"
+                    : "Thinking...";
+            _thinkingSeconds = 0;
+            _thinkingTimer?.Stop();
+            _thinkingTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+            _thinkingTimer.Tick += (s, e) =>
+            {
+                _thinkingSeconds++;
+                string agenticSuffix = _blockByBlockStep > 0
+                    ? $" (step {_blockByBlockStep}/{_blockByBlockTotal})"
+                    : _agenticDepth > 0
+                        ? $" (agentic {_agenticDepth}/{DevMindOptions.Instance.AgenticLoopMaxDepth})"
+                        : "";
+                StatusText.Text = $"Thinking{agenticSuffix} ({_thinkingSeconds}s)";
+            };
+            _thinkingTimer.Start();
             _cts = new CancellationTokenSource();
 
             // Reset file capture state
@@ -595,10 +620,35 @@ namespace DevMind
                 "## Before PATCH\n" +
                 "Never output raw code blocks. Use FILE: for new files, PATCH for edits.\n" +
                 "READ the file first if you have not seen it. You may combine FILE, PATCH, SHELL in one response.\n" +
-                "FIND text must be copied verbatim from READ output — never reconstructed from memory.\n\n" +
+                "FIND text must be copied verbatim from READ output — never reconstructed from memory.\n" +
+                "Do not read the same file multiple times. If you have an outline and a line range, that is sufficient context to write a PATCH. Act immediately.\n\n" +
+                "## Large File Strategy\n" +
+                "For files over 100 lines:\n" +
+                "1. First READ gets an outline (types, methods, signatures with line numbers).\n" +
+                "2. Use the outline to identify the exact line range you need.\n" +
+                "3. READ filename:start-end for just that section.\n" +
+                "4. PATCH using only the content from that range.\n" +
+                "Never READ! an entire large file unless explicitly asked. Work from outline → range → patch.\n\n" +
+                "## Core rules\n" +
+                "After a READ is loaded, act on it immediately in the same response. Never emit only READ directives and stop. Every response must include at least one PATCH, FILE, or SHELL directive unless you are responding to a question.\n\n" +
+                "## Task Completion\n" +
+                "When all steps of the task are complete and nothing remains to do, emit:\nDONE\n" +
+                "Only emit DONE when the task is truly finished. Do not emit DONE mid-task.\n\n" +
                 "## Scratchpad\n" +
                 "Emit a SCRATCHPAD: block (end with END_SCRATCHPAD on its own line) to track state across turns:\n" +
                 "SCRATCHPAD:\nGoal: <task>\nFiles: <file> (lines N-M)\nStatus: <PLANNING|PATCHING|BUILDING|DONE>\nLast: <action>\nNext: <step>\nEND_SCRATCHPAD";
+            if (DevMindOptions.Instance.BlockByBlockMode != BlockByBlockModeType.Off)
+
+                llmDirective +=
+                    "\n\n## Block-by-Block Mode (Active)\n" +
+                    "You are operating in block-by-block mode for memory-constrained environments.\n" +
+                    "Rules:\n" +
+                    "1. Start each task by READing the file outline only — do not request full content.\n" +
+                    "2. Each turn: READ one range, emit one PATCH, update SCRATCHPAD with remaining steps.\n" +
+                    "3. Do not attempt multiple file sections in a single response.\n" +
+                    "4. After each PATCH, mark that step done in SCRATCHPAD before continuing.\n" +
+                    "5. If more steps remain, state the next step clearly and wait for the next turn.\n" +
+                    "Work incrementally: outline → one range → one patch → repeat until done.";
             if (!string.IsNullOrEmpty(projectNamespace))
                 llmDirective += $"\n- When creating new files, use the namespace '{projectNamespace}'.";
             string combined = $"{originalSystemPrompt}\n\n{llmDirective}";
@@ -675,6 +725,12 @@ namespace DevMind
                                     return;
                                 }
 
+                                if (_thinkingTimer != null)
+                                {
+                                    _thinkingTimer.Stop();
+                                    _thinkingTimer = null;
+                                    StatusText.Text = "Generating...";
+                                }
                                 streamRun.Text += visible;
                                 OutputBox.ScrollToEnd();
                             }));
@@ -713,7 +769,12 @@ namespace DevMind
 
                                 // Parse the full response for directives
                                 string fullResponse = responseBuffer.ToString();
+                                System.Diagnostics.Debug.WriteLine($"[DEVMIND-DIAG] responseBuffer length={fullResponse.Length}");
+                                System.Diagnostics.Debug.WriteLine($"[DEVMIND-DIAG] responseBuffer first 500 chars: {(fullResponse.Length > 500 ? fullResponse.Substring(0, 500) : fullResponse)}");
                                 var blocks = ResponseParser.Parse(fullResponse);
+                                System.Diagnostics.Debug.WriteLine($"[DEVMIND-DIAG] Parsed {blocks.Count} blocks:");
+                                foreach (var diagBlock in blocks)
+                                    System.Diagnostics.Debug.WriteLine($"[DEVMIND-DIAG]   Type={diagBlock.Type} FileName={diagBlock.FileName} Command={diagBlock.Command} ContentLen={diagBlock.Content?.Length ?? 0}");
 
                                 var patchedPaths = new List<string>();
                                 var shellOutputs = new StringBuilder();
@@ -723,6 +784,7 @@ namespace DevMind
 
                                 foreach (var block in blocks)
                                 {
+                                    System.Diagnostics.Debug.WriteLine($"[DEVMIND-DIAG] Executing block Type={block.Type} FileName={block.FileName} Command={block.Command}");
                                     switch (block.Type)
                                     {
                                         case BlockType.File:
@@ -761,12 +823,18 @@ namespace DevMind
                                             var appliedPath = await ApplyPatchAsync(block.Content, clearInput: false);
                                             if (appliedPath != null && !patchedPaths.Contains(appliedPath))
                                                 patchedPaths.Add(appliedPath);
+                                            else if (appliedPath == null)
+                                            {
+                                                string failedFile = Path.GetFileName(block.FileName);
+                                                shellOutputs.AppendLine($"[PATCH-FAILED:{failedFile}] FIND text not found — file was NOT modified. READ the file to get exact current content, then retry PATCH with correct FIND text.");
+                                            }
                                             break;
 
-                                        case BlockType.Shell:
+                                            case BlockType.Shell:
                                             AppendOutput($"[SHELL] > {block.Command}\n", OutputColor.Dim);
                                             var (output, exitCode) = await RunShellCommandCaptureAsync(block.Command);
                                             _lastShellExitCode = exitCode;
+                                            _lastShellCommand = block.Command;
                                             AppendOutput(output + "\n", OutputColor.Normal);
                                             string shellTag = block.Command.Length > 60 ? block.Command.Substring(0, 60) : block.Command;
                                             shellOutputs.AppendLine($"[SHELL-RESULT:{shellTag}]\nShell command: {block.Command}\nOutput:\n{output}\n---");
@@ -792,6 +860,10 @@ namespace DevMind
                                             break;
                                         }
 
+                                        case BlockType.Done:
+                                            // Handled in the agentic decision below
+                                            break;
+
                                         case BlockType.Text:
                                             // Already displayed during streaming
                                             break;
@@ -801,27 +873,44 @@ namespace DevMind
                                 // ── Agentic loop decision ─────────────────────────────────────
 
                                 bool hasActions = patchedPaths.Count > 0 || ranShell || createdFile;
+                                bool hasDone = blocks.Any(b => b.Type == BlockType.Done);
+                                System.Diagnostics.Debug.WriteLine($"[DEVMIND-DIAG] Agentic decision: hasActions={hasActions} hasDone={hasDone} patchedPaths={patchedPaths.Count} ranShell={ranShell} createdFile={createdFile} hadReadRequest={hadReadRequest} _agenticDepth={_agenticDepth} _shellLoopPending={_shellLoopPending}");
 
-                                // Auto-READ resubmit: response was just a READ request, no other actions
-                                if (hadReadRequest && !hasActions && !string.IsNullOrEmpty(_pendingResubmitPrompt))
-                                {
-                                    string saved = _pendingResubmitPrompt;
-                                    _pendingResubmitPrompt = null;
-                                    AppendOutput($"[AUTO-READ] File(s) loaded — resubmitting original prompt...\n", OutputColor.Dim);
-                                    InputTextBox.Text = saved;
-                                    SendToLlm();
-                                    return;
-                                }
+                                    // Auto-READ resubmit: response read files but took no action (PATCH/FILE/SHELL).
+                                    // Triggers at any depth — any response that reads files but takes no action
+                                    // is treated as incomplete and resubmitted.
+                                    if (hadReadRequest && !hasActions)
+                                    {
+                                        if (_agenticDepth > 0)
+                                        {
+                                            // Mid-agentic READ: resubmit with continuation prompt
+                                            AppendOutput($"[AUTO-READ] File(s) loaded during agentic iteration — continuing...\n", OutputColor.Dim);
+                                            InputTextBox.Text = "The requested file(s) have been loaded into context. Continue with the task using PATCH/SHELL/FILE directives.";
+                                            _shellLoopPending = true;
+                                            SendToLlm();
+                                            return;
+                                        }
+                                        else if (!string.IsNullOrEmpty(_pendingResubmitPrompt))
+                                        {
+                                            // Depth-0 READ: resubmit original user prompt
+                                            string saved = _pendingResubmitPrompt;
+                                            _pendingResubmitPrompt = null;
+                                            AppendOutput($"[AUTO-READ] File(s) loaded — resubmitting original prompt...\n", OutputColor.Dim);
+                                            InputTextBox.Text = saved;
+                                            SendToLlm();
+                                            return;
+                                        }
+                                    }
 
-                                // Build succeeded — done
-                                if (ranShell && _lastShellExitCode == 0)
+                                // Model signalled task complete
+                                if (hasDone)
                                 {
-                                    AppendOutput("[AGENTIC] Build succeeded — task complete.\n", OutputColor.Success);
+                                    AppendOutput("[AGENTIC] Task complete.\n", OutputColor.Success);
                                     _agenticDepth = 0;
                                     _pendingResubmitPrompt = null;
                                     // fall through to completion
                                 }
-                                // Build failed or actions taken without build — re-trigger if depth allows
+                                // Actions taken — re-trigger or report depth cap
                                 else if (hasActions)
                                 {
                                     int maxDepth = DevMindOptions.Instance.AgenticLoopMaxDepth;
@@ -882,45 +971,106 @@ namespace DevMind
                                             catch { }
                                         }
 
-                                        agenticContext.AppendLine("Continue with any remaining steps. If all steps are complete and the build succeeded, respond with DONE.");
+                                        agenticContext.AppendLine("Continue with any remaining steps. When there is nothing left to do, emit DONE on a line by itself.");
                                         _pendingShellContext = agenticContext.ToString().TrimEnd();
 
-                                        InputTextBox.Text = ranShell
-                                            ? "The shell output above shows build errors. Analyze the specific error messages and apply targeted PATCH fixes. Do NOT re-add code that already exists in the file. Do NOT replace code with unrelated code."
-                                            : hasActions && !ranShell
-                                                ? "Continue with remaining steps (modify other files, run builds). If done, respond with DONE."
-                                                : "Continue with remaining steps.";
-
-                                        // Post-turn: outline-compress READ blocks in the just-completed user message
-                                        // so the LLM had full content this turn but history stays lean next turn.
-                                        string postTurnMsg = _llmClient.CompressLastUserReadBlocks();
-                                        if (postTurnMsg != null)
-                                            AppendOutput(postTurnMsg, OutputColor.Dim);
-
-                                        // Check cancellation before re-triggering
-                                        if (_cts.IsCancellationRequested)
+                                        if (ranShell && _lastShellExitCode == 0 && IsRunOrExecCommand(_lastShellCommand))
                                         {
-                                            _shellLoopPending = false;
+                                            AppendOutput("[AGENTIC] Run/exec command succeeded — treating as task complete.\n", OutputColor.Success);
                                             _agenticDepth = 0;
-                                            AppendOutput("[AGENTIC] Cancelled.\n", OutputColor.Dim);
-                                            StatusText.Text = "Stopped";
-                                            SetInputEnabled(true);
+                                            _pendingResubmitPrompt = null;
+                                            // fall through to completion (no re-trigger)
+                                        }
+                                        else
+                                        {
+                                            if (ranShell && _lastShellExitCode == 0
+                                                && DevMindOptions.Instance.BlockByBlockMode != BlockByBlockModeType.Off)
+                                            {
+                                                // Block-by-block: parse scratchpad for remaining steps
+                                                var steps = ParseScratchpadSteps(_llmClient.TaskScratchpad);
+                                                var nextStep = steps.Find(s => !s.IsDone);
+                                                if (nextStep.StepNumber > 0)
+                                                {
+                                                    // Advance to next step: clear history (keep scratchpad), build continuation prompt
+                                                    _blockByBlockStep  = nextStep.StepNumber;
+                                                    _blockByBlockTotal = steps.Count;
+                                                    AppendOutput($"[AGENTIC] Block-by-block: advancing to step {nextStep.StepNumber}/{steps.Count}\n", OutputColor.Dim);
+                                                    _llmClient.ClearHistory(preserveScratchpad: true);
+                                                    InputTextBox.Text = $"Continue with step {nextStep.StepNumber}: {nextStep.Description}. READ the relevant file range first, then PATCH. Build when done.";
+                                                    _pendingShellContext = null;
+                                                    _agenticDepth = 0;
+
+                                                    if (_cts.IsCancellationRequested)
+                                                    {
+                                                        _shellLoopPending = false;
+                                                        _blockByBlockStep = 0;
+                                                        AppendOutput("[AGENTIC] Cancelled.\n", OutputColor.Dim);
+                                                        StatusText.Text = "Stopped";
+                                                        SetInputEnabled(true);
+                                                        return;
+                                                    }
+                                                    _shellLoopPending = true;
+                                                    try { SendToLlm(); }
+                                                    catch
+                                                    {
+                                                        _shellLoopPending = false;
+                                                        _blockByBlockStep = 0;
+                                                        _agenticDepth = 0;
+                                                        StatusText.Text = "Error";
+                                                        SetInputEnabled(true);
+                                                        throw;
+                                                    }
+                                                    return;
+                                                }
+                                                else if (steps.Count > 0)
+                                                {
+                                                    // All numbered steps are DONE — task complete
+                                                    AppendOutput("[AGENTIC] Block-by-block: all steps complete.\n", OutputColor.Success);
+                                                    _blockByBlockStep = 0;
+                                                    string deferredLog = _llmClient.RunDeferredCompression();
+                                                    if (deferredLog != null)
+                                                        AppendOutput(deferredLog, OutputColor.Dim);
+                                                    // fall through to completion
+                                                }
+                                            }
+                                            else if (ranShell && _lastShellExitCode == 0)
+                                                InputTextBox.Text = "Build succeeded (exit code 0). Continue with any remaining steps from the original task, or emit DONE if the task is complete.";
+                                            else if (ranShell && _lastShellExitCode != 0)
+                                                InputTextBox.Text = "The shell output above shows build errors. Analyze the specific error messages and apply targeted PATCH fixes. Do NOT re-add code that already exists in the file. Do NOT replace code with unrelated code.";
+                                            else
+                                                InputTextBox.Text = "Continue with remaining steps (modify other files, run builds). When done, emit DONE.";
+
+                                            // Post-turn: outline-compress READ blocks in the just-completed user message
+                                            // so the LLM had full content this turn but history stays lean next turn.
+                                            string postTurnMsg = _llmClient.CompressLastUserReadBlocks();
+                                            if (postTurnMsg != null)
+                                                AppendOutput(postTurnMsg, OutputColor.Dim);
+
+                                            // Check cancellation before re-triggering
+                                            if (_cts.IsCancellationRequested)
+                                            {
+                                                _shellLoopPending = false;
+                                                _agenticDepth = 0;
+                                                AppendOutput("[AGENTIC] Cancelled.\n", OutputColor.Dim);
+                                                StatusText.Text = "Stopped";
+                                                SetInputEnabled(true);
+                                                return;
+                                            }
+                                            _shellLoopPending = true;
+                                            try
+                                            {
+                                                SendToLlm();
+                                            }
+                                            catch
+                                            {
+                                                _shellLoopPending = false;
+                                                _agenticDepth = 0;
+                                                StatusText.Text = "Error";
+                                                SetInputEnabled(true);
+                                                throw;
+                                            }
                                             return;
                                         }
-                                        _shellLoopPending = true;
-                                        try
-                                        {
-                                            SendToLlm();
-                                        }
-                                        catch
-                                        {
-                                            _shellLoopPending = false;
-                                            _agenticDepth = 0;
-                                            StatusText.Text = "Error";
-                                            SetInputEnabled(true);
-                                            throw;
-                                        }
-                                        return;
                                     }
                                 }
                                 else
@@ -962,8 +1112,21 @@ namespace DevMind
                                     AppendOutput($"[CONTEXT] Working: {cbUsed:N0} / {cbBudget:N0} ({cbPct}%) | Response headroom: {cbHeadroom:N0} reserved\n", cbColor);
                                 }
 
+                                // Deferred compression: run all five phases once the agentic loop
+                                // has completed to keep history lean for the next user turn,
+                                // without invalidating the KV cache during agentic iterations.
+                                if (_shellLoopPending)
+                                {
+                                    string deferredLog = _llmClient.RunDeferredCompression();
+                                    if (deferredLog != null)
+                                        AppendOutput(deferredLog, OutputColor.Dim);
+                                }
+
                                 _agenticDepth = 0;
+                                _blockByBlockStep = 0;
                                 _pendingResubmitPrompt = null;
+                                _thinkingTimer?.Stop();
+                                _thinkingTimer = null;
                                 StatusText.Text = "Ready";
                                 ContextIndicator.Text = "";
                                 SetInputEnabled(true);
@@ -975,6 +1138,9 @@ namespace DevMind
                                 {
                                     _shellLoopPending = false;
                                     _agenticDepth = 0;
+                                    _blockByBlockStep = 0;
+                                    _thinkingTimer?.Stop();
+                                    _thinkingTimer = null;
                                     AppendOutput($"\n[onComplete error: {onCompleteEx.Message}]\n", OutputColor.Error);
                                     StatusText.Text = "Error";
                                     SetInputEnabled(true);
@@ -991,8 +1157,11 @@ namespace DevMind
                             {
 #pragma warning restore VSTHRD001, VSTHRD110
                                 StopGeneratingAnimation();
+                                _thinkingTimer?.Stop();
+                                _thinkingTimer = null;
                                 _shellLoopPending = false;
                                 _agenticDepth = 0;
+                                _blockByBlockStep = 0;
                                 _pendingResubmitPrompt = null;
                                 AppendOutput($"\n[Error: {ex.Message}]\n", OutputColor.Error);
                                 StatusText.Text = "Error";
@@ -1001,7 +1170,8 @@ namespace DevMind
                                 _batchOnComplete = null;
                             }));
                         },
-                        _cts.Token);
+                        deferCompression: _shellLoopPending,
+                        cancellationToken: _cts.Token);
                 }
                 finally
                 {
@@ -1009,10 +1179,13 @@ namespace DevMind
                     if (_cts.IsCancellationRequested)
                     {
                         StopGeneratingAnimation();
+                        _thinkingTimer?.Stop();
+                        _thinkingTimer = null;
                         AppendOutput("\n[Stopped]\n", OutputColor.Dim);
                         StatusText.Text = "Stopped";
                         _shellLoopPending = false;
                         _agenticDepth = 0;
+                        _blockByBlockStep = 0;
                         _pendingResubmitPrompt = null;
                     }
                     // Skip re-enabling input when the agentic loop is still active.
@@ -1053,7 +1226,9 @@ namespace DevMind
                     AppendOutput("\n> 1\n", OutputColor.Input);
                     var pending = _pendingFuzzyPatch.Value;
                     _pendingFuzzyPatch = null;
-                    ApplyPendingFuzzyPatch(pending);
+#pragma warning disable VSSDK007
+                    _ = ApplyPendingFuzzyPatchAsync(pending);
+#pragma warning restore VSSDK007
                     return;
                 }
                 if (e.Key == Key.D2 || e.Key == Key.NumPad2)
@@ -1150,6 +1325,62 @@ namespace DevMind
             AppendOutput($"Files in READ context:         {_readFileCount}\n", OutputColor.Normal);
             AppendOutput($"Context budget:                ~{historyTokens} tokens ({budgetPct}% of {_llmClient.MaxPromptTokens})\n", OutputColor.Normal);
             AppendOutput("─────────────────────────────────────────\n", OutputColor.Dim);
+        }
+
+        /// <summary>
+        /// Returns true if the shell command is a run/exec invocation (not a build command).
+        /// These commands complete a task when they exit 0 and should not trigger agentic continuation.
+        /// </summary>
+        private static bool IsRunOrExecCommand(string command)
+        {
+            if (string.IsNullOrEmpty(command))
+                return false;
+            string cmd = command.Trim().ToLowerInvariant();
+            return cmd.Contains("dotnet run")
+                || cmd.Contains("dotnet exec")
+                || (cmd.EndsWith(".exe") && !cmd.Contains("msbuild") && !cmd.Contains("dotnet build"));
+        }
+
+        /// <summary>
+        /// Represents a single parsed step from the SCRATCHPAD block.
+        /// </summary>
+        private struct ScratchpadStep
+        {
+            public int    StepNumber;
+            public bool   IsDone;
+            public string Description;
+        }
+
+        /// <summary>
+        /// Parses numbered steps from a SCRATCHPAD block.
+        /// Recognises lines of the form: "N. [DONE] description" / "N. DONE: description" / "N. description"
+        /// A step is done when the text immediately after "N." contains "DONE" (case-insensitive).
+        /// Returns an empty list when the scratchpad is blank or contains no numbered steps.
+        /// </summary>
+        private static System.Collections.Generic.List<ScratchpadStep> ParseScratchpadSteps(string scratchpad)
+        {
+            var result = new System.Collections.Generic.List<ScratchpadStep>();
+            if (string.IsNullOrWhiteSpace(scratchpad))
+                return result;
+
+            var stepLine = new System.Text.RegularExpressions.Regex(
+                @"^\s*(\d+)\.\s+(.+)$",
+                System.Text.RegularExpressions.RegexOptions.Multiline);
+
+            foreach (System.Text.RegularExpressions.Match m in stepLine.Matches(scratchpad))
+            {
+                int  num  = int.Parse(m.Groups[1].Value);
+                string raw = m.Groups[2].Value.Trim();
+                // Strip leading "[DONE]" / "DONE:" markers to get clean description
+                bool done = System.Text.RegularExpressions.Regex.IsMatch(
+                    raw, @"^(\[DONE\]|DONE\s*:)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                string desc = done
+                    ? System.Text.RegularExpressions.Regex.Replace(
+                        raw, @"^(\[DONE\]|DONE\s*:)\s*", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Trim()
+                    : raw;
+                result.Add(new ScratchpadStep { StepNumber = num, IsDone = done, Description = desc });
+            }
+            return result;
         }
 
         private static bool ContainsWaitSeparator(string text)
