@@ -6,7 +6,7 @@
 
 - **Product**: DevMind
 - **Brand**: iOnline Consulting LLC
-- **Current Version**: v5.30
+- **Current Version**: v6.0.0
 - **Platform**: Visual Studio 2022+ (VSIX), .NET Framework (VSSDK requirement)
 - **Language**: C# with WPF UI
 

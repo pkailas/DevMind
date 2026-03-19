@@ -63,7 +63,8 @@
       "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Professional/MSBuild/Current/Bin/MSBuild.exe\" DevMind.csproj /p:Configuration=Release /v:q 2>&1 | tail -10)",
       "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Professional/MSBuild/Current/Bin/MSBuild.exe\" DevMind.csproj -p:Configuration=Release -v:q 2>&1 | tail -10)",
       "Bash(git checkout:*)",
-      "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Professional/MSBuild/Current/Bin/MSBuild.exe\" \"C:/Users/pkailas.KAILAS/source/repos/DevMind/DevMind.csproj\" /p:Configuration=Release /t:Build /v:minimal /nologo)"
+      "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Professional/MSBuild/Current/Bin/MSBuild.exe\" \"C:/Users/pkailas.KAILAS/source/repos/DevMind/DevMind.csproj\" /p:Configuration=Release /t:Build /v:minimal /nologo)",
+      "Bash(grep -r \"5\\\\.30\\\\|AssemblyVersion\\\\|<Version>\" C:/Users/pkailas.KAILAS/source/repos/DevMind --include=*.cs --include=*.csproj --include=*.vsixmanifest --include=*.json -l)"
     ]
   }
 }
