@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v5.0.41
+// File: DevMindToolWindowControl.xaml.cs  v5.0.42
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -112,10 +112,6 @@ namespace DevMind
             }), System.Windows.Threading.DispatcherPriority.Background);
 #pragma warning restore VSTHRD001
         }
-
-        // ── Output color ──────────────────────────────────────────────────────
-
-        private enum OutputColor { Normal, Dim, Input, Error, Success, Thinking }
 
         private void InitOutputDocument()
         {
