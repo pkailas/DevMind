@@ -1,4 +1,4 @@
-// File: IAgenticHost.cs  v1.0.0
+// File: IAgenticHost.cs  v1.0.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System.Threading.Tasks;
@@ -14,13 +14,13 @@ namespace DevMind
     public interface IAgenticHost
     {
         /// <summary>
-        /// Apply a PATCH block to a file. Returns true if the patch was
-        /// applied successfully, false if it failed (fuzzy match rejected,
-        /// file not found, ambiguous match, etc.).
+        /// Apply a PATCH block to a file. Returns the resolved file path on
+        /// success, or null if the patch failed (FIND text not found, fuzzy
+        /// match rejected, ambiguous match, file not found, etc.).
         /// The patchContent parameter is the full PATCH block text including
         /// the "PATCH filename" header line and all FIND:/REPLACE: pairs.
         /// </summary>
-        Task<bool> ApplyPatchAsync(string patchContent);
+        Task<string> ApplyPatchAsync(string patchContent);
 
         /// <summary>
         /// Run a shell command and capture its output.

@@ -20,11 +20,20 @@
 |------|---------|
 | `DevMindPackage.cs` | Main VS package — registers tool window, options page, commands |
 | `DevMindToolWindow.cs` | Tool window host — creates `LlmClient` and `DevMindToolWindowControl` on startup |
-| `DevMindToolWindowControl.xaml/.cs` | WPF UI — single-stream output, input bar, system prompt panel, streaming, agentic loop |
+| `DevMindToolWindowControl.xaml/.cs` | WPF UI — single-stream output, input bar, system prompt panel, streaming, agentic pipeline entry point |
+| `DevMindToolWindowControl.AgenticHost.cs` | `IAgenticHost` implementation — bridges pipeline to VS/UI side effects |
 | `DevMindToolWindowControl.Context.cs` | Editor context, DevMind.md loading, READ command, file search, `BuildMessageWithContext` |
 | `DevMindToolWindowControl.Patch.cs` | PATCH command — parsing, whitespace-normalized matching, fuzzy matching, UNDO, backup stack |
 | `DevMindToolWindowControl.Shell.cs` | Shell execution — `RunShellCommand`, `RunShellCommandCaptureAsync`, `ParseShellDirectives` |
 | `ResponseParser.cs` | Parses complete LLM responses into typed blocks (File, Patch, Shell, ReadRequest, Text) |
+| `ResponseClassifier.cs` | Wraps `ResponseParser.Parse()` and returns `ResponseOutcome` — abstraction boundary |
+| `ResponseOutcome.cs` | Wraps parsed blocks with pre-computed boolean flags (HasPatches, IsDone, IsReadOnly, etc.) |
+| `AgenticActionResolver.cs` | Pure static: maps `ResponseOutcome` + `ExecutionResult` → `AgenticAction` (9 priority rules) |
+| `AgenticExecutor.cs` | Executes an `AgenticAction` via `IAgenticHost`; the only class with side effects in the pipeline |
+| `AgenticAction.cs` / `ActionType` | Decision output — describes the next step the agentic loop should take |
+| `ExecutionResult.cs` | Captures what happened during execution (patches applied/failed, shell result, files created) |
+| `IAgenticHost.cs` | Interface abstracting all VS/file-system/UI side effects from the pipeline |
+| `OutputColor.cs` | Public enum for output panel color categories |
 | `LlmClient.cs` | HTTP client — SSE streaming to OpenAI-compatible `/v1/chat/completions` |
 | `DevMindOptionsPage.cs` | VS Tools > Options settings — EndpointUrl, ApiKey, ModelName, ServerType, CustomContextEndpoint, SystemPrompt, AgenticLoopMaxDepth, ShowLlmThinking |
 | `FileContentCache.cs` | In-memory line-indexed file cache — powers `READ filename:start-end` line-range access |
@@ -35,9 +44,25 @@
 User types → InputTextBox
   Enter      → SendToLlm() → LlmClient.SendMessageAsync()
                 → onToken: streams to OutputBox, captures FILE: blocks into _fileCaptureBuffer
-                → onComplete: ResponseParser.Parse() → execute blocks in order → agentic loop
+                → onComplete: classify → decide → execute → continue-or-stop
   Ctrl+Enter → RunShellCommand() → powershell.exe / cmd.exe → stdout/stderr → AppendOutput()
 ```
+
+### Agentic Pipeline (v6.0+)
+
+The `onComplete` handler runs the classify → decide → execute pipeline:
+
+```
+fullResponse
+  → ResponseClassifier.Classify()    → ResponseOutcome  (HasPatches, IsDone, IsReadOnly, …)
+  → AgenticActionResolver.Resolve()  → AgenticAction    (ApplyAndBuild, LoadAndResubmit, Stop, …)
+  → AgenticExecutor.ExecuteAsync()   → ExecutionResult  (PatchedPaths, ShellExitCode, Errors, …)
+  → AgenticActionResolver.Resolve()  → next AgenticAction  (Continue or Stop)
+  → re-trigger SendToLlm() or fall through to completion
+```
+
+`AgenticExecutor` calls `IAgenticHost` methods (implemented on `DevMindToolWindowControl.AgenticHost.cs`)
+to perform side effects without knowing about VS, WPF, or file system details.
 
 ### Response Dispatcher (v5.0+)
 
@@ -46,11 +71,11 @@ The LLM response is classified AFTER it arrives, not before. All tokens stream i
 ```
 ResponseBlock
 ├── TextBlock        — plain text (already displayed during streaming)
-├── FileBlock        — FILE:/END_FILE content → SaveGeneratedFileAsync()
-├── PatchBlock       — PATCH directive → ApplyPatchAsync()
-├── ShellBlock       — SHELL: directive → RunShellCommandCaptureAsync()
-├── ReadRequest      — model asking to READ a file → ApplyReadCommandAsync() / ApplyReadRangeAsync()
-├── Scratchpad       — SCRATCHPAD: block → LlmClient.UpdateScratchpad()
+├── FileBlock        — FILE:/END_FILE content → IAgenticHost.SaveFileAsync()
+├── PatchBlock       — PATCH directive → IAgenticHost.ApplyPatchAsync()
+├── ShellBlock       — SHELL: directive → IAgenticHost.RunShellAsync()
+├── ReadRequest      — model asking to READ a file → IAgenticHost.LoadFileContentAsync()
+├── Scratchpad       — SCRATCHPAD: block → IAgenticHost.UpdateScratchpad()
 └── DoneBlock        — DONE directive → explicit task completion signal, stops agentic loop
 ```
 

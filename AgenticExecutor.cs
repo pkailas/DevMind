@@ -1,4 +1,4 @@
-// File: AgenticExecutor.cs  v1.0.0
+// File: AgenticExecutor.cs  v1.0.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -49,8 +49,9 @@ namespace DevMind
                         try
                         {
                             var (exitCode, output) = await _host.RunShellAsync(action.ShellCommand);
-                            result.ShellExitCode = exitCode;
-                            result.ShellOutput   = output ?? string.Empty;
+                            result.ShellExitCode     = exitCode;
+                            result.ShellOutput       = output ?? string.Empty;
+                            result.LastShellCommand  = action.ShellCommand;
                         }
                         catch (Exception ex)
                         {
@@ -148,11 +149,21 @@ namespace DevMind
                         if (!processPatches) break;
                         try
                         {
-                            bool applied = await _host.ApplyPatchAsync(block.Content);
-                            if (applied)
+                            string patchedPath = await _host.ApplyPatchAsync(block.Content);
+                            if (patchedPath != null)
+                            {
                                 result.PatchesApplied++;
+                                result.PatchedPaths.Add(patchedPath);
+                            }
                             else
+                            {
                                 result.PatchesFailed++;
+                                string failedFile = string.IsNullOrEmpty(block.FileName)
+                                    ? "unknown" : System.IO.Path.GetFileName(block.FileName);
+                                result.Errors.Add(
+                                    $"[PATCH-FAILED:{failedFile}] FIND text not found — file was NOT modified. " +
+                                    "READ the file to get exact current content, then retry PATCH with correct FIND text.");
+                            }
                         }
                         catch (Exception ex)
                         {
@@ -167,8 +178,9 @@ namespace DevMind
                         try
                         {
                             var (exitCode, output) = await _host.RunShellAsync(block.Command);
-                            result.ShellExitCode = exitCode;
-                            result.ShellOutput   = output ?? string.Empty;
+                            result.ShellExitCode    = exitCode;
+                            result.ShellOutput      = output ?? string.Empty;
+                            result.LastShellCommand = block.Command;
                         }
                         catch (Exception ex)
                         {

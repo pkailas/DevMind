@@ -1,4 +1,4 @@
-// File: ExecutionResult.cs  v1.0.0
+// File: ExecutionResult.cs  v1.0.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System.Collections.Generic;
@@ -22,14 +22,18 @@ namespace DevMind
         /// </summary>
         public bool BuildSucceeded => ShellExitCode.HasValue && ShellExitCode.Value == 0;
 
-        public List<string> FilesCreated { get; set; }
-        public List<string> Errors       { get; set; }
+        public List<string> FilesCreated  { get; set; }
+        public List<string> PatchedPaths  { get; set; }  // full paths of successfully patched files
+        public List<string> Errors        { get; set; }
+        public string       LastShellCommand { get; set; }  // last shell command that was run
 
         public ExecutionResult()
         {
-            ShellOutput  = string.Empty;
-            FilesCreated = new List<string>();
-            Errors       = new List<string>();
+            ShellOutput       = string.Empty;
+            LastShellCommand  = string.Empty;
+            FilesCreated      = new List<string>();
+            PatchedPaths      = new List<string>();
+            Errors            = new List<string>();
         }
 
         /// <summary>
