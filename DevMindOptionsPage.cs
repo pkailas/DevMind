@@ -1,4 +1,4 @@
-// File: DevMindOptionsPage.cs  v5.5
+// File: DevMindOptionsPage.cs  v5.6
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -84,6 +84,16 @@ namespace DevMind
         /// Custom endpoint path used for context-size detection when Server Type is "Custom".
         /// Relative to the server root (e.g., /api/info) or absolute URL.
         /// </summary>
+        /// <summary>
+        /// Maximum time in minutes to wait for the first token from the LLM.
+        /// This covers the prompt-ingestion phase before the model begins generating.
+        /// </summary>
+        [Category("Connection")]
+        [DisplayName("First Token Timeout (minutes)")]
+        [Description("Maximum time to wait for the first response token. Increase for large prompts on slower hardware where prompt ingestion takes a long time.")]
+        [DefaultValue(5)]
+        public int FirstTokenTimeoutMinutes { get; set; } = 5;
+
         /// <summary>
         /// Maximum time in minutes to wait for a complete LLM response.
         /// </summary>

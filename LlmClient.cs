@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v5.43
+// File: LlmClient.cs  v5.44
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -511,10 +511,44 @@ namespace DevMind
                 using var reader = new StreamReader(stream, Encoding.UTF8);
 
                 var fullResponse = new StringBuilder();
-                string line;
+                bool firstTokenReceived = false;
+                var firstTokenDeadline = DateTime.UtcNow.AddMinutes(
+                    DevMindOptions.Instance.FirstTokenTimeoutMinutes);
 
-                while ((line = await reader.ReadLineAsync().ConfigureAwait(false)) != null)
+                while (true)
                 {
+                    Task<string> readTask = reader.ReadLineAsync();
+
+                    if (!firstTokenReceived)
+                    {
+                        // Phase 1: race each read against the first-token deadline.
+                        var remaining = firstTokenDeadline - DateTime.UtcNow;
+                        if (remaining <= TimeSpan.Zero)
+                            throw new TimeoutException(
+                                $"No response received within {DevMindOptions.Instance.FirstTokenTimeoutMinutes} minute(s). " +
+                                "The server may still be processing the prompt. " +
+                                "Increase 'First Token Timeout' in Tools > Options > DevMind.");
+
+                        var timeoutTask = Task.Delay(remaining, cancellationToken);
+                        var winner = await Task.WhenAny(readTask, timeoutTask).ConfigureAwait(false);
+
+                        if (winner == timeoutTask)
+                        {
+                            // If user cancelled, ThrowIfCancellationRequested gives clean exit.
+                            cancellationToken.ThrowIfCancellationRequested();
+                            throw new TimeoutException(
+                                $"No response received within {DevMindOptions.Instance.FirstTokenTimeoutMinutes} minute(s). " +
+                                "The server may still be processing the prompt. " +
+                                "Increase 'First Token Timeout' in Tools > Options > DevMind.");
+                        }
+                    }
+
+                    string line = await readTask.ConfigureAwait(false);
+                    if (line == null)
+                        break;
+
+                    // Phase 2 (after first token): only user-cancellation is checked;
+                    // HttpClient.Timeout enforces the total request ceiling.
                     cancellationToken.ThrowIfCancellationRequested();
 
                     if (!line.StartsWith("data: ", StringComparison.Ordinal))
@@ -528,6 +562,7 @@ namespace DevMind
                     string token = ParseContentDelta(data);
                     if (token != null)
                     {
+                        firstTokenReceived = true;
                         fullResponse.Append(token);
                         onToken(token);
                     }
