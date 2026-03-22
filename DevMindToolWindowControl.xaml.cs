@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v5.0.46
+// File: DevMindToolWindowControl.xaml.cs  v5.0.52
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -47,7 +47,6 @@ namespace DevMind
         private int _blockByBlockTotal;  // total step count for current block-by-block task
         private int _lastShellExitCode;
         private string _lastShellCommand;
-        private int _generatingTokenCount;
         private bool _inThinkBlock;
         private readonly StringBuilder _thinkBuffer = new StringBuilder();
         private string _pendingThinkText;   // set by FilterChunk when ShowLlmThinking is true
@@ -56,8 +55,7 @@ namespace DevMind
         private Paragraph _spacerParagraph;
         private string _pendingResubmitPrompt;
         private Action _batchOnComplete;
-        private bool _inFileCapture;
-        private string _fileCaptureFileName;
+        private bool _suppressDisplay;
         private int _patchCount = 0;
         private int _undoCount = 0;
         private int _readFileCount = 0;
@@ -278,9 +276,6 @@ namespace DevMind
             // Reset think filter state
             _inThinkBlock = false;
             _thinkBuffer.Clear();
-
-            // Reset token counter
-            _generatingTokenCount = 0;
 
             // Clear terminal history
             _terminalHistory.Clear();
@@ -562,9 +557,8 @@ namespace DevMind
             _thinkingTimer.Start();
             _cts = new CancellationTokenSource();
 
-            // Reset file capture state
-            _inFileCapture = false;
-            _fileCaptureFileName = null;
+            // Reset display-suppression state
+            _suppressDisplay = false;
 
             var streamPara = new Paragraph { Margin = new Thickness(0) };
             OutputBox.Document.Blocks.Add(streamPara);
@@ -601,7 +595,8 @@ namespace DevMind
             string llmDirective =
                 "## Directives\n" +
                 "FILE: <filename>\n<raw source>\nEND_FILE\n\n" +
-                "PATCH <filename>\nFIND:\n<exact text>\nREPLACE:\n<replacement>\n\n" +
+                "PATCH <filename>\nFIND:\n<exact text>\nREPLACE:\n<replacement>\nEND_PATCH\n" +
+                "Multiple FIND/REPLACE pairs are allowed before END_PATCH. END_PATCH is required and must appear on its own line after the last REPLACE block.\n\n" +
                 "SHELL: <command>\n\n" +
                 "READ <filename>  — full if <100 lines, outline otherwise\n" +
                 "READ <filename>:<start>-<end>  — targeted line range (1-based)\n" +
@@ -684,57 +679,30 @@ namespace DevMind
 
                                 responseBuffer.Append(visible);
 
-                                if (_inFileCapture)
+                                // Lightweight display-suppression for FILE: blocks.
+                                // Only inspect at newline boundaries — partial lines are never checked.
+                                // onComplete / ResponseParser.Parse() is the sole authority for all parsing;
+                                // _suppressDisplay only affects what the user sees in the OutputBox during streaming.
+                                if (visible.Contains('\n'))
                                 {
-                                    // Check for END_FILE on its own line
-                                    string bufTail = responseBuffer.ToString();
-                                    int endIdx = bufTail.LastIndexOf("\nEND_FILE", StringComparison.Ordinal);
-                                    if (endIdx < 0) endIdx = bufTail.LastIndexOf("\r\nEND_FILE", StringComparison.Ordinal);
-                                    if (endIdx >= 0)
-                                    {
-                                        _inFileCapture = false;
-                                        StopGeneratingAnimation();
-                                        return;
-                                    }
+                                    string buf = responseBuffer.ToString();
+                                    int lastNl = buf.LastIndexOf('\n');
+                                    int prevNl = lastNl > 0 ? buf.LastIndexOf('\n', lastNl - 1) : -1;
+                                    string completedLine = buf.Substring(prevNl + 1, lastNl - prevNl - 1).TrimEnd('\r');
 
-                                    // Implicit END_FILE: model emitted a directive line without END_FILE.
-                                    // Detect at token boundaries — only act when the current tail forms a
-                                    // complete line that starts with a known directive keyword.
-                                    string tail = bufTail.Length > 200 ? bufTail.Substring(bufTail.Length - 200) : bufTail;
-                                    int lastNl = tail.LastIndexOf('\n');
-                                    string candidateLine = lastNl >= 0 ? tail.Substring(lastNl + 1).TrimEnd('\r') : tail.TrimEnd('\r');
-                                    bool isImplicitTerminator =
-                                        candidateLine.StartsWith("SCRATCHPAD:", StringComparison.OrdinalIgnoreCase) ||
-                                        candidateLine.StartsWith("SHELL:",      StringComparison.OrdinalIgnoreCase) ||
-                                        Regex.IsMatch(candidateLine, @"^PATCH(\s|$)", RegexOptions.IgnoreCase)      ||
-                                        string.Equals(candidateLine, "DONE", StringComparison.OrdinalIgnoreCase);
-                                    if (isImplicitTerminator)
+                                    if (!_suppressDisplay && Regex.IsMatch(completedLine, @"^FILE:\s*\S", RegexOptions.IgnoreCase))
                                     {
-                                        _inFileCapture = false;
-                                        StopGeneratingAnimation();
-                                        // Fall through — let the directive token render to streamRun normally.
+                                        _suppressDisplay = true;
+                                        StartGeneratingAnimation(completedLine.Substring("FILE:".Length).Trim());
                                     }
-                                    else
+                                    else if (_suppressDisplay && string.Equals(completedLine, "END_FILE", StringComparison.OrdinalIgnoreCase))
                                     {
-                                        _generatingTokenCount++;
-                                        StatusText.Text = $"Generating {_fileCaptureFileName}... ({_generatingTokenCount} tokens)";
-                                        return;
+                                        _suppressDisplay = false;
+                                        StopGeneratingAnimation();
                                     }
                                 }
 
-                                // Check if the latest content starts a FILE: block
-                                string buf = responseBuffer.ToString();
-                                var fileMatch = Regex.Match(buf, @"\nFILE:\s*(\S+\.\w+)\s*\n", RegexOptions.None);
-                                if (!fileMatch.Success)
-                                    fileMatch = Regex.Match(buf, @"^FILE:\s*(\S+\.\w+)\s*\n", RegexOptions.None);
-                                if (fileMatch.Success && fileMatch.Index + fileMatch.Length >= buf.Length - visible.Length)
-                                {
-                                    _inFileCapture = true;
-                                    _fileCaptureFileName = fileMatch.Groups[1].Value;
-                                    _generatingTokenCount = 0;
-                                    StartGeneratingAnimation(_fileCaptureFileName);
-                                    return;
-                                }
+                                if (_suppressDisplay) return;
 
                                 if (_thinkingTimer != null)
                                 {
@@ -1076,6 +1044,7 @@ namespace DevMind
                                     _thinkingTimer?.Stop();
                                     _thinkingTimer = null;
                                     AppendOutput($"\n[onComplete error: {onCompleteEx.Message}]\n", OutputColor.Error);
+                                    AppendOutput($"{onCompleteEx.StackTrace}\n", OutputColor.Error);
                                     StatusText.Text = "Error";
                                     SetInputEnabled(true);
                                 }
@@ -1090,6 +1059,7 @@ namespace DevMind
                             Dispatcher.BeginInvoke(new Action(() =>
                             {
 #pragma warning restore VSTHRD001, VSTHRD110
+                                _suppressDisplay = false;
                                 StopGeneratingAnimation();
                                 _thinkingTimer?.Stop();
                                 _thinkingTimer = null;
@@ -1112,6 +1082,7 @@ namespace DevMind
                     await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
                     if (_cts.IsCancellationRequested)
                     {
+                        _suppressDisplay = false;
                         StopGeneratingAnimation();
                         _thinkingTimer?.Stop();
                         _thinkingTimer = null;

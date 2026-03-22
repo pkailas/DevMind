@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.AgenticHost.cs  v1.0.1
+// File: DevMindToolWindowControl.AgenticHost.cs  v1.0.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Microsoft.VisualStudio.Shell;
@@ -68,7 +68,7 @@ namespace DevMind
 
         async Task<string> IAgenticHost.SaveFileAsync(string fileName, string content)
         {
-            await SaveGeneratedFileAsync(fileName, content);
+            await SaveGeneratedFileAsync(fileName, StripOuterCodeFence(content));
             // Approximate the resolved path for agentic context / diff view purposes.
             try
             {
@@ -135,5 +135,6 @@ namespace DevMind
         // ── IAgenticHost.GetWorkingDirectory ──────────────────────────────────────
 
         string IAgenticHost.GetWorkingDirectory() => _terminalWorkingDir;
+
     }
 }

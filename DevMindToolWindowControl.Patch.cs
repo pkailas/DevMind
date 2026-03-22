@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.Patch.cs  v5.13
+// File: DevMindToolWindowControl.Patch.cs  v5.14
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -272,9 +272,17 @@ namespace DevMind
 
             if (lines.Count == 0) return string.Empty;
 
-            // Strip trailing closing fence — matches only bare ```
-            if (Regex.IsMatch(lines[lines.Count - 1], @"^\s*```\s*$"))
-                lines.RemoveAt(lines.Count - 1);
+            // Strip trailing closing fence — matches only bare ```.
+            // Search from the end, skipping empty/whitespace-only lines, so a
+            // trailing newline in FILE block content doesn't hide the fence.
+            for (int i = lines.Count - 1; i >= 0; i--)
+            {
+                if (string.IsNullOrWhiteSpace(lines[i]))
+                    continue;
+                if (Regex.IsMatch(lines[i], @"^\s*```\s*$"))
+                    lines.RemoveAt(i);
+                break;
+            }
 
             return string.Join("\n", lines);
         }

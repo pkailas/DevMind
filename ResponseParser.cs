@@ -1,4 +1,4 @@
-// File: ResponseParser.cs  v5.0.11
+// File: ResponseParser.cs  v5.2.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -23,26 +23,43 @@ namespace DevMind
 
     public static class ResponseParser
     {
+        // ── Directive patterns ────────────────────────────────────────────────────
+
         // Matches FILE: filename
-        private static readonly Regex _fileStart   = new Regex(@"^FILE:\s*(\S+\.\w+)",       RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        private static readonly Regex _fileStart      = new Regex(@"^FILE:\s*(\S+\.\w+)",         RegexOptions.Compiled | RegexOptions.IgnoreCase);
         // Matches END_FILE (optional trailing whitespace)
-        private static readonly Regex _fileEnd     = new Regex(@"^END_FILE\s*$",              RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        private static readonly Regex _fileEnd        = new Regex(@"^END_FILE\s*$",                RegexOptions.Compiled | RegexOptions.IgnoreCase);
         // Matches PATCH filename
-        private static readonly Regex _patchStart  = new Regex(@"^PATCH\s+(\S+\.\S+)",        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        private static readonly Regex _patchStart     = new Regex(@"^PATCH\s+(\S+\.\S+)",          RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        // Matches END_PATCH (optional trailing whitespace)
+        private static readonly Regex _patchEnd       = new Regex(@"^END_PATCH\s*$",               RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        // Matches FIND: exactly (optional trailing whitespace)
+        private static readonly Regex _findLine       = new Regex(@"^FIND:\s*$",                   RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        // Matches REPLACE: exactly (optional trailing whitespace)
+        private static readonly Regex _replaceLine    = new Regex(@"^REPLACE:\s*$",                RegexOptions.Compiled | RegexOptions.IgnoreCase);
         // Matches SHELL: command
-        private static readonly Regex _shellLine   = new Regex(@"^\s*SHELL:\s*(.+)",          RegexOptions.Compiled | RegexOptions.IgnoreCase);
-        // Matches READ filename, READ filename:start-end, or READ filename:line (only used when no PATCH/FILE present)
-        private static readonly Regex _readLine       = new Regex(@"^READ\s+(\S+\.\S+?)(?::(\d+)(?:-(\d+))?)?\s*$",  RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        private static readonly Regex _shellLine      = new Regex(@"^\s*SHELL:\s*(.+)",            RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        // Matches READ filename, READ filename:start-end, or READ filename:line
+        private static readonly Regex _readLine       = new Regex(@"^READ\s+(\S+\.\S+?)(?::(\d+)(?:-(\d+))?)?\s*$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
         // Matches READ! filename — force full content regardless of file size
-        private static readonly Regex _forceReadLine  = new Regex(@"^READ!\s+(\S+\.\S+?)\s*$",                        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        private static readonly Regex _forceReadLine  = new Regex(@"^READ!\s+(\S+\.\S+?)\s*$",    RegexOptions.Compiled | RegexOptions.IgnoreCase);
         // Matches SCRATCHPAD: block start (must be on its own line)
-        private static readonly Regex _scratchpadStart = new Regex(@"^SCRATCHPAD:\s*$",  RegexOptions.Compiled | RegexOptions.IgnoreCase);
-        // Matches END_SCRATCHPAD terminator used to close a SCRATCHPAD block
-        private static readonly Regex _scratchpadEnd   = new Regex(@"^\s*END_SCRATCHPAD\s*$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
-        // Matches a line that is exactly "DONE" (signals task completion)
-        private static readonly Regex _doneLine        = new Regex(@"^\s*DONE\s*$",       RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        private static readonly Regex _scratchpadStart = new Regex(@"^SCRATCHPAD:\s*$",            RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        // Matches END_SCRATCHPAD terminator
+        private static readonly Regex _scratchpadEnd  = new Regex(@"^\s*END_SCRATCHPAD\s*$",       RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        // Matches a line that is exactly "DONE"
+        private static readonly Regex _doneLine       = new Regex(@"^\s*DONE\s*$",                 RegexOptions.Compiled | RegexOptions.IgnoreCase);
         // Markdown fence: ```lang or ```
-        private static readonly Regex _mdFence         = new Regex(@"^```",              RegexOptions.Compiled);
+        private static readonly Regex _mdFence        = new Regex(@"^```",                         RegexOptions.Compiled);
+
+        // ── Parser states ─────────────────────────────────────────────────────────
+
+        private enum State { TopLevel, InFile, InPatch, InScratchpad }
+
+        // Sub-state inside InPatch
+        private enum PatchSection { Preamble, InFind, InReplace }
+
+        // ── Public API ────────────────────────────────────────────────────────────
 
         public static List<ResponseBlock> Parse(string response)
         {
@@ -56,197 +73,572 @@ namespace DevMind
             // Pre-pass: strip markdown fence lines that wrap PATCH/FILE blocks
             lines = StripMarkdownFenceLines(lines);
 
-            // Determine whether there are any PATCH or FILE blocks (for READ treatment)
+            // Determine whether there are any PATCH or FILE blocks (controls READ treatment)
             bool hasActionableBlocks = HasActionableBlocks(lines);
-
-            var blocks = new List<ResponseBlock>();
-            var textBuf = new StringBuilder();
-            string lastShellCommand = null;
 
             System.Diagnostics.Debug.WriteLine($"[PARSER-DIAG] Parsing {lines.Length} lines (after fence strip), hasActionableBlocks={hasActionableBlocks}");
             for (int dbgI = 0; dbgI < Math.Min(lines.Length, 30); dbgI++)
                 System.Diagnostics.Debug.WriteLine($"[PARSER-DIAG] line[{dbgI}]: \"{lines[dbgI]}\"");
 
-            int i = 0;
-            while (i < lines.Length)
+            var blocks       = new List<ResponseBlock>();
+            var textBuf      = new StringBuilder();   // pending TopLevel text
+            var fileBuf      = new StringBuilder();   // content inside FILE: block
+            var patchBuf     = new StringBuilder();   // raw PATCH text (header + all pairs)
+            var scratchBuf   = new StringBuilder();   // content inside SCRATCHPAD: block
+            var findBuf      = new StringBuilder();   // current FIND: section text
+            var replaceBuf   = new StringBuilder();   // current REPLACE: section text
+
+            string lastShellCommand = null;
+            string fileBlockName    = null;           // filename of the current FILE: block
+            string patchFileName    = null;           // filename of the current PATCH block
+            PatchSection patchSec   = PatchSection.Preamble;
+
+            State state = State.TopLevel;
+
+            for (int i = 0; i < lines.Length; i++)
             {
                 string line = lines[i];
 
-                // FILE: block
-                Match fileMatch = _fileStart.Match(line);
-                if (fileMatch.Success)
+                switch (state)
                 {
-                    FlushText(blocks, textBuf);
-                    string fileName = fileMatch.Groups[1].Value;
-                    var contentBuf = new StringBuilder();
-                    i++;
-                    while (i < lines.Length && !_fileEnd.IsMatch(lines[i]) && !IsImplicitFileTerminator(lines[i]))
-                    {
-                        contentBuf.AppendLine(lines[i]);
-                        i++;
-                    }
-                    // consume END_FILE line if present
-                    if (i < lines.Length && _fileEnd.IsMatch(lines[i]))
-                        i++;
-                    // Second-layer defense: strip any trailing END / END_FILE line that
-                    // leaked into the buffer due to token boundary splits during streaming.
-                    string fileBlockContent = contentBuf.ToString().TrimEnd('\r', '\n', ' ');
-                    int lastNl = fileBlockContent.LastIndexOf('\n');
-                    string lastLine = lastNl >= 0 ? fileBlockContent.Substring(lastNl + 1).Trim() : fileBlockContent.Trim();
-                    if (lastLine == "END_FILE" || lastLine == "END" || lastLine.StartsWith("END_FILE"))
-                        fileBlockContent = fileBlockContent.Substring(0, lastNl < 0 ? 0 : lastNl).TrimEnd('\r', '\n', ' ');
-                    blocks.Add(new ResponseBlock
-                    {
-                        Type = BlockType.File,
-                        FileName = fileName,
-                        Content = fileBlockContent
-                    });
-                    continue;
-                }
+                    // ── TopLevel ──────────────────────────────────────────────────
+                    case State.TopLevel:
+                        ProcessTopLevel(line, blocks, textBuf, ref lastShellCommand,
+                                        hasActionableBlocks,
+                                        ref state, ref fileBlockName,
+                                        ref patchFileName, patchBuf, ref patchSec,
+                                        scratchBuf);
+                        break;
 
-                // PATCH block
-                Match patchMatch = _patchStart.Match(line);
-                if (patchMatch.Success)
-                {
-                    FlushText(blocks, textBuf);
-                    string fileName = patchMatch.Groups[1].Value;
-                    var patchBuf = new StringBuilder();
-                    patchBuf.AppendLine(line);  // include the PATCH header line
-                    i++;
-                    while (i < lines.Length)
-                    {
-                        string pl = lines[i];
-                        // Terminators: FILE:, another PATCH, SHELL:, or end
-                        if (_fileStart.IsMatch(pl) || _patchStart.IsMatch(pl) || _shellLine.IsMatch(pl))
-                            break;
-                        patchBuf.AppendLine(pl);
-                        i++;
-                    }
-                    blocks.Add(new ResponseBlock
-                    {
-                        Type = BlockType.Patch,
-                        FileName = fileName,
-                        Content = patchBuf.ToString().TrimEnd('\r', '\n', ' ')
-                    });
-                    continue;
-                }
+                    // ── InFile ────────────────────────────────────────────────────
+                    case State.InFile:
+                        ProcessInFile(line, blocks, fileBuf, fileBlockName,
+                                      ref state, ref fileBlockName,
+                                      ref patchFileName, patchBuf, ref patchSec,
+                                      scratchBuf, textBuf, ref lastShellCommand,
+                                      hasActionableBlocks);
+                        break;
 
-                // SHELL: directive
-                Match shellMatch = _shellLine.Match(line);
-                if (shellMatch.Success)
-                {
-                    FlushText(blocks, textBuf);
-                    string cmd = shellMatch.Groups[1].Value.Trim();
-                    // Deduplicate consecutive identical commands
-                    if (!string.Equals(cmd, lastShellCommand, StringComparison.Ordinal))
-                    {
-                        blocks.Add(new ResponseBlock { Type = BlockType.Shell, Command = cmd });
-                        lastShellCommand = cmd;
-                    }
-                    i++;
-                    continue;
-                }
+                    // ── InPatch ───────────────────────────────────────────────────
+                    case State.InPatch:
+                        ProcessInPatch(line, blocks, patchBuf, patchFileName,
+                                       findBuf, replaceBuf,
+                                       ref patchSec, ref state,
+                                       ref patchFileName, textBuf, fileBuf,
+                                       ref fileBlockName, scratchBuf,
+                                       ref lastShellCommand, hasActionableBlocks);
+                        break;
 
-                // READ! line — force full content (checked before plain READ)
-                Match forceReadMatch = _forceReadLine.Match(line);
-                if (forceReadMatch.Success && !hasActionableBlocks)
-                {
-                    FlushText(blocks, textBuf);
-                    blocks.Add(new ResponseBlock
-                    {
-                        Type          = BlockType.ReadRequest,
-                        FileName      = forceReadMatch.Groups[1].Value,
-                        ForceFullRead = true
-                    });
-                    i++;
-                    continue;
+                    // ── InScratchpad ──────────────────────────────────────────────
+                    case State.InScratchpad:
+                        ProcessInScratchpad(line, blocks, scratchBuf, ref state,
+                                            ref fileBlockName, fileBuf,
+                                            ref patchFileName, patchBuf, ref patchSec,
+                                            textBuf, ref lastShellCommand, hasActionableBlocks);
+                        break;
                 }
-
-                // READ line
-                Match readMatch = _readLine.Match(line);
-                if (readMatch.Success)
-                {
-                    if (!hasActionableBlocks)
-                    {
-                        FlushText(blocks, textBuf);
-                        int rangeStart = 0, rangeEnd = 0;
-                        if (readMatch.Groups[2].Success)
-                        {
-                            int.TryParse(readMatch.Groups[2].Value, out rangeStart);
-                            // Group 3 present → explicit end line; absent → single-line read (start == end)
-                            rangeEnd = readMatch.Groups[3].Success
-                                ? (int.TryParse(readMatch.Groups[3].Value, out int re) ? re : rangeStart)
-                                : rangeStart;
-                        }
-                        blocks.Add(new ResponseBlock
-                        {
-                            Type       = BlockType.ReadRequest,
-                            FileName   = readMatch.Groups[1].Value,
-                            RangeStart = rangeStart,
-                            RangeEnd   = rangeEnd
-                        });
-                        i++;
-                        continue;
-                    }
-                    // else fall through to text
-                }
-
-                // SCRATCHPAD: block — always parsed regardless of actionable blocks
-                if (_scratchpadStart.IsMatch(line))
-                {
-                    FlushText(blocks, textBuf);
-                    var scratchBuf = new StringBuilder();
-                    i++;
-                    while (i < lines.Length && !_scratchpadEnd.IsMatch(lines[i]))
-                    {
-                        // Break if the model started a directive without closing the scratchpad
-                        string sl = lines[i];
-                        if (_patchStart.IsMatch(sl) || _fileStart.IsMatch(sl) || _shellLine.IsMatch(sl)
-                            || (sl.StartsWith("READ ", StringComparison.Ordinal) && (_readLine.IsMatch(sl) || _forceReadLine.IsMatch(sl))))
-                            break;
-                        scratchBuf.AppendLine(sl);
-                        i++;
-                    }
-                    if (i < lines.Length && _scratchpadEnd.IsMatch(lines[i]))
-                        i++; // consume the --- terminator
-                    string scratchContent = scratchBuf.ToString().TrimEnd('\r', '\n', ' ');
-                    if (!string.IsNullOrWhiteSpace(scratchContent))
-                        blocks.Add(new ResponseBlock { Type = BlockType.Scratchpad, Content = scratchContent });
-                    continue;
-                }
-
-                // DONE — task-completion signal (only meaningful during agentic loop)
-                if (_doneLine.IsMatch(line))
-                {
-                    FlushText(blocks, textBuf);
-                    blocks.Add(new ResponseBlock { Type = BlockType.Done });
-                    i++;
-                    continue;
-                }
-
-                // Plain text
-                textBuf.AppendLine(line);
-                i++;
             }
 
-            FlushText(blocks, textBuf);
+            // ── Flush whatever state we are in at end-of-response ─────────────
+            switch (state)
+            {
+                case State.TopLevel:
+                    FlushText(blocks, textBuf);
+                    break;
+
+                case State.InFile:
+                    // Implicit end — emit what we have
+                    EmitFileBlock(blocks, fileBlockName,
+                                  fileBuf.ToString().TrimEnd('\r', '\n', ' '));
+                    fileBuf.Clear();
+                    FlushText(blocks, textBuf);
+                    break;
+
+                case State.InPatch:
+                    // Flush any open FIND/REPLACE pair into patchBuf, then emit PatchBlock
+                    FlushOpenPatchPair(patchBuf, findBuf, replaceBuf, patchSec);
+                    EmitPatchBlock(blocks, patchFileName,
+                                   patchBuf.ToString().TrimEnd('\r', '\n', ' '));
+                    patchBuf.Clear();
+                    FlushText(blocks, textBuf);
+                    break;
+
+                case State.InScratchpad:
+                    EmitScratchpadBlock(blocks, scratchBuf);
+                    FlushText(blocks, textBuf);
+                    break;
+            }
+
             return blocks;
         }
 
-        // ── Helpers ──────────────────────────────────────────────────────────────
+        // ── State handlers ────────────────────────────────────────────────────────
+
+        private static void ProcessTopLevel(
+            string line,
+            List<ResponseBlock> blocks,
+            StringBuilder textBuf,
+            ref string lastShellCommand,
+            bool hasActionableBlocks,
+            ref State state,
+            ref string fileBlockName,
+            ref string patchFileName,
+            StringBuilder patchBuf,
+            ref PatchSection patchSec,
+            StringBuilder scratchBuf)
+        {
+            Match m;
+
+            // FILE: <filename>
+            m = _fileStart.Match(line);
+            if (m.Success)
+            {
+                FlushText(blocks, textBuf);
+                fileBlockName = m.Groups[1].Value;
+                state = State.InFile;
+                return;
+            }
+
+            // PATCH <filename>
+            m = _patchStart.Match(line);
+            if (m.Success)
+            {
+                FlushText(blocks, textBuf);
+                patchFileName = m.Groups[1].Value;
+                patchBuf.Clear();
+                patchBuf.AppendLine(line); // include PATCH header in content
+                patchSec = PatchSection.Preamble;
+                state = State.InPatch;
+                return;
+            }
+
+            // SCRATCHPAD:
+            if (_scratchpadStart.IsMatch(line))
+            {
+                FlushText(blocks, textBuf);
+                scratchBuf.Clear();
+                state = State.InScratchpad;
+                return;
+            }
+
+            // SHELL: <command>
+            m = _shellLine.Match(line);
+            if (m.Success)
+            {
+                FlushText(blocks, textBuf);
+                string cmd = m.Groups[1].Value.Trim();
+                if (!string.Equals(cmd, lastShellCommand, StringComparison.Ordinal))
+                {
+                    blocks.Add(new ResponseBlock { Type = BlockType.Shell, Command = cmd });
+                    lastShellCommand = cmd;
+                }
+                return; // stay in TopLevel
+            }
+
+            // READ! <filename>  (checked before plain READ)
+            m = _forceReadLine.Match(line);
+            if (m.Success && !hasActionableBlocks)
+            {
+                FlushText(blocks, textBuf);
+                blocks.Add(new ResponseBlock
+                {
+                    Type          = BlockType.ReadRequest,
+                    FileName      = m.Groups[1].Value,
+                    ForceFullRead = true
+                });
+                return;
+            }
+
+            // READ <filename>[:range]
+            m = _readLine.Match(line);
+            if (m.Success && !hasActionableBlocks)
+            {
+                FlushText(blocks, textBuf);
+                int rangeStart = 0, rangeEnd = 0;
+                if (m.Groups[2].Success)
+                {
+                    int.TryParse(m.Groups[2].Value, out rangeStart);
+                    rangeEnd = m.Groups[3].Success
+                        ? (int.TryParse(m.Groups[3].Value, out int re) ? re : rangeStart)
+                        : rangeStart;
+                }
+                blocks.Add(new ResponseBlock
+                {
+                    Type       = BlockType.ReadRequest,
+                    FileName   = m.Groups[1].Value,
+                    RangeStart = rangeStart,
+                    RangeEnd   = rangeEnd
+                });
+                return;
+            }
+
+            // DONE
+            if (_doneLine.IsMatch(line))
+            {
+                FlushText(blocks, textBuf);
+                blocks.Add(new ResponseBlock { Type = BlockType.Done });
+                return;
+            }
+
+            // Plain text
+            textBuf.AppendLine(line);
+        }
+
+        private static void ProcessInFile(
+            string line,
+            List<ResponseBlock> blocks,
+            StringBuilder fileBuf,
+            string currentFileName,
+            ref State state,
+            ref string fileBlockName,
+            ref string patchFileName,
+            StringBuilder patchBuf,
+            ref PatchSection patchSec,
+            StringBuilder scratchBuf,
+            StringBuilder textBuf,
+            ref string lastShellCommand,
+            bool hasActionableBlocks)
+        {
+            // END_FILE — explicit terminator
+            if (_fileEnd.IsMatch(line))
+            {
+                EmitFileBlock(blocks, currentFileName,
+                              fileBuf.ToString().TrimEnd('\r', '\n', ' '));
+                fileBuf.Clear();
+                state = State.TopLevel;
+                return;
+            }
+
+            // New FILE: — implicit termination, start new file block
+            Match m = _fileStart.Match(line);
+            if (m.Success)
+            {
+                EmitFileBlock(blocks, currentFileName,
+                              fileBuf.ToString().TrimEnd('\r', '\n', ' '));
+                fileBuf.Clear();
+                fileBlockName = m.Groups[1].Value;
+                // state stays InFile with new filename
+                return;
+            }
+
+            // PATCH — implicit termination, transition to InPatch
+            m = _patchStart.Match(line);
+            if (m.Success)
+            {
+                EmitFileBlock(blocks, currentFileName,
+                              fileBuf.ToString().TrimEnd('\r', '\n', ' '));
+                fileBuf.Clear();
+                patchFileName = m.Groups[1].Value;
+                patchBuf.Clear();
+                patchBuf.AppendLine(line);
+                patchSec = PatchSection.Preamble;
+                state = State.InPatch;
+                return;
+            }
+
+            // SCRATCHPAD: — implicit termination
+            if (_scratchpadStart.IsMatch(line))
+            {
+                EmitFileBlock(blocks, currentFileName,
+                              fileBuf.ToString().TrimEnd('\r', '\n', ' '));
+                fileBuf.Clear();
+                scratchBuf.Clear();
+                state = State.InScratchpad;
+                return;
+            }
+
+            // SHELL: — implicit termination, emit shell block, return to TopLevel
+            m = _shellLine.Match(line);
+            if (m.Success)
+            {
+                EmitFileBlock(blocks, currentFileName,
+                              fileBuf.ToString().TrimEnd('\r', '\n', ' '));
+                fileBuf.Clear();
+                string cmd = m.Groups[1].Value.Trim();
+                if (!string.Equals(cmd, lastShellCommand, StringComparison.Ordinal))
+                {
+                    blocks.Add(new ResponseBlock { Type = BlockType.Shell, Command = cmd });
+                    lastShellCommand = cmd;
+                }
+                state = State.TopLevel;
+                return;
+            }
+
+            // READ — implicit termination
+            bool isRead = (!hasActionableBlocks) &&
+                          (_forceReadLine.IsMatch(line) || _readLine.IsMatch(line));
+            if (isRead)
+            {
+                EmitFileBlock(blocks, currentFileName,
+                              fileBuf.ToString().TrimEnd('\r', '\n', ' '));
+                fileBuf.Clear();
+                // Re-process as TopLevel so the READ block is emitted correctly
+                state = State.TopLevel;
+                ProcessTopLevel(line, blocks, textBuf, ref lastShellCommand,
+                                hasActionableBlocks, ref state, ref fileBlockName,
+                                ref patchFileName, patchBuf, ref patchSec, scratchBuf);
+                return;
+            }
+
+            // DONE — implicit termination
+            if (_doneLine.IsMatch(line))
+            {
+                EmitFileBlock(blocks, currentFileName,
+                              fileBuf.ToString().TrimEnd('\r', '\n', ' '));
+                fileBuf.Clear();
+                blocks.Add(new ResponseBlock { Type = BlockType.Done });
+                state = State.TopLevel;
+                return;
+            }
+
+            // Content line
+            fileBuf.AppendLine(line);
+        }
+
+        private static void ProcessInPatch(
+            string line,
+            List<ResponseBlock> blocks,
+            StringBuilder patchBuf,
+            string currentPatchFile,
+            StringBuilder findBuf,
+            StringBuilder replaceBuf,
+            ref PatchSection patchSec,
+            ref State state,
+            ref string patchFileName,
+            StringBuilder textBuf,
+            StringBuilder fileBuf,
+            ref string fileBlockName,
+            StringBuilder scratchBuf,
+            ref string lastShellCommand,
+            bool hasActionableBlocks)
+        {
+            // END_PATCH — explicit terminator (consumed, not added to patchBuf)
+            if (_patchEnd.IsMatch(line))
+            {
+                FlushOpenPatchPair(patchBuf, findBuf, replaceBuf, patchSec);
+                EmitPatchBlock(blocks, currentPatchFile,
+                               patchBuf.ToString().TrimEnd('\r', '\n', ' '));
+                patchBuf.Clear();
+                findBuf.Clear();
+                replaceBuf.Clear();
+                patchSec = PatchSection.Preamble;
+                state = State.TopLevel;
+                return;
+            }
+
+            // New PATCH <filename> — implicit end of current PATCH, start new one
+            Match m = _patchStart.Match(line);
+            if (m.Success)
+            {
+                FlushOpenPatchPair(patchBuf, findBuf, replaceBuf, patchSec);
+                EmitPatchBlock(blocks, currentPatchFile,
+                               patchBuf.ToString().TrimEnd('\r', '\n', ' '));
+                patchBuf.Clear();
+                findBuf.Clear();
+                replaceBuf.Clear();
+                patchFileName = m.Groups[1].Value;
+                patchBuf.AppendLine(line);
+                patchSec = PatchSection.Preamble;
+                // state stays InPatch
+                return;
+            }
+
+            // FIND: — start a new find section
+            // (if we were in InReplace, the previous pair is complete — flush it)
+            if (_findLine.IsMatch(line))
+            {
+                if (patchSec == PatchSection.InReplace)
+                {
+                    // Close previous pair: write FIND/REPLACE into patchBuf
+                    patchBuf.AppendLine("FIND:");
+                    patchBuf.Append(findBuf);
+                    findBuf.Clear();
+                    patchBuf.AppendLine("REPLACE:");
+                    patchBuf.Append(replaceBuf);
+                    replaceBuf.Clear();
+                }
+                patchSec = PatchSection.InFind;
+                findBuf.Clear();
+                return; // don't add the FIND: keyword line itself — it gets added when we flush the pair
+            }
+
+            // REPLACE: — transition from InFind to InReplace
+            if (_replaceLine.IsMatch(line) && patchSec == PatchSection.InFind)
+            {
+                patchSec = PatchSection.InReplace;
+                replaceBuf.Clear();
+                return;
+            }
+
+            // All other lines are opaque content — FILE:, SHELL:, SCRATCHPAD:, DONE, etc.
+            // are NOT directive boundaries inside a PATCH block.
+            switch (patchSec)
+            {
+                case PatchSection.Preamble:
+                    // Lines between PATCH header and first FIND: — usually empty or comments.
+                    // Write directly into patchBuf.
+                    patchBuf.AppendLine(line);
+                    break;
+                case PatchSection.InFind:
+                    findBuf.AppendLine(line);
+                    break;
+                case PatchSection.InReplace:
+                    replaceBuf.AppendLine(line);
+                    break;
+            }
+        }
+
+        private static void ProcessInScratchpad(
+            string line,
+            List<ResponseBlock> blocks,
+            StringBuilder scratchBuf,
+            ref State state,
+            ref string fileBlockName,
+            StringBuilder fileBuf,
+            ref string patchFileName,
+            StringBuilder patchBuf,
+            ref PatchSection patchSec,
+            StringBuilder textBuf,
+            ref string lastShellCommand,
+            bool hasActionableBlocks)
+        {
+            // END_SCRATCHPAD — explicit terminator
+            if (_scratchpadEnd.IsMatch(line))
+            {
+                EmitScratchpadBlock(blocks, scratchBuf);
+                state = State.TopLevel;
+                return;
+            }
+
+            // Implicit termination: directive keywords at line start cannot be scratchpad content.
+            // Re-process the line as TopLevel after emitting the scratchpad block.
+            Match m;
+
+            // FILE: <filename>
+            m = _fileStart.Match(line);
+            if (m.Success)
+            {
+                EmitScratchpadBlock(blocks, scratchBuf);
+                fileBlockName = m.Groups[1].Value;
+                fileBuf.Clear();
+                state = State.InFile;
+                return;
+            }
+
+            // PATCH <filename>
+            m = _patchStart.Match(line);
+            if (m.Success)
+            {
+                EmitScratchpadBlock(blocks, scratchBuf);
+                patchFileName = m.Groups[1].Value;
+                patchBuf.Clear();
+                patchBuf.AppendLine(line);
+                patchSec = PatchSection.Preamble;
+                state = State.InPatch;
+                return;
+            }
+
+            // SHELL: <command>
+            m = _shellLine.Match(line);
+            if (m.Success)
+            {
+                EmitScratchpadBlock(blocks, scratchBuf);
+                string cmd = m.Groups[1].Value.Trim();
+                if (!string.Equals(cmd, lastShellCommand, StringComparison.Ordinal))
+                {
+                    blocks.Add(new ResponseBlock { Type = BlockType.Shell, Command = cmd });
+                    lastShellCommand = cmd;
+                }
+                state = State.TopLevel;
+                return;
+            }
+
+            // READ / READ! — implicit termination (only when no actionable blocks)
+            bool isRead = !hasActionableBlocks &&
+                          (_forceReadLine.IsMatch(line) || _readLine.IsMatch(line));
+            if (isRead)
+            {
+                EmitScratchpadBlock(blocks, scratchBuf);
+                state = State.TopLevel;
+                ProcessTopLevel(line, blocks, textBuf, ref lastShellCommand,
+                                hasActionableBlocks, ref state, ref fileBlockName,
+                                ref patchFileName, patchBuf, ref patchSec, scratchBuf);
+                return;
+            }
+
+            // DONE — implicit termination
+            if (_doneLine.IsMatch(line))
+            {
+                EmitScratchpadBlock(blocks, scratchBuf);
+                blocks.Add(new ResponseBlock { Type = BlockType.Done });
+                state = State.TopLevel;
+                return;
+            }
+
+            // Content line
+            scratchBuf.AppendLine(line);
+        }
+
+        private static void EmitScratchpadBlock(List<ResponseBlock> blocks, StringBuilder scratchBuf)
+        {
+            string content = scratchBuf.ToString().TrimEnd('\r', '\n', ' ');
+            if (!string.IsNullOrWhiteSpace(content))
+                blocks.Add(new ResponseBlock { Type = BlockType.Scratchpad, Content = content });
+            scratchBuf.Clear();
+        }
+
+        // ── Helpers ───────────────────────────────────────────────────────────────
 
         /// <summary>
-        /// Returns true when a line signals an implicit end of a FILE block — i.e. the model
-        /// emitted a directive without END_FILE first.  The line is NOT consumed here; the
-        /// caller's outer parse loop will process it normally on the next iteration.
+        /// Flush any open FIND/REPLACE pair buffers into patchBuf before emitting the PatchBlock.
         /// </summary>
-        private static bool IsImplicitFileTerminator(string line)
+        private static void FlushOpenPatchPair(
+            StringBuilder patchBuf,
+            StringBuilder findBuf,
+            StringBuilder replaceBuf,
+            PatchSection patchSec)
         {
-            string t = line.TrimStart();
-            return t.StartsWith("SCRATCHPAD:", StringComparison.OrdinalIgnoreCase) ||
-                   t.StartsWith("SHELL:",      StringComparison.OrdinalIgnoreCase) ||
-                   Regex.IsMatch(t, @"^PATCH(\s|$)", RegexOptions.IgnoreCase)      ||
-                   string.Equals(t, "DONE", StringComparison.OrdinalIgnoreCase);
+            if (patchSec == PatchSection.InFind || patchSec == PatchSection.InReplace)
+            {
+                patchBuf.AppendLine("FIND:");
+                patchBuf.Append(findBuf);
+                findBuf.Clear();
+                if (patchSec == PatchSection.InReplace)
+                {
+                    patchBuf.AppendLine("REPLACE:");
+                    patchBuf.Append(replaceBuf);
+                    replaceBuf.Clear();
+                }
+            }
+        }
+
+        private static void EmitFileBlock(List<ResponseBlock> blocks, string fileName, string content)
+        {
+            // Second-layer defense: strip any trailing END / END_FILE line that leaked into
+            // the buffer due to token boundary splits during streaming.
+            int lastNl = content.LastIndexOf('\n');
+            string lastLine = lastNl >= 0
+                ? content.Substring(lastNl + 1).Trim()
+                : content.Trim();
+            if (lastLine == "END_FILE" || lastLine == "END" || lastLine.StartsWith("END_FILE"))
+                content = content.Substring(0, lastNl < 0 ? 0 : lastNl).TrimEnd('\r', '\n', ' ');
+
+            blocks.Add(new ResponseBlock
+            {
+                Type     = BlockType.File,
+                FileName = fileName,
+                Content  = content
+            });
+        }
+
+        private static void EmitPatchBlock(List<ResponseBlock> blocks, string fileName, string content)
+        {
+            blocks.Add(new ResponseBlock
+            {
+                Type     = BlockType.Patch,
+                FileName = fileName,
+                Content  = content
+            });
         }
 
         private static void FlushText(List<ResponseBlock> blocks, StringBuilder buf)
@@ -269,7 +661,6 @@ namespace DevMind
             {
                 if (_mdFence.IsMatch(lines[i]))
                 {
-                    // Check if the next non-empty line is a directive, or the previous was
                     bool nextIsDirective = false;
                     for (int j = i + 1; j < lines.Length; j++)
                     {
@@ -292,7 +683,7 @@ namespace DevMind
                     }
                     System.Diagnostics.Debug.WriteLine($"[PARSER-DIAG] Fence at line {i}: \"{lines[i]}\" nextIsDirective={nextIsDirective} prevIsDirective={prevIsDirective} → {(nextIsDirective || prevIsDirective ? "DROPPED" : "KEPT")}");
                     if (nextIsDirective || prevIsDirective)
-                        continue;  // drop fence
+                        continue; // drop fence
                 }
                 result.Add(lines[i]);
             }
@@ -301,6 +692,7 @@ namespace DevMind
 
         private static bool HasActionableBlocks(string[] lines)
         {
+            bool inPatch = false;
             bool inScratchpad = false;
             foreach (string line in lines)
             {
@@ -309,6 +701,11 @@ namespace DevMind
                 if (_scratchpadStart.IsMatch(line)) { inScratchpad = true;  continue; }
                 if (_scratchpadEnd.IsMatch(line))   { inScratchpad = false; continue; }
                 if (inScratchpad) continue;
+
+                // Skip PATCH content — FILE: inside a PATCH is not a real file block
+                if (_patchStart.IsMatch(line)) { inPatch = true; }
+                if (_patchEnd.IsMatch(line))   { inPatch = false; continue; }
+                if (inPatch) continue;
 
                 if (_patchStart.IsMatch(line) || _fileStart.IsMatch(line) || _shellLine.IsMatch(line))
                     return true;

@@ -1,4 +1,4 @@
-# CLAUDE.md — DevMind Developer Reference
+# CLAUDE.md — DevMind Developer Reference  v1.1
 
 ## Project Overview
 
@@ -6,7 +6,7 @@
 
 - **Product**: DevMind
 - **Brand**: iOnline Consulting LLC
-- **Current Version**: v6.0.0
+- **Current Version**: v6.0.33
 - **Platform**: Visual Studio 2022+ (VSIX), .NET Framework (VSSDK requirement)
 - **Language**: C# with WPF UI
 
@@ -21,9 +21,9 @@
 | `DevMindPackage.cs` | Main VS package — registers tool window, options page, commands |
 | `DevMindToolWindow.cs` | Tool window host — creates `LlmClient` and `DevMindToolWindowControl` on startup |
 | `DevMindToolWindowControl.xaml/.cs` | WPF UI — single-stream output, input bar, system prompt panel, streaming, agentic pipeline entry point |
-| `DevMindToolWindowControl.AgenticHost.cs` | `IAgenticHost` implementation — bridges pipeline to VS/UI side effects |
+| `DevMindToolWindowControl.AgenticHost.cs` | `IAgenticHost` implementation — bridges pipeline to VS/UI side effects; calls `StripOuterCodeFence` on saved file content |
 | `DevMindToolWindowControl.Context.cs` | Editor context, DevMind.md loading, READ command, file search, `BuildMessageWithContext` |
-| `DevMindToolWindowControl.Patch.cs` | PATCH command — parsing, whitespace-normalized matching, fuzzy matching, UNDO, backup stack |
+| `DevMindToolWindowControl.Patch.cs` | PATCH command — parsing, whitespace-normalized matching, fuzzy matching, UNDO, backup stack; `StripOuterCodeFence` applied to FIND/REPLACE text |
 | `DevMindToolWindowControl.Shell.cs` | Shell execution — `RunShellCommand`, `RunShellCommandCaptureAsync`, `ParseShellDirectives` |
 | `ResponseParser.cs` | Parses complete LLM responses into typed blocks (File, Patch, Shell, ReadRequest, Text) |
 | `ResponseClassifier.cs` | Wraps `ResponseParser.Parse()` and returns `ResponseOutcome` — abstraction boundary |
@@ -43,7 +43,7 @@
 ```
 User types → InputTextBox
   Enter      → SendToLlm() → LlmClient.SendMessageAsync()
-                → onToken: streams to OutputBox, captures FILE: blocks into _fileCaptureBuffer
+                → onToken: filter → accumulate into responseBuffer → display (suppressed during FILE: blocks)
                 → onComplete: classify → decide → execute → continue-or-stop
   Ctrl+Enter → RunShellCommand() → powershell.exe / cmd.exe → stdout/stderr → AppendOutput()
 ```
@@ -143,9 +143,9 @@ namespace MyProject;
 public static class DateHelper { ... }
 END_FILE
 ```
-- During streaming, `FILE:` triggers silent file capture mode (generating animation plays).
-- `END_FILE` ends capture. File is saved via `SaveGeneratedFileAsync()`.
-- Token boundary defense: `_fileCaptureBuffer` is trimmed of trailing `END` fragments before saving.
+- During streaming, `FILE:` triggers display suppression (`_suppressDisplay = true`); generating animation plays, tokens are suppressed from the OutputBox.
+- `END_FILE` (or an implicit directive-line terminator) ends capture mode. File content is written to disk by `AgenticExecutor` → `IAgenticHost.SaveFileAsync` after streaming completes — **not** during streaming.
+- `SaveFileAsync` calls `StripOuterCodeFence()` before writing, removing any wrapping ` ``` ` fence the model may have emitted around the file content.
 - Multiple `FILE:` blocks can appear in a single response.
 
 ### PATCH — Edit Existing Files
@@ -155,11 +155,15 @@ FIND:
 <exact text from file>
 REPLACE:
 <replacement text>
+END_PATCH
 ```
+- `END_PATCH` is required and must appear on its own line after the last REPLACE block. It is the explicit terminator for the PATCH block.
+- Multiple FIND/REPLACE pairs are supported within a single PATCH block, before END_PATCH.
+- **PATCH blocks are opaque** — inside a PATCH block (between the header and END_PATCH), directive keywords like `FILE:`, `SHELL:`, `SCRATCHPAD:`, and `DONE` are treated as literal FIND/REPLACE content, not new directives. Only `FIND:`, `REPLACE:`, `END_PATCH`, and a new `PATCH` header are meaningful inside a PATCH block.
 - Whitespace-normalized matching — CRLF and indentation differences ignored.
 - Fuzzy matching fallback (Levenshtein similarity ≥85%) with confirmation prompt (auto-accepted during agentic loop).
 - Ambiguity detection — if FIND matches multiple locations, PATCH is rejected with guidance.
-- Multi-block support — multiple FIND/REPLACE pairs in one PATCH.
+- `StripOuterCodeFence()` is applied to both FIND and REPLACE text before matching, removing any wrapping ` ``` ` fence the model may have emitted.
 - Auto-READ — target file is loaded into context before patching if not already present.
 - UNDO stack — 10-deep timestamped backups in `%TEMP%\DevMind\`.
 
@@ -232,13 +236,17 @@ Error recovery: `onError` and `finally` both reset `_agenticDepth` and `_shellLo
 
 ## Streaming (onToken)
 
-Single streaming path with inline FILE: detection:
+`onToken` has exactly three jobs: **filter**, **accumulate**, **display**.
 
 1. Token arrives → `FilterChunk()` strips `<think>` blocks → appended to `responseBuffer`.
-2. If `_inFileCapture` is true: tokens accumulate in `_fileCaptureBuffer`, generating animation plays. `END_FILE` line exits capture mode.
-3. If `_inFileCapture` is false: check `responseBuffer` tail for `FILE: <filename>` pattern. If found, enter capture mode. Otherwise, append to `streamRun` for display.
+2. **Display suppression**: only at newline boundaries (when `visible` contains `\n`), inspect the last completed line in `responseBuffer`:
+   - Matches `^FILE: \S+` → set `_suppressDisplay = true`, start the generating animation.
+   - Equals `END_FILE` → set `_suppressDisplay = false`, stop the generating animation.
+3. If `_suppressDisplay` is true, return without appending to `streamRun`. Otherwise append to `streamRun` for display.
 
-Fields: `_inFileCapture`, `_fileCaptureFileName`, `_fileCaptureBuffer`.
+No PATCH tracking. No implicit termination checks. No filename field. `_suppressDisplay` is a display-only flag — even a false positive (e.g. a `FILE: ` line inside PATCH FIND text) only affects what the user sees, not what `onComplete` parses. `responseBuffer` receives every token unconditionally and is the sole input to `ResponseParser.Parse()`.
+
+Fields: `_suppressDisplay`.
 
 ---
 
@@ -394,3 +402,4 @@ Squeeze runs before the hard-trim (`TrimHistoryToFit`) and after each agentic tu
 3. **Syntax highlighting** — Color-code fenced code blocks in `OutputBox` using span-level `Run` coloring.
 4. **Multi-turn context control** — Button to include/exclude file context per message.
 5. **Self-modification** — DevMind building DevMind through its own UI.
+6. **Smart READ targeting** — Model frequently does linear search through large files in 200-line increments (e.g., five sequential READs to scan a 1,473-line file), consuming excessive context. Investigate system prompt hints or outline-guided targeting so the model reads the relevant line range on the first try instead of brute-force scanning.
