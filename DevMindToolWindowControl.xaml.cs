@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v5.0.44
+// File: DevMindToolWindowControl.xaml.cs  v5.0.45
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -58,7 +58,6 @@ namespace DevMind
         private Action _batchOnComplete;
         private bool _inFileCapture;
         private string _fileCaptureFileName;
-        private StringBuilder _fileCaptureBuffer;
         private int _patchCount = 0;
         private int _undoCount = 0;
         private int _readFileCount = 0;
@@ -566,7 +565,6 @@ namespace DevMind
             // Reset file capture state
             _inFileCapture = false;
             _fileCaptureFileName = null;
-            _fileCaptureBuffer = null;
 
             var streamPara = new Paragraph { Margin = new Thickness(0) };
             OutputBox.Document.Blocks.Add(streamPara);
@@ -699,7 +697,6 @@ namespace DevMind
                                     }
                                     else
                                     {
-                                        _fileCaptureBuffer.Append(visible);
                                         _generatingTokenCount++;
                                         StatusText.Text = $"Generating {_fileCaptureFileName}... ({_generatingTokenCount} tokens)";
                                     }
@@ -715,7 +712,6 @@ namespace DevMind
                                 {
                                     _inFileCapture = true;
                                     _fileCaptureFileName = fileMatch.Groups[1].Value;
-                                    _fileCaptureBuffer = new StringBuilder();
                                     _generatingTokenCount = 0;
                                     StartGeneratingAnimation(_fileCaptureFileName);
                                     return;
@@ -747,19 +743,6 @@ namespace DevMind
                                 await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
 
                                 AppendNewLine();
-
-                                // Save any file captured during streaming (FILE:/END_FILE).
-                                // Strip trailing END_FILE sentinel fragments caused by token boundary splits.
-                                if (_fileCaptureBuffer != null && _fileCaptureBuffer.Length > 0)
-                                {
-                                    string fileContent = _fileCaptureBuffer.ToString().TrimEnd();
-                                    if (fileContent.EndsWith("\nEND_FILE") || fileContent.EndsWith("\r\nEND_FILE"))
-                                        fileContent = fileContent.Substring(0, fileContent.LastIndexOf("END_FILE")).TrimEnd();
-                                    else if (fileContent.EndsWith("\nEND") || fileContent.EndsWith("\r\nEND"))
-                                        fileContent = fileContent.Substring(0, fileContent.LastIndexOf("\nEND")).TrimEnd();
-                                    await SaveGeneratedFileAsync(_fileCaptureFileName, fileContent);
-                                    _fileCaptureBuffer = null;
-                                }
 
                                 // ── Classify → Decide → Execute pipeline ──────────────────────
 

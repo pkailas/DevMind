@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.AgenticHost.cs  v1.0.0
+// File: DevMindToolWindowControl.AgenticHost.cs  v1.0.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Microsoft.VisualStudio.Shell;
@@ -68,8 +68,6 @@ namespace DevMind
 
         async Task<string> IAgenticHost.SaveFileAsync(string fileName, string content)
         {
-            // Already saved during streaming via _fileCaptureBuffer if the streaming
-            // capture picked it up. SaveGeneratedFileAsync handles the dedup guard.
             await SaveGeneratedFileAsync(fileName, content);
             // Approximate the resolved path for agentic context / diff view purposes.
             try
