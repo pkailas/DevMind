@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v5.0.45
+// File: DevMindToolWindowControl.xaml.cs  v5.0.46
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -694,13 +694,32 @@ namespace DevMind
                                     {
                                         _inFileCapture = false;
                                         StopGeneratingAnimation();
+                                        return;
+                                    }
+
+                                    // Implicit END_FILE: model emitted a directive line without END_FILE.
+                                    // Detect at token boundaries — only act when the current tail forms a
+                                    // complete line that starts with a known directive keyword.
+                                    string tail = bufTail.Length > 200 ? bufTail.Substring(bufTail.Length - 200) : bufTail;
+                                    int lastNl = tail.LastIndexOf('\n');
+                                    string candidateLine = lastNl >= 0 ? tail.Substring(lastNl + 1).TrimEnd('\r') : tail.TrimEnd('\r');
+                                    bool isImplicitTerminator =
+                                        candidateLine.StartsWith("SCRATCHPAD:", StringComparison.OrdinalIgnoreCase) ||
+                                        candidateLine.StartsWith("SHELL:",      StringComparison.OrdinalIgnoreCase) ||
+                                        Regex.IsMatch(candidateLine, @"^PATCH(\s|$)", RegexOptions.IgnoreCase)      ||
+                                        string.Equals(candidateLine, "DONE", StringComparison.OrdinalIgnoreCase);
+                                    if (isImplicitTerminator)
+                                    {
+                                        _inFileCapture = false;
+                                        StopGeneratingAnimation();
+                                        // Fall through — let the directive token render to streamRun normally.
                                     }
                                     else
                                     {
                                         _generatingTokenCount++;
                                         StatusText.Text = $"Generating {_fileCaptureFileName}... ({_generatingTokenCount} tokens)";
+                                        return;
                                     }
-                                    return;
                                 }
 
                                 // Check if the latest content starts a FILE: block

@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.Patch.cs  v5.12
+// File: DevMindToolWindowControl.Patch.cs  v5.13
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -255,6 +255,30 @@ namespace DevMind
             return string.Join("\n", kept);
         }
 
+        /// <summary>
+        /// Strips a leading opening code fence line (e.g. ```csharp) and/or a trailing
+        /// closing code fence line (```) from extracted FIND/REPLACE text.  Only the first
+        /// and last lines are examined so interior fence-like lines in the actual source are
+        /// left untouched.
+        /// </summary>
+        private static string StripOuterCodeFence(string text)
+        {
+            var lines = text.Split('\n').ToList();
+            if (lines.Count == 0) return text;
+
+            // Strip leading opening fence — matches ```  or ```csharp etc.
+            if (Regex.IsMatch(lines[0], @"^\s*```\w*\s*$"))
+                lines.RemoveAt(0);
+
+            if (lines.Count == 0) return string.Empty;
+
+            // Strip trailing closing fence — matches only bare ```
+            if (Regex.IsMatch(lines[lines.Count - 1], @"^\s*```\s*$"))
+                lines.RemoveAt(lines.Count - 1);
+
+            return string.Join("\n", lines);
+        }
+
         private static readonly string[] _hallucinatedTerminators =
         {
             "END_PATCH", "END_FILE", "END_REPLACE", "END_FIND", "END"
@@ -375,8 +399,8 @@ namespace DevMind
                 findText    = StripHallucinatedTerminators(findText);
                 replaceText = StripHallucinatedTerminators(replaceText);
 
-                findText    = StripMarkdownFenceLines(findText);
-                replaceText = StripMarkdownFenceLines(replaceText);
+                findText    = StripOuterCodeFence(StripMarkdownFenceLines(findText));
+                replaceText = StripOuterCodeFence(StripMarkdownFenceLines(replaceText));
 
                 results.Add((findText, replaceText));
                 cursor = nextFindIdx >= 0 ? nextFindIdx : input.Length;

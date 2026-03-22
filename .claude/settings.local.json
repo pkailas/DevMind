@@ -68,7 +68,10 @@
       "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Enterprise/MSBuild/Current/Bin/MSBuild.exe\" DevMind.csproj /p:Configuration=Release /t:Build /v:minimal)",
       "Bash(Select-String -Pattern \"error|warning|Build succeeded|FAILED\")",
       "Bash(Select-Object -Last 20)",
-      "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Enterprise/MSBuild/Current/Bin/MSBuild.exe\" DevMind.csproj /p:Configuration=Release /v:minimal)"
+      "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Enterprise/MSBuild/Current/Bin/MSBuild.exe\" DevMind.csproj /p:Configuration=Release /v:minimal)",
+      "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Enterprise/MSBuild/Current/Bin/MSBuild.exe\" \"C:\\\\Users\\\\pkailas.KAILAS\\\\source\\\\repos\\\\DevMind\\\\DevMind.sln\" /p:Configuration=Release /t:Build /v:minimal)",
+      "Bash(cmd.exe /c \"\"\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Enterprise\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\"\" \"\"C:\\\\Users\\\\pkailas.KAILAS\\\\source\\\\repos\\\\DevMind\\\\DevMind.sln\"\" /p:Configuration=Release /t:Build /v:minimal > C:\\\\Temp\\\\devmind_build.txt 2>&1\")",
+      "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Professional/MSBuild/Current/Bin/MSBuild.exe\" DevMind.csproj /p:Configuration=Release /t:Build /v:minimal)"
     ]
   }
 }

@@ -1,4 +1,4 @@
-// File: ResponseParser.cs  v5.0.10
+// File: ResponseParser.cs  v5.0.11
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -80,7 +80,7 @@ namespace DevMind
                     string fileName = fileMatch.Groups[1].Value;
                     var contentBuf = new StringBuilder();
                     i++;
-                    while (i < lines.Length && !_fileEnd.IsMatch(lines[i]))
+                    while (i < lines.Length && !_fileEnd.IsMatch(lines[i]) && !IsImplicitFileTerminator(lines[i]))
                     {
                         contentBuf.AppendLine(lines[i]);
                         i++;
@@ -234,6 +234,20 @@ namespace DevMind
         }
 
         // ── Helpers ──────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Returns true when a line signals an implicit end of a FILE block — i.e. the model
+        /// emitted a directive without END_FILE first.  The line is NOT consumed here; the
+        /// caller's outer parse loop will process it normally on the next iteration.
+        /// </summary>
+        private static bool IsImplicitFileTerminator(string line)
+        {
+            string t = line.TrimStart();
+            return t.StartsWith("SCRATCHPAD:", StringComparison.OrdinalIgnoreCase) ||
+                   t.StartsWith("SHELL:",      StringComparison.OrdinalIgnoreCase) ||
+                   Regex.IsMatch(t, @"^PATCH(\s|$)", RegexOptions.IgnoreCase)      ||
+                   string.Equals(t, "DONE", StringComparison.OrdinalIgnoreCase);
+        }
 
         private static void FlushText(List<ResponseBlock> blocks, StringBuilder buf)
         {
