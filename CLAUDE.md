@@ -1,4 +1,4 @@
-# CLAUDE.md — DevMind Developer Reference  v1.1
+# CLAUDE.md — DevMind Developer Reference  v1.3
 
 ## Project Overview
 
@@ -403,3 +403,9 @@ Squeeze runs before the hard-trim (`TrimHistoryToFit`) and after each agentic tu
 4. **Multi-turn context control** — Button to include/exclude file context per message.
 5. **Self-modification** — DevMind building DevMind through its own UI.
 6. **Smart READ targeting** — Model frequently does linear search through large files in 200-line increments (e.g., five sequential READs to scan a 1,473-line file), consuming excessive context. Investigate system prompt hints or outline-guided targeting so the model reads the relevant line range on the first try instead of brute-force scanning.
+7. **GREP directive** — Single-line directive (`GREP: "pattern" filename`) that returns matching lines with line numbers. Eliminates sequential READ scanning for locating code. Model does one GREP to find the target, then one targeted READ for context. Two turns instead of five, minimal context usage. Implement as a single-line directive in the parser (like SHELL:), with execution handled by IAgenticHost.
+8. **RENAME directive** — `RENAME OldFile.cs NewFile.cs`. Handles file system move, project reference update, and VS editor refresh in one verb. Replaces the current workaround of FILE (copy) + SHELL (delete) + manual project fixup.
+9. **DELETE directive** — `DELETE TestFile.cs`. Removes file from disk and project. Replaces SHELL-based deletion which doesn't handle project references or editor cleanup.
+10. **FIND directive** — `FIND "pattern" *.cs`. Cross-file search by glob pattern. Returns filename + line number + match for each hit. Solves the "where is this used?" problem without sequential READs.
+11. **TEST directive** — `TEST ProjectName.csproj` or `TEST ClassName.MethodName`. Structured test execution with per-test pass/fail results instead of raw console output. Cheaper on context than SHELL: dotnet test.
+12. **DIFF directive** — `DIFF Program.cs`. Shows changes since last clean state or conversation start. Helps the model track cumulative modifications across multiple agentic turns.
