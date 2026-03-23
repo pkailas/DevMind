@@ -1,4 +1,4 @@
-// File: IAgenticHost.cs  v1.0.1
+// File: IAgenticHost.cs  v1.1.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System.Threading.Tasks;
@@ -78,5 +78,11 @@ namespace DevMind
         /// Used by the executor to resolve relative file paths.
         /// </summary>
         string GetWorkingDirectory();
+
+        /// <summary>
+        /// Searches a file for lines containing the pattern (case-insensitive substring match).
+        /// Returns formatted results with line numbers, capped at maxMatches.
+        /// </summary>
+        Task<string> GrepFileAsync(string pattern, string filename, int? startLine, int? endLine);
     }
 }

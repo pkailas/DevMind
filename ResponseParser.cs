@@ -1,4 +1,4 @@
-// File: ResponseParser.cs  v5.2.0
+// File: ResponseParser.cs  v5.3.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -8,17 +8,18 @@ using System.Text.RegularExpressions;
 
 namespace DevMind
 {
-    public enum BlockType { Text, File, Patch, Shell, ReadRequest, Scratchpad, Done }
+    public enum BlockType { Text, File, Patch, Shell, ReadRequest, Scratchpad, Done, Grep }
 
     public class ResponseBlock
     {
         public BlockType Type { get; set; }
         public string Content { get; set; }   // raw text, file source, or full PATCH text
-        public string FileName { get; set; }  // for File, Patch, ReadRequest
+        public string FileName { get; set; }  // for File, Patch, ReadRequest, Grep
         public string Command { get; set; }   // for Shell
-        public int  RangeStart    { get; set; }  // for ReadRequest line-range (0 = full read)
-        public int  RangeEnd      { get; set; }  // for ReadRequest line-range (0 = full read)
+        public int  RangeStart    { get; set; }  // for ReadRequest/Grep line-range (0 = full read)
+        public int  RangeEnd      { get; set; }  // for ReadRequest/Grep line-range (0 = full read)
         public bool ForceFullRead { get; set; }  // READ! — bypass outline-first behavior
+        public string Pattern     { get; set; }  // for Grep — substring search pattern
     }
 
     public static class ResponseParser
@@ -49,6 +50,8 @@ namespace DevMind
         private static readonly Regex _scratchpadEnd  = new Regex(@"^\s*END_SCRATCHPAD\s*$",       RegexOptions.Compiled | RegexOptions.IgnoreCase);
         // Matches a line that is exactly "DONE"
         private static readonly Regex _doneLine       = new Regex(@"^\s*DONE\s*$",                 RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        // Matches GREP: "pattern" filename or GREP: "pattern" filename:start-end
+        private static readonly Regex _grepLine       = new Regex(@"^GREP:\s+""([^""]+)""\s+(\S+\.\S+?)(?::(\d+)(?:-(\d+))?)?\s*$", RegexOptions.Compiled);
         // Markdown fence: ```lang or ```
         private static readonly Regex _mdFence        = new Regex(@"^```",                         RegexOptions.Compiled);
 
@@ -272,6 +275,30 @@ namespace DevMind
                 return;
             }
 
+            // GREP: "pattern" filename[:range]
+            m = _grepLine.Match(line);
+            if (m.Success && !hasActionableBlocks)
+            {
+                FlushText(blocks, textBuf);
+                int grepStart = 0, grepEnd = 0;
+                if (m.Groups[3].Success)
+                {
+                    int.TryParse(m.Groups[3].Value, out grepStart);
+                    grepEnd = m.Groups[4].Success
+                        ? (int.TryParse(m.Groups[4].Value, out int ge) ? ge : grepStart)
+                        : grepStart;
+                }
+                blocks.Add(new ResponseBlock
+                {
+                    Type       = BlockType.Grep,
+                    Pattern    = m.Groups[1].Value,
+                    FileName   = m.Groups[2].Value,
+                    RangeStart = grepStart,
+                    RangeEnd   = grepEnd
+                });
+                return;
+            }
+
             // DONE
             if (_doneLine.IsMatch(line))
             {
@@ -373,6 +400,19 @@ namespace DevMind
                               fileBuf.ToString().TrimEnd('\r', '\n', ' '));
                 fileBuf.Clear();
                 // Re-process as TopLevel so the READ block is emitted correctly
+                state = State.TopLevel;
+                ProcessTopLevel(line, blocks, textBuf, ref lastShellCommand,
+                                hasActionableBlocks, ref state, ref fileBlockName,
+                                ref patchFileName, patchBuf, ref patchSec, scratchBuf);
+                return;
+            }
+
+            // GREP: — implicit termination
+            if (!hasActionableBlocks && _grepLine.IsMatch(line))
+            {
+                EmitFileBlock(blocks, currentFileName,
+                              fileBuf.ToString().TrimEnd('\r', '\n', ' '));
+                fileBuf.Clear();
                 state = State.TopLevel;
                 ProcessTopLevel(line, blocks, textBuf, ref lastShellCommand,
                                 hasActionableBlocks, ref state, ref fileBlockName,
@@ -557,6 +597,17 @@ namespace DevMind
             bool isRead = !hasActionableBlocks &&
                           (_forceReadLine.IsMatch(line) || _readLine.IsMatch(line));
             if (isRead)
+            {
+                EmitScratchpadBlock(blocks, scratchBuf);
+                state = State.TopLevel;
+                ProcessTopLevel(line, blocks, textBuf, ref lastShellCommand,
+                                hasActionableBlocks, ref state, ref fileBlockName,
+                                ref patchFileName, patchBuf, ref patchSec, scratchBuf);
+                return;
+            }
+
+            // GREP: — implicit termination
+            if (!hasActionableBlocks && _grepLine.IsMatch(line))
             {
                 EmitScratchpadBlock(blocks, scratchBuf);
                 state = State.TopLevel;

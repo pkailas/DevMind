@@ -1,4 +1,4 @@
-// File: AgenticActionResolver.cs  v1.0.0
+// File: AgenticActionResolver.cs  v1.1.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System.Collections.Generic;
@@ -36,13 +36,15 @@ namespace DevMind
             if (outcome.IsDone && !outcome.HasPatches && !outcome.HasFileCreation && !outcome.HasShellCommands)
                 return AgenticAction.Stop("Task complete.");
 
-            // ── Rule 2: READ-only response → auto-READ resubmit ──────────────────
+            // ── Rule 2: READ/GREP-only response → auto-load and resubmit ────────
             if (outcome.IsReadOnly)
             {
                 List<string> filesToRead = outcome.Blocks
                     .Where(b => b.Type == BlockType.ReadRequest)
                     .Select(b => b.FileName)
                     .ToList();
+                // GREP blocks are executed directly by ExecuteLoadAndResubmitAsync;
+                // their filenames do not need to be in FilesToRead.
                 return AgenticAction.Resubmit(filesToRead);
             }
 

@@ -1,4 +1,4 @@
-// File: AgenticExecutor.cs  v1.0.1
+// File: AgenticExecutor.cs  v1.1.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -189,6 +189,21 @@ namespace DevMind
                         }
                         break;
 
+                    case BlockType.Grep:
+                        try
+                        {
+                            int? grepStart = block.RangeStart > 0 ? (int?)block.RangeStart : null;
+                            int? grepEnd   = block.RangeEnd   > 0 ? (int?)block.RangeEnd   : null;
+                            // GrepFileAsync injects results into _readContext and emits status as side effects
+                            await _host.GrepFileAsync(block.Pattern, block.FileName, grepStart, grepEnd);
+                        }
+                        catch (Exception ex)
+                        {
+                            result.Errors.Add(ex.Message);
+                            _host.AppendOutput($"[GREP ERROR] {block.FileName}: {ex.Message}\n", OutputColor.Error);
+                        }
+                        break;
+
                     // Text, ReadRequest, Done — already handled during streaming or by resolver
                     default:
                         break;
@@ -220,6 +235,26 @@ namespace DevMind
                 catch (Exception ex)
                 {
                     _host.AppendOutput($"[READ ERROR] {fileName}: {ex.Message}\n", OutputColor.Error);
+                }
+            }
+
+            // Execute any GREP blocks — results are injected into context as a side effect
+            if (outcome?.Blocks != null)
+            {
+                foreach (var block in outcome.Blocks)
+                {
+                    if (block.Type != BlockType.Grep) continue;
+                    try
+                    {
+                        int? grepStart = block.RangeStart > 0 ? (int?)block.RangeStart : null;
+                        int? grepEnd   = block.RangeEnd   > 0 ? (int?)block.RangeEnd   : null;
+                        // GrepFileAsync injects results into _readContext and emits status as side effects
+                        await _host.GrepFileAsync(block.Pattern, block.FileName, grepStart, grepEnd);
+                    }
+                    catch (Exception ex)
+                    {
+                        _host.AppendOutput($"[GREP ERROR] {block.FileName}: {ex.Message}\n", OutputColor.Error);
+                    }
                 }
             }
 

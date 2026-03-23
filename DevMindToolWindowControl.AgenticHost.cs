@@ -1,9 +1,12 @@
-// File: DevMindToolWindowControl.AgenticHost.cs  v1.0.2
+// File: DevMindToolWindowControl.AgenticHost.cs  v1.2.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
+using Community.VisualStudio.Toolkit;
 using Microsoft.VisualStudio.Shell;
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -115,11 +118,11 @@ namespace DevMind
         async Task<bool> IAgenticHost.ShowConfirmationAsync(string message)
         {
             await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
-            var result = MessageBox.Show(
+            var result = System.Windows.MessageBox.Show(
                 message, "DevMind",
-                MessageBoxButton.YesNo,
-                MessageBoxImage.Question);
-            return result == MessageBoxResult.Yes;
+                System.Windows.MessageBoxButton.YesNo,
+                System.Windows.MessageBoxImage.Question);
+            return result == System.Windows.MessageBoxResult.Yes;
         }
 
         // ── IAgenticHost.UpdateScratchpad ─────────────────────────────────────────
@@ -135,6 +138,137 @@ namespace DevMind
         // ── IAgenticHost.GetWorkingDirectory ──────────────────────────────────────
 
         string IAgenticHost.GetWorkingDirectory() => _terminalWorkingDir;
+
+        // ── IAgenticHost.GrepFileAsync ────────────────────────────────────────────
+
+        async Task<string> IAgenticHost.GrepFileAsync(string pattern, string filename, int? startLine, int? endLine)
+        {
+            const int MaxMatches = 50;
+
+            // Resolve the file
+            string fileNameOnly;
+            try { fileNameOnly = Path.GetFileName(filename.Replace('\\', '/')); }
+            catch { fileNameOnly = filename; }
+
+            string resolvedPath = await FindFileInSolutionAsync(fileNameOnly, filename.Replace('\\', '/'))
+                ?? Path.Combine(_terminalWorkingDir, fileNameOnly);
+
+            if (!File.Exists(resolvedPath))
+                return await BuildFileNotFoundMessageAsync("GREP", filename);
+
+            // Populate cache if needed
+            if (!_llmClient._fileCache.Contains(fileNameOnly))
+            {
+                string diskContent;
+                try { diskContent = File.ReadAllText(resolvedPath); }
+                catch (Exception ex) { return $"GREP: error reading {filename} — {ex.Message}"; }
+                _llmClient._fileCache.Store(fileNameOnly, diskContent);
+            }
+
+            // Get lines from cache
+            int totalFileLines = _llmClient._fileCache.GetLineCount(fileNameOnly);
+            int scanStart = startLine.HasValue ? Math.Max(1, startLine.Value) : 1;
+            int scanEnd   = endLine.HasValue   ? Math.Min(totalFileLines, endLine.Value) : totalFileLines;
+
+            // Collect matches
+            var matches = new System.Collections.Generic.List<(int lineNum, string lineText)>();
+            for (int lineNum = scanStart; lineNum <= scanEnd; lineNum++)
+            {
+                string lineContent = _llmClient._fileCache.GetLineRange(fileNameOnly, lineNum, lineNum);
+                if (lineContent == null) continue;
+                if (lineContent.IndexOf(pattern, StringComparison.OrdinalIgnoreCase) >= 0)
+                    matches.Add((lineNum, lineContent));
+            }
+
+            if (matches.Count == 0)
+            {
+                string noMatch = $"GREP: no matches for \"{pattern}\" in {filename}";
+                _readContext = (_readContext ?? "") + noMatch + "\n\n";
+                AppendOutput($"[GREP] no matches for \"{pattern}\" in {filename}\n", OutputColor.Dim);
+                return noMatch;
+            }
+
+            int totalMatches = matches.Count;
+            bool truncated = totalMatches > MaxMatches;
+            if (truncated)
+                matches = matches.GetRange(0, MaxMatches);
+
+            // Right-align line numbers to the width of the largest line number shown
+            int maxLineNum = matches[matches.Count - 1].lineNum;
+            int numWidth = maxLineNum.ToString().Length;
+
+            string header = truncated
+                ? $"GREP results for \"{pattern}\" in {filename} ({MaxMatches} of {totalMatches} matches — narrow your pattern or use a line range):"
+                : $"GREP results for \"{pattern}\" in {filename} ({totalMatches} match{(totalMatches == 1 ? "" : "es")}):";
+
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine(header);
+            foreach (var (lineNum, lineText) in matches)
+                sb.AppendLine($"  {lineNum.ToString().PadLeft(numWidth)}: {lineText.TrimEnd()}");
+
+            string result = sb.ToString().TrimEnd('\r', '\n');
+
+            // Inject into read context so the LLM sees the results on resubmit (same pattern as ApplyReadCommandAsync)
+            _readContext = (_readContext ?? "") + result + "\n\n";
+            AppendOutput($"[GREP] {totalMatches} match{(totalMatches == 1 ? "" : "es")} for \"{pattern}\" in {filename}\n", OutputColor.Success);
+
+            return result;
+        }
+
+        // ── Shared helper: file-not-found message with project file listing ──────
+
+        /// <summary>
+        /// Returns a file-not-found message for the given directive, augmented with
+        /// a sorted list of *.cs files in the active project directory so the model
+        /// can self-correct the filename in one turn.
+        /// </summary>
+        internal async Task<string> BuildFileNotFoundMessageAsync(string directive, string filename)
+        {
+            const int MaxFiles = 50;
+
+            string projectDir = null;
+            try
+            {
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                var dte = await VS.GetServiceAsync<EnvDTE.DTE, EnvDTE.DTE>();
+                var project = dte?.ActiveDocument?.ProjectItem?.ContainingProject;
+                if (project != null)
+                {
+                    string projFile = project.FullName;
+                    if (!string.IsNullOrEmpty(projFile))
+                        projectDir = Path.GetDirectoryName(projFile);
+                }
+            }
+            catch { }
+
+            string searchDir = projectDir ?? _terminalWorkingDir;
+
+            List<string> csFiles = null;
+            try
+            {
+                csFiles = Directory.GetFiles(searchDir, "*.cs", SearchOption.TopDirectoryOnly)
+                    .Select(Path.GetFileName)
+                    .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+            }
+            catch { }
+
+            if (csFiles == null || csFiles.Count == 0)
+                return $"{directive}: file not found — {filename}";
+
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine($"{directive}: file not found — {filename}");
+            sb.AppendLine("Project files:");
+
+            int shown = Math.Min(csFiles.Count, MaxFiles);
+            for (int i = 0; i < shown; i++)
+                sb.AppendLine($"  {csFiles[i]}");
+
+            if (csFiles.Count > MaxFiles)
+                sb.AppendLine($"  ... and {csFiles.Count - MaxFiles} more");
+
+            return sb.ToString().TrimEnd('\r', '\n');
+        }
 
     }
 }

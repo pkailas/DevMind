@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.Context.cs  v5.10
+// File: DevMindToolWindowControl.Context.cs  v5.11
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -237,6 +237,8 @@ namespace DevMind
                     if (!File.Exists(fullPath))
                     {
                         AppendOutput($"[READ] File not found: {hint}\n", OutputColor.Error);
+                        string notFoundMsg = await BuildFileNotFoundMessageAsync("READ", hint);
+                        _readContext = (_readContext ?? "") + notFoundMsg + "\n\n";
                         continue;
                     }
 
@@ -309,6 +311,8 @@ namespace DevMind
                     if (!File.Exists(fullPath))
                     {
                         AppendOutput($"[READ] File not found: {fileHint}\n", OutputColor.Error);
+                        string notFoundMsg = await BuildFileNotFoundMessageAsync("READ", fileHint);
+                        _readContext = (_readContext ?? "") + notFoundMsg + "\n\n";
                         return;
                     }
 

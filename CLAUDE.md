@@ -1,4 +1,4 @@
-# CLAUDE.md — DevMind Developer Reference  v1.3
+# CLAUDE.md — DevMind Developer Reference  v1.6
 
 ## Project Overview
 
@@ -75,6 +75,7 @@ ResponseBlock
 ├── PatchBlock       — PATCH directive → IAgenticHost.ApplyPatchAsync()
 ├── ShellBlock       — SHELL: directive → IAgenticHost.RunShellAsync()
 ├── ReadRequest      — model asking to READ a file → IAgenticHost.LoadFileContentAsync()
+├── GrepBlock        — GREP: directive → IAgenticHost.GrepFileAsync()
 ├── Scratchpad       — SCRATCHPAD: block → IAgenticHost.UpdateScratchpad()
 └── DoneBlock        — DONE directive → explicit task completion signal, stops agentic loop
 ```
@@ -186,6 +187,28 @@ READ! Program.cs           — force full content (bypasses outline-first for la
 - Line-range reads use `FileContentCache` (keyed by filename); the cache is populated on first READ and updated after each PATCH.
 - When the model responds with only READ requests (no PATCH/SHELL/FILE), DevMind auto-loads the files and resubmits the original prompt.
 - `_pendingResubmitPrompt` stores the original prompt; cleared after use or on cancel.
+- If the file is not found, READ returns a list of `*.cs` files in the project directory so you can identify the correct filename.
+
+### GREP — Search File for Pattern
+```
+GREP: "pattern" filename
+GREP: "pattern" filename:100-200
+```
+- Pattern must be enclosed in double quotes. Matching is case-insensitive substring (`IndexOf`), not regex.
+- Optional `:start-end` line range restricts the search window — same syntax as `READ filename:start-end`.
+- Results return matching lines with absolute 1-based line numbers (usable directly in a follow-up `READ`).
+- Capped at 50 matches. If truncated, the header notes the total count and suggests narrowing the pattern.
+- Results are injected into `_readContext` as a side effect (same mechanism as `ApplyReadCommandAsync`).
+- A GREP-only response (no PATCH/SHELL/FILE) triggers auto-resubmit via `IsReadOnly` — same path as READ.
+- If the file is not found, GREP returns a list of `*.cs` files in the project directory so you can identify the correct filename.
+
+**Typical workflow:**
+```
+GREP: "SaveFileAsync" AgenticExecutor.cs     → finds lines 42, 89, 155
+READ AgenticExecutor.cs:85-100               → reads context around line 89
+PATCH AgenticExecutor.cs                      → applies the change
+```
+Prefer GREP + targeted READ over sequential full-file READs for large files.
 
 ### DONE — Explicit Task Completion
 ```
@@ -312,7 +335,7 @@ Task<bool> CheckConnectionHealthAsync()
 ## Batch Input ([WAIT] separator)
 
 Multi-block input can be typed into the input box using `[WAIT]` as a separator line (case-insensitive). Each block is processed sequentially:
-- `READ filename` / `SHELL: cmd` / `PATCH file` blocks are executed directly without the LLM.
+- `READ filename` / `SHELL: cmd` / `PATCH file` / `GREP: "pattern" filename` blocks are executed directly without the LLM.
 - All other blocks are sent to the LLM; execution pauses until `onComplete` fires before sending the next block.
 - Implemented via `ProcessBatchInputAsync()`, signaled by `_batchOnComplete` TaskCompletionSource callback.
 
@@ -403,7 +426,7 @@ Squeeze runs before the hard-trim (`TrimHistoryToFit`) and after each agentic tu
 4. **Multi-turn context control** — Button to include/exclude file context per message.
 5. **Self-modification** — DevMind building DevMind through its own UI.
 6. **Smart READ targeting** — Model frequently does linear search through large files in 200-line increments (e.g., five sequential READs to scan a 1,473-line file), consuming excessive context. Investigate system prompt hints or outline-guided targeting so the model reads the relevant line range on the first try instead of brute-force scanning.
-7. **GREP directive** — Single-line directive (`GREP: "pattern" filename`) that returns matching lines with line numbers. Eliminates sequential READ scanning for locating code. Model does one GREP to find the target, then one targeted READ for context. Two turns instead of five, minimal context usage. Implement as a single-line directive in the parser (like SHELL:), with execution handled by IAgenticHost.
+7. ~~**GREP directive**~~ — **Implemented v6.0.34**. Single-file substring search with line numbers. Eliminates sequential READ scanning. Model does one GREP to find the target, then one targeted READ for context.
 8. **RENAME directive** — `RENAME OldFile.cs NewFile.cs`. Handles file system move, project reference update, and VS editor refresh in one verb. Replaces the current workaround of FILE (copy) + SHELL (delete) + manual project fixup.
 9. **DELETE directive** — `DELETE TestFile.cs`. Removes file from disk and project. Replaces SHELL-based deletion which doesn't handle project references or editor cleanup.
 10. **FIND directive** — `FIND "pattern" *.cs`. Cross-file search by glob pattern. Returns filename + line number + match for each hit. Solves the "where is this used?" problem without sequential READs.

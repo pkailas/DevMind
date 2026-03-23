@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v5.0.52
+// File: DevMindToolWindowControl.xaml.cs  v5.0.54
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -444,6 +444,32 @@ namespace DevMind
                 return;
             }
 
+            if (text.StartsWith("GREP:", StringComparison.OrdinalIgnoreCase))
+            {
+                AppendOutput($"\n> {text}\n", OutputColor.Input);
+                AppendNewLine();
+                var grepMatch = System.Text.RegularExpressions.Regex.Match(
+                    text,
+                    @"^GREP:\s+""([^""]+)""\s+(\S+\.\S+?)(?::(\d+)(?:-(\d+))?)?\s*$",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                if (grepMatch.Success)
+                {
+                    string gPattern  = grepMatch.Groups[1].Value;
+                    string gFile     = grepMatch.Groups[2].Value;
+                    int?   gStart    = grepMatch.Groups[3].Success ? (int?)int.Parse(grepMatch.Groups[3].Value) : null;
+                    int?   gEnd      = grepMatch.Groups[4].Success ? (int?)int.Parse(grepMatch.Groups[4].Value) : null;
+                    string gResult   = await ((IAgenticHost)this).GrepFileAsync(gPattern, gFile, gStart, gEnd);
+                    AppendOutput(gResult + "\n", OutputColor.Normal);
+                }
+                else
+                {
+                    AppendOutput("GREP syntax: GREP: \"pattern\" filename[:start-end]\n", OutputColor.Error);
+                }
+                InputTextBox.Text = "";
+                SetInputEnabled(true);
+                return;
+            }
+
             // Process consecutive READ lines from the top of the input
             {
                 var allLines = text.Split('\n');
@@ -601,6 +627,20 @@ namespace DevMind
                 "READ <filename>  — full if <100 lines, outline otherwise\n" +
                 "READ <filename>:<start>-<end>  — targeted line range (1-based)\n" +
                 "READ! <filename>  — force full content (expensive)\n\n" +
+                "### GREP — Search File for Pattern\n" +
+                "GREP: \"pattern\" filename\n" +
+                "GREP: \"pattern\" filename:100-200\n\n" +
+                "Searches for lines containing the pattern (case-insensitive substring match) in a single file.\n" +
+                "Returns matching lines with line numbers. Use GREP to locate code before doing a targeted READ.\n\n" +
+                "Example workflow:\n" +
+                "1. GREP: \"SaveFileAsync\" AgenticExecutor.cs     → finds lines 42, 89, 155\n" +
+                "2. READ AgenticExecutor.cs:85-100               → reads context around line 89\n" +
+                "3. PATCH AgenticExecutor.cs                      → applies the change\n\n" +
+                "Rules:\n" +
+                "- Pattern must be in double quotes.\n" +
+                "- Results are capped at 50 matches. If truncated, narrow your pattern or add a line range.\n" +
+                "- GREP does not modify files. It is information-gathering only.\n" +
+                "- Prefer GREP + targeted READ over sequential full-file READs.\n\n" +
                 "## Build Verification\n" +
                 $"After ANY code change emit: SHELL: {buildCommand}\n\n" +
                 "## After PATCH\n" +
@@ -1368,6 +1408,27 @@ namespace DevMind
                     string patchFile = block.Split('\n')[0].Substring("PATCH ".Length).Trim();
                     AppendOutput($"[BATCH] Direct execute: PATCH {patchFile}\n", OutputColor.Dim);
                     await ApplyPatchAsync(block, clearInput: false);
+                }
+                else if (block.StartsWith("GREP:", StringComparison.OrdinalIgnoreCase))
+                {
+                    AppendOutput($"[BATCH] Direct execute: {block.Split('\n')[0].Trim()}\n", OutputColor.Dim);
+                    var grepMatch = System.Text.RegularExpressions.Regex.Match(
+                        block,
+                        @"^GREP:\s+""([^""]+)""\s+(\S+\.\S+?)(?::(\d+)(?:-(\d+))?)?\s*$",
+                        System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                    if (grepMatch.Success)
+                    {
+                        string gPattern = grepMatch.Groups[1].Value;
+                        string gFile    = grepMatch.Groups[2].Value;
+                        int?   gStart   = grepMatch.Groups[3].Success ? (int?)int.Parse(grepMatch.Groups[3].Value) : null;
+                        int?   gEnd     = grepMatch.Groups[4].Success ? (int?)int.Parse(grepMatch.Groups[4].Value) : null;
+                        string gResult  = await ((IAgenticHost)this).GrepFileAsync(gPattern, gFile, gStart, gEnd);
+                        AppendOutput(gResult + "\n", OutputColor.Normal);
+                    }
+                    else
+                    {
+                        AppendOutput("GREP syntax: GREP: \"pattern\" filename[:start-end]\n", OutputColor.Error);
+                    }
                 }
                 else
                 {
