@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.AgenticHost.cs  v1.7.0
+// File: DevMindToolWindowControl.AgenticHost.cs  v1.8.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -44,6 +44,45 @@ namespace DevMind
         /// </summary>
         internal void ClearFileSnapshots() => _fileSnapshots.Clear();
 
+        // ── Unrelated-file write guard ────────────────────────────────────────────
+
+        /// <summary>
+        /// Returns true if the model is allowed to write to the given file without user
+        /// confirmation — i.e., the file was read during the current task OR was explicitly
+        /// named in the user's original prompt.
+        /// </summary>
+        private bool IsFileKnownToTask(string fileNameOnly)
+        {
+            if (_taskReadFiles.Contains(fileNameOnly))
+                return true;
+            if (!string.IsNullOrEmpty(_pendingResubmitPrompt) &&
+                _pendingResubmitPrompt.IndexOf(fileNameOnly, StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+            // No active task prompt recorded (e.g. direct invocation) — be permissive.
+            if (_pendingResubmitPrompt == null)
+                return true;
+            return false;
+        }
+
+        /// <summary>
+        /// Shows a Yes/No dialog asking the user to approve writing to a file that the model
+        /// has not read during the current task. Returns true if the user approves.
+        /// </summary>
+        private async Task<bool> ConfirmUnreadFileWriteAsync(string fileNameOnly)
+        {
+            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+            AppendOutput(
+                $"[WRITE GUARD] \"{fileNameOnly}\" was not read during this task — asking for approval.\n",
+                OutputColor.Dim);
+            var answer = System.Windows.MessageBox.Show(
+                $"DevMind wants to write to \"{fileNameOnly}\", but that file was not read during this task " +
+                $"and was not mentioned in your request.\n\nAllow this write?",
+                "DevMind — Unread File Write",
+                System.Windows.MessageBoxButton.YesNo,
+                System.Windows.MessageBoxImage.Warning);
+            return answer == System.Windows.MessageBoxResult.Yes;
+        }
+
         // ── IAgenticHost.ApplyPatchAsync ──────────────────────────────────────────
 
         async Task<string> IAgenticHost.ApplyPatchAsync(string patchContent)
@@ -51,6 +90,27 @@ namespace DevMind
             // Extract the filename from the first line ("PATCH filename") for auto-READ.
             string firstLine = (patchContent ?? string.Empty).Split('\n')[0];
             string blockFileName = firstLine.Length > 5 ? firstLine.Substring(5).Trim() : string.Empty;
+
+            // Unrelated-file write guard: confirm before patching a file the model hasn't read.
+            if (!string.IsNullOrEmpty(blockFileName))
+            {
+                string guardFileOnly;
+                try { guardFileOnly = Path.GetFileName(blockFileName.Replace('\\', '/')); }
+                catch { guardFileOnly = blockFileName; }
+
+                if (!IsFileKnownToTask(guardFileOnly))
+                {
+                    bool approved = await ConfirmUnreadFileWriteAsync(guardFileOnly);
+                    if (!approved)
+                    {
+                        AppendOutput($"[WRITE GUARD] Patch to \"{guardFileOnly}\" blocked by user.\n", OutputColor.Dim);
+                        return null;
+                    }
+                    // User approved — treat the file as known so subsequent patches in this
+                    // response don't re-prompt for the same file.
+                    _taskReadFiles.Add(guardFileOnly);
+                }
+            }
 
             // Auto-READ the target file into context if it is not already present.
             if (!string.IsNullOrEmpty(blockFileName))
@@ -99,6 +159,22 @@ namespace DevMind
 
         async Task<string> IAgenticHost.SaveFileAsync(string fileName, string content)
         {
+            // Unrelated-file write guard: confirm before creating/overwriting an unread file.
+            string saveFileOnly;
+            try { saveFileOnly = Path.GetFileName(fileName.Replace('\\', '/')); }
+            catch { saveFileOnly = fileName; }
+
+            if (!IsFileKnownToTask(saveFileOnly))
+            {
+                bool approved = await ConfirmUnreadFileWriteAsync(saveFileOnly);
+                if (!approved)
+                {
+                    AppendOutput($"[WRITE GUARD] File write to \"{saveFileOnly}\" blocked by user.\n", OutputColor.Dim);
+                    return null;
+                }
+                _taskReadFiles.Add(saveFileOnly);
+            }
+
             await SaveGeneratedFileAsync(fileName, StripOuterCodeFence(content));
             // Approximate the resolved path for agentic context / diff view purposes.
             try
@@ -251,6 +327,7 @@ namespace DevMind
 
             // Inject into read context so the LLM sees the results on resubmit (same pattern as ApplyReadCommandAsync)
             _readContext = (_readContext ?? "") + result + "\n\n";
+            _taskReadFiles.Add(fileNameOnly);
             AppendOutput($"[GREP] {totalMatches} match{(totalMatches == 1 ? "" : "es")} for \"{pattern}\" in {filename}\n", OutputColor.Success);
 
             return result;

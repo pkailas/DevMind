@@ -1,6 +1,6 @@
 <PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011">
   <Metadata>
-    <Identity Id="DevMind.LocalLLMAssistant" Version="6.0.72" Language="en-US" Publisher="iOnline Consulting LLC" />
+    <Identity Id="DevMind.LocalLLMAssistant" Version="6.0.73" Language="en-US" Publisher="iOnline Consulting LLC" />
     <DisplayName>DevMind</DisplayName>
     <Description xml:space="preserve">Local LLM coding assistant for Visual Studio. Supports any OpenAI-compatible endpoint including LM Studio and Ollama. 100% private - no code leaves your machine.</Description>
     <Tags>AI, LLM, local, privacy, coding assistant</Tags>

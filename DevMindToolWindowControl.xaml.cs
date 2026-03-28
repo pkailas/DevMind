@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v5.0.59
+// File: DevMindToolWindowControl.xaml.cs  v5.0.60
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -54,6 +54,11 @@ namespace DevMind
         private const int PatchBackupStackLimit = 10;
         private Paragraph _spacerParagraph;
         private string _pendingResubmitPrompt;
+        // Tracks filenames (filename-only, case-insensitive) that have been READ during the
+        // current task. Cleared at the start of each new top-level user request.
+        // Used by the unrelated-file write guard in AgenticHost.
+        internal readonly HashSet<string> _taskReadFiles =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private Action _batchOnComplete;
         private bool _suppressDisplay;
         private int _patchCount = 0;
@@ -638,7 +643,10 @@ namespace DevMind
             // Capture original prompt for auto-resubmit after READ-only responses
             // Only save when not already in an agentic or resubmit cycle
             if (!_shellLoopPending && _pendingResubmitPrompt == null)
+            {
                 _pendingResubmitPrompt = text;
+                _taskReadFiles.Clear();
+            }
 
             InputTextBox.Text = "";
             SetInputEnabled(false);

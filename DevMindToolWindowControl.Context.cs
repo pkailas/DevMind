@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.Context.cs  v5.16
+// File: DevMindToolWindowControl.Context.cs  v5.17
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -269,6 +269,7 @@ namespace DevMind
 
                     var (content, _) = ReadFilePreservingEncoding(fullPath);
                     _llmClient._fileCache.Store(fileNameOnly, content);
+                    _taskReadFiles.Add(fileNameOnly);
                     int lineCount = content.Split('\n').Length;
 
                     bool injectOutline = lineCount >= ReadOutlineThresholdLines && !isForceRead;
@@ -327,6 +328,7 @@ namespace DevMind
                     AppendOutput($"[READ] Cached {fullPath} for range access\n", OutputColor.Dim);
                 }
 
+                _taskReadFiles.Add(fileNameOnly);
                 int totalLines = _llmClient._fileCache.GetLineCount(fileNameOnly);
 
                 // Swap inverted range silently
