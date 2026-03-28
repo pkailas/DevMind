@@ -1,4 +1,4 @@
-// File: AgenticExecutor.cs  v1.4.0
+// File: AgenticExecutor.cs  v1.5.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -289,6 +289,31 @@ namespace DevMind
                         {
                             result.Errors.Add(ex.Message);
                             _host.AppendOutput($"[DELETE ERROR] {block.FileName}: {ex.Message}\n", OutputColor.Error);
+                        }
+                        break;
+
+                    case BlockType.Rename:
+                        try
+                        {
+                            string renameResult = await _host.RenameFileAsync(block.RenameFrom, block.RenameTo);
+                            bool renamed = renameResult != null && renameResult.StartsWith("Renamed:");
+                            _host.AppendOutput($"[RENAME] {renameResult}\n",
+                                renamed ? OutputColor.Success : OutputColor.Error);
+                            if (renamed)
+                            {
+                                result.FilesRenamed.Add(renameResult.Substring("Renamed:".Length).Trim());
+                            }
+                            else if (!string.IsNullOrEmpty(renameResult))
+                            {
+                                result.Errors.Add(renameResult);
+                            }
+                            _lastReadKey = null;
+                            _lastReadRepeatCount = 0;
+                        }
+                        catch (Exception ex)
+                        {
+                            result.Errors.Add(ex.Message);
+                            _host.AppendOutput($"[RENAME ERROR] {block.RenameFrom}: {ex.Message}\n", OutputColor.Error);
                         }
                         break;
 

@@ -65,6 +65,7 @@ Every response in an agentic turn MUST end with at least one directive. Prose co
 | `GREP: "pattern" file` | Search file for pattern matches — Information-gathering, same as READ |
 | `FIND: "pattern" *.cs` | Cross-file search by glob — returns filename:line: content for each match |
 | `DELETE filename.cs` | Delete a file from disk — use only when explicitly asked to remove a file |
+| `RENAME OldFile.cs NewFile.cs` | Rename a file on disk — does not update references in other files |
 | `SCRATCHPAD:` ... `END_SCRATCHPAD` | Internal reasoning state — not shown to user |
 | `DONE` | Signal task completion — only emit when all steps are verified complete |
 
@@ -142,6 +143,19 @@ Does **not** modify `.csproj` or other project references.
 - Use only when the task explicitly requires file removal.
 - Do not use DELETE speculatively.
 - After DELETE, emit DONE or SHELL: to build/verify as appropriate.
+
+### RENAME — Rename/Move File
+```
+RENAME OldFile.cs NewFile.cs
+```
+
+Renames a file on disk. The old file is closed in the VS editor and the new file is opened after rename.
+Does **not** update references in other files — use FIND + PATCH to update imports or usings if needed.
+
+**Rules:**
+- Use only when the task explicitly requires a file rename or move.
+- If the destination already exists, RENAME is rejected with an error — no overwrite.
+- After RENAME, use FIND + PATCH to update any references to the old filename if needed.
 
 ### FIND — Cross-File Search
 ```

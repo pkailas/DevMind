@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.AgenticHost.cs  v1.4.0
+// File: DevMindToolWindowControl.AgenticHost.cs  v1.5.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -373,6 +373,80 @@ namespace DevMind
             {
                 return $"DELETE: failed to delete {resolvedPath} — {ex.Message}";
             }
+        }
+
+        // ── IAgenticHost.RenameFileAsync ──────────────────────────────────────────
+
+        async Task<string> IAgenticHost.RenameFileAsync(string oldFilename, string newFilename)
+        {
+            string oldNameOnly;
+            try { oldNameOnly = Path.GetFileName(oldFilename.Replace('\\', '/')); }
+            catch { oldNameOnly = oldFilename; }
+
+            string oldPath = await FindFileInSolutionAsync(oldNameOnly, oldFilename.Replace('\\', '/'))
+                ?? Path.Combine(_terminalWorkingDir, oldNameOnly);
+
+            if (!File.Exists(oldPath))
+                return await BuildFileNotFoundMessageAsync("RENAME", oldFilename);
+
+            // Build destination path
+            string newPath;
+            bool newHasDir = newFilename.Contains('/') || newFilename.Contains('\\');
+            if (newHasDir)
+            {
+                // Treat as relative to project/working directory
+                string projectDir = Path.GetDirectoryName(oldPath) ?? _terminalWorkingDir;
+                newPath = Path.Combine(projectDir, newFilename.Replace('/', Path.DirectorySeparatorChar));
+            }
+            else
+            {
+                // Same directory as the old file, just different name
+                newPath = Path.Combine(Path.GetDirectoryName(oldPath) ?? _terminalWorkingDir, newFilename);
+            }
+
+            if (File.Exists(newPath))
+                return $"RENAME: destination already exists — {newPath}";
+
+            // Close old file in the VS editor if open
+            try
+            {
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                var dte = await VS.GetServiceAsync<EnvDTE.DTE, EnvDTE.DTE>();
+                if (dte?.Documents != null)
+                {
+                    foreach (EnvDTE.Document doc in dte.Documents)
+                    {
+                        if (string.Equals(doc.FullName, oldPath, StringComparison.OrdinalIgnoreCase))
+                        {
+                            doc.Close(EnvDTE.vsSaveChanges.vsSaveChangesNo);
+                            break;
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            try
+            {
+                File.Move(oldPath, newPath);
+            }
+            catch (Exception ex)
+            {
+                return $"RENAME: failed to rename {oldPath} → {newPath} — {ex.Message}";
+            }
+
+            // Invalidate FileContentCache for the old filename
+            try { _llmClient._fileCache.Invalidate(oldNameOnly); } catch { }
+
+            // Open new file in VS editor
+            try
+            {
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                await VS.Documents.OpenAsync(newPath);
+            }
+            catch { }
+
+            return $"Renamed: {oldPath} → {newPath}";
         }
 
         // ── Shared helper: file-not-found message with project file listing ──────

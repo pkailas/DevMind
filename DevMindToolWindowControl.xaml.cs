@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v5.0.56
+// File: DevMindToolWindowControl.xaml.cs  v5.0.57
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -529,6 +529,41 @@ namespace DevMind
                 return;
             }
 
+            if (text.StartsWith("RENAME ", StringComparison.OrdinalIgnoreCase) && !text.Contains('\n'))
+            {
+                AppendOutput($"\n> {text}\n", OutputColor.Input);
+                AppendNewLine();
+                string[] renameParts = text.Substring("RENAME ".Length).Trim().Split(new[] { ' ', '\t' }, 2, StringSplitOptions.RemoveEmptyEntries);
+                if (renameParts.Length == 2)
+                {
+                    string renameOld = renameParts[0];
+                    string renameNew = renameParts[1];
+                    await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                    var dlgResult = System.Windows.MessageBox.Show(
+                        $"Rename {renameOld} → {renameNew}?",
+                        "DevMind — Confirm Rename",
+                        System.Windows.MessageBoxButton.YesNo,
+                        System.Windows.MessageBoxImage.Question);
+                    if (dlgResult == System.Windows.MessageBoxResult.Yes)
+                    {
+                        string renResult = await ((IAgenticHost)this).RenameFileAsync(renameOld, renameNew);
+                        bool ok = renResult != null && renResult.StartsWith("Renamed:");
+                        AppendOutput(renResult + "\n", ok ? OutputColor.Success : OutputColor.Error);
+                    }
+                    else
+                    {
+                        AppendOutput("Rename cancelled.\n", OutputColor.Dim);
+                    }
+                }
+                else
+                {
+                    AppendOutput("RENAME syntax: RENAME OldFile.cs NewFile.cs\n", OutputColor.Error);
+                }
+                InputTextBox.Text = "";
+                SetInputEnabled(true);
+                return;
+            }
+
             // Process consecutive READ lines from the top of the input
             {
                 var allLines = text.Split('\n');
@@ -711,6 +746,10 @@ namespace DevMind
                 "DELETE filename.cs\n\n" +
                 "Deletes a file from disk. Use only when explicitly asked to remove a file.\n" +
                 "Do not use DELETE speculatively — only when the task requires file removal.\n\n" +
+                "### RENAME — Rename/Move File\n" +
+                "RENAME OldFile.cs NewFile.cs\n\n" +
+                "Renames a file on disk. The old file is closed in the editor and the new file is opened.\n" +
+                "Does not update references in other files — use FIND + PATCH to update imports or usings if needed.\n\n" +
                 "## Build Verification\n" +
                 $"After ANY code change emit: SHELL: {buildCommand}\n\n" +
                 "## After PATCH\n" +
@@ -1034,6 +1073,9 @@ namespace DevMind
 
                                                 if (result.FilesDeleted.Count > 0)
                                                     agenticContext.AppendLine($"[FILE DELETED] Deleted from disk: {string.Join(", ", result.FilesDeleted.ConvertAll(System.IO.Path.GetFileName))}.");
+
+                                                if (result.FilesRenamed.Count > 0)
+                                                    agenticContext.AppendLine($"[FILE RENAMED] {string.Join("; ", result.FilesRenamed)}.");
 
                                                 if (!string.IsNullOrEmpty(result.ShellOutput))
                                                 {
@@ -1537,6 +1579,21 @@ namespace DevMind
                     else
                     {
                         AppendOutput("DELETE syntax: DELETE filename.cs\n", OutputColor.Error);
+                    }
+                }
+                else if (block.StartsWith("RENAME ", StringComparison.OrdinalIgnoreCase) && !block.Contains('\n'))
+                {
+                    AppendOutput($"[BATCH] Direct execute: {block.Trim()}\n", OutputColor.Dim);
+                    string[] batchRenameParts = block.Substring("RENAME ".Length).Trim().Split(new[] { ' ', '\t' }, 2, StringSplitOptions.RemoveEmptyEntries);
+                    if (batchRenameParts.Length == 2)
+                    {
+                        string batchRenResult = await ((IAgenticHost)this).RenameFileAsync(batchRenameParts[0], batchRenameParts[1]);
+                        bool batchRenOk = batchRenResult != null && batchRenResult.StartsWith("Renamed:");
+                        AppendOutput(batchRenResult + "\n", batchRenOk ? OutputColor.Success : OutputColor.Error);
+                    }
+                    else
+                    {
+                        AppendOutput("RENAME syntax: RENAME OldFile.cs NewFile.cs\n", OutputColor.Error);
                     }
                 }
                 else

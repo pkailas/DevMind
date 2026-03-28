@@ -1,4 +1,4 @@
-// File: ResponseParser.cs  v5.5.0
+// File: ResponseParser.cs  v5.6.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -8,7 +8,7 @@ using System.Text.RegularExpressions;
 
 namespace DevMind
 {
-    public enum BlockType { Text, File, Patch, Shell, ReadRequest, Scratchpad, Done, Grep, Find, Delete }
+    public enum BlockType { Text, File, Patch, Shell, ReadRequest, Scratchpad, Done, Grep, Find, Delete, Rename }
 
     public class ResponseBlock
     {
@@ -21,6 +21,8 @@ namespace DevMind
         public bool ForceFullRead { get; set; }  // READ! — bypass outline-first behavior
         public string Pattern     { get; set; }  // for Grep/Find — substring search pattern
         public string GlobPattern { get; set; }  // for Find — glob file pattern (e.g. *.cs, Services/*.cs)
+        public string RenameFrom  { get; set; }  // for Rename — source filename
+        public string RenameTo    { get; set; }  // for Rename — destination filename
     }
 
     public static class ResponseParser
@@ -57,6 +59,8 @@ namespace DevMind
         private static readonly Regex _findFileLine   = new Regex(@"^FIND:\s+""([^""]+)""\s+(\S+)(?::(\d+)(?:-(\d+))?)?\s*$", RegexOptions.Compiled);
         // Matches DELETE filename (no colon)
         private static readonly Regex _deleteLine     = new Regex(@"^DELETE\s+(\S+\.\S+)\s*$",     RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        // Matches RENAME OldFile.cs NewFile.cs
+        private static readonly Regex _renameLine     = new Regex(@"^RENAME\s+(\S+)\s+(\S+)\s*$",  RegexOptions.Compiled | RegexOptions.IgnoreCase);
         // Markdown fence: ```lang or ```
         private static readonly Regex _mdFence        = new Regex(@"^```",                         RegexOptions.Compiled);
 
@@ -337,6 +341,20 @@ namespace DevMind
                 return;
             }
 
+            // RENAME <oldFilename> <newFilename>
+            m = _renameLine.Match(line);
+            if (m.Success)
+            {
+                FlushText(blocks, textBuf);
+                blocks.Add(new ResponseBlock
+                {
+                    Type       = BlockType.Rename,
+                    RenameFrom = m.Groups[1].Value,
+                    RenameTo   = m.Groups[2].Value
+                });
+                return;
+            }
+
             // DONE
             if (_doneLine.IsMatch(line))
             {
@@ -484,6 +502,19 @@ namespace DevMind
 
             // DELETE — implicit termination
             if (_deleteLine.IsMatch(line))
+            {
+                EmitFileBlock(blocks, currentFileName,
+                              fileBuf.ToString().TrimEnd('\r', '\n', ' '));
+                fileBuf.Clear();
+                state = State.TopLevel;
+                ProcessTopLevel(line, blocks, textBuf, ref lastShellCommand,
+                                hasActionableBlocks, ref state, ref fileBlockName,
+                                ref patchFileName, patchBuf, ref patchSec, scratchBuf);
+                return;
+            }
+
+            // RENAME — implicit termination
+            if (_renameLine.IsMatch(line))
             {
                 EmitFileBlock(blocks, currentFileName,
                               fileBuf.ToString().TrimEnd('\r', '\n', ' '));
@@ -712,6 +743,17 @@ namespace DevMind
                 return;
             }
 
+            // RENAME — implicit termination
+            if (_renameLine.IsMatch(line))
+            {
+                EmitScratchpadBlock(blocks, scratchBuf);
+                state = State.TopLevel;
+                ProcessTopLevel(line, blocks, textBuf, ref lastShellCommand,
+                                hasActionableBlocks, ref state, ref fileBlockName,
+                                ref patchFileName, patchBuf, ref patchSec, scratchBuf);
+                return;
+            }
+
             // Content line
             scratchBuf.AppendLine(line);
         }
@@ -844,7 +886,7 @@ namespace DevMind
                 if (_patchEnd.IsMatch(line))   { inPatch = false; continue; }
                 if (inPatch) continue;
 
-                if (_patchStart.IsMatch(line) || _fileStart.IsMatch(line) || _shellLine.IsMatch(line) || _deleteLine.IsMatch(line))
+                if (_patchStart.IsMatch(line) || _fileStart.IsMatch(line) || _shellLine.IsMatch(line) || _deleteLine.IsMatch(line) || _renameLine.IsMatch(line))
                     return true;
             }
             return false;

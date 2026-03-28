@@ -1,4 +1,4 @@
-// File: IAgenticHost.cs  v1.3.0
+// File: IAgenticHost.cs  v1.4.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System.Threading.Tasks;
@@ -98,5 +98,13 @@ namespace DevMind
         /// Does NOT modify .csproj or other project references.
         /// </summary>
         Task<string> DeleteFileAsync(string filename);
+
+        /// <summary>
+        /// Renames (moves) a file on disk. Closes the old file in the VS editor if open,
+        /// then opens the new file. Invalidates the FileContentCache for the old filename.
+        /// Returns "Renamed: {oldPath} → {newPath}" on success, or an error message on failure.
+        /// Does NOT update references in other files.
+        /// </summary>
+        Task<string> RenameFileAsync(string oldFilename, string newFilename);
     }
 }

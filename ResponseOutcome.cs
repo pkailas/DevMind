@@ -1,4 +1,4 @@
-// File: ResponseOutcome.cs  v1.3.0
+// File: ResponseOutcome.cs  v1.4.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System.Collections.Generic;
@@ -22,6 +22,7 @@ namespace DevMind
         public bool HasGrepRequests    { get; }
         public bool HasFindRequests    { get; }
         public bool HasDeleteRequests  { get; }
+        public bool HasRenameRequests  { get; }
         public bool HasScratchpad      { get; }
         public bool IsDone             { get; }
 
@@ -49,10 +50,11 @@ namespace DevMind
             HasGrepRequests   = Blocks.Any(b => b.Type == BlockType.Grep);
             HasFindRequests   = Blocks.Any(b => b.Type == BlockType.Find);
             HasDeleteRequests = Blocks.Any(b => b.Type == BlockType.Delete);
+            HasRenameRequests = Blocks.Any(b => b.Type == BlockType.Rename);
             HasScratchpad     = Blocks.Any(b => b.Type == BlockType.Scratchpad);
             IsDone            = Blocks.Any(b => b.Type == BlockType.Done);
 
-            bool hasAnyAction  = HasPatches || HasShellCommands || HasFileCreation || HasDeleteRequests || IsDone;
+            bool hasAnyAction  = HasPatches || HasShellCommands || HasFileCreation || HasDeleteRequests || HasRenameRequests || IsDone;
             bool hasInfoGather = HasReadRequests || HasGrepRequests || HasFindRequests;
 
             IsEmptyOrBareCode = !hasAnyAction && !hasInfoGather;
