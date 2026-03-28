@@ -1,4 +1,4 @@
-# DevMind Project Context
+# DevMind Project Context  v1.1
 
 ## Platform & Constraints
 - VSIX (.NET Framework net48), C# 8.0 only — no C# 9+ syntax (no records, no file-scoped namespaces, no collection expressions, no init-only setters, no top-level statements, no primary constructors)
@@ -19,9 +19,7 @@
 
 ## LLM Backend
 - Local model via llama-server at http://127.0.0.1:1234 (OpenAI-compatible)
-- Current model: Qwen3.5 27B Q4_K_M on RTX PRO 4000 Blackwell (24GB GDDR7)
-- Custom Jinja template (qwen35_fixed.jinja) to prevent KV cache invalidation
-- Context: 32,768 tokens with quantized KV cache (K: q8_0, V: q4_0)
+- Context: 32,768 tokens with quantized KV cache (K: q4_0, V: q4_0)
 - Server type detection supports llama-server, LM Studio, and Custom endpoints
 
 ## Context Management (5-Phase Compression)
@@ -40,7 +38,104 @@
 - Namespace: DevMind
 - Block-scoped namespaces (required by C# 8.0)
 
-## Key Directives
+## Build Command
+VSIX projects require msbuild, NOT dotnet build. Use this exact command:
+
+```
+dotnet msbuild "C:\Users\pkailas.KAILAS\source\repos\DevMind\DevMind.csproj" /p:DeployExtension=false /verbosity:minimal
+```
+
+If `dotnet msbuild` is unavailable, use the full VS2022 path:
+```
+& "C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe" "C:\Users\pkailas.KAILAS\source\repos\DevMind\DevMind.csproj" /p:DeployExtension=false /verbosity:minimal
+```
+
+Never use `dotnet build` — it fails with VSIX deployment errors.
+
+## Directive Protocol
+
+Every response in an agentic turn MUST end with at least one directive. Prose conclusions without directives will be rejected and retried. The valid directives are:
+
+| Directive | Purpose |
+|-----------|---------|
+| `PATCH FileName.cs` | Edit an existing file using FIND/REPLACE blocks |
+| `FILE: path/to/file.cs` ... `END_FILE` | Create or fully replace a file |
+| `SHELL: command` | Run a shell command (PowerShell) |
+| `READ FileName.cs` | Load a file or line range into context |
+| `GREP: "pattern" file` | Search file for pattern matches — Information-gathering, same as READ |
+| `SCRATCHPAD:` ... `END_SCRATCHPAD` | Internal reasoning state — not shown to user |
+| `DONE` | Signal task completion — only emit when all steps are verified complete |
+
+### PATCH Format
+```
+PATCH FileName.cs
+FIND:
+<exact text to find — must match file content verbatim>
+REPLACE:
+<new text to substitute>
+END_PATCH
+```
+Multiple PATCH blocks are allowed in one response. Each is applied in order.
+
+### READ-Before-Assess Rule
+**Never assess the state of a file from its outline alone.** An outline shows method signatures but not whether XML doc comments, implementations, or logic are present. Before concluding anything about file content, issue ranged READs to verify:
+
+```
+READ FileName.cs:1-50
+READ FileName.cs:51-100
+```
+
+Violating this rule causes hallucinated conclusions ("all methods are documented") that contradict actual file content.
+
+### GREP — Search File for Pattern
+```
+GREP: "pattern" filename
+GREP: "pattern" filename:100-200
+```
+
+Searches for lines containing the pattern (case-insensitive substring match).
+Returns matching lines with absolute line numbers. Use GREP to locate code before doing a targeted READ.
+
+**Workflow:**
+1. `GREP: "SaveFileAsync" AgenticExecutor.cs`  → finds lines 42, 89, 155
+2. `READ AgenticExecutor.cs:85-100`             → reads context around line 89
+3. `PATCH AgenticExecutor.cs`                   → applies the change
+
+**Rules:**
+- Pattern must be in double quotes.
+- Results capped at 50 matches — narrow your pattern or add a line range if truncated.
+- Prefer GREP + targeted READ over sequential full-file READs.
+
+### Nothing-To-Do Case
+If after reading the file you determine no changes are needed, emit DONE with an explanation — never emit prose without a directive:
+
+```
+DONE
+All methods in AgenticExecutor.cs already have XML doc comments. No changes required.
+```
+
+### Task-Complete Case
+After a successful build with zero errors, emit DONE:
+
+```
+DONE
+Applied XML doc comments to constructor and ExecuteLoadAndResubmitAsync. Build succeeded (6.0.54.0).
+```
+
+### SCRATCHPAD Usage
+Use SCRATCHPAD to track multi-step task state across agentic iterations:
+
+```
+SCRATCHPAD:
+Goal: Add XML doc comments to AgenticExecutor.cs
+Status: READ complete — constructor and ExecuteLoadAndResubmitAsync missing docs
+Next: PATCH both methods, then SHELL build
+END_SCRATCHPAD
+```
+
+Update SCRATCHPAD at the start of each iteration to reflect current status.
+
+## Key Parser Notes
 - SCRATCHPAD terminated by END_SCRATCHPAD (not ---)
 - PATCH separator --- between blocks stripped by AutoExecutePatchAsync
 - ParsePatchBlocks uses context-aware --- detection to avoid stripping file content
@@ -49,12 +144,6 @@
 - DevMindTestBed (.NET 10 console app) at C:\Users\pkailas.KAILAS\source\repos\DevMindTestBed\
 - TestBed.cs is the scratch file for PATCH and agentic loop testing
 - Test with experimental VS instance (F5 from DevMind project)
-
-## Build Command
-Use msbuild, NOT dotnet build — VSIX projects don't support dotnet build:
-msbuild "C:\Users\pkailas.KAILAS\source\repos\DevMind\DevMind.csproj" /p:DeployExtension=false /verbosity:minimal
-
-
 
 ## Future Roadmap
 

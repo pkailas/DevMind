@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.Context.cs  v5.11
+// File: DevMindToolWindowControl.Context.cs  v5.12
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -213,6 +213,12 @@ namespace DevMind
                         AppendOutput("[READ] No filename specified.\n", OutputColor.Error);
                         continue;
                     }
+
+                    // Isolate filename — take first whitespace-delimited token only.
+                    // Handles "READ AgenticExecutor.cs and fix the bug" → "AgenticExecutor.cs"
+                    int spaceIdx = hint.IndexOf(' ');
+                    if (spaceIdx > 0)
+                        hint = hint.Substring(0, spaceIdx);
 
                     // Detect line-range suffix: filename.cs:400-450 or filename.cs:400 (single line)
                     var rangeMatch = Regex.Match(hint, @"^(.+):(\d+)(?:-(\d+))?$");

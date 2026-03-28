@@ -1,4 +1,4 @@
-// File: AgenticExecutor.cs  v1.1.0
+// File: AgenticExecutor.cs  v1.2.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -17,6 +17,14 @@ namespace DevMind
     {
         private readonly IAgenticHost _host;
 
+        // Repetition guard — tracks consecutive identical READ/GREP requests to break infinite loops
+        private string _lastReadKey;
+        private int _lastReadRepeatCount;
+
+        /// <summary>
+        /// Initializes a new instance of the <see cref="AgenticExecutor"/> class.
+        /// </summary>
+        /// <param name="host">The agentic host that provides side-effect operations.</param>
         public AgenticExecutor(IAgenticHost host)
         {
             _host = host;
@@ -99,10 +107,15 @@ namespace DevMind
         // ── Private helpers ───────────────────────────────────────────────────────
 
         /// <summary>
-        /// Iterates outcome.Blocks in order and executes the requested block types.
-        /// Each block is wrapped in its own try/catch so a failure in one block
-        /// does not abort the rest.
+        /// Iterates through <paramref name="outcome"/>.Blocks in order and executes
+        /// the requested block types based on the process flags. Each block is wrapped
+        /// in its own try/catch so a failure in one block does not abort the rest.
         /// </summary>
+        /// <param name="outcome">The response outcome containing blocks to execute.</param>
+        /// <param name="processFiles">Whether to process FILE blocks.</param>
+        /// <param name="processPatches">Whether to process PATCH blocks.</param>
+        /// <param name="processShell">Whether to process SHELL blocks.</param>
+        /// <returns>An <see cref="ExecutionResult"/> with aggregated results from all blocks.</returns>
         private async Task<ExecutionResult> ExecuteBlocksAsync(
             ResponseOutcome outcome,
             bool processFiles,
@@ -136,7 +149,11 @@ namespace DevMind
                         {
                             string savedPath = await _host.SaveFileAsync(block.FileName, block.Content);
                             if (!string.IsNullOrEmpty(savedPath))
+                            {
                                 result.FilesCreated.Add(savedPath);
+                                _lastReadKey = null;
+                                _lastReadRepeatCount = 0;
+                            }
                         }
                         catch (Exception ex)
                         {
@@ -154,6 +171,8 @@ namespace DevMind
                             {
                                 result.PatchesApplied++;
                                 result.PatchedPaths.Add(patchedPath);
+                                _lastReadKey = null;
+                                _lastReadRepeatCount = 0;
                             }
                             else
                             {
@@ -181,6 +200,8 @@ namespace DevMind
                             result.ShellExitCode    = exitCode;
                             result.ShellOutput      = output ?? string.Empty;
                             result.LastShellCommand = block.Command;
+                            _lastReadKey = null;
+                            _lastReadRepeatCount = 0;
                         }
                         catch (Exception ex)
                         {
@@ -194,6 +215,19 @@ namespace DevMind
                         {
                             int? grepStart = block.RangeStart > 0 ? (int?)block.RangeStart : null;
                             int? grepEnd   = block.RangeEnd   > 0 ? (int?)block.RangeEnd   : null;
+                            string grepKey = $"GREP:{block.Pattern}@{block.FileName}" +
+                                (grepStart.HasValue ? $":{grepStart}-{grepEnd}" : "");
+                            if (string.Equals(grepKey, _lastReadKey, StringComparison.OrdinalIgnoreCase))
+                                _lastReadRepeatCount++;
+                            else { _lastReadKey = grepKey; _lastReadRepeatCount = 1; }
+                            if (_lastReadRepeatCount >= 3)
+                            {
+                                _host.AppendOutput(
+                                    "[READ returned same content 3 times — possible truncation or parsing issue. " +
+                                    "Proceeding with available data. Use a different line range or try GREP to locate what you need.]\n",
+                                    OutputColor.Dim);
+                                break;
+                            }
                             // GrepFileAsync injects results into _readContext and emits status as side effects
                             await _host.GrepFileAsync(block.Pattern, block.FileName, grepStart, grepEnd);
                         }
@@ -213,6 +247,14 @@ namespace DevMind
             return result;
         }
 
+        /// <summary>
+        /// Loads files specified in <paramref name="action"/>.FilesToRead and runs
+        /// any GREP operations from <paramref name="outcome"/>.Blocks. After loading,
+        /// signals the main loop to resubmit the request with the newly loaded content.
+        /// </summary>
+        /// <param name="action">The agentic action containing files to read.</param>
+        /// <param name="outcome">The response outcome that may contain GREP blocks.</param>
+        /// <returns>An <see cref="ExecutionResult"/> with None status to trigger resubmission.</returns>
         private async Task<ExecutionResult> ExecuteLoadAndResubmitAsync(
             AgenticAction action,
             ResponseOutcome outcome)
@@ -227,6 +269,21 @@ namespace DevMind
                 int rangeStart    = readBlock?.RangeStart    ?? 0;
                 int rangeEnd      = readBlock?.RangeEnd      ?? 0;
                 bool forceFullRead = readBlock?.ForceFullRead ?? false;
+
+                string readKey = rangeStart > 0
+                    ? $"{fileName}:{rangeStart}-{rangeEnd}"
+                    : fileName;
+                if (string.Equals(readKey, _lastReadKey, StringComparison.OrdinalIgnoreCase))
+                    _lastReadRepeatCount++;
+                else { _lastReadKey = readKey; _lastReadRepeatCount = 1; }
+                if (_lastReadRepeatCount >= 3)
+                {
+                    _host.AppendOutput(
+                        "[READ returned same content 3 times — possible truncation or parsing issue. " +
+                        "Proceeding with available data. Use a different line range or try GREP to locate what you need.]\n",
+                        OutputColor.Dim);
+                    continue;
+                }
 
                 try
                 {
@@ -248,6 +305,19 @@ namespace DevMind
                     {
                         int? grepStart = block.RangeStart > 0 ? (int?)block.RangeStart : null;
                         int? grepEnd   = block.RangeEnd   > 0 ? (int?)block.RangeEnd   : null;
+                        string grepKey = $"GREP:{block.Pattern}@{block.FileName}" +
+                            (grepStart.HasValue ? $":{grepStart}-{grepEnd}" : "");
+                        if (string.Equals(grepKey, _lastReadKey, StringComparison.OrdinalIgnoreCase))
+                            _lastReadRepeatCount++;
+                        else { _lastReadKey = grepKey; _lastReadRepeatCount = 1; }
+                        if (_lastReadRepeatCount >= 3)
+                        {
+                            _host.AppendOutput(
+                                "[READ returned same content 3 times — possible truncation or parsing issue. " +
+                                "Proceeding with available data. Use a different line range or try GREP to locate what you need.]\n",
+                                OutputColor.Dim);
+                            continue;
+                        }
                         // GrepFileAsync injects results into _readContext and emits status as side effects
                         await _host.GrepFileAsync(block.Pattern, block.FileName, grepStart, grepEnd);
                     }
