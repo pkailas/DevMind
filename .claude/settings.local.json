@@ -79,7 +79,8 @@
       "Bash(dotnet msbuild:*)",
       "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Professional/MSBuild/Current/Bin/MSBuild.exe\" DevMind.csproj /p:Configuration=Release /v:minimal)",
       "Bash(cmd.exe /c \"\"\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Professional\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\"\" C:\\\\Users\\\\pkailas.KAILAS\\\\source\\\\repos\\\\DevMind\\\\DevMind.csproj /p:Configuration=Release /v:minimal\")",
-      "Bash(echo \"EXIT:$?\")"
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Professional/MSBuild/Current/Bin/MSBuild.exe\" DevMind.sln /p:Configuration=Release /t:Build /v:minimal)"
     ]
   }
 }

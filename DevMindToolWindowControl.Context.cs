@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.Context.cs  v5.13
+// File: DevMindToolWindowControl.Context.cs  v5.15
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -361,6 +361,9 @@ namespace DevMind
                     $"{header}\n```\n{numbered.ToString().TrimEnd('\r', '\n')}\n```\n\n";
 
                 AppendOutput($"[READ] {fileNameOnly}:{clampedStart}-{clampedEnd} ({clampedEnd - clampedStart + 1} lines){(clamped ? " [clamped]" : "")}\n", OutputColor.Success);
+
+                // Display content for user-initiated reads
+                AppendOutput(numbered.ToString(), OutputColor.Dim);
             }
             catch (Exception ex)
             {
@@ -387,10 +390,12 @@ namespace DevMind
         {
             var results = new List<string>();
             string currentType = null;
+            var rawLines = content.Split('\n');
 
-            foreach (var rawLine in content.Split('\n'))
+            for (int i = 0; i < rawLines.Length; i++)
             {
-                string line = rawLine.TrimEnd('\r').Trim();
+                int lineNumber = i + 1;
+                string line = rawLines[i].TrimEnd('\r').Trim();
 
                 // Detect class/struct/interface/enum declarations
                 var typeMatch = Regex.Match(line,
@@ -398,7 +403,7 @@ namespace DevMind
                 if (typeMatch.Success)
                 {
                     currentType = typeMatch.Value;
-                    results.Add(currentType);
+                    results.Add($"{lineNumber,6}: {currentType}");
                     continue;
                 }
 
@@ -418,7 +423,7 @@ namespace DevMind
                     string sig = methodMatch.Value.Trim();
                     if (sig.Length > 100) sig = sig.Substring(0, 100) + "...";
                     string indent = currentType != null ? "  " : "";
-                    results.Add(indent + sig);
+                    results.Add($"{lineNumber,6}: {indent}{sig}");
                     continue;
                 }
 
@@ -433,7 +438,7 @@ namespace DevMind
                     if (sig.Contains("=>")) sig = sig.Substring(0, sig.IndexOf("=>")).Trim();
                     if (sig.Contains("{")) sig = sig.Substring(0, sig.IndexOf("{")).Trim();
                     string indent = currentType != null ? "  " : "";
-                    results.Add(indent + sig);
+                    results.Add($"{lineNumber,6}: {indent}{sig}");
                 }
             }
             return results;
