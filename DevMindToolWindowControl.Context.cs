@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.Context.cs  v5.12
+// File: DevMindToolWindowControl.Context.cs  v5.13
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;

@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v5.44
+// File: LlmClient.cs  v5.45
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -1365,7 +1365,7 @@ namespace DevMind
 
                         if (pendingDoc != null)
                         {
-                            sb.AppendLine($"L{pendingDocLine}: {indent}/// {pendingDoc}");
+                            sb.AppendLine($"{pendingDocLine,6}: {indent}/// {pendingDoc}");
                             pendingDoc = null;
                         }
 
@@ -1382,7 +1382,7 @@ namespace DevMind
                             sig = t;
                         }
 
-                        sb.AppendLine($"L{lineNumber}: {indent}{sig}");
+                        sb.AppendLine($"{lineNumber,6}: {indent}{sig}");
                     }
                     else
                     {

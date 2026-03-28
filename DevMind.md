@@ -1,4 +1,4 @@
-# DevMind Project Context  v1.1
+# DevMind Project Context  v1.2
 
 ## Platform & Constraints
 - VSIX (.NET Framework net48), C# 8.0 only — no C# 9+ syntax (no records, no file-scoped namespaces, no collection expressions, no init-only setters, no top-level statements, no primary constructors)
@@ -86,6 +86,28 @@ READ FileName.cs:51-100
 ```
 
 Violating this rule causes hallucinated conclusions ("all methods are documented") that contradict actual file content.
+
+### Outline-Guided Navigation
+When you READ a large file and receive an outline, use the line numbers to target your next READ.
+
+BAD — sequential scanning:
+  READ LlmClient.cs:1-200
+  READ LlmClient.cs:201-400
+  READ LlmClient.cs:401-600
+
+GOOD — outline-guided:
+  READ LlmClient.cs              → outline shows "  587: private void TrimHistoryToFit("
+  READ LlmClient.cs:580-620      → targeted read around the method you need
+  PATCH LlmClient.cs             → apply the change
+
+If the outline doesn't show what you need, use GREP to find the exact line, then READ a targeted range around it.
+
+GOOD — GREP-guided:
+  GREP: "TrimHistoryToFit" LlmClient.cs  → line 587
+  READ LlmClient.cs:580-620
+  PATCH LlmClient.cs
+
+Never scan a file in sequential 200-line chunks. Always use outline line numbers or GREP first.
 
 ### GREP — Search File for Pattern
 ```
