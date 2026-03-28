@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.Shell.cs  v5.4
+// File: DevMindToolWindowControl.Shell.cs  v5.5
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -121,10 +121,11 @@ namespace DevMind
             }
 
             bool usePowerShell = IsPowerShellAvailable();
-            string shell = usePowerShell ? "powershell.exe" : "cmd.exe";
+            string shell     = usePowerShell ? "powershell.exe" : "cmd.exe";
+            string sanitized = SanitizeShellCommand(command);
             string args = usePowerShell
-                ? $"-NoProfile -NonInteractive -Command \"{command.Replace("\"", "\\\"")}\""
-                : $"/c \"{command}\"";
+                ? $"-NoProfile -NonInteractive -Command \"{sanitized.Replace("\"", "\\\"")}\""
+                : $"/c \"{sanitized}\"";
 
             SetInputEnabled(false);
             StatusText.Text = "Running...";
@@ -203,13 +204,64 @@ namespace DevMind
             catch { return false; }
         }
 
+        /// <summary>
+        /// Replaces newlines (and tabs) inside quoted strings with a single space, collapsing
+        /// runs of whitespace to one space. Content outside quotes is passed through unchanged.
+        /// Prevents PowerShell "missing string terminator" errors from multi-line commit messages.
+        /// Handles both single- and double-quoted strings; the closing quote must match the opener.
+        /// </summary>
+        internal static string SanitizeShellCommand(string command)
+        {
+            if (string.IsNullOrEmpty(command)) return command;
+
+            var  sb           = new StringBuilder(command.Length);
+            char quoteChar    = '\0'; // '\0' = not inside a quoted string
+            bool lastWasSpace = false;
+
+            foreach (char c in command)
+            {
+                if (quoteChar == '\0')
+                {
+                    // Outside quotes — pass through unchanged; track opening quote.
+                    if (c == '"' || c == '\'')
+                        quoteChar = c;
+                    sb.Append(c);
+                }
+                else if (c == quoteChar)
+                {
+                    // Matching closing quote — exit quoted context.
+                    quoteChar    = '\0';
+                    lastWasSpace = false;
+                    sb.Append(c);
+                }
+                else if (c == '\r' || c == '\n' || c == '\t')
+                {
+                    // Newline / tab inside quoted string — replace with space, collapse runs.
+                    if (!lastWasSpace)
+                    {
+                        sb.Append(' ');
+                        lastWasSpace = true;
+                    }
+                    // else: skip to collapse consecutive whitespace
+                }
+                else
+                {
+                    sb.Append(c);
+                    lastWasSpace = (c == ' ');
+                }
+            }
+
+            return sb.ToString();
+        }
+
         private async Task<(string output, int exitCode)> RunShellCommandCaptureAsync(string command)
         {
             bool usePowerShell = IsPowerShellAvailable();
-            string shell = usePowerShell ? "powershell.exe" : "cmd.exe";
+            string shell     = usePowerShell ? "powershell.exe" : "cmd.exe";
+            string sanitized = SanitizeShellCommand(command);
             string args = usePowerShell
-                ? $"-NoProfile -NonInteractive -Command \"{command.Replace("\"", "\\\"")}\""
-                : $"/c \"{command}\"";
+                ? $"-NoProfile -NonInteractive -Command \"{sanitized.Replace("\"", "\\\"")}\""
+                : $"/c \"{sanitized}\"";
 
             try
             {
