@@ -80,6 +80,7 @@ ResponseBlock
 ├── DeleteBlock      — DELETE directive → IAgenticHost.DeleteFileAsync()
 ├── RenameBlock      — RENAME directive → IAgenticHost.RenameFileAsync()
 ├── DiffBlock        — DIFF directive → IAgenticHost.GetFileDiffAsync()
+├── TestBlock        — TEST directive → IAgenticHost.RunTestsAsync()
 ├── Scratchpad       — SCRATCHPAD: block → IAgenticHost.UpdateScratchpad()
 └── DoneBlock        — DONE directive → explicit task completion signal, stops agentic loop
 ```
@@ -259,6 +260,19 @@ DIFF filename.cs
 - Output capped at 200 lines with a truncation notice if exceeded.
 - Information-gathering only — same category as READ/GREP/FIND. A DIFF-only response triggers `IsReadOnly → LoadAndResubmit`.
 - Use DIFF after multiple PATCHes to verify cumulative changes before confirming task completion.
+
+### TEST — Run Tests
+```
+TEST ProjectName.csproj
+TEST ProjectName.csproj ClassName.MethodName
+TEST ProjectName.csproj --filter "FullyQualifiedName~SomeTest"
+```
+- Runs `dotnet test --no-build --verbosity quiet` and parses the TRX output into a compact summary.
+- Output format: `TEST RESULTS: N passed, M failed, K skipped (total, Xs)` plus per-failed-test details (name, duration, error message, capped at 10 failures).
+- Only failed tests show details; passed/skipped get summary counts only.
+- TEST is an action (not read-only) — result is fed back into the agentic loop via `ShellOutput`/`ShellExitCode` so the model can fix failing tests and re-run.
+- Falls back to raw console output if TRX parsing fails.
+- Project resolution: bare name (e.g. `MyProject`) is searched for as `MyProject.csproj` in the solution directory.
 
 ### DONE — Explicit Task Completion
 ```
@@ -480,5 +494,5 @@ Squeeze runs before the hard-trim (`TrimHistoryToFit`) and after each agentic tu
 8. ~~**RENAME directive**~~ — **Implemented**. `RENAME OldFile.cs NewFile.cs`. Renames file on disk, closes old editor tab, opens new file. Does not update project references (separate concern).
 9. ~~**DELETE directive**~~ — **Implemented v6.0.65**. `DELETE filename.cs`. Removes file from disk, closes open editor tab. Does not update `.csproj` references (separate concern).
 10. ~~**FIND directive**~~ — **Implemented v6.0.64**. `FIND: "pattern" *.cs`. Cross-file search by glob pattern. Returns filename + line number + match for each hit across all matching files, capped at 100. Solves the "where is this used?" problem without sequential READs.
-11. **TEST directive** — `TEST ProjectName.csproj` or `TEST ClassName.MethodName`. Structured test execution with per-test pass/fail results instead of raw console output. Cheaper on context than SHELL: dotnet test.
+11. ~~**TEST directive**~~ — **Implemented**. `TEST ProjectName.csproj [filter]`. Runs `dotnet test` and returns a compact summary: pass/fail/skip counts, failed test names + error messages (capped at 10). Much cheaper on context than `SHELL: dotnet test`. Feeds back into the agentic loop so the model can fix failing tests.
 12. ~~**DIFF directive**~~ — **Implemented**. `DIFF Program.cs`. Shows changes since conversation start as a unified-style diff. Uses LCS-based algorithm for small files, positional fallback for large files. Helps the model verify cumulative modifications across multiple agentic turns.

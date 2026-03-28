@@ -1,4 +1,4 @@
-// File: AgenticActionResolver.cs  v1.3.0
+// File: AgenticActionResolver.cs  v1.4.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System.Collections.Generic;
@@ -31,10 +31,11 @@ namespace DevMind
                 return AgenticAction.Stop("No response.");
 
             // ── Rule 1: DONE signal (only when no actionable blocks present) ─────
-            // If the response also contains patches/files/shell/delete, let the executor
+            // If the response also contains patches/files/shell/delete/test, let the executor
             // handle those first; the subsequent iteration will see a clean DONE.
             if (outcome.IsDone && !outcome.HasPatches && !outcome.HasFileCreation
-                && !outcome.HasShellCommands && !outcome.HasDeleteRequests && !outcome.HasRenameRequests)
+                && !outcome.HasShellCommands && !outcome.HasDeleteRequests && !outcome.HasRenameRequests
+                && !outcome.HasTestRequests)
                 return AgenticAction.Stop("Task complete.");
 
             // ── Rule 2: READ/GREP-only response → auto-load and resubmit ────────
@@ -53,8 +54,8 @@ namespace DevMind
             if (outcome.HasFileCreation)
                 return new AgenticAction { Type = ActionType.CreateFile };
 
-            // ── Rule 3b: DELETE/RENAME blocks — execute and allow LLM to follow up ─
-            if ((outcome.HasDeleteRequests || outcome.HasRenameRequests) && !outcome.HasPatches && !outcome.HasShellCommands)
+            // ── Rule 3b: DELETE/RENAME/TEST blocks — execute and allow LLM to follow up ─
+            if ((outcome.HasDeleteRequests || outcome.HasRenameRequests || outcome.HasTestRequests) && !outcome.HasPatches && !outcome.HasShellCommands)
                 return new AgenticAction { Type = ActionType.ApplyAndBuild };
 
             // ── Rule 4: Patches and/or shell commands ────────────────────────────

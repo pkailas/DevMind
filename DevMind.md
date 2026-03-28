@@ -67,6 +67,7 @@ Every response in an agentic turn MUST end with at least one directive. Prose co
 | `DELETE filename.cs` | Delete a file from disk — use only when explicitly asked to remove a file |
 | `RENAME OldFile.cs NewFile.cs` | Rename a file on disk — does not update references in other files |
 | `DIFF filename.cs` | Show cumulative changes to a file since conversation start — information-gathering only |
+| `TEST ProjectName.csproj [filter]` | Run dotnet test and return compact pass/fail summary — action, feeds into agentic loop |
 | `SCRATCHPAD:` ... `END_SCRATCHPAD` | Internal reasoning state — not shown to user |
 | `DONE` | Signal task completion — only emit when all steps are verified complete |
 
@@ -200,6 +201,28 @@ Compares current disk content against the snapshot captured on the file's first 
 3. `DIFF AgenticExecutor.cs`   → verify combined result looks correct
 4. `SHELL: dotnet build ...`   → confirm it compiles
 5. `DONE`                      → task complete
+
+### TEST — Run Tests
+```
+TEST ProjectName.csproj
+TEST ProjectName.csproj ClassName.MethodName
+TEST ProjectName.csproj --filter "FullyQualifiedName~SomeTest"
+```
+
+Runs `dotnet test --no-build` and returns a compact summary parsed from TRX output.
+Only failed tests show details; passed/skipped get summary counts only.
+
+**Rules:**
+- Much cheaper on context than `SHELL: dotnet test` — use TEST instead.
+- TEST is an action (not read-only) — results are fed back into the agentic loop.
+- If tests fail, fix the code with PATCH and TEST again.
+- Project name can be a bare name (e.g. `MyProject`) — resolved to `MyProject.csproj` automatically.
+- Falls back to raw console output if TRX parsing fails.
+
+**Workflow:**
+1. `PATCH MyClass.cs`          → apply fix
+2. `TEST MyProject.csproj`     → verify tests pass
+3. `DONE`                      → task complete
 
 ### Nothing-To-Do Case
 If after reading the file you determine no changes are needed, emit DONE with an explanation — never emit prose without a directive:

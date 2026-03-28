@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v5.0.58
+// File: DevMindToolWindowControl.xaml.cs  v5.0.59
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -586,6 +586,29 @@ namespace DevMind
                 return;
             }
 
+            if (text.StartsWith("TEST ", StringComparison.OrdinalIgnoreCase) && !text.Contains('\n'))
+            {
+                AppendOutput($"\n> {text}\n", OutputColor.Input);
+                AppendNewLine();
+                string testArgs = text.Substring("TEST ".Length).Trim();
+                if (!string.IsNullOrEmpty(testArgs))
+                {
+                    string[] testParts = testArgs.Split(new[] { ' ', '\t' }, 2, StringSplitOptions.RemoveEmptyEntries);
+                    string testProject = testParts[0];
+                    string testFilter  = testParts.Length > 1 ? testParts[1] : null;
+                    string testResult  = await ((IAgenticHost)this).RunTestsAsync(testProject, testFilter);
+                    bool testAllPassed = testResult != null && !testResult.Contains("FAILED:") && !testResult.Contains("failed,");
+                    AppendOutput(testResult + "\n", testAllPassed ? OutputColor.Success : OutputColor.Error);
+                }
+                else
+                {
+                    AppendOutput("TEST syntax: TEST ProjectName.csproj [filter]\n", OutputColor.Error);
+                }
+                InputTextBox.Text = "";
+                SetInputEnabled(true);
+                return;
+            }
+
             // Process consecutive READ lines from the top of the input
             {
                 var allLines = text.Split('\n');
@@ -778,6 +801,14 @@ namespace DevMind
                 "Use DIFF to review cumulative modifications before confirming task completion.\n" +
                 "Use DIFF after multiple PATCHes to verify the overall result is correct.\n" +
                 "DIFF is information-gathering only — it does not modify files.\n\n" +
+                "### TEST — Run Tests\n" +
+                "TEST ProjectName.csproj\n" +
+                "TEST ProjectName.csproj ClassName.MethodName\n" +
+                "TEST ProjectName.csproj --filter \"FullyQualifiedName~SomeTest\"\n\n" +
+                "Runs dotnet test and returns structured pass/fail results.\n" +
+                "Output is compact — only failed tests show details. Much cheaper than SHELL: dotnet test.\n" +
+                "Use TEST after making changes to verify correctness.\n" +
+                "If tests fail, fix the code with PATCH and TEST again.\n\n" +
                 "## Build Verification\n" +
                 $"After ANY code change emit: SHELL: {buildCommand}\n\n" +
                 "## After PATCH\n" +
@@ -1636,6 +1667,24 @@ namespace DevMind
                     else
                     {
                         AppendOutput("DIFF syntax: DIFF filename.cs\n", OutputColor.Error);
+                    }
+                }
+                else if (block.StartsWith("TEST ", StringComparison.OrdinalIgnoreCase) && !block.Contains('\n'))
+                {
+                    AppendOutput($"[BATCH] Direct execute: {block.Trim()}\n", OutputColor.Dim);
+                    string batchTestArgs = block.Substring("TEST ".Length).Trim();
+                    if (!string.IsNullOrEmpty(batchTestArgs))
+                    {
+                        string[] batchTestParts = batchTestArgs.Split(new[] { ' ', '\t' }, 2, StringSplitOptions.RemoveEmptyEntries);
+                        string batchTestProject = batchTestParts[0];
+                        string batchTestFilter  = batchTestParts.Length > 1 ? batchTestParts[1] : null;
+                        string batchTestResult  = await ((IAgenticHost)this).RunTestsAsync(batchTestProject, batchTestFilter);
+                        bool batchTestPassed    = batchTestResult != null && !batchTestResult.Contains("FAILED:") && !batchTestResult.Contains("failed,");
+                        AppendOutput(batchTestResult + "\n", batchTestPassed ? OutputColor.Success : OutputColor.Error);
+                    }
+                    else
+                    {
+                        AppendOutput("TEST syntax: TEST ProjectName.csproj [filter]\n", OutputColor.Error);
                     }
                 }
                 else

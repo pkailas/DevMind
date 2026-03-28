@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.AgenticHost.cs  v1.6.0
+// File: DevMindToolWindowControl.AgenticHost.cs  v1.7.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -10,6 +10,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Xml.Linq;
 
 namespace DevMind
 {
@@ -535,6 +536,178 @@ namespace DevMind
             AppendOutput($"[DIFF] {filename}: changes shown ({oldLines.Length} → {newLines.Length} lines)\n", OutputColor.Dim);
 
             return diffResult;
+        }
+
+        // ── IAgenticHost.RunTestsAsync ────────────────────────────────────────────
+
+        async Task<string> IAgenticHost.RunTestsAsync(string project, string filter)
+        {
+            const int MaxFailedTests = 10;
+
+            // Resolve project path — if it looks like a bare name (no path separators, no .csproj ext),
+            // search for a matching .csproj in the solution/working directory.
+            string resolvedProject = project;
+            bool looksLikeBare = !project.Contains('/') && !project.Contains('\\');
+            string projectDir = null;
+
+            try
+            {
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                var dte = await VS.GetServiceAsync<EnvDTE.DTE, EnvDTE.DTE>();
+                var activeProject = dte?.ActiveDocument?.ProjectItem?.ContainingProject;
+                if (activeProject != null)
+                {
+                    string projFile = activeProject.FullName;
+                    if (!string.IsNullOrEmpty(projFile))
+                        projectDir = Path.GetDirectoryName(projFile);
+                }
+            }
+            catch { }
+
+            string searchDir = projectDir ?? _terminalWorkingDir;
+
+            if (looksLikeBare)
+            {
+                // Search for <project>.csproj or just project if it already ends with .csproj
+                string searchName = project.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase)
+                    ? project : project + ".csproj";
+                try
+                {
+                    string[] found = Directory.GetFiles(searchDir, searchName, SearchOption.AllDirectories);
+                    if (found.Length > 0)
+                        resolvedProject = found[0];
+                }
+                catch { }
+            }
+            else if (!Path.IsPathRooted(resolvedProject))
+            {
+                resolvedProject = Path.Combine(searchDir, resolvedProject.Replace('/', Path.DirectorySeparatorChar));
+            }
+
+            // Determine a unique TRX output path so we can parse it after the run
+            string trxDir  = Path.Combine(Path.GetTempPath(), "DevMind", "TestResults");
+            string trxFile = Path.Combine(trxDir, "devmind_test.trx");
+            try { Directory.CreateDirectory(trxDir); } catch { }
+            // Remove stale TRX from a previous run
+            try { if (File.Exists(trxFile)) File.Delete(trxFile); } catch { }
+
+            // Build command
+            string quotedProject = resolvedProject.Contains(' ')
+                ? $"\"{resolvedProject}\"" : resolvedProject;
+            string cmd = $"dotnet test {quotedProject} --no-build --verbosity quiet" +
+                         $" --logger \"trx;LogFileName={trxFile}\"";
+            if (!string.IsNullOrWhiteSpace(filter))
+                cmd += $" --filter \"{filter.Trim('\"')}\"";
+
+            AppendOutput($"[TEST] > {cmd}\n", OutputColor.Dim);
+            var (rawOutput, exitCode) = await RunShellCommandCaptureAsync(cmd);
+
+            // Try TRX parsing first
+            try
+            {
+                if (File.Exists(trxFile))
+                {
+                    string trxContent = File.ReadAllText(trxFile);
+                    string summary = ParseTrxSummary(trxContent, MaxFailedTests);
+                    try { File.Delete(trxFile); } catch { }
+                    return summary;
+                }
+            }
+            catch { }
+
+            // Fallback: return raw console output
+            return string.IsNullOrWhiteSpace(rawOutput)
+                ? $"TEST: no output (exit code {exitCode})"
+                : rawOutput;
+        }
+
+        /// <summary>
+        /// Parses a TRX XML file and returns a compact test results summary.
+        /// Only failed tests show details; passed/skipped get summary counts only.
+        /// </summary>
+        private static string ParseTrxSummary(string trxXml, int maxFailedTests)
+        {
+            // TRX files use the VS test results namespace
+            XDocument doc = XDocument.Parse(trxXml);
+            XNamespace ns = "http://microsoft.com/schemas/VisualStudio/TeamTest/2010";
+
+            // Counters element: total, passed, failed, etc.
+            var counters = doc.Descendants(ns + "Counters").FirstOrDefault();
+            int total   = counters != null ? (int?)counters.Attribute("total")   ?? 0 : 0;
+            int passed  = counters != null ? (int?)counters.Attribute("passed")  ?? 0 : 0;
+            int failed  = counters != null ? (int?)counters.Attribute("failed")  ?? 0 : 0;
+            int skipped = total - passed - failed;
+            if (skipped < 0) skipped = 0;
+
+            // Duration from TestRun summary
+            double totalSecs = 0;
+            var runInfos = doc.Descendants(ns + "Times").FirstOrDefault();
+            if (runInfos != null)
+            {
+                string start  = (string)runInfos.Attribute("start");
+                string finish = (string)runInfos.Attribute("finish");
+                if (DateTime.TryParse(start, out DateTime s) && DateTime.TryParse(finish, out DateTime f))
+                    totalSecs = (f - s).TotalSeconds;
+            }
+
+            string durationStr = totalSecs > 0 ? $"{totalSecs:0.#}s" : "";
+
+            var sb = new System.Text.StringBuilder();
+            sb.Append($"TEST RESULTS: {passed} passed, {failed} failed, {skipped} skipped ({total} total");
+            if (!string.IsNullOrEmpty(durationStr)) sb.Append($", {durationStr}");
+            sb.AppendLine(")");
+
+            if (failed > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine("FAILED:");
+
+                var unitTestResults = doc.Descendants(ns + "UnitTestResult")
+                    .Where(r => string.Equals((string)r.Attribute("outcome"), "Failed", StringComparison.OrdinalIgnoreCase))
+                    .Take(maxFailedTests)
+                    .ToList();
+
+                foreach (var tr in unitTestResults)
+                {
+                    string name = (string)tr.Attribute("testName") ?? "Unknown";
+                    string dur  = (string)tr.Attribute("duration") ?? "";
+                    // duration is like "00:00:00.0500000" — convert to seconds
+                    string durStr = "";
+                    if (TimeSpan.TryParse(dur, out TimeSpan durTs))
+                        durStr = $" ({durTs.TotalSeconds:0.##}s)";
+
+                    sb.AppendLine($"  {name}{durStr}");
+
+                    // Error message from Output/ErrorInfo/Message
+                    var errorMsg = tr.Descendants(ns + "Message").FirstOrDefault()?.Value;
+                    if (!string.IsNullOrWhiteSpace(errorMsg))
+                    {
+                        // Trim to first 3 lines to keep output compact
+                        string[] errorLines = errorMsg.Trim().Split('\n');
+                        int showLines = Math.Min(errorLines.Length, 3);
+                        for (int i = 0; i < showLines; i++)
+                            sb.AppendLine($"    {errorLines[i].TrimEnd()}");
+                    }
+                }
+
+                if (failed > maxFailedTests)
+                    sb.AppendLine($"  ... and {failed - maxFailedTests} more failed test(s) (truncated)");
+            }
+
+            if (passed > 0)
+            {
+                sb.AppendLine();
+                string passedDur = totalSecs > 0 && failed == 0 ? $" ({totalSecs:0.#}s)" : "";
+                sb.AppendLine($"PASSED: {passed} test{(passed == 1 ? "" : "s")}{passedDur}");
+            }
+
+            if (skipped > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine($"SKIPPED: {skipped} test{(skipped == 1 ? "" : "s")}");
+            }
+
+            return sb.ToString().TrimEnd('\r', '\n');
         }
 
         // ── Shared helper: file-not-found message with project file listing ──────

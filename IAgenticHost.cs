@@ -1,4 +1,4 @@
-// File: IAgenticHost.cs  v1.5.0
+// File: IAgenticHost.cs  v1.6.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System.Threading.Tasks;
@@ -113,5 +113,13 @@ namespace DevMind
         /// "no changes" message. Caps output at 200 lines.
         /// </summary>
         Task<string> GetFileDiffAsync(string filename);
+
+        /// <summary>
+        /// Runs dotnet test on the specified project with an optional filter.
+        /// Parses TRX output into a compact summary: total/pass/fail/skip counts,
+        /// plus details for each failed test (name, duration, error message).
+        /// Falls back to raw console output if TRX parsing fails.
+        /// </summary>
+        Task<string> RunTestsAsync(string project, string filter);
     }
 }

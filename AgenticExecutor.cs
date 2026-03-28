@@ -1,4 +1,4 @@
-// File: AgenticExecutor.cs  v1.6.0
+// File: AgenticExecutor.cs  v1.7.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -338,6 +338,29 @@ namespace DevMind
                         {
                             result.Errors.Add(ex.Message);
                             _host.AppendOutput($"[DIFF ERROR] {block.FileName}: {ex.Message}\n", OutputColor.Error);
+                        }
+                        break;
+
+                    case BlockType.Test:
+                        try
+                        {
+                            string testSummary = await _host.RunTestsAsync(block.TestProject, block.TestFilter);
+                            bool allPassed = testSummary != null
+                                && !testSummary.Contains("FAILED:")
+                                && !testSummary.Contains("failed,");
+                            _host.AppendOutput(testSummary + "\n",
+                                allPassed ? OutputColor.Success : OutputColor.Error);
+                            // Inject results into shell context so the agentic loop sees them
+                            result.ShellOutput      = testSummary ?? string.Empty;
+                            result.ShellExitCode    = allPassed ? 0 : 1;
+                            result.LastShellCommand = $"TEST {block.TestProject}";
+                            _lastReadKey = null;
+                            _lastReadRepeatCount = 0;
+                        }
+                        catch (Exception ex)
+                        {
+                            result.Errors.Add(ex.Message);
+                            _host.AppendOutput($"[TEST ERROR] {block.TestProject}: {ex.Message}\n", OutputColor.Error);
                         }
                         break;
 

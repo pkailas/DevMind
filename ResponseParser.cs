@@ -1,4 +1,4 @@
-// File: ResponseParser.cs  v5.7.0
+// File: ResponseParser.cs  v5.8.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -8,7 +8,7 @@ using System.Text.RegularExpressions;
 
 namespace DevMind
 {
-    public enum BlockType { Text, File, Patch, Shell, ReadRequest, Scratchpad, Done, Grep, Find, Delete, Rename, Diff }
+    public enum BlockType { Text, File, Patch, Shell, ReadRequest, Scratchpad, Done, Grep, Find, Delete, Rename, Diff, Test }
 
     public class ResponseBlock
     {
@@ -23,6 +23,8 @@ namespace DevMind
         public string GlobPattern { get; set; }  // for Find — glob file pattern (e.g. *.cs, Services/*.cs)
         public string RenameFrom  { get; set; }  // for Rename — source filename
         public string RenameTo    { get; set; }  // for Rename — destination filename
+        public string TestProject { get; set; }  // for Test — project file path or name
+        public string TestFilter  { get; set; }  // for Test — optional filter string (nullable)
     }
 
     public static class ResponseParser
@@ -63,6 +65,8 @@ namespace DevMind
         private static readonly Regex _renameLine     = new Regex(@"^RENAME\s+(\S+)\s+(\S+)\s*$",  RegexOptions.Compiled | RegexOptions.IgnoreCase);
         // Matches DIFF filename
         private static readonly Regex _diffLine        = new Regex(@"^DIFF\s+(\S+\.\S+)\s*$",       RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        // Matches TEST project [filter]  — project is first token, everything after is optional filter
+        private static readonly Regex _testLine        = new Regex(@"^TEST\s+(\S+)(?:\s+(.+))?\s*$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
         // Markdown fence: ```lang or ```
         private static readonly Regex _mdFence        = new Regex(@"^```",                         RegexOptions.Compiled);
 
@@ -366,6 +370,20 @@ namespace DevMind
                 return;
             }
 
+            // TEST <project> [filter]
+            m = _testLine.Match(line);
+            if (m.Success)
+            {
+                FlushText(blocks, textBuf);
+                blocks.Add(new ResponseBlock
+                {
+                    Type        = BlockType.Test,
+                    TestProject = m.Groups[1].Value,
+                    TestFilter  = m.Groups[2].Success ? m.Groups[2].Value.Trim() : null
+                });
+                return;
+            }
+
             // DONE
             if (_doneLine.IsMatch(line))
             {
@@ -526,6 +544,19 @@ namespace DevMind
 
             // RENAME — implicit termination
             if (_renameLine.IsMatch(line))
+            {
+                EmitFileBlock(blocks, currentFileName,
+                              fileBuf.ToString().TrimEnd('\r', '\n', ' '));
+                fileBuf.Clear();
+                state = State.TopLevel;
+                ProcessTopLevel(line, blocks, textBuf, ref lastShellCommand,
+                                hasActionableBlocks, ref state, ref fileBlockName,
+                                ref patchFileName, patchBuf, ref patchSec, scratchBuf);
+                return;
+            }
+
+            // TEST — implicit termination
+            if (_testLine.IsMatch(line))
             {
                 EmitFileBlock(blocks, currentFileName,
                               fileBuf.ToString().TrimEnd('\r', '\n', ' '));
@@ -765,6 +796,17 @@ namespace DevMind
                 return;
             }
 
+            // TEST — implicit termination
+            if (_testLine.IsMatch(line))
+            {
+                EmitScratchpadBlock(blocks, scratchBuf);
+                state = State.TopLevel;
+                ProcessTopLevel(line, blocks, textBuf, ref lastShellCommand,
+                                hasActionableBlocks, ref state, ref fileBlockName,
+                                ref patchFileName, patchBuf, ref patchSec, scratchBuf);
+                return;
+            }
+
             // Content line
             scratchBuf.AppendLine(line);
         }
@@ -897,7 +939,7 @@ namespace DevMind
                 if (_patchEnd.IsMatch(line))   { inPatch = false; continue; }
                 if (inPatch) continue;
 
-                if (_patchStart.IsMatch(line) || _fileStart.IsMatch(line) || _shellLine.IsMatch(line) || _deleteLine.IsMatch(line) || _renameLine.IsMatch(line))
+                if (_patchStart.IsMatch(line) || _fileStart.IsMatch(line) || _shellLine.IsMatch(line) || _deleteLine.IsMatch(line) || _renameLine.IsMatch(line) || _testLine.IsMatch(line))
                     return true;
             }
             return false;
