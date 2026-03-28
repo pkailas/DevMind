@@ -77,6 +77,7 @@ ResponseBlock
 ├── ReadRequest      — model asking to READ a file → IAgenticHost.LoadFileContentAsync()
 ├── GrepBlock        — GREP: directive → IAgenticHost.GrepFileAsync()
 ├── FindBlock        — FIND: directive → IAgenticHost.FindInFilesAsync()
+├── DeleteBlock      — DELETE directive → IAgenticHost.DeleteFileAsync()
 ├── Scratchpad       — SCRATCHPAD: block → IAgenticHost.UpdateScratchpad()
 └── DoneBlock        — DONE directive → explicit task completion signal, stops agentic loop
 ```
@@ -222,6 +223,17 @@ FIND: "pattern" Services/*.cs
 - Optional `:start-end` line range restricts the search window within each matched file.
 - Results injected into `_readContext` (same as GREP). FIND-only responses trigger auto-resubmit via `IsReadOnly`.
 - Use FIND when you need to know where something is used across the project. Use GREP when you already know which file to search.
+
+### DELETE — Remove File
+```
+DELETE filename.cs
+```
+- Deletes a file from disk. Does **not** modify `.csproj` or other project references.
+- If the file is open in the VS editor, it is closed (without saving) before deletion.
+- If the file is not found, returns a list of `*.cs` files in the project directory.
+- Resets the repetition guard (same as PATCH/SHELL) — treated as a mutating action.
+- Direct user input (`DELETE filename`) prompts a Yes/No confirmation dialog before deleting.
+- In batch input (`[WAIT]` separated) and agentic loop, deletion is auto-confirmed.
 
 ### DONE — Explicit Task Completion
 ```
@@ -441,7 +453,7 @@ Squeeze runs before the hard-trim (`TrimHistoryToFit`) and after each agentic tu
 6. **Smart READ targeting** — Model frequently does linear search through large files in 200-line increments (e.g., five sequential READs to scan a 1,473-line file), consuming excessive context. Investigate system prompt hints or outline-guided targeting so the model reads the relevant line range on the first try instead of brute-force scanning.
 7. ~~**GREP directive**~~ — **Implemented v6.0.34**. Single-file substring search with line numbers. Eliminates sequential READ scanning. Model does one GREP to find the target, then one targeted READ for context.
 8. **RENAME directive** — `RENAME OldFile.cs NewFile.cs`. Handles file system move, project reference update, and VS editor refresh in one verb. Replaces the current workaround of FILE (copy) + SHELL (delete) + manual project fixup.
-9. **DELETE directive** — `DELETE TestFile.cs`. Removes file from disk and project. Replaces SHELL-based deletion which doesn't handle project references or editor cleanup.
+9. ~~**DELETE directive**~~ — **Implemented v6.0.65**. `DELETE filename.cs`. Removes file from disk, closes open editor tab. Does not update `.csproj` references (separate concern).
 10. ~~**FIND directive**~~ — **Implemented v6.0.64**. `FIND: "pattern" *.cs`. Cross-file search by glob pattern. Returns filename + line number + match for each hit across all matching files, capped at 100. Solves the "where is this used?" problem without sequential READs.
 11. **TEST directive** — `TEST ProjectName.csproj` or `TEST ClassName.MethodName`. Structured test execution with per-test pass/fail results instead of raw console output. Cheaper on context than SHELL: dotnet test.
 12. **DIFF directive** — `DIFF Program.cs`. Shows changes since last clean state or conversation start. Helps the model track cumulative modifications across multiple agentic turns.

@@ -64,6 +64,7 @@ Every response in an agentic turn MUST end with at least one directive. Prose co
 | `READ FileName.cs` | Load a file or line range into context |
 | `GREP: "pattern" file` | Search file for pattern matches — Information-gathering, same as READ |
 | `FIND: "pattern" *.cs` | Cross-file search by glob — returns filename:line: content for each match |
+| `DELETE filename.cs` | Delete a file from disk — use only when explicitly asked to remove a file |
 | `SCRATCHPAD:` ... `END_SCRATCHPAD` | Internal reasoning state — not shown to user |
 | `DONE` | Signal task completion — only emit when all steps are verified complete |
 
@@ -128,6 +129,19 @@ Returns matching lines with absolute line numbers. Use GREP to locate code befor
 - Pattern must be in double quotes.
 - Results capped at 50 matches — narrow your pattern or add a line range if truncated.
 - Prefer GREP + targeted READ over sequential full-file READs.
+
+### DELETE — Remove File
+```
+DELETE filename.cs
+```
+
+Deletes a file from disk. Closes the file in the VS editor first if it is open.
+Does **not** modify `.csproj` or other project references.
+
+**Rules:**
+- Use only when the task explicitly requires file removal.
+- Do not use DELETE speculatively.
+- After DELETE, emit DONE or SHELL: to build/verify as appropriate.
 
 ### FIND — Cross-File Search
 ```

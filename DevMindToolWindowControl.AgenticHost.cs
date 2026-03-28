@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.AgenticHost.cs  v1.3.0
+// File: DevMindToolWindowControl.AgenticHost.cs  v1.4.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -329,6 +329,50 @@ namespace DevMind
             AppendOutput($"[FIND] {(hitCap ? MaxMatches + "+" : shownCount.ToString())} match{(shownCount == 1 ? "" : "es")} for \"{pattern}\" in {globPattern}\n", OutputColor.Success);
 
             return result;
+        }
+
+        // ── IAgenticHost.DeleteFileAsync ──────────────────────────────────────────
+
+        async Task<string> IAgenticHost.DeleteFileAsync(string filename)
+        {
+            string fileNameOnly;
+            try { fileNameOnly = Path.GetFileName(filename.Replace('\\', '/')); }
+            catch { fileNameOnly = filename; }
+
+            string resolvedPath = await FindFileInSolutionAsync(fileNameOnly, filename.Replace('\\', '/'))
+                ?? Path.Combine(_terminalWorkingDir, fileNameOnly);
+
+            if (!File.Exists(resolvedPath))
+                return await BuildFileNotFoundMessageAsync("DELETE", filename);
+
+            // Close the file in the VS editor if it is open
+            try
+            {
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                var dte = await VS.GetServiceAsync<EnvDTE.DTE, EnvDTE.DTE>();
+                if (dte?.Documents != null)
+                {
+                    foreach (EnvDTE.Document doc in dte.Documents)
+                    {
+                        if (string.Equals(doc.FullName, resolvedPath, StringComparison.OrdinalIgnoreCase))
+                        {
+                            doc.Close(EnvDTE.vsSaveChanges.vsSaveChangesNo);
+                            break;
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            try
+            {
+                File.Delete(resolvedPath);
+                return $"Deleted: {resolvedPath}";
+            }
+            catch (Exception ex)
+            {
+                return $"DELETE: failed to delete {resolvedPath} — {ex.Message}";
+            }
         }
 
         // ── Shared helper: file-not-found message with project file listing ──────

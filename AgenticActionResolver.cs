@@ -1,4 +1,4 @@
-// File: AgenticActionResolver.cs  v1.1.0
+// File: AgenticActionResolver.cs  v1.2.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System.Collections.Generic;
@@ -31,9 +31,10 @@ namespace DevMind
                 return AgenticAction.Stop("No response.");
 
             // ── Rule 1: DONE signal (only when no actionable blocks present) ─────
-            // If the response also contains patches/files/shell, let the executor
+            // If the response also contains patches/files/shell/delete, let the executor
             // handle those first; the subsequent iteration will see a clean DONE.
-            if (outcome.IsDone && !outcome.HasPatches && !outcome.HasFileCreation && !outcome.HasShellCommands)
+            if (outcome.IsDone && !outcome.HasPatches && !outcome.HasFileCreation
+                && !outcome.HasShellCommands && !outcome.HasDeleteRequests)
                 return AgenticAction.Stop("Task complete.");
 
             // ── Rule 2: READ/GREP-only response → auto-load and resubmit ────────
@@ -51,6 +52,10 @@ namespace DevMind
             // ── Rule 3: File creation (primary intent when FILE: blocks present) ──
             if (outcome.HasFileCreation)
                 return new AgenticAction { Type = ActionType.CreateFile };
+
+            // ── Rule 3b: DELETE blocks — execute and allow LLM to follow up ─────
+            if (outcome.HasDeleteRequests && !outcome.HasPatches && !outcome.HasShellCommands)
+                return new AgenticAction { Type = ActionType.ApplyAndBuild };
 
             // ── Rule 4: Patches and/or shell commands ────────────────────────────
             if (outcome.HasPatches || outcome.HasShellCommands)

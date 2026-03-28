@@ -1,4 +1,4 @@
-// File: IAgenticHost.cs  v1.2.0
+// File: IAgenticHost.cs  v1.3.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System.Threading.Tasks;
@@ -91,5 +91,12 @@ namespace DevMind
         /// capped at 100 results total across all files.
         /// </summary>
         Task<string> FindInFilesAsync(string pattern, string globPattern, int? startLine, int? endLine);
+
+        /// <summary>
+        /// Deletes a file from disk. Closes the file in the VS editor first if it is open.
+        /// Returns "Deleted: {fullPath}" on success, or an error message on failure.
+        /// Does NOT modify .csproj or other project references.
+        /// </summary>
+        Task<string> DeleteFileAsync(string filename);
     }
 }

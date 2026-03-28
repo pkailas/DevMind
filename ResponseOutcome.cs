@@ -1,4 +1,4 @@
-// File: ResponseOutcome.cs  v1.2.0
+// File: ResponseOutcome.cs  v1.3.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System.Collections.Generic;
@@ -15,14 +15,15 @@ namespace DevMind
     {
         public List<ResponseBlock> Blocks { get; }
 
-        public bool HasPatches       { get; }
-        public bool HasShellCommands { get; }
-        public bool HasFileCreation  { get; }
-        public bool HasReadRequests  { get; }
-        public bool HasGrepRequests  { get; }
-        public bool HasFindRequests  { get; }
-        public bool HasScratchpad    { get; }
-        public bool IsDone           { get; }
+        public bool HasPatches         { get; }
+        public bool HasShellCommands   { get; }
+        public bool HasFileCreation    { get; }
+        public bool HasReadRequests    { get; }
+        public bool HasGrepRequests    { get; }
+        public bool HasFindRequests    { get; }
+        public bool HasDeleteRequests  { get; }
+        public bool HasScratchpad      { get; }
+        public bool IsDone             { get; }
 
         /// <summary>
         /// True when Blocks is empty, or contains only Text blocks with no
@@ -41,16 +42,17 @@ namespace DevMind
         {
             Blocks = blocks ?? new List<ResponseBlock>();
 
-            HasPatches       = Blocks.Any(b => b.Type == BlockType.Patch);
-            HasShellCommands = Blocks.Any(b => b.Type == BlockType.Shell);
-            HasFileCreation  = Blocks.Any(b => b.Type == BlockType.File);
-            HasReadRequests  = Blocks.Any(b => b.Type == BlockType.ReadRequest);
-            HasGrepRequests  = Blocks.Any(b => b.Type == BlockType.Grep);
-            HasFindRequests  = Blocks.Any(b => b.Type == BlockType.Find);
-            HasScratchpad    = Blocks.Any(b => b.Type == BlockType.Scratchpad);
-            IsDone           = Blocks.Any(b => b.Type == BlockType.Done);
+            HasPatches        = Blocks.Any(b => b.Type == BlockType.Patch);
+            HasShellCommands  = Blocks.Any(b => b.Type == BlockType.Shell);
+            HasFileCreation   = Blocks.Any(b => b.Type == BlockType.File);
+            HasReadRequests   = Blocks.Any(b => b.Type == BlockType.ReadRequest);
+            HasGrepRequests   = Blocks.Any(b => b.Type == BlockType.Grep);
+            HasFindRequests   = Blocks.Any(b => b.Type == BlockType.Find);
+            HasDeleteRequests = Blocks.Any(b => b.Type == BlockType.Delete);
+            HasScratchpad     = Blocks.Any(b => b.Type == BlockType.Scratchpad);
+            IsDone            = Blocks.Any(b => b.Type == BlockType.Done);
 
-            bool hasAnyAction = HasPatches || HasShellCommands || HasFileCreation || IsDone;
+            bool hasAnyAction  = HasPatches || HasShellCommands || HasFileCreation || HasDeleteRequests || IsDone;
             bool hasInfoGather = HasReadRequests || HasGrepRequests || HasFindRequests;
 
             IsEmptyOrBareCode = !hasAnyAction && !hasInfoGather;

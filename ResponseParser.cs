@@ -1,4 +1,4 @@
-// File: ResponseParser.cs  v5.4.0
+// File: ResponseParser.cs  v5.5.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -8,7 +8,7 @@ using System.Text.RegularExpressions;
 
 namespace DevMind
 {
-    public enum BlockType { Text, File, Patch, Shell, ReadRequest, Scratchpad, Done, Grep, Find }
+    public enum BlockType { Text, File, Patch, Shell, ReadRequest, Scratchpad, Done, Grep, Find, Delete }
 
     public class ResponseBlock
     {
@@ -55,6 +55,8 @@ namespace DevMind
         private static readonly Regex _grepLine       = new Regex(@"^GREP:\s+""([^""]+)""\s+(\S+\.\S+?)(?::(\d+)(?:-(\d+))?)?\s*$", RegexOptions.Compiled);
         // Matches FIND: "pattern" glob or FIND: "pattern" glob:start-end  (glob may contain * and /)
         private static readonly Regex _findFileLine   = new Regex(@"^FIND:\s+""([^""]+)""\s+(\S+)(?::(\d+)(?:-(\d+))?)?\s*$", RegexOptions.Compiled);
+        // Matches DELETE filename (no colon)
+        private static readonly Regex _deleteLine     = new Regex(@"^DELETE\s+(\S+\.\S+)\s*$",     RegexOptions.Compiled | RegexOptions.IgnoreCase);
         // Markdown fence: ```lang or ```
         private static readonly Regex _mdFence        = new Regex(@"^```",                         RegexOptions.Compiled);
 
@@ -326,6 +328,15 @@ namespace DevMind
                 return;
             }
 
+            // DELETE <filename>
+            m = _deleteLine.Match(line);
+            if (m.Success)
+            {
+                FlushText(blocks, textBuf);
+                blocks.Add(new ResponseBlock { Type = BlockType.Delete, FileName = m.Groups[1].Value });
+                return;
+            }
+
             // DONE
             if (_doneLine.IsMatch(line))
             {
@@ -468,6 +479,19 @@ namespace DevMind
                 fileBuf.Clear();
                 blocks.Add(new ResponseBlock { Type = BlockType.Done });
                 state = State.TopLevel;
+                return;
+            }
+
+            // DELETE — implicit termination
+            if (_deleteLine.IsMatch(line))
+            {
+                EmitFileBlock(blocks, currentFileName,
+                              fileBuf.ToString().TrimEnd('\r', '\n', ' '));
+                fileBuf.Clear();
+                state = State.TopLevel;
+                ProcessTopLevel(line, blocks, textBuf, ref lastShellCommand,
+                                hasActionableBlocks, ref state, ref fileBlockName,
+                                ref patchFileName, patchBuf, ref patchSec, scratchBuf);
                 return;
             }
 
@@ -677,6 +701,17 @@ namespace DevMind
                 return;
             }
 
+            // DELETE — implicit termination
+            if (_deleteLine.IsMatch(line))
+            {
+                EmitScratchpadBlock(blocks, scratchBuf);
+                state = State.TopLevel;
+                ProcessTopLevel(line, blocks, textBuf, ref lastShellCommand,
+                                hasActionableBlocks, ref state, ref fileBlockName,
+                                ref patchFileName, patchBuf, ref patchSec, scratchBuf);
+                return;
+            }
+
             // Content line
             scratchBuf.AppendLine(line);
         }
@@ -809,7 +844,7 @@ namespace DevMind
                 if (_patchEnd.IsMatch(line))   { inPatch = false; continue; }
                 if (inPatch) continue;
 
-                if (_patchStart.IsMatch(line) || _fileStart.IsMatch(line) || _shellLine.IsMatch(line))
+                if (_patchStart.IsMatch(line) || _fileStart.IsMatch(line) || _shellLine.IsMatch(line) || _deleteLine.IsMatch(line))
                     return true;
             }
             return false;

@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v5.0.55
+// File: DevMindToolWindowControl.xaml.cs  v5.0.56
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -496,6 +496,39 @@ namespace DevMind
                 return;
             }
 
+            if (text.StartsWith("DELETE ", StringComparison.OrdinalIgnoreCase) && !text.Contains('\n'))
+            {
+                AppendOutput($"\n> {text}\n", OutputColor.Input);
+                AppendNewLine();
+                string deleteTarget = text.Substring("DELETE ".Length).Trim();
+                if (!string.IsNullOrEmpty(deleteTarget))
+                {
+                    await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                    var dlgResult = System.Windows.MessageBox.Show(
+                        $"Delete {deleteTarget}?\n\nThis cannot be undone.",
+                        "DevMind — Confirm Delete",
+                        System.Windows.MessageBoxButton.YesNo,
+                        System.Windows.MessageBoxImage.Warning);
+                    if (dlgResult == System.Windows.MessageBoxResult.Yes)
+                    {
+                        string delResult = await ((IAgenticHost)this).DeleteFileAsync(deleteTarget);
+                        bool ok = delResult != null && delResult.StartsWith("Deleted:");
+                        AppendOutput(delResult + "\n", ok ? OutputColor.Success : OutputColor.Error);
+                    }
+                    else
+                    {
+                        AppendOutput("Delete cancelled.\n", OutputColor.Dim);
+                    }
+                }
+                else
+                {
+                    AppendOutput("DELETE syntax: DELETE filename.cs\n", OutputColor.Error);
+                }
+                InputTextBox.Text = "";
+                SetInputEnabled(true);
+                return;
+            }
+
             // Process consecutive READ lines from the top of the input
             {
                 var allLines = text.Split('\n');
@@ -674,6 +707,10 @@ namespace DevMind
                 "Returns filename:line: content for each match, capped at 100 results across all files.\n\n" +
                 "Use FIND when you need to know where something is used across the project.\n" +
                 "Use GREP when you already know which file to search.\n\n" +
+                "### DELETE — Remove File\n" +
+                "DELETE filename.cs\n\n" +
+                "Deletes a file from disk. Use only when explicitly asked to remove a file.\n" +
+                "Do not use DELETE speculatively — only when the task requires file removal.\n\n" +
                 "## Build Verification\n" +
                 $"After ANY code change emit: SHELL: {buildCommand}\n\n" +
                 "## After PATCH\n" +
@@ -814,7 +851,7 @@ namespace DevMind
                                 var executor = new AgenticExecutor(this);
                                 int maxDepth = DevMindOptions.Instance.AgenticLoopMaxDepth;
 
-                                System.Diagnostics.Debug.WriteLine($"[DEVMIND-DIAG] Outcome: HasPatches={outcome.HasPatches} HasShell={outcome.HasShellCommands} HasFile={outcome.HasFileCreation} IsDone={outcome.IsDone} IsReadOnly={outcome.IsReadOnly} IsEmptyOrBareCode={outcome.IsEmptyOrBareCode}");
+                                System.Diagnostics.Debug.WriteLine($"[DEVMIND-DIAG] Outcome: HasPatches={outcome.HasPatches} HasShell={outcome.HasShellCommands} HasFile={outcome.HasFileCreation} HasDelete={outcome.HasDeleteRequests} IsDone={outcome.IsDone} IsReadOnly={outcome.IsReadOnly} IsEmptyOrBareCode={outcome.IsEmptyOrBareCode}");
 
                                 // Initial resolve — no previousResult on the first call
                                 AgenticAction action = AgenticActionResolver.Resolve(outcome, null, _agenticDepth, maxDepth);
@@ -994,6 +1031,9 @@ namespace DevMind
 
                                                 if (result.FilesCreated.Count > 0)
                                                     agenticContext.AppendLine("[FILE CREATED] File was generated and added to the project.");
+
+                                                if (result.FilesDeleted.Count > 0)
+                                                    agenticContext.AppendLine($"[FILE DELETED] Deleted from disk: {string.Join(", ", result.FilesDeleted.ConvertAll(System.IO.Path.GetFileName))}.");
 
                                                 if (!string.IsNullOrEmpty(result.ShellOutput))
                                                 {
@@ -1482,6 +1522,21 @@ namespace DevMind
                     else
                     {
                         AppendOutput("FIND syntax: FIND: \"pattern\" glob[:start-end]  (e.g. FIND: \"foo\" *.cs)\n", OutputColor.Error);
+                    }
+                }
+                else if (block.StartsWith("DELETE ", StringComparison.OrdinalIgnoreCase) && !block.Contains('\n'))
+                {
+                    AppendOutput($"[BATCH] Direct execute: {block.Trim()}\n", OutputColor.Dim);
+                    string batchDeleteFile = block.Substring("DELETE ".Length).Trim();
+                    if (!string.IsNullOrEmpty(batchDeleteFile))
+                    {
+                        string batchDelResult = await ((IAgenticHost)this).DeleteFileAsync(batchDeleteFile);
+                        bool batchOk = batchDelResult != null && batchDelResult.StartsWith("Deleted:");
+                        AppendOutput(batchDelResult + "\n", batchOk ? OutputColor.Success : OutputColor.Error);
+                    }
+                    else
+                    {
+                        AppendOutput("DELETE syntax: DELETE filename.cs\n", OutputColor.Error);
                     }
                 }
                 else

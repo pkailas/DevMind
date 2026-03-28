@@ -1,4 +1,4 @@
-// File: AgenticExecutor.cs  v1.3.0
+// File: AgenticExecutor.cs  v1.4.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -263,6 +263,32 @@ namespace DevMind
                         {
                             result.Errors.Add(ex.Message);
                             _host.AppendOutput($"[FIND ERROR] {block.GlobPattern}: {ex.Message}\n", OutputColor.Error);
+                        }
+                        break;
+
+                    case BlockType.Delete:
+                        try
+                        {
+                            string deleteResult = await _host.DeleteFileAsync(block.FileName);
+                            bool deleted = deleteResult != null && deleteResult.StartsWith("Deleted:");
+                            _host.AppendOutput($"[DELETE] {deleteResult}\n",
+                                deleted ? OutputColor.Success : OutputColor.Error);
+                            if (deleted)
+                            {
+                                string deletedPath = deleteResult.Substring("Deleted:".Length).Trim();
+                                result.FilesDeleted.Add(deletedPath);
+                            }
+                            else if (!string.IsNullOrEmpty(deleteResult))
+                            {
+                                result.Errors.Add(deleteResult);
+                            }
+                            _lastReadKey = null;
+                            _lastReadRepeatCount = 0;
+                        }
+                        catch (Exception ex)
+                        {
+                            result.Errors.Add(ex.Message);
+                            _host.AppendOutput($"[DELETE ERROR] {block.FileName}: {ex.Message}\n", OutputColor.Error);
                         }
                         break;
 
