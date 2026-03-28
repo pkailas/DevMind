@@ -1,4 +1,4 @@
-// File: ResponseParser.cs  v5.3.0
+// File: ResponseParser.cs  v5.4.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -8,7 +8,7 @@ using System.Text.RegularExpressions;
 
 namespace DevMind
 {
-    public enum BlockType { Text, File, Patch, Shell, ReadRequest, Scratchpad, Done, Grep }
+    public enum BlockType { Text, File, Patch, Shell, ReadRequest, Scratchpad, Done, Grep, Find }
 
     public class ResponseBlock
     {
@@ -19,7 +19,8 @@ namespace DevMind
         public int  RangeStart    { get; set; }  // for ReadRequest/Grep line-range (0 = full read)
         public int  RangeEnd      { get; set; }  // for ReadRequest/Grep line-range (0 = full read)
         public bool ForceFullRead { get; set; }  // READ! — bypass outline-first behavior
-        public string Pattern     { get; set; }  // for Grep — substring search pattern
+        public string Pattern     { get; set; }  // for Grep/Find — substring search pattern
+        public string GlobPattern { get; set; }  // for Find — glob file pattern (e.g. *.cs, Services/*.cs)
     }
 
     public static class ResponseParser
@@ -52,6 +53,8 @@ namespace DevMind
         private static readonly Regex _doneLine       = new Regex(@"^\s*DONE\s*$",                 RegexOptions.Compiled | RegexOptions.IgnoreCase);
         // Matches GREP: "pattern" filename or GREP: "pattern" filename:start-end
         private static readonly Regex _grepLine       = new Regex(@"^GREP:\s+""([^""]+)""\s+(\S+\.\S+?)(?::(\d+)(?:-(\d+))?)?\s*$", RegexOptions.Compiled);
+        // Matches FIND: "pattern" glob or FIND: "pattern" glob:start-end  (glob may contain * and /)
+        private static readonly Regex _findFileLine   = new Regex(@"^FIND:\s+""([^""]+)""\s+(\S+)(?::(\d+)(?:-(\d+))?)?\s*$", RegexOptions.Compiled);
         // Markdown fence: ```lang or ```
         private static readonly Regex _mdFence        = new Regex(@"^```",                         RegexOptions.Compiled);
 
@@ -299,6 +302,30 @@ namespace DevMind
                 return;
             }
 
+            // FIND: "pattern" glob[:range]
+            m = _findFileLine.Match(line);
+            if (m.Success && !hasActionableBlocks)
+            {
+                FlushText(blocks, textBuf);
+                int findStart = 0, findEnd = 0;
+                if (m.Groups[3].Success)
+                {
+                    int.TryParse(m.Groups[3].Value, out findStart);
+                    findEnd = m.Groups[4].Success
+                        ? (int.TryParse(m.Groups[4].Value, out int fe) ? fe : findStart)
+                        : findStart;
+                }
+                blocks.Add(new ResponseBlock
+                {
+                    Type        = BlockType.Find,
+                    Pattern     = m.Groups[1].Value,
+                    GlobPattern = m.Groups[2].Value,
+                    RangeStart  = findStart,
+                    RangeEnd    = findEnd
+                });
+                return;
+            }
+
             // DONE
             if (_doneLine.IsMatch(line))
             {
@@ -409,6 +436,19 @@ namespace DevMind
 
             // GREP: — implicit termination
             if (!hasActionableBlocks && _grepLine.IsMatch(line))
+            {
+                EmitFileBlock(blocks, currentFileName,
+                              fileBuf.ToString().TrimEnd('\r', '\n', ' '));
+                fileBuf.Clear();
+                state = State.TopLevel;
+                ProcessTopLevel(line, blocks, textBuf, ref lastShellCommand,
+                                hasActionableBlocks, ref state, ref fileBlockName,
+                                ref patchFileName, patchBuf, ref patchSec, scratchBuf);
+                return;
+            }
+
+            // FIND: — implicit termination
+            if (!hasActionableBlocks && _findFileLine.IsMatch(line))
             {
                 EmitFileBlock(blocks, currentFileName,
                               fileBuf.ToString().TrimEnd('\r', '\n', ' '));
@@ -608,6 +648,17 @@ namespace DevMind
 
             // GREP: — implicit termination
             if (!hasActionableBlocks && _grepLine.IsMatch(line))
+            {
+                EmitScratchpadBlock(blocks, scratchBuf);
+                state = State.TopLevel;
+                ProcessTopLevel(line, blocks, textBuf, ref lastShellCommand,
+                                hasActionableBlocks, ref state, ref fileBlockName,
+                                ref patchFileName, patchBuf, ref patchSec, scratchBuf);
+                return;
+            }
+
+            // FIND: — implicit termination
+            if (!hasActionableBlocks && _findFileLine.IsMatch(line))
             {
                 EmitScratchpadBlock(blocks, scratchBuf);
                 state = State.TopLevel;

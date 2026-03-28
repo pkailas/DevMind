@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.AgenticHost.cs  v1.2.0
+// File: DevMindToolWindowControl.AgenticHost.cs  v1.3.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -211,6 +211,122 @@ namespace DevMind
             // Inject into read context so the LLM sees the results on resubmit (same pattern as ApplyReadCommandAsync)
             _readContext = (_readContext ?? "") + result + "\n\n";
             AppendOutput($"[GREP] {totalMatches} match{(totalMatches == 1 ? "" : "es")} for \"{pattern}\" in {filename}\n", OutputColor.Success);
+
+            return result;
+        }
+
+        // ── IAgenticHost.FindInFilesAsync ─────────────────────────────────────────
+
+        async Task<string> IAgenticHost.FindInFilesAsync(string pattern, string globPattern, int? startLine, int? endLine)
+        {
+            const int MaxMatches = 100;
+
+            // Determine search root (project directory preferred, fallback to working dir)
+            string searchDir = _terminalWorkingDir;
+            try
+            {
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                var dte = await VS.GetServiceAsync<EnvDTE.DTE, EnvDTE.DTE>();
+                var project = dte?.ActiveDocument?.ProjectItem?.ContainingProject;
+                if (project != null)
+                {
+                    string projFile = project.FullName;
+                    if (!string.IsNullOrEmpty(projFile))
+                        searchDir = Path.GetDirectoryName(projFile);
+                }
+            }
+            catch { }
+
+            // Split glob into directory prefix and file pattern
+            // e.g. "Services/*.cs" → dir="Services", filePattern="*.cs"
+            string normalizedGlob = globPattern.Replace('\\', '/');
+            string filePattern = normalizedGlob;
+            string effectiveRoot = searchDir;
+            int lastSlash = normalizedGlob.LastIndexOf('/');
+            if (lastSlash >= 0)
+            {
+                string dirPart = normalizedGlob.Substring(0, lastSlash);
+                filePattern    = normalizedGlob.Substring(lastSlash + 1);
+                string candidate = Path.Combine(searchDir, dirPart.Replace('/', Path.DirectorySeparatorChar));
+                if (Directory.Exists(candidate))
+                    effectiveRoot = candidate;
+            }
+
+            // Enumerate matching files (sorted for deterministic output)
+            IEnumerable<string> files;
+            try
+            {
+                files = SafeEnumerateFilesGlob(effectiveRoot, filePattern)
+                    .Where(f => !IsNoisePath(f))
+                    .OrderBy(f => f, StringComparer.OrdinalIgnoreCase);
+            }
+            catch (Exception ex)
+            {
+                return $"FIND: error enumerating files for {globPattern} — {ex.Message}";
+            }
+
+            var allMatches = new List<(string fileLabel, int lineNum, string lineText)>();
+            bool hitCap = false;
+
+            foreach (string filePath in files)
+            {
+                if (hitCap) break;
+
+                string fileNameOnly;
+                try { fileNameOnly = Path.GetFileName(filePath); }
+                catch { fileNameOnly = filePath; }
+
+                // Populate cache if needed
+                if (!_llmClient._fileCache.Contains(fileNameOnly))
+                {
+                    string diskContent;
+                    try { diskContent = File.ReadAllText(filePath); }
+                    catch { continue; }
+                    _llmClient._fileCache.Store(fileNameOnly, diskContent);
+                }
+
+                int totalFileLines = _llmClient._fileCache.GetLineCount(fileNameOnly);
+                int scanStart = startLine.HasValue ? Math.Max(1, startLine.Value) : 1;
+                int scanEnd   = endLine.HasValue   ? Math.Min(totalFileLines, endLine.Value) : totalFileLines;
+
+                for (int lineNum = scanStart; lineNum <= scanEnd; lineNum++)
+                {
+                    string lineContent = _llmClient._fileCache.GetLineRange(fileNameOnly, lineNum, lineNum);
+                    if (lineContent == null) continue;
+                    if (lineContent.IndexOf(pattern, StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        allMatches.Add((fileNameOnly, lineNum, lineContent));
+                        if (allMatches.Count >= MaxMatches)
+                        {
+                            hitCap = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (allMatches.Count == 0)
+            {
+                string noMatch = $"FIND: no matches for \"{pattern}\" in {globPattern}";
+                _readContext = (_readContext ?? "") + noMatch + "\n\n";
+                AppendOutput($"[FIND] no matches for \"{pattern}\" in {globPattern}\n", OutputColor.Dim);
+                return noMatch;
+            }
+
+            int shownCount = allMatches.Count;
+            string header = hitCap
+                ? $"FIND results for \"{pattern}\" in {globPattern} ({MaxMatches}+ matches — narrow your pattern or add a line range):"
+                : $"FIND results for \"{pattern}\" in {globPattern} ({shownCount} match{(shownCount == 1 ? "" : "es")}):";
+
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine(header);
+            foreach (var (fileLabel, lineNum, lineText) in allMatches)
+                sb.AppendLine($"  {fileLabel}:{lineNum}: {lineText.TrimEnd()}");
+
+            string result = sb.ToString().TrimEnd('\r', '\n');
+
+            _readContext = (_readContext ?? "") + result + "\n\n";
+            AppendOutput($"[FIND] {(hitCap ? MaxMatches + "+" : shownCount.ToString())} match{(shownCount == 1 ? "" : "es")} for \"{pattern}\" in {globPattern}\n", OutputColor.Success);
 
             return result;
         }

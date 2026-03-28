@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v5.0.54
+// File: DevMindToolWindowControl.xaml.cs  v5.0.55
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -470,6 +470,32 @@ namespace DevMind
                 return;
             }
 
+            if (text.StartsWith("FIND:", StringComparison.OrdinalIgnoreCase))
+            {
+                AppendOutput($"\n> {text}\n", OutputColor.Input);
+                AppendNewLine();
+                var findMatch = System.Text.RegularExpressions.Regex.Match(
+                    text,
+                    @"^FIND:\s+""([^""]+)""\s+(\S+)(?::(\d+)(?:-(\d+))?)?\s*$",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                if (findMatch.Success)
+                {
+                    string fPattern  = findMatch.Groups[1].Value;
+                    string fGlob     = findMatch.Groups[2].Value;
+                    int?   fStart    = findMatch.Groups[3].Success ? (int?)int.Parse(findMatch.Groups[3].Value) : null;
+                    int?   fEnd      = findMatch.Groups[4].Success ? (int?)int.Parse(findMatch.Groups[4].Value) : null;
+                    string fResult   = await ((IAgenticHost)this).FindInFilesAsync(fPattern, fGlob, fStart, fEnd);
+                    AppendOutput(fResult + "\n", OutputColor.Normal);
+                }
+                else
+                {
+                    AppendOutput("FIND syntax: FIND: \"pattern\" glob[:start-end]  (e.g. FIND: \"foo\" *.cs)\n", OutputColor.Error);
+                }
+                InputTextBox.Text = "";
+                SetInputEnabled(true);
+                return;
+            }
+
             // Process consecutive READ lines from the top of the input
             {
                 var allLines = text.Split('\n');
@@ -641,6 +667,13 @@ namespace DevMind
                 "- Results are capped at 50 matches. If truncated, narrow your pattern or add a line range.\n" +
                 "- GREP does not modify files. It is information-gathering only.\n" +
                 "- Prefer GREP + targeted READ over sequential full-file READs.\n\n" +
+                "### FIND — Cross-File Search\n" +
+                "FIND: \"pattern\" *.cs\n" +
+                "FIND: \"pattern\" Services/*.cs\n\n" +
+                "Searches all files matching the glob for lines containing the pattern (case-insensitive substring match).\n" +
+                "Returns filename:line: content for each match, capped at 100 results across all files.\n\n" +
+                "Use FIND when you need to know where something is used across the project.\n" +
+                "Use GREP when you already know which file to search.\n\n" +
                 "## Build Verification\n" +
                 $"After ANY code change emit: SHELL: {buildCommand}\n\n" +
                 "## After PATCH\n" +
@@ -1428,6 +1461,27 @@ namespace DevMind
                     else
                     {
                         AppendOutput("GREP syntax: GREP: \"pattern\" filename[:start-end]\n", OutputColor.Error);
+                    }
+                }
+                else if (block.StartsWith("FIND:", StringComparison.OrdinalIgnoreCase))
+                {
+                    AppendOutput($"[BATCH] Direct execute: {block.Split('\n')[0].Trim()}\n", OutputColor.Dim);
+                    var findMatch = System.Text.RegularExpressions.Regex.Match(
+                        block,
+                        @"^FIND:\s+""([^""]+)""\s+(\S+)(?::(\d+)(?:-(\d+))?)?\s*$",
+                        System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                    if (findMatch.Success)
+                    {
+                        string fPattern = findMatch.Groups[1].Value;
+                        string fGlob    = findMatch.Groups[2].Value;
+                        int?   fStart   = findMatch.Groups[3].Success ? (int?)int.Parse(findMatch.Groups[3].Value) : null;
+                        int?   fEnd     = findMatch.Groups[4].Success ? (int?)int.Parse(findMatch.Groups[4].Value) : null;
+                        string fResult  = await ((IAgenticHost)this).FindInFilesAsync(fPattern, fGlob, fStart, fEnd);
+                        AppendOutput(fResult + "\n", OutputColor.Normal);
+                    }
+                    else
+                    {
+                        AppendOutput("FIND syntax: FIND: \"pattern\" glob[:start-end]  (e.g. FIND: \"foo\" *.cs)\n", OutputColor.Error);
                     }
                 }
                 else

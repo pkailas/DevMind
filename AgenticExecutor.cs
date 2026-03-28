@@ -1,4 +1,4 @@
-// File: AgenticExecutor.cs  v1.2.0
+// File: AgenticExecutor.cs  v1.3.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -238,6 +238,34 @@ namespace DevMind
                         }
                         break;
 
+                    case BlockType.Find:
+                        try
+                        {
+                            int? findStart = block.RangeStart > 0 ? (int?)block.RangeStart : null;
+                            int? findEnd   = block.RangeEnd   > 0 ? (int?)block.RangeEnd   : null;
+                            string findKey = $"FIND:{block.Pattern}@{block.GlobPattern}" +
+                                (findStart.HasValue ? $":{findStart}-{findEnd}" : "");
+                            if (string.Equals(findKey, _lastReadKey, StringComparison.OrdinalIgnoreCase))
+                                _lastReadRepeatCount++;
+                            else { _lastReadKey = findKey; _lastReadRepeatCount = 1; }
+                            if (_lastReadRepeatCount >= 3)
+                            {
+                                _host.AppendOutput(
+                                    "[FIND returned same content 3 times — possible truncation or parsing issue. " +
+                                    "Proceeding with available data. Use a different glob or line range.]\n",
+                                    OutputColor.Dim);
+                                break;
+                            }
+                            // FindInFilesAsync injects results into _readContext and emits status as side effects
+                            await _host.FindInFilesAsync(block.Pattern, block.GlobPattern, findStart, findEnd);
+                        }
+                        catch (Exception ex)
+                        {
+                            result.Errors.Add(ex.Message);
+                            _host.AppendOutput($"[FIND ERROR] {block.GlobPattern}: {ex.Message}\n", OutputColor.Error);
+                        }
+                        break;
+
                     // Text, ReadRequest, Done — already handled during streaming or by resolver
                     default:
                         break;
@@ -324,6 +352,39 @@ namespace DevMind
                     catch (Exception ex)
                     {
                         _host.AppendOutput($"[GREP ERROR] {block.FileName}: {ex.Message}\n", OutputColor.Error);
+                    }
+                }
+            }
+
+            // Execute any FIND blocks — results are injected into context as a side effect
+            if (outcome?.Blocks != null)
+            {
+                foreach (var block in outcome.Blocks)
+                {
+                    if (block.Type != BlockType.Find) continue;
+                    try
+                    {
+                        int? findStart = block.RangeStart > 0 ? (int?)block.RangeStart : null;
+                        int? findEnd   = block.RangeEnd   > 0 ? (int?)block.RangeEnd   : null;
+                        string findKey = $"FIND:{block.Pattern}@{block.GlobPattern}" +
+                            (findStart.HasValue ? $":{findStart}-{findEnd}" : "");
+                        if (string.Equals(findKey, _lastReadKey, StringComparison.OrdinalIgnoreCase))
+                            _lastReadRepeatCount++;
+                        else { _lastReadKey = findKey; _lastReadRepeatCount = 1; }
+                        if (_lastReadRepeatCount >= 3)
+                        {
+                            _host.AppendOutput(
+                                "[FIND returned same content 3 times — possible truncation or parsing issue. " +
+                                "Proceeding with available data. Use a different glob or line range.]\n",
+                                OutputColor.Dim);
+                            continue;
+                        }
+                        // FindInFilesAsync injects results into _readContext and emits status as side effects
+                        await _host.FindInFilesAsync(block.Pattern, block.GlobPattern, findStart, findEnd);
+                    }
+                    catch (Exception ex)
+                    {
+                        _host.AppendOutput($"[FIND ERROR] {block.GlobPattern}: {ex.Message}\n", OutputColor.Error);
                     }
                 }
             }

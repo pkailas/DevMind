@@ -1,4 +1,4 @@
-// File: IAgenticHost.cs  v1.1.0
+// File: IAgenticHost.cs  v1.2.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System.Threading.Tasks;
@@ -84,5 +84,12 @@ namespace DevMind
         /// Returns formatted results with line numbers, capped at maxMatches.
         /// </summary>
         Task<string> GrepFileAsync(string pattern, string filename, int? startLine, int? endLine);
+
+        /// <summary>
+        /// Searches all files matching the glob pattern for lines containing the search pattern
+        /// (case-insensitive substring match). Returns filename:line: content for each match,
+        /// capped at 100 results total across all files.
+        /// </summary>
+        Task<string> FindInFilesAsync(string pattern, string globPattern, int? startLine, int? endLine);
     }
 }

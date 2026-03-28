@@ -63,6 +63,7 @@ Every response in an agentic turn MUST end with at least one directive. Prose co
 | `SHELL: command` | Run a shell command (PowerShell) |
 | `READ FileName.cs` | Load a file or line range into context |
 | `GREP: "pattern" file` | Search file for pattern matches — Information-gathering, same as READ |
+| `FIND: "pattern" *.cs` | Cross-file search by glob — returns filename:line: content for each match |
 | `SCRATCHPAD:` ... `END_SCRATCHPAD` | Internal reasoning state — not shown to user |
 | `DONE` | Signal task completion — only emit when all steps are verified complete |
 
@@ -127,6 +128,27 @@ Returns matching lines with absolute line numbers. Use GREP to locate code befor
 - Pattern must be in double quotes.
 - Results capped at 50 matches — narrow your pattern or add a line range if truncated.
 - Prefer GREP + targeted READ over sequential full-file READs.
+
+### FIND — Cross-File Search
+```
+FIND: "pattern" *.cs
+FIND: "pattern" Services/*.cs
+```
+
+Searches all files matching the glob for lines containing the pattern (case-insensitive substring match).
+Returns `filename:line: content` for each match across all matching files.
+
+**Rules:**
+- Pattern must be in double quotes.
+- Results capped at 100 matches total across all files — narrow your pattern if truncated.
+- Optional `:start-end` range restricts search within each file (e.g. `FIND: "foo" *.cs:100-200`).
+- Use FIND when you need to know where something is used across the project.
+- Use GREP when you already know which file to search.
+
+**Workflow:**
+1. `FIND: "IAgenticHost" *.cs`  → shows all files that reference the interface
+2. `READ AgenticExecutor.cs:40-60`   → targeted read around the hit you need
+3. `PATCH AgenticExecutor.cs`        → applies the change
 
 ### Nothing-To-Do Case
 If after reading the file you determine no changes are needed, emit DONE with an explanation — never emit prose without a directive:
