@@ -79,6 +79,7 @@ ResponseBlock
 ├── FindBlock        — FIND: directive → IAgenticHost.FindInFilesAsync()
 ├── DeleteBlock      — DELETE directive → IAgenticHost.DeleteFileAsync()
 ├── RenameBlock      — RENAME directive → IAgenticHost.RenameFileAsync()
+├── DiffBlock        — DIFF directive → IAgenticHost.GetFileDiffAsync()
 ├── Scratchpad       — SCRATCHPAD: block → IAgenticHost.UpdateScratchpad()
 └── DoneBlock        — DONE directive → explicit task completion signal, stops agentic loop
 ```
@@ -247,6 +248,17 @@ RENAME OldFile.cs NewFile.cs
 - Direct user input (`RENAME old new`) prompts a Yes/No confirmation dialog before renaming.
 - In batch input (`[WAIT]` separated) and agentic loop, rename is auto-confirmed.
 - Invalidates `FileContentCache` for the old filename after renaming.
+
+### DIFF — Show File Changes
+```
+DIFF filename.cs
+```
+- Shows all changes made to the file during this conversation as a unified-style diff.
+- Compares the current disk content against the snapshot captured on the file's first READ or PATCH this session.
+- Returns `"No changes"` if the file has not been modified or read this session.
+- Output capped at 200 lines with a truncation notice if exceeded.
+- Information-gathering only — same category as READ/GREP/FIND. A DIFF-only response triggers `IsReadOnly → LoadAndResubmit`.
+- Use DIFF after multiple PATCHes to verify cumulative changes before confirming task completion.
 
 ### DONE — Explicit Task Completion
 ```
@@ -469,4 +481,4 @@ Squeeze runs before the hard-trim (`TrimHistoryToFit`) and after each agentic tu
 9. ~~**DELETE directive**~~ — **Implemented v6.0.65**. `DELETE filename.cs`. Removes file from disk, closes open editor tab. Does not update `.csproj` references (separate concern).
 10. ~~**FIND directive**~~ — **Implemented v6.0.64**. `FIND: "pattern" *.cs`. Cross-file search by glob pattern. Returns filename + line number + match for each hit across all matching files, capped at 100. Solves the "where is this used?" problem without sequential READs.
 11. **TEST directive** — `TEST ProjectName.csproj` or `TEST ClassName.MethodName`. Structured test execution with per-test pass/fail results instead of raw console output. Cheaper on context than SHELL: dotnet test.
-12. **DIFF directive** — `DIFF Program.cs`. Shows changes since last clean state or conversation start. Helps the model track cumulative modifications across multiple agentic turns.
+12. ~~**DIFF directive**~~ — **Implemented**. `DIFF Program.cs`. Shows changes since conversation start as a unified-style diff. Uses LCS-based algorithm for small files, positional fallback for large files. Helps the model verify cumulative modifications across multiple agentic turns.

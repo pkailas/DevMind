@@ -1,4 +1,4 @@
-# DevMind Project Context  v1.2
+# DevMind Project Context  v1.3
 
 ## Platform & Constraints
 - VSIX (.NET Framework net48), C# 8.0 only — no C# 9+ syntax (no records, no file-scoped namespaces, no collection expressions, no init-only setters, no top-level statements, no primary constructors)
@@ -66,6 +66,7 @@ Every response in an agentic turn MUST end with at least one directive. Prose co
 | `FIND: "pattern" *.cs` | Cross-file search by glob — returns filename:line: content for each match |
 | `DELETE filename.cs` | Delete a file from disk — use only when explicitly asked to remove a file |
 | `RENAME OldFile.cs NewFile.cs` | Rename a file on disk — does not update references in other files |
+| `DIFF filename.cs` | Show cumulative changes to a file since conversation start — information-gathering only |
 | `SCRATCHPAD:` ... `END_SCRATCHPAD` | Internal reasoning state — not shown to user |
 | `DONE` | Signal task completion — only emit when all steps are verified complete |
 
@@ -177,6 +178,28 @@ Returns `filename:line: content` for each match across all matching files.
 1. `FIND: "IAgenticHost" *.cs`  → shows all files that reference the interface
 2. `READ AgenticExecutor.cs:40-60`   → targeted read around the hit you need
 3. `PATCH AgenticExecutor.cs`        → applies the change
+
+### DIFF — Show File Changes
+```
+DIFF filename.cs
+```
+
+Shows all changes made to a file during this conversation as a unified-style diff.
+Compares current disk content against the snapshot captured on the file's first READ or PATCH this session.
+
+**Rules:**
+- Information-gathering only — does not modify files.
+- Returns "No changes" if the file has not been modified or read this session.
+- Output capped at 200 lines — use READ for full context if truncated.
+- Use DIFF after multiple PATCHes to verify cumulative changes before emitting DONE.
+- A DIFF-only response triggers auto-resubmit (same as READ/GREP/FIND).
+
+**Workflow:**
+1. `PATCH AgenticExecutor.cs`  → first change
+2. `PATCH AgenticExecutor.cs`  → second change
+3. `DIFF AgenticExecutor.cs`   → verify combined result looks correct
+4. `SHELL: dotnet build ...`   → confirm it compiles
+5. `DONE`                      → task complete
 
 ### Nothing-To-Do Case
 If after reading the file you determine no changes are needed, emit DONE with an explanation — never emit prose without a directive:

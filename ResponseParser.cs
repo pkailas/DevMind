@@ -1,4 +1,4 @@
-// File: ResponseParser.cs  v5.6.0
+// File: ResponseParser.cs  v5.7.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -8,7 +8,7 @@ using System.Text.RegularExpressions;
 
 namespace DevMind
 {
-    public enum BlockType { Text, File, Patch, Shell, ReadRequest, Scratchpad, Done, Grep, Find, Delete, Rename }
+    public enum BlockType { Text, File, Patch, Shell, ReadRequest, Scratchpad, Done, Grep, Find, Delete, Rename, Diff }
 
     public class ResponseBlock
     {
@@ -61,6 +61,8 @@ namespace DevMind
         private static readonly Regex _deleteLine     = new Regex(@"^DELETE\s+(\S+\.\S+)\s*$",     RegexOptions.Compiled | RegexOptions.IgnoreCase);
         // Matches RENAME OldFile.cs NewFile.cs
         private static readonly Regex _renameLine     = new Regex(@"^RENAME\s+(\S+)\s+(\S+)\s*$",  RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        // Matches DIFF filename
+        private static readonly Regex _diffLine        = new Regex(@"^DIFF\s+(\S+\.\S+)\s*$",       RegexOptions.Compiled | RegexOptions.IgnoreCase);
         // Markdown fence: ```lang or ```
         private static readonly Regex _mdFence        = new Regex(@"^```",                         RegexOptions.Compiled);
 
@@ -352,6 +354,15 @@ namespace DevMind
                     RenameFrom = m.Groups[1].Value,
                     RenameTo   = m.Groups[2].Value
                 });
+                return;
+            }
+
+            // DIFF <filename>
+            m = _diffLine.Match(line);
+            if (m.Success && !hasActionableBlocks)
+            {
+                FlushText(blocks, textBuf);
+                blocks.Add(new ResponseBlock { Type = BlockType.Diff, FileName = m.Groups[1].Value });
                 return;
             }
 

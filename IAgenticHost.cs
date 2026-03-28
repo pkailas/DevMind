@@ -1,4 +1,4 @@
-// File: IAgenticHost.cs  v1.4.0
+// File: IAgenticHost.cs  v1.5.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System.Threading.Tasks;
@@ -106,5 +106,12 @@ namespace DevMind
         /// Does NOT update references in other files.
         /// </summary>
         Task<string> RenameFileAsync(string oldFilename, string newFilename);
+
+        /// <summary>
+        /// Returns a unified-style diff of the file compared to its snapshot at the start
+        /// of the conversation. If the file has not been modified this session, returns a
+        /// "no changes" message. Caps output at 200 lines.
+        /// </summary>
+        Task<string> GetFileDiffAsync(string filename);
     }
 }

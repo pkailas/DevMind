@@ -1,4 +1,4 @@
-// File: AgenticExecutor.cs  v1.5.0
+// File: AgenticExecutor.cs  v1.6.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -317,6 +317,30 @@ namespace DevMind
                         }
                         break;
 
+                    case BlockType.Diff:
+                        try
+                        {
+                            string diffKey = $"DIFF:{block.FileName}";
+                            if (string.Equals(diffKey, _lastReadKey, StringComparison.OrdinalIgnoreCase))
+                                _lastReadRepeatCount++;
+                            else { _lastReadKey = diffKey; _lastReadRepeatCount = 1; }
+                            if (_lastReadRepeatCount >= 3)
+                            {
+                                _host.AppendOutput(
+                                    "[DIFF returned same content 3 times — skipping.]\n",
+                                    OutputColor.Dim);
+                                break;
+                            }
+                            // GetFileDiffAsync injects results into context as a side effect
+                            await _host.GetFileDiffAsync(block.FileName);
+                        }
+                        catch (Exception ex)
+                        {
+                            result.Errors.Add(ex.Message);
+                            _host.AppendOutput($"[DIFF ERROR] {block.FileName}: {ex.Message}\n", OutputColor.Error);
+                        }
+                        break;
+
                     // Text, ReadRequest, Done — already handled during streaming or by resolver
                     default:
                         break;
@@ -436,6 +460,34 @@ namespace DevMind
                     catch (Exception ex)
                     {
                         _host.AppendOutput($"[FIND ERROR] {block.GlobPattern}: {ex.Message}\n", OutputColor.Error);
+                    }
+                }
+            }
+
+            // Execute any DIFF blocks — results are injected into context as a side effect
+            if (outcome?.Blocks != null)
+            {
+                foreach (var block in outcome.Blocks)
+                {
+                    if (block.Type != BlockType.Diff) continue;
+                    try
+                    {
+                        string diffKey = $"DIFF:{block.FileName}";
+                        if (string.Equals(diffKey, _lastReadKey, StringComparison.OrdinalIgnoreCase))
+                            _lastReadRepeatCount++;
+                        else { _lastReadKey = diffKey; _lastReadRepeatCount = 1; }
+                        if (_lastReadRepeatCount >= 3)
+                        {
+                            _host.AppendOutput(
+                                "[DIFF returned same content 3 times — skipping.]\n",
+                                OutputColor.Dim);
+                            continue;
+                        }
+                        await _host.GetFileDiffAsync(block.FileName);
+                    }
+                    catch (Exception ex)
+                    {
+                        _host.AppendOutput($"[DIFF ERROR] {block.FileName}: {ex.Message}\n", OutputColor.Error);
                     }
                 }
             }

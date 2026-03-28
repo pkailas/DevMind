@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v5.0.57
+// File: DevMindToolWindowControl.xaml.cs  v5.0.58
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -292,6 +292,9 @@ namespace DevMind
             _pendingResubmitPrompt = null;
             _readFileCount = 0;
 
+            // Clear per-conversation file snapshots (for DIFF directive)
+            ClearFileSnapshots();
+
             // Discard pending fuzzy confirmation
             _pendingFuzzyPatch = null;
 
@@ -564,6 +567,25 @@ namespace DevMind
                 return;
             }
 
+            if (text.StartsWith("DIFF ", StringComparison.OrdinalIgnoreCase) && !text.Contains('\n'))
+            {
+                AppendOutput($"\n> {text}\n", OutputColor.Input);
+                AppendNewLine();
+                string diffTarget = text.Substring("DIFF ".Length).Trim();
+                if (!string.IsNullOrEmpty(diffTarget))
+                {
+                    string diffResult = await ((IAgenticHost)this).GetFileDiffAsync(diffTarget);
+                    AppendOutput(diffResult + "\n", OutputColor.Dim);
+                }
+                else
+                {
+                    AppendOutput("DIFF syntax: DIFF filename.cs\n", OutputColor.Error);
+                }
+                InputTextBox.Text = "";
+                SetInputEnabled(true);
+                return;
+            }
+
             // Process consecutive READ lines from the top of the input
             {
                 var allLines = text.Split('\n');
@@ -750,6 +772,12 @@ namespace DevMind
                 "RENAME OldFile.cs NewFile.cs\n\n" +
                 "Renames a file on disk. The old file is closed in the editor and the new file is opened.\n" +
                 "Does not update references in other files — use FIND + PATCH to update imports or usings if needed.\n\n" +
+                "### DIFF — Show File Changes\n" +
+                "DIFF filename.cs\n\n" +
+                "Shows all changes made to a file during this conversation as a unified-style diff.\n" +
+                "Use DIFF to review cumulative modifications before confirming task completion.\n" +
+                "Use DIFF after multiple PATCHes to verify the overall result is correct.\n" +
+                "DIFF is information-gathering only — it does not modify files.\n\n" +
                 "## Build Verification\n" +
                 $"After ANY code change emit: SHELL: {buildCommand}\n\n" +
                 "## After PATCH\n" +
@@ -1594,6 +1622,20 @@ namespace DevMind
                     else
                     {
                         AppendOutput("RENAME syntax: RENAME OldFile.cs NewFile.cs\n", OutputColor.Error);
+                    }
+                }
+                else if (block.StartsWith("DIFF ", StringComparison.OrdinalIgnoreCase) && !block.Contains('\n'))
+                {
+                    AppendOutput($"[BATCH] Direct execute: {block.Trim()}\n", OutputColor.Dim);
+                    string batchDiffFile = block.Substring("DIFF ".Length).Trim();
+                    if (!string.IsNullOrEmpty(batchDiffFile))
+                    {
+                        string batchDiffResult = await ((IAgenticHost)this).GetFileDiffAsync(batchDiffFile);
+                        AppendOutput(batchDiffResult + "\n", OutputColor.Dim);
+                    }
+                    else
+                    {
+                        AppendOutput("DIFF syntax: DIFF filename.cs\n", OutputColor.Error);
                     }
                 }
                 else
