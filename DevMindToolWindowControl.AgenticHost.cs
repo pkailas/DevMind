@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.AgenticHost.cs  v1.8.0
+// File: DevMindToolWindowControl.AgenticHost.cs  v1.9.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -7,9 +7,11 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Documents;
 using System.Xml.Linq;
 
 namespace DevMind
@@ -785,6 +787,141 @@ namespace DevMind
             }
 
             return sb.ToString().TrimEnd('\r', '\n');
+        }
+
+        // ── IAgenticHost.ResolvePatchAsync ───────────────────────────────────────
+
+        async Task<PatchResolveResult> IAgenticHost.ResolvePatchAsync(string patchContent)
+        {
+            // Extract filename for auto-READ and write guard
+            string firstLine = (patchContent ?? string.Empty).Split('\n')[0];
+            string blockFileName = firstLine.Length > 5 ? firstLine.Substring(5).Trim() : string.Empty;
+
+            // Unrelated-file write guard
+            if (!string.IsNullOrEmpty(blockFileName))
+            {
+                string guardFileOnly;
+                try { guardFileOnly = Path.GetFileName(blockFileName.Replace('\\', '/')); }
+                catch { guardFileOnly = blockFileName; }
+
+                if (!IsFileKnownToTask(guardFileOnly))
+                {
+                    bool approved = await ConfirmUnreadFileWriteAsync(guardFileOnly);
+                    if (!approved)
+                    {
+                        AppendOutput($"[WRITE GUARD] Patch to \"{guardFileOnly}\" blocked by user.\n", OutputColor.Dim);
+                        return null;
+                    }
+                    _taskReadFiles.Add(guardFileOnly);
+                }
+            }
+
+            // Auto-READ target file
+            if (!string.IsNullOrEmpty(blockFileName))
+            {
+                string patchFileOnly;
+                try { patchFileOnly = Path.GetFileName(blockFileName.Replace('\\', '/')); }
+                catch { patchFileOnly = blockFileName; }
+
+                if (!string.IsNullOrEmpty(patchFileOnly))
+                {
+                    string resolvedPath =
+                        await FindFileInSolutionAsync(patchFileOnly, blockFileName.Replace('\\', '/'))
+                        ?? Path.Combine(_terminalWorkingDir, patchFileOnly);
+
+                    bool alreadyLoaded = _readContext != null && _readContext.Contains(resolvedPath);
+                    if (!alreadyLoaded)
+                    {
+                        AppendOutput($"[AUTO-READ] Loading {patchFileOnly} before patch...\n", OutputColor.Dim);
+                        await ApplyReadCommandAsync($"READ {blockFileName}");
+                    }
+
+                    if (File.Exists(resolvedPath))
+                        CaptureFileSnapshot(resolvedPath);
+                }
+            }
+
+            return await ResolvePatchAsync(patchContent);
+        }
+
+        // ── IAgenticHost.ApplyResolvedPatchAsync ────────────────────────────────
+
+        async Task<string> IAgenticHost.ApplyResolvedPatchAsync(PatchResolveResult resolved)
+        {
+            return await ApplyResolvedPatchAsync(resolved);
+        }
+
+        // ── IAgenticHost.ShowDiffPreviewAsync ───────────────────────────────────
+
+        async Task<List<int>> IAgenticHost.ShowDiffPreviewAsync(
+            List<PatchResolveResult> resolvedPatches,
+            CancellationToken cancellationToken)
+        {
+            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+
+            var cards = new List<DiffPreviewCard>();
+            var approvedIndices = new List<int>();
+
+            // Create all diff preview cards
+            for (int i = 0; i < resolvedPatches.Count; i++)
+            {
+                var resolved = resolvedPatches[i];
+                var card = new DiffPreviewCard();
+                card.ResolveResult = resolved;
+                card.ConfigureMultiBlock(
+                    resolved.FileName,
+                    resolved.Confidence,
+                    resolved.ParsedPairs,
+                    resolved.OriginalContent);
+
+                cards.Add(card);
+
+                // Add card inline into the output panel
+                var container = new BlockUIContainer(card) { Margin = new Thickness(0) };
+                OutputBox.Document.Blocks.Add(container);
+            }
+
+            // Add batch bar if more than one card
+            DiffBatchBar batchBar = null;
+            if (cards.Count > 1)
+            {
+                batchBar = new DiffBatchBar(cards);
+                var batchContainer = new BlockUIContainer(batchBar) { Margin = new Thickness(0) };
+                OutputBox.Document.Blocks.Add(batchContainer);
+            }
+
+            OutputBox.ScrollToEnd();
+
+            // Register cancellation to cancel all pending cards
+            using (cancellationToken.Register(() =>
+            {
+                // Fire-and-forget dispatch to UI thread is intentional — cancellation callback
+                // runs on a thread-pool thread and must not block.
+#pragma warning disable VSTHRD001, VSTHRD110
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    foreach (var card in cards)
+                        card.Cancel();
+                }));
+#pragma warning restore VSTHRD001, VSTHRD110
+            }))
+            {
+                // Await all card decisions
+                var tasks = cards.Select(c => c.UserDecision).ToArray();
+                await Task.WhenAll(tasks);
+            }
+
+            // Collect approved indices — all tasks are completed at this point,
+            // so .Result is non-blocking.
+            for (int i = 0; i < cards.Count; i++)
+            {
+#pragma warning disable VSTHRD103
+                if (cards[i].UserDecision.Result)
+                    approvedIndices.Add(i);
+#pragma warning restore VSTHRD103
+            }
+
+            return approvedIndices;
         }
 
         // ── Shared helper: file-not-found message with project file listing ──────

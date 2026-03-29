@@ -1,4 +1,4 @@
-// File: DevMindOptionsPage.cs  v5.6
+// File: DevMindOptionsPage.cs  v5.7
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -178,6 +178,17 @@ namespace DevMind
         [Description("Off: Always use full context mode. On: Always use block-by-block mode. Auto: Automatically choose based on file size and model constraints.")]
         [DefaultValue(DevMind.BlockByBlockModeType.Auto)]
         public BlockByBlockModeType BlockByBlockMode { get; set; } = BlockByBlockModeType.Auto;
+
+        /// <summary>
+        /// When enabled, all PATCH operations pause for user confirmation via an inline
+        /// diff preview card — even exact matches. When disabled (default), only
+        /// fuzzy-matched patches require confirmation.
+        /// </summary>
+        [Category("Agentic Loop")]
+        [DisplayName("Always Confirm PATCH")]
+        [Description("When enabled, all PATCH operations pause for confirmation — even exact matches. When disabled, only fuzzy-matched patches require confirmation.")]
+        [DefaultValue(false)]
+        public bool AlwaysConfirmPatch { get; set; } = false;
 
     }
 }

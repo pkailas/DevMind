@@ -190,6 +190,7 @@ namespace DevMind
 
         private async Task ApplyReadCommandAsync(string input, bool showOutline = false)
         {
+            System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] ApplyReadCommandAsync ENTER — input='{input.Substring(0, Math.Min(input.Length, 120))}', showOutline={showOutline}");
             try
             {
                 // Support multi-line input: process each line starting with "READ " or "RELOAD "

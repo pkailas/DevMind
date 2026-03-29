@@ -1,4 +1,4 @@
-// File: ResponseOutcome.cs  v1.6.0
+// File: ResponseOutcome.cs  v1.7.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System.Collections.Generic;
@@ -36,10 +36,19 @@ namespace DevMind
         public bool IsEmptyOrBareCode { get; }
 
         /// <summary>
-        /// True when the response contains READ requests and no other action —
-        /// used to trigger auto-READ resubmission.
+        /// True when the response contains READ/GREP/FIND/DIFF requests and
+        /// no mutating actions — used to trigger auto-READ resubmission.
+        /// DONE does not suppress this: a response with READ + DONE will still
+        /// load the file first (the caller checks IsDone after loading).
         /// </summary>
         public bool IsReadOnly { get; }
+
+        /// <summary>
+        /// True when the response contains any directive from the set:
+        /// READ, SHELL, FILE, FIND, GREP, DELETE, RENAME, DIFF, TEST, PATCH.
+        /// Excludes DONE and SCRATCHPAD — those are control signals, not actions.
+        /// </summary>
+        public bool HasAnyDirective { get; }
 
         public ResponseOutcome(List<ResponseBlock> blocks)
         {
@@ -58,11 +67,12 @@ namespace DevMind
             HasScratchpad     = Blocks.Any(b => b.Type == BlockType.Scratchpad);
             IsDone            = Blocks.Any(b => b.Type == BlockType.Done);
 
-            bool hasAnyAction  = HasPatches || HasShellCommands || HasFileCreation || HasDeleteRequests || HasRenameRequests || HasTestRequests || IsDone;
-            bool hasInfoGather = HasReadRequests || HasGrepRequests || HasFindRequests || HasDiffRequests;
+            bool hasMutatingAction = HasPatches || HasShellCommands || HasFileCreation || HasDeleteRequests || HasRenameRequests || HasTestRequests;
+            bool hasInfoGather    = HasReadRequests || HasGrepRequests || HasFindRequests || HasDiffRequests;
 
-            IsEmptyOrBareCode = !hasAnyAction && !hasInfoGather;
-            IsReadOnly        = hasInfoGather && !hasAnyAction;
+            HasAnyDirective   = hasMutatingAction || hasInfoGather;
+            IsEmptyOrBareCode = !HasAnyDirective && !IsDone;
+            IsReadOnly        = hasInfoGather && !hasMutatingAction;
         }
 
         /// <summary>

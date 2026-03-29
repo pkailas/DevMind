@@ -1,6 +1,8 @@
-// File: IAgenticHost.cs  v1.6.0
+// File: IAgenticHost.cs  v1.7.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
+using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace DevMind
@@ -121,5 +123,26 @@ namespace DevMind
         /// Falls back to raw console output if TRX parsing fails.
         /// </summary>
         Task<string> RunTestsAsync(string project, string filter);
+
+        /// <summary>
+        /// Resolves a PATCH block without applying it. Returns a
+        /// <see cref="PatchResolveResult"/> with confidence and match data,
+        /// or null if resolution failed.
+        /// </summary>
+        Task<PatchResolveResult> ResolvePatchAsync(string patchContent);
+
+        /// <summary>
+        /// Applies a previously resolved PATCH. Returns the full path on success, null on failure.
+        /// </summary>
+        Task<string> ApplyResolvedPatchAsync(PatchResolveResult resolved);
+
+        /// <summary>
+        /// Presents diff preview cards for a batch of resolved patches and awaits
+        /// user decisions. Returns the list of indices that were approved.
+        /// If the cancellation token is triggered, all pending cards are cancelled.
+        /// </summary>
+        Task<List<int>> ShowDiffPreviewAsync(
+            List<PatchResolveResult> resolvedPatches,
+            CancellationToken cancellationToken);
     }
 }

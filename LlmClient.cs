@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v5.45
+// File: LlmClient.cs  v5.46
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -378,6 +378,8 @@ namespace DevMind
             bool deferCompression = false,
             CancellationToken cancellationToken = default)
         {
+            System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] SendMessageAsync ENTER — userMessage length={userMessage?.Length ?? 0}, deferCompression={deferCompression}");
+
             // Ensure context-size detection has completed before computing budget math.
             // If detection is still in-flight (common on the first message after launch),
             // wait up to 5 seconds. If it times out or the send is cancelled first,
@@ -497,6 +499,8 @@ namespace DevMind
             {
                 Content = new StringContent(requestJson, Encoding.UTF8, "application/json")
             };
+
+            System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] About to POST to {url} — requestJson length={requestJson.Length}");
 
             try
             {
@@ -742,6 +746,12 @@ namespace DevMind
 
                 while (true)
                 {
+                    if (searchFrom < 0 || searchFrom >= content.Length)
+                    {
+                        debugLines.Add($"[CONTEXT] DeduplicateReadBlocks: searchFrom ({searchFrom}) out of range in message {i}, skipping scan");
+                        break;
+                    }
+
                     int tagStart = content.IndexOf("[READ:", searchFrom, StringComparison.Ordinal);
                     if (tagStart < 0) break;
 
@@ -799,6 +809,13 @@ namespace DevMind
                     string content = _conversationHistory[msgIdx].Content;
                     string role    = _conversationHistory[msgIdx].Role;
 
+                    // Bounds check: charPos may have drifted out of range after delta adjustments.
+                    if (charPos < 0 || charPos >= content.Length)
+                    {
+                        debugLines.Add($"[CONTEXT] DeduplicateReadBlocks: charPos ({charPos}) out of range for message {msgIdx} (len={content.Length}), skipping {filename}");
+                        continue;
+                    }
+
                     int tagEnd = content.IndexOf(']', charPos);
                     if (tagEnd < 0) continue;
 
@@ -808,7 +825,9 @@ namespace DevMind
                         contentStart++;
 
                     // Block ends at the next '\n[' sequence (start of next tag) or end of string.
-                    int nextTag  = content.IndexOf("\n[", contentStart, StringComparison.Ordinal);
+                    int nextTag = contentStart < content.Length
+                        ? content.IndexOf("\n[", contentStart, StringComparison.Ordinal)
+                        : -1;
                     int blockEnd = nextTag >= 0 ? nextTag : content.Length;
 
                     string oldBlock    = content.Substring(charPos, blockEnd - charPos);

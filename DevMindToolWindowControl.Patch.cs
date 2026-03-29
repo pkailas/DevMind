@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.Patch.cs  v5.14
+// File: DevMindToolWindowControl.Patch.cs  v5.15
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -796,6 +796,229 @@ namespace DevMind
             }
 
             return sb.ToString().TrimEnd('\r', '\n');
+        }
+
+        // ── PATCH resolution (preview gate support) ─────────────────────────
+
+        /// <summary>
+        /// Resolves a PATCH block to determine what would change, without applying.
+        /// Returns a <see cref="PatchResolveResult"/> with match confidence and
+        /// resolved blocks, or null if parsing/matching failed.
+        /// Used by the diff preview gate to show a card before committing.
+        /// </summary>
+        internal async Task<PatchResolveResult> ResolvePatchAsync(string input)
+        {
+            try
+            {
+                var lines = input.Split(new[] { '\r', '\n' }, StringSplitOptions.None);
+                string fileName = lines[0].Substring("PATCH ".Length).Trim();
+                if (string.IsNullOrEmpty(fileName))
+                {
+                    AppendOutput("[PATCH] No filename specified.\n", OutputColor.Error);
+                    return null;
+                }
+
+                int firstNl = input.IndexOf('\n');
+                if (firstNl >= 0)
+                {
+                    string header = input.Substring(0, firstNl + 1);
+                    string body   = StripMarkdownFenceLines(input.Substring(firstNl + 1));
+                    input = header + body;
+                }
+
+                var rawBlocks = ParsePatchBlocks(input);
+                if (rawBlocks.Count == 0)
+                {
+                    AppendOutput("[PATCH] Invalid syntax — must contain at least one FIND: and REPLACE: pair.\n", OutputColor.Error);
+                    return null;
+                }
+
+                var blocks = new List<(string findText, string replaceText)>(rawBlocks.Count);
+                foreach (var (rawFind, rawReplace) in rawBlocks)
+                {
+                    var headingWarnings = new List<string>();
+                    string cleanFind    = StripMarkdownHeadingLines(rawFind,    headingWarnings);
+                    string cleanReplace = StripMarkdownHeadingLines(rawReplace, headingWarnings);
+                    foreach (var w in headingWarnings)
+                        AppendOutput($"[WARNING] Stripped markdown heading from PATCH content: {w}\n", OutputColor.Error);
+                    blocks.Add((cleanFind, cleanReplace));
+                }
+
+                string normalizedFileName = fileName.Replace('\\', '/');
+                string fileNameOnly;
+                try { fileNameOnly = Path.GetFileName(normalizedFileName); }
+                catch (ArgumentException diagEx)
+                {
+                    AppendOutput($"[PATCH error: {diagEx.Message}]\n", OutputColor.Error);
+                    return null;
+                }
+                string fullPath = await FindFileInSolutionAsync(fileNameOnly, normalizedFileName)
+                    ?? Path.Combine(_terminalWorkingDir, fileNameOnly);
+
+                if (!File.Exists(fullPath))
+                {
+                    AppendOutput($"[PATCH] File not found: {fullPath}\n", OutputColor.Error);
+                    return null;
+                }
+
+                var (content, fileEncoding) = ReadFilePreservingEncoding(fullPath);
+                bool fileUsesCrlf = content.Contains("\r\n");
+                var (normContent, normToOrig) = NormalizeWithMap(content);
+                var resolvedBlocks = new List<(int origStart, int origEnd, string replaceText)>();
+                var confidence = PatchConfidence.Exact;
+
+                for (int i = 0; i < blocks.Count; i++)
+                {
+                    var (findText, replaceText) = blocks[i];
+                    string normFind = Regex.Replace(findText, @"\s+", " ").Trim();
+                    if (string.IsNullOrEmpty(normFind))
+                    {
+                        AppendOutput($"[PATCH] Block {i + 1}: FIND is empty after fence stripping — skipping.\n", OutputColor.Error);
+                        continue;
+                    }
+
+                    int normIdx = normContent.IndexOf(normFind, StringComparison.Ordinal);
+                    int origStart = 0, origEnd = 0;
+
+                    if (normIdx < 0)
+                    {
+                        var fuzzy = FindFuzzyMatch(content, findText, normFind);
+                        if (fuzzy == null)
+                        {
+                            AppendOutput($"[PATCH] Block {i + 1}: FIND text not found in {fileName} — no changes made.\n", OutputColor.Error);
+                            return null;
+                        }
+                        confidence = PatchConfidence.Fuzzy;
+                        string fuzzyNormReplace = replaceText.Replace("\r\n", "\n");
+                        string fuzzyFinalReplace = fileUsesCrlf ? fuzzyNormReplace.Replace("\n", "\r\n") : fuzzyNormReplace;
+                        resolvedBlocks.Add((fuzzy.Value.origStart, fuzzy.Value.origEnd, fuzzyFinalReplace));
+                        int fuzzyLine = content.Substring(0, fuzzy.Value.origStart).Count(c => c == '\n') + 1;
+                        AppendOutput($"[PATCH] Block {i + 1}: Fuzzy match at line {fuzzyLine} ({fuzzy.Value.similarity:P0} similarity).\n", OutputColor.Dim);
+                        continue;
+                    }
+
+                    // Ambiguity check
+                    int secondNormIdx = normContent.IndexOf(normFind, normIdx + 1, StringComparison.Ordinal);
+                    if (secondNormIdx >= 0)
+                    {
+                        int line1 = content.Substring(0, normToOrig[normIdx]).Count(c => c == '\n') + 1;
+                        int line2 = content.Substring(0, normToOrig[secondNormIdx]).Count(c => c == '\n') + 1;
+                        AppendOutput(
+                            $"[PATCH] Block {i + 1}: Ambiguous FIND — matched at line {line1} and line {line2} in {fileName}. " +
+                            $"Add more surrounding context to make the match unique.\n",
+                            OutputColor.Error);
+                        return null;
+                    }
+                    origStart = normToOrig[normIdx];
+                    while (origStart > 0 && content[origStart - 1] != '\n')
+                        origStart--;
+                    origEnd = (normIdx + normFind.Length < normToOrig.Length)
+                        ? normToOrig[normIdx + normFind.Length]
+                        : content.Length;
+
+                    string normalizedReplace = replaceText.Replace("\r\n", "\n");
+                    string finalReplace = fileUsesCrlf
+                        ? normalizedReplace.Replace("\n", "\r\n")
+                        : normalizedReplace;
+                    resolvedBlocks.Add((origStart, origEnd, finalReplace));
+                }
+
+                if (resolvedBlocks.Count == 0)
+                {
+                    AppendOutput("[PATCH] No changes resolved — file not modified.\n", OutputColor.Error);
+                    return null;
+                }
+
+                return new PatchResolveResult
+                {
+                    FullPath = fullPath,
+                    FileName = fileName,
+                    OriginalContent = content,
+                    FileEncoding = fileEncoding,
+                    Confidence = confidence,
+                    ResolvedBlocks = resolvedBlocks,
+                    ParsedPairs = blocks
+                };
+            }
+            catch (Exception ex)
+            {
+                AppendOutput($"[PATCH] Error: {ex.Message}\n", OutputColor.Error);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Applies a previously resolved patch. Called after the diff preview gate
+        /// approves the change. Returns the full path on success, null on failure.
+        /// </summary>
+        internal async Task<string> ApplyResolvedPatchAsync(PatchResolveResult resolved)
+        {
+            try
+            {
+                resolved.ResolvedBlocks.Sort((a, b) => b.origStart.CompareTo(a.origStart));
+                var updated = resolved.OriginalContent;
+                foreach (var (origStart, origEnd, finalReplace) in resolved.ResolvedBlocks)
+                    updated = updated.Substring(0, origStart) + finalReplace + updated.Substring(origEnd);
+
+                // UNDO backup
+                try
+                {
+                    string backupDir = Path.Combine(Path.GetTempPath(), "DevMind");
+                    Directory.CreateDirectory(backupDir);
+                    string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
+                    string backupPath = Path.Combine(backupDir, $"{Path.GetFileName(resolved.FullPath)}.{timestamp}.bak");
+                    File.Copy(resolved.FullPath, backupPath, overwrite: true);
+                    if (_patchBackupStack.Count >= PatchBackupStackLimit)
+                    {
+                        var oldest = _patchBackupStack.ToArray().Last();
+                        try { File.Delete(oldest.backupPath); } catch { }
+                        var entries = _patchBackupStack.ToArray().Reverse().Skip(1).ToArray();
+                        _patchBackupStack.Clear();
+                        foreach (var e in entries) _patchBackupStack.Push(e);
+                    }
+                    _patchBackupStack.Push((resolved.FullPath, backupPath));
+                }
+                catch { }
+
+                File.WriteAllText(resolved.FullPath, updated, resolved.FileEncoding);
+                _llmClient._fileCache.Store(Path.GetFileName(resolved.FullPath), updated);
+
+                try
+                {
+                    await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                    ReloadDocumentFromDisk(resolved.FullPath);
+                }
+                catch { }
+
+                _patchDiffCache[resolved.FullPath] = BuildPatchDiffView(
+                    resolved.OriginalContent, updated, resolved.ResolvedBlocks);
+
+                if (_readContext != null)
+                {
+                    string patchedFileName = Path.GetFileName(resolved.FullPath);
+                    int entryStart = _readContext.IndexOf($"\n\n{patchedFileName}\n```\n", StringComparison.OrdinalIgnoreCase);
+                    if (entryStart >= 0)
+                    {
+                        int blockEnd = _readContext.IndexOf("\n```\n\n", entryStart + patchedFileName.Length, StringComparison.Ordinal);
+                        if (blockEnd >= 0)
+                        {
+                            _readContext = _readContext.Remove(entryStart, blockEnd + "\n```\n\n".Length - entryStart);
+                            int lineCount = updated.Split('\n').Length;
+                            _readContext += $"The following files have been loaded for context:\n\n{patchedFileName}\n```\n{updated}\n```\n\n";
+                            AppendOutput($"[PATCH] Context refreshed: {patchedFileName} ({lineCount} lines)\n", OutputColor.Dim);
+                        }
+                    }
+                }
+
+                int undosAvailable = _patchBackupStack.Count;
+                AppendOutput($"[PATCH] Applied to {resolved.FullPath} (undo depth: {undosAvailable})\n", OutputColor.Success);
+                return resolved.FullPath;
+            }
+            catch (Exception ex)
+            {
+                AppendOutput($"[PATCH] Error: {ex.Message}\n", OutputColor.Error);
+                return null;
+            }
         }
 
         // ── AUTO-PATCH ────────────────────────────────────────────────────────

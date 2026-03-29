@@ -1,4 +1,4 @@
-// File: AgenticActionResolver.cs  v1.4.0
+// File: AgenticActionResolver.cs  v1.5.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System.Collections.Generic;
@@ -30,12 +30,11 @@ namespace DevMind
             if (outcome == null || outcome.Blocks == null || outcome.Blocks.Count == 0)
                 return AgenticAction.Stop("No response.");
 
-            // ── Rule 1: DONE signal (only when no actionable blocks present) ─────
-            // If the response also contains patches/files/shell/delete/test, let the executor
-            // handle those first; the subsequent iteration will see a clean DONE.
-            if (outcome.IsDone && !outcome.HasPatches && !outcome.HasFileCreation
-                && !outcome.HasShellCommands && !outcome.HasDeleteRequests && !outcome.HasRenameRequests
-                && !outcome.HasTestRequests)
+            // ── Rule 1: DONE signal (only when no other directives need processing) ─
+            // If the response also contains any directive (PATCH, SHELL, FILE, READ,
+            // GREP, FIND, DELETE, RENAME, DIFF, TEST), let the executor handle those
+            // first; the caller checks IsDone after execution to decide whether to stop.
+            if (outcome.IsDone && !outcome.HasAnyDirective)
                 return AgenticAction.Stop("Task complete.");
 
             // ── Rule 2: READ/GREP-only response → auto-load and resubmit ────────

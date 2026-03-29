@@ -255,7 +255,7 @@ namespace DevMind
 
             // READ! <filename>  (checked before plain READ)
             m = _forceReadLine.Match(line);
-            if (m.Success && !hasActionableBlocks)
+            if (m.Success)
             {
                 FlushText(blocks, textBuf);
                 blocks.Add(new ResponseBlock
@@ -269,7 +269,7 @@ namespace DevMind
 
             // READ <filename>[:range]
             m = _readLine.Match(line);
-            if (m.Success && !hasActionableBlocks)
+            if (m.Success)
             {
                 FlushText(blocks, textBuf);
                 int rangeStart = 0, rangeEnd = 0;
@@ -292,7 +292,7 @@ namespace DevMind
 
             // GREP: "pattern" filename[:range]
             m = _grepLine.Match(line);
-            if (m.Success && !hasActionableBlocks)
+            if (m.Success)
             {
                 FlushText(blocks, textBuf);
                 int grepStart = 0, grepEnd = 0;
@@ -316,7 +316,7 @@ namespace DevMind
 
             // FIND: "pattern" glob[:range]
             m = _findFileLine.Match(line);
-            if (m.Success && !hasActionableBlocks)
+            if (m.Success)
             {
                 FlushText(blocks, textBuf);
                 int findStart = 0, findEnd = 0;
@@ -363,7 +363,7 @@ namespace DevMind
 
             // DIFF <filename>
             m = _diffLine.Match(line);
-            if (m.Success && !hasActionableBlocks)
+            if (m.Success)
             {
                 FlushText(blocks, textBuf);
                 blocks.Add(new ResponseBlock { Type = BlockType.Diff, FileName = m.Groups[1].Value });
@@ -935,11 +935,11 @@ namespace DevMind
                 if (inScratchpad) continue;
 
                 // Skip PATCH content — FILE: inside a PATCH is not a real file block
-                if (_patchStart.IsMatch(line)) { inPatch = true; }
+                if (_patchStart.IsMatch(line)) { inPatch = true; return true; }
                 if (_patchEnd.IsMatch(line))   { inPatch = false; continue; }
                 if (inPatch) continue;
 
-                if (_patchStart.IsMatch(line) || _fileStart.IsMatch(line) || _shellLine.IsMatch(line) || _deleteLine.IsMatch(line) || _renameLine.IsMatch(line) || _testLine.IsMatch(line))
+                if (_fileStart.IsMatch(line) || _shellLine.IsMatch(line) || _deleteLine.IsMatch(line) || _renameLine.IsMatch(line) || _testLine.IsMatch(line))
                     return true;
             }
             return false;

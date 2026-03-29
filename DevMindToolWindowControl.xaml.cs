@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v5.0.60
+// File: DevMindToolWindowControl.xaml.cs  v5.0.64
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -408,13 +408,20 @@ namespace DevMind
 #pragma warning restore VSTHRD100
 #pragma warning restore VSSDK007
         {
+            System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] SendToLlm ENTER — _shellLoopPending={_shellLoopPending}, _agenticDepth={_agenticDepth}");
             string text = InputTextBox.Text?.Trim();
-            if (string.IsNullOrEmpty(text)) return;
+            if (string.IsNullOrEmpty(text))
+            {
+                System.Diagnostics.Debug.WriteLine("[DevMind TRACE] SendToLlm EXIT — text is null/empty");
+                return;
+            }
+            System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] SendToLlm text={text.Substring(0, Math.Min(text.Length, 120))}...");
 
             // [WAIT] batch: if the input contains a line that is exactly "[WAIT]" (case-insensitive),
             // split into blocks and send each block sequentially, waiting for completion between them.
             if (!_shellLoopPending && ContainsWaitSeparator(text))
             {
+                System.Diagnostics.Debug.WriteLine("[DevMind TRACE] SendToLlm EXIT — routed to ProcessBatchInputAsync");
                 await ProcessBatchInputAsync(text);
                 return;
             }
@@ -624,12 +631,30 @@ namespace DevMind
                     readLineCount++;
                 }
 
+                System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] READ pre-processing: {readLineCount} READ line(s) found out of {allLines.Length} total lines");
+
                 if (readLineCount > 0)
                 {
                     string readBlock = string.Join("\n", allLines, 0, readLineCount);
+                    System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] READ readBlock={readBlock.Substring(0, Math.Min(readBlock.Length, 120))}");
                     await ApplyReadCommandAsync(readBlock, showOutline: true);
 
                     string remaining = string.Join("\n", allLines, readLineCount, allLines.Length - readLineCount).Trim();
+
+                    // Single-line fix: "READ File.cs do something" → extract instruction after the filename.
+                    // ApplyReadCommandAsync already isolates the filename (first token after "READ "),
+                    // but the trailing instruction on that same line was being discarded.
+                    if (string.IsNullOrEmpty(remaining) && readLineCount == 1)
+                    {
+                        string readLine = allLines[0].TrimEnd('\r');
+                        string afterRead = readLine.Substring("READ ".Length).Trim();
+                        // afterRead = "File.cs do something" — skip first token (filename) to get instruction
+                        int firstSpace = afterRead.IndexOf(' ');
+                        if (firstSpace > 0)
+                            remaining = afterRead.Substring(firstSpace + 1).Trim();
+                    }
+
+                    System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] READ remaining={remaining.Length} chars: '{remaining.Substring(0, Math.Min(remaining.Length, 120))}'");
                     if (string.IsNullOrEmpty(remaining))
                         return;
 
@@ -645,8 +670,17 @@ namespace DevMind
             if (!_shellLoopPending && _pendingResubmitPrompt == null)
             {
                 _pendingResubmitPrompt = text;
+                // Preserve files registered by pre-processed READ lines above —
+                // Clear() would wipe them, causing false positives in the write guard.
+                var preReadFiles = _taskReadFiles.Count > 0
+                    ? new HashSet<string>(_taskReadFiles, StringComparer.OrdinalIgnoreCase)
+                    : null;
                 _taskReadFiles.Clear();
+                if (preReadFiles != null)
+                    _taskReadFiles.UnionWith(preReadFiles);
             }
+
+            System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] Post-READ: text='{text.Substring(0, Math.Min(text.Length, 120))}', _pendingResubmitPrompt set={_pendingResubmitPrompt != null}");
 
             InputTextBox.Text = "";
             SetInputEnabled(false);
@@ -861,6 +895,8 @@ namespace DevMind
                 combined += $"\n\n--- Project Context (DevMind.md) ---\n{_devMindContext}\n---";
             DevMindOptions.Instance.SystemPrompt = combined;
 
+            System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] About to call SendMessageAsync — contextualMessage length={contextualMessage.Length}");
+
             // Guard: always restore the original system prompt, even if RunAsync throws
             // synchronously or an exception propagates before RunAsync returns.
             try
@@ -955,6 +991,7 @@ namespace DevMind
 
                                 var outcome  = ResponseClassifier.Classify(fullResponse);
                                 var executor = new AgenticExecutor(this);
+                                executor.SetCancellationToken(_cts?.Token ?? CancellationToken.None);
                                 int maxDepth = DevMindOptions.Instance.AgenticLoopMaxDepth;
 
                                 System.Diagnostics.Debug.WriteLine($"[DEVMIND-DIAG] Outcome: HasPatches={outcome.HasPatches} HasShell={outcome.HasShellCommands} HasFile={outcome.HasFileCreation} HasDelete={outcome.HasDeleteRequests} IsDone={outcome.IsDone} IsReadOnly={outcome.IsReadOnly} IsEmptyOrBareCode={outcome.IsEmptyOrBareCode}");
@@ -970,10 +1007,21 @@ namespace DevMind
 
                                     if (action.Type == ActionType.LoadAndResubmit)
                                     {
-                                        if (_agenticDepth > 0)
+                                        // DONE + info-gather: load files but then stop
+                                        if (outcome.IsDone)
+                                        {
+                                            AppendOutput("[AGENTIC] File(s) loaded. Task complete.\n", OutputColor.Success);
+                                            _agenticDepth = 0;
+                                            _pendingResubmitPrompt = null;
+                                            // fall through to completion
+                                        }
+                                        else if (_agenticDepth > 0)
                                         {
                                             AppendOutput("[AUTO-READ] File(s) loaded during agentic iteration — continuing...\n", OutputColor.Dim);
                                             InputTextBox.Text = "The requested file(s) have been loaded into context. Continue with the task using PATCH/SHELL/FILE directives.";
+                                            _shellLoopPending = true;
+                                            SendToLlm();
+                                            return;
                                         }
                                         else if (!string.IsNullOrEmpty(_pendingResubmitPrompt))
                                         {
@@ -981,15 +1029,18 @@ namespace DevMind
                                             _pendingResubmitPrompt = null;
                                             AppendOutput("[AUTO-READ] File(s) loaded — resubmitting original prompt...\n", OutputColor.Dim);
                                             InputTextBox.Text = saved;
+                                            _shellLoopPending = true;
+                                            SendToLlm();
+                                            return;
                                         }
                                         else
                                         {
                                             AppendOutput("[AUTO-READ] File(s) loaded — resubmitting...\n", OutputColor.Dim);
                                             InputTextBox.Text = "The requested file(s) have been loaded. Continue with the task.";
+                                            _shellLoopPending = true;
+                                            SendToLlm();
+                                            return;
                                         }
-                                        _shellLoopPending = true;
-                                        SendToLlm();
-                                        return;
                                     }
 
                                     if (action.Type == ActionType.RetryWithCorrection)
@@ -1023,7 +1074,7 @@ namespace DevMind
                                             && !string.IsNullOrEmpty(result.LastShellCommand)
                                             && IsRunOrExecCommand(result.LastShellCommand);
 
-                                        if (hasDone && !ranShell && result.PatchesApplied == 0 && result.FilesCreated.Count == 0)
+                                        if (hasDone)
                                         {
                                             AppendOutput("[AGENTIC] Task complete.\n", OutputColor.Success);
                                             _agenticDepth = 0;
@@ -1033,13 +1084,6 @@ namespace DevMind
                                         else if (isRunExec)
                                         {
                                             AppendOutput("[AGENTIC] Run/exec command succeeded — treating as task complete.\n", OutputColor.Success);
-                                            _agenticDepth = 0;
-                                            _pendingResubmitPrompt = null;
-                                            // fall through to completion
-                                        }
-                                        else if (hasDone)
-                                        {
-                                            AppendOutput("[AGENTIC] Task complete.\n", OutputColor.Success);
                                             _agenticDepth = 0;
                                             _pendingResubmitPrompt = null;
                                             // fall through to completion

@@ -1,8 +1,10 @@
-// File: AgenticExecutor.cs  v1.7.0
+// File: AgenticExecutor.cs  v2.0.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace DevMind
@@ -16,6 +18,7 @@ namespace DevMind
     public class AgenticExecutor
     {
         private readonly IAgenticHost _host;
+        private CancellationToken _cancellationToken;
 
         // Repetition guard — tracks consecutive identical READ/GREP requests to break infinite loops
         private string _lastReadKey;
@@ -28,6 +31,15 @@ namespace DevMind
         public AgenticExecutor(IAgenticHost host)
         {
             _host = host;
+        }
+
+        /// <summary>
+        /// Sets the cancellation token for the current execution cycle.
+        /// Used to cancel pending diff preview cards on Stop.
+        /// </summary>
+        public void SetCancellationToken(CancellationToken token)
+        {
+            _cancellationToken = token;
         }
 
         /// <summary>
@@ -163,33 +175,8 @@ namespace DevMind
                         break;
 
                     case BlockType.Patch:
-                        if (!processPatches) break;
-                        try
-                        {
-                            string patchedPath = await _host.ApplyPatchAsync(block.Content);
-                            if (patchedPath != null)
-                            {
-                                result.PatchesApplied++;
-                                result.PatchedPaths.Add(patchedPath);
-                                _lastReadKey = null;
-                                _lastReadRepeatCount = 0;
-                            }
-                            else
-                            {
-                                result.PatchesFailed++;
-                                string failedFile = string.IsNullOrEmpty(block.FileName)
-                                    ? "unknown" : System.IO.Path.GetFileName(block.FileName);
-                                result.Errors.Add(
-                                    $"[PATCH-FAILED:{failedFile}] FIND text not found — file was NOT modified. " +
-                                    "READ the file to get exact current content, then retry PATCH with correct FIND text.");
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            result.PatchesFailed++;
-                            result.Errors.Add(ex.Message);
-                            _host.AppendOutput($"[PATCH ERROR] {block.FileName}: {ex.Message}\n", OutputColor.Error);
-                        }
+                        // Patches are handled in a batch after the loop — skip individual processing.
+                        // See batch patch handling below.
                         break;
 
                     case BlockType.Shell:
@@ -364,13 +351,204 @@ namespace DevMind
                         }
                         break;
 
-                    // Text, ReadRequest, Done — already handled during streaming or by resolver
+                    case BlockType.ReadRequest:
+                        try
+                        {
+                            string readKey = block.RangeStart > 0
+                                ? $"{block.FileName}:{block.RangeStart}-{block.RangeEnd}"
+                                : block.FileName;
+                            if (string.Equals(readKey, _lastReadKey, StringComparison.OrdinalIgnoreCase))
+                                _lastReadRepeatCount++;
+                            else { _lastReadKey = readKey; _lastReadRepeatCount = 1; }
+                            if (_lastReadRepeatCount >= 3)
+                            {
+                                _host.AppendOutput(
+                                    "[READ returned same content 3 times — possible truncation or parsing issue. " +
+                                    "Proceeding with available data. Use a different line range or try GREP to locate what you need.]\n",
+                                    OutputColor.Dim);
+                                break;
+                            }
+                            await _host.LoadFileContentAsync(
+                                block.FileName, block.RangeStart, block.RangeEnd,
+                                block.ForceFullRead);
+                        }
+                        catch (Exception ex)
+                        {
+                            result.Errors.Add(ex.Message);
+                            _host.AppendOutput($"[READ ERROR] {block.FileName}: {ex.Message}\n", OutputColor.Error);
+                        }
+                        break;
+
+                    // Text, Done — already handled during streaming or by resolver
                     default:
                         break;
                 }
             }
 
+            // ── Batch PATCH processing with diff preview gate ──────────────────
+            if (processPatches)
+            {
+                var patchBlocks = outcome.Blocks
+                    .Where(b => b.Type == BlockType.Patch)
+                    .ToList();
+
+                if (patchBlocks.Count > 0)
+                {
+                    await ExecuteBatchPatchesAsync(patchBlocks, result);
+                }
+            }
+
             return result;
+        }
+
+        /// <summary>
+        /// Resolves all PATCH blocks, determines whether diff preview cards are
+        /// needed, shows them if so, and applies approved patches.
+        /// </summary>
+        private async Task ExecuteBatchPatchesAsync(
+            List<ResponseBlock> patchBlocks,
+            ExecutionResult result)
+        {
+            bool alwaysConfirm = DevMindOptions.Instance.AlwaysConfirmPatch;
+
+            // Phase 1: Resolve all patches (parse + match, no side effects)
+            var resolved = new List<PatchResolveResult>();
+            var resolveIndices = new List<int>(); // maps resolved[] index to patchBlocks[] index
+
+            for (int i = 0; i < patchBlocks.Count; i++)
+            {
+                var block = patchBlocks[i];
+                try
+                {
+                    var resolveResult = await _host.ResolvePatchAsync(block.Content);
+                    if (resolveResult != null)
+                    {
+                        resolved.Add(resolveResult);
+                        resolveIndices.Add(i);
+                    }
+                    else
+                    {
+                        result.PatchesFailed++;
+                        string failedFile = string.IsNullOrEmpty(block.FileName)
+                            ? "unknown" : System.IO.Path.GetFileName(block.FileName);
+                        result.Errors.Add(
+                            $"[PATCH-FAILED:{failedFile}] FIND text not found — file was NOT modified. " +
+                            "READ the file to get exact current content, then retry PATCH with correct FIND text.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    result.PatchesFailed++;
+                    result.Errors.Add(ex.Message);
+                    _host.AppendOutput($"[PATCH ERROR] {block.FileName}: {ex.Message}\n", OutputColor.Error);
+                }
+            }
+
+            if (resolved.Count == 0) return;
+
+            // Phase 2: Auto-apply exact matches, collect fuzzy/confirm patches for preview
+            var needPreview = new List<PatchResolveResult>();
+            var needPreviewIndices = new List<int>(); // index into resolved[]
+
+            for (int i = 0; i < resolved.Count; i++)
+            {
+                var r = resolved[i];
+                if (!alwaysConfirm && r.Confidence == PatchConfidence.Exact)
+                {
+                    // Auto-apply immediately — no card, no await
+                    try
+                    {
+                        string patchedPath = await _host.ApplyResolvedPatchAsync(r);
+                        if (patchedPath != null)
+                        {
+                            result.PatchesApplied++;
+                            result.PatchedPaths.Add(patchedPath);
+                            _lastReadKey = null;
+                            _lastReadRepeatCount = 0;
+                        }
+                        else
+                        {
+                            result.PatchesFailed++;
+                            string failedFile = string.IsNullOrEmpty(r.FileName)
+                                ? "unknown" : System.IO.Path.GetFileName(r.FileName);
+                            result.Errors.Add(
+                                $"[PATCH-FAILED:{failedFile}] FIND text not found — file was NOT modified. " +
+                                "READ the file to get exact current content, then retry PATCH with correct FIND text.");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        result.PatchesFailed++;
+                        result.Errors.Add(ex.Message);
+                        _host.AppendOutput($"[PATCH ERROR] {r.FileName}: {ex.Message}\n", OutputColor.Error);
+                    }
+                }
+                else
+                {
+                    // Needs user confirmation — queue for preview
+                    needPreview.Add(r);
+                    needPreviewIndices.Add(i);
+                }
+            }
+
+            // Phase 3: Show preview cards only for patches that need confirmation
+            if (needPreview.Count > 0)
+            {
+                List<int> approvedIndices;
+                try
+                {
+                    approvedIndices = await _host.ShowDiffPreviewAsync(needPreview, _cancellationToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    foreach (var r in needPreview)
+                    {
+                        result.PatchesFailed++;
+                        result.Errors.Add(
+                            $"[PATCH-SKIPPED: {r.FileName} \u2014 user cancelled. Re-READ the file if you need to try again.]");
+                    }
+                    return;
+                }
+
+                // Apply approved, inject SKIPPED for rejected
+                for (int i = 0; i < needPreview.Count; i++)
+                {
+                    if (approvedIndices.Contains(i))
+                    {
+                        try
+                        {
+                            string patchedPath = await _host.ApplyResolvedPatchAsync(needPreview[i]);
+                            if (patchedPath != null)
+                            {
+                                result.PatchesApplied++;
+                                result.PatchedPaths.Add(patchedPath);
+                                _lastReadKey = null;
+                                _lastReadRepeatCount = 0;
+                            }
+                            else
+                            {
+                                result.PatchesFailed++;
+                                result.Errors.Add($"[PATCH-FAILED:{needPreview[i].FileName}] Apply failed after approval.");
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            result.PatchesFailed++;
+                            result.Errors.Add(ex.Message);
+                            _host.AppendOutput($"[PATCH ERROR] {needPreview[i].FileName}: {ex.Message}\n", OutputColor.Error);
+                        }
+                    }
+                    else
+                    {
+                        result.PatchesFailed++;
+                        result.Errors.Add(
+                            $"[PATCH-SKIPPED: {needPreview[i].FileName} \u2014 user rejected this change. Re-READ the file if you need to try again.]");
+                        _host.AppendOutput(
+                            $"[PATCH] Skipped {needPreview[i].FileName} \u2014 user rejected.\n",
+                            OutputColor.Dim);
+                    }
+                }
+            }
         }
 
         /// <summary>
