@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v5.0.64
+// File: DevMindToolWindowControl.xaml.cs  v5.0.65
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -61,6 +61,7 @@ namespace DevMind
             new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private Action _batchOnComplete;
         private bool _suppressDisplay;
+        private bool _diffPreviewPending;
         private int _patchCount = 0;
         private int _undoCount = 0;
         private int _readFileCount = 0;
@@ -341,7 +342,7 @@ namespace DevMind
             InputTextBox.IsEnabled = enabled;
             AskButton.IsEnabled = enabled;
             RunButton.IsEnabled = enabled;
-            StopButton.IsEnabled = !enabled;
+            StopButton.IsEnabled = !enabled || _diffPreviewPending;
         }
 
         // ── Think-block filter ────────────────────────────────────────────────

@@ -94,7 +94,11 @@
       "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Professional/MSBuild/Current/Bin/MSBuild.exe\" \"C:/Users/pkailas.KAILAS/source/repos/DevMind/DevMind.slnx\" /p:Configuration=Release /p:DeployExtension=false /verbosity:minimal)",
       "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Professional/MSBuild/Current/Bin/MSBuild.exe\" DevMind.slnx //p:Configuration=Release //p:DeployExtension=false //verbosity:minimal)",
       "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Professional/MSBuild/Current/Bin/MSBuild.exe\" DevMind.csproj /p:Configuration=Release /v:q /nologo)",
-      "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Professional/MSBuild/Current/Bin/MSBuild.exe\" DevMind.csproj //p:Configuration=Release //v:q //nologo)"
+      "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Professional/MSBuild/Current/Bin/MSBuild.exe\" DevMind.csproj //p:Configuration=Release //v:q //nologo)",
+      "Bash(\"/c/Program Files/Microsoft Visual Studio/2022/Enterprise/MSBuild/Current/Bin/MSBuild.exe\" \"C:\\\\Users\\\\pkailas.KAILAS\\\\source\\\\repos\\\\DevMind\\\\DevMind.csproj\" /p:Configuration=Release /v:minimal)",
+      "Bash(cmd.exe //c \"\"\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Professional\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\"\" DevMind.csproj /p:Configuration=Release /v:minimal\")",
+      "Bash(MSBUILDFULL=\"/c/Program Files/Microsoft Visual Studio/2022/Professional/MSBuild/Current/Bin/MSBuild.exe\")",
+      "Bash(\"$MSBUILDFULL\" \"C:/Users/pkailas.KAILAS/source/repos/DevMind/DevMind.csproj\" //p:Configuration=Release //v:minimal)"
     ]
   }
 }

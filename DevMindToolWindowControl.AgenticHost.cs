@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.AgenticHost.cs  v1.9.0
+// File: DevMindToolWindowControl.AgenticHost.cs  v1.9.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -906,9 +906,17 @@ namespace DevMind
 #pragma warning restore VSTHRD001, VSTHRD110
             }))
             {
-                // Await all card decisions
-                var tasks = cards.Select(c => c.UserDecision).ToArray();
-                await Task.WhenAll(tasks);
+                // Await all card decisions — keep Stop button enabled while waiting
+                _diffPreviewPending = true;
+                try
+                {
+                    var tasks = cards.Select(c => c.UserDecision).ToArray();
+                    await Task.WhenAll(tasks);
+                }
+                finally
+                {
+                    _diffPreviewPending = false;
+                }
             }
 
             // Collect approved indices — all tasks are completed at this point,

@@ -1,4 +1,4 @@
-// File: DiffPreviewCard.xaml.cs  v1.0.0
+// File: DiffPreviewCard.xaml.cs  v1.0.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -201,7 +201,7 @@ namespace DevMind
         /// </summary>
         public void Cancel()
         {
-            _tcs.TrySetResult(false);
+            _tcs.TrySetCanceled();
             ApplyButton.IsEnabled = false;
             SkipButton.IsEnabled = false;
             SkipButton.Content = "\u2717 Cancelled";
