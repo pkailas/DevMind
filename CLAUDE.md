@@ -1,4 +1,4 @@
-# CLAUDE.md — DevMind Developer Reference  v1.6
+# CLAUDE.md — DevMind Developer Reference  v1.8
 
 ## Project Overview
 
@@ -6,7 +6,7 @@
 
 - **Product**: DevMind
 - **Brand**: iOnline Consulting LLC
-- **Current Version**: v6.0.33
+- **Current Version**: v6.0.83
 - **Platform**: Visual Studio 2022+ (VSIX), .NET Framework (VSSDK requirement)
 - **Language**: C# with WPF UI
 
@@ -37,6 +37,10 @@
 | `LlmClient.cs` | HTTP client — SSE streaming to OpenAI-compatible `/v1/chat/completions` |
 | `DevMindOptionsPage.cs` | VS Tools > Options settings — EndpointUrl, ApiKey, ModelName, ServerType, CustomContextEndpoint, SystemPrompt, AgenticLoopMaxDepth, ShowLlmThinking |
 | `FileContentCache.cs` | In-memory line-indexed file cache — powers `READ filename:start-end` line-range access |
+| `DiffPreviewCard.xaml/.cs` | Inline diff preview card — rendered in OutputBox for PATCH confirmation; exposes `Task<bool> UserDecision` |
+| `DiffBatchBar.xaml/.cs` | Batch action bar — "Apply All / Skip All" shown when 2+ PATCH blocks need confirmation |
+| `PatchConfidence.cs` | `PatchConfidence` enum (`Exact`, `Fuzzy`) + `PatchResolveResult` class for two-phase PATCH resolution |
+| `StringValidator.cs` | Trivial utility: `StringValidator.IsValid(string)` — checks `!IsNullOrWhiteSpace` |
 
 ### Data Flow
 
@@ -92,8 +96,10 @@ A single LLM response can contain any combination of FILE:, PATCH, SHELL:, READ,
 ```
 Row 0  Height="Auto"   — System prompt collapsible panel (ToggleButton + Border)
 Row 1  Height="Auto"   — Input area (Border + TextBox, AcceptsReturn, MinHeight=60)
-Row 2  Height="Auto"   — Toolbar (Ask | Run | Stop | Clear | ContextIndicator | StatusText)
-Row 3  Height="*"      — OutputBox (RichTextBox, dark theme, Consolas, read-only)
+Row 2  Height="Auto"   — Toolbar (Ask | Run | Stop | Restart | Clear | ⌫ | ContextIndicator | StatusText)
+Row 3  Height="*"      — DockPanel:
+                           └─ Bottom: Terminal strip ("> " + TerminalInputBox, single-line, Consolas)
+                           └─ Fill:   OutputBox (RichTextBox, dark theme, Consolas, read-only)
 ```
 
 ### Output Rendering
@@ -131,7 +137,7 @@ v5.0 eliminates this. All tokens stream into a single buffer. `ResponseParser.Pa
 `_terminalWorkingDir` tracks the current working directory. `cd` is intercepted before spawning a process — relative and absolute paths resolved via `Path.GetFullPath`, `~` / bare `cd` reset to user profile. Commands run via `powershell.exe` (standard Windows path) or fall back to `cmd.exe`. History maintained in `_terminalHistory` (deduped, appended) with `_terminalHistoryIndex` for Up/Down navigation in InputTextBox. stdout and stderr are read concurrently to prevent deadlocks. A **120-second hard timeout** kills the process and reports a timeout error; both interactive and captured variants share this logic.
 
 ### Cancellation
-`_cts` (`CancellationTokenSource`) is created fresh in `SendToLlm()` and passed to `LlmClient.SendMessageAsync()`. `OperationCanceledException` is swallowed silently in `LlmClient` — cancellation is not treated as an error. Stop button is enabled (`IsEnabled`) during generation; Ask/Run are disabled. Cancellation is checked before agentic re-triggers to prevent frozen loops.
+`_cts` (`CancellationTokenSource`) is created fresh in `SendToLlm()` and passed to `LlmClient.SendMessageAsync()`. `OperationCanceledException` is swallowed silently in `LlmClient` — cancellation is not treated as an error. Stop button is enabled (`IsEnabled`) during generation and during diff preview (`_diffPreviewPending`); Ask/Run are disabled. Cancellation is checked before agentic re-triggers to prevent frozen loops. When Stop is pressed during diff preview, all pending `DiffPreviewCard` decisions are cancelled via `TrySetCanceled()`.
 
 ### Thread Model
 All UI updates must be dispatched to the main thread. The `onToken`, `onComplete`, and `onError` callbacks from `LlmClient` use `Dispatcher.BeginInvoke` (FIFO queue) rather than `ThreadHelper.JoinableTaskFactory.Run` to avoid blocking the SSE streaming reader and to guarantee FIFO token ordering. VSSDK007/VSTHRD001/VSTHRD110 pragmas suppress fire-and-forget and dispatcher warnings for these intentional patterns.
@@ -140,7 +146,7 @@ All UI updates must be dispatched to the main thread. The `onToken`, `onComplete
 
 ## LLM Directives
 
-The model communicates actions through five directives, all injected into the system prompt at runtime:
+The model communicates actions through directives, all injected into the system prompt at runtime:
 
 ### FILE: / END_FILE — Create New Files
 ```
@@ -321,6 +327,70 @@ Error recovery: `onError` and `finally` both reset `_agenticDepth` and `_shellLo
 
 ---
 
+## Diff Preview (v6.0.74+)
+
+When the model emits PATCH blocks, DevMind can show an inline diff preview for user confirmation before applying. Controlled by the `AlwaysConfirmPatch` setting.
+
+### Three-Phase PATCH Pipeline (`AgenticExecutor.ExecuteBatchPatchesAsync`)
+
+1. **Resolve** — all patches are resolved via `IAgenticHost.ResolvePatchAsync()` (parse + match, no side effects). Returns `PatchResolveResult` with `Confidence` (`Exact` or `Fuzzy`), `ResolvedBlocks`, and `ParsedPairs`.
+2. **Auto-apply** — when `AlwaysConfirmPatch` is `false`, exact matches are applied immediately via `IAgenticHost.ApplyResolvedPatchAsync()`. When `true`, all patches are queued for preview.
+3. **Preview** — remaining patches are shown via `IAgenticHost.ShowDiffPreviewAsync()`, which renders `DiffPreviewCard` controls inline in the OutputBox. Returns a list of approved indices; rejected patches inject `[PATCH-SKIPPED]` into the agentic context.
+
+### DiffPreviewCard
+
+- WPF `UserControl` rendered via `BlockUIContainer` directly into `OutputBox.Document.Blocks`.
+- Header shows `PATCH — filename.cs` + confidence badge (green "Exact ✓" or amber "Fuzzy ⚠").
+- Exposes `Task<bool> UserDecision` — a `TaskCompletionSource<bool>` awaited by the agentic loop.
+- `Configure()` for single FIND/REPLACE; `ConfigureMultiBlock()` for multiple pairs per file.
+- `Cancel()` — resolves via `TrySetCanceled()`; called when Stop button is pressed.
+- `DiffLineItem` — view model for each diff line: `Removed()` (red bg `#3C1F1F`), `Added()` (green bg `#1F3C1F`), `Context()` (transparent).
+
+### DiffBatchBar
+
+- Shown only when a single LLM response contains 2+ PATCH blocks needing confirmation.
+- "Apply All" / "Skip All" buttons iterate over all card references and call `ResolveApply()` / `ResolveSkip()`.
+
+### UI State: `_diffPreviewPending`
+
+- Set to `true` while `ShowDiffPreviewAsync` is awaiting user decisions.
+- Keeps `StopButton.IsEnabled = true` even while input is disabled, so the user can cancel pending cards.
+
+---
+
+## Unrelated-File Write Guard (v6.0.73+)
+
+Safety mechanism that prompts before writing to files the model never read:
+
+- `_taskReadFiles` (`HashSet<string>`) — tracks filename-only (case-insensitive) of files READ during the current task. Cleared at the start of each top-level user request.
+- `IsFileKnownToTask(fileNameOnly)` — returns `true` if the file was read this session, appears in `_pendingResubmitPrompt`, or no active task is running.
+- `ConfirmUnreadFileWriteAsync(fileNameOnly)` — shows a Yes/No `MessageBox` if the model tries to write a file it never read.
+- Applied to `ApplyPatchAsync`, `SaveFileAsync`, and `RenameFileAsync`.
+
+---
+
+## Auto-Read Referenced Files
+
+`AutoReadReferencedFilesAsync(string prompt)` runs automatically on every user-initiated `SendToLlm()` turn (when `!_shellLoopPending`):
+
+- Scans the prompt for: explicit `*.cs` filenames, PascalCase words → `<Word>.cs`, and `test`/`tests` keyword → `*Test*.cs` files.
+- Auto-reads up to **3 files** not already in `_readContext`.
+- Best-effort only; exceptions are swallowed; emits `[AUTO-READ] Pre-loaded N referenced file(s).`
+
+---
+
+## Block-by-Block Mode
+
+Controlled by `DevMindOptions.BlockByBlockMode` (`Off` / `On` / `Auto`):
+
+- When active, injects a "Block-by-Block Mode (Active)" section into the runtime system prompt instructing the model to read one range, emit one PATCH per turn, and track numbered steps in SCRATCHPAD.
+- `_blockByBlockStep` and `_blockByBlockTotal` — status fields displayed in `StatusText` as "Thinking... (step N/M)".
+- `ParseScratchpadSteps(scratchpad)` — parses numbered steps from SCRATCHPAD, recognizing `N. [DONE] description` / `N. DONE: description` patterns.
+- After each successful build: reads `_llmClient.TaskScratchpad`, finds next undone step, advances by calling `ClearHistory(preserveScratchpad: true)` and re-triggering with "Continue with step N: ...".
+- When all steps are done: emits "[AGENTIC] Block-by-block: all steps complete." and stops.
+
+---
+
 ## Streaming (onToken)
 
 `onToken` has exactly three jobs: **filter**, **accumulate**, **display**.
@@ -350,6 +420,12 @@ Fields: `_suppressDisplay`.
 | `OpenFileAfterGeneration` | `true` | Auto-open generated files in VS editor |
 | `AgenticLoopMaxDepth` | `5` | Max autonomous iterations (0 = disabled) |
 | `ShowLlmThinking` | `false` | Show `<think>` tokens with `[THINKING]` prefix in muted color when `true` |
+| `ShowContextBudget` | `true` | Display color-coded context budget line after every LLM response |
+| `BlockByBlockMode` | `Auto` | `Off` / `On` / `Auto` — block-by-block mode for memory-constrained environments |
+| `AlwaysConfirmPatch` | `false` | When `true`, all PATCHes pause for diff preview confirmation; when `false` only fuzzy matches require confirmation |
+| `FirstTokenTimeoutMinutes` | `5` | Max minutes to wait for the first token (covers prompt-ingestion phase) |
+| `RequestTimeoutMinutes` | `10` | Max minutes for a complete LLM response; sets `HttpClient.Timeout` |
+| `ContextEviction` | `Balanced` | `Off` / `Balanced` / `Aggressive` — tiered eviction of stale context turns |
 
 Settings are accessed via `DevMindOptions.Instance` (synchronous) or `GetLiveInstanceAsync()` (async). The `DevMindOptions.Saved` event fires when the user saves options, triggering `LlmClient.Configure()` and a background connection test.
 
@@ -435,6 +511,46 @@ Squeeze runs before the hard-trim (`TrimHistoryToFit`) and after each agentic tu
 - Detection is awaited (up to 5 seconds) before the first `SendMessageAsync` call.
 - `HistoryHardLimit = TotalLimit - ResponseHeadroomLimit` — history must never exceed this.
 
+## Tiered Context Eviction (v6.0.84+)
+
+Before each `SendMessageAsync`, `EvictStaleContext()` compresses or drops stale messages based on their age relative to the current turn. Controlled by `ContextEviction` setting (`Off` / `Balanced` / `Aggressive`).
+
+### Turn Tracking
+
+Each `ChatMessage` carries a `Turn` property. `_currentTurn` in `LlmClient` is incremented once per user-initiated send (via `IncrementTurn()`). Agentic resubmits share the same turn number. Reset to 0 on `ClearHistory()`.
+
+### Three Tiers
+
+| Tier | Balanced | Aggressive | Treatment |
+|------|----------|------------|-----------|
+| HOT | current + 1 previous | current only | Full fidelity — unchanged |
+| WARM | next 3 turns | next 2 turns | One-line summary per message (e.g. `[WARM] READ file.cs — 200 lines`) |
+| COLD | next 3 turns | next 2 turns | Entire turn collapsed to `[COLD] Turn N: actions...` |
+| DROP | age 8+ | age 5+ | Removed entirely |
+
+### Pinned Content (never evicted)
+
+- System prompt (index 0)
+- DevMind.md content (`[DevMind.md]` marker)
+- SCRATCHPAD state (`[TASK STATE]` marker)
+
+### WARM Summaries
+
+Each message type gets a specific summary format:
+- `[WARM] READ filename.cs — N lines` / `[WARM] READ filename.cs:start-end — N lines loaded`
+- `[WARM] SHELL: <command> — exit code N (succeeded/failed, E errors)`
+- `[WARM] PATCH filename.cs — applied` / `[WARM] PATCH filename.cs — skipped by user`
+- `[WARM] FILE filename.cs — created (N lines)`
+- `[WARM] GREP/FIND "pattern" — N matches`
+- `[WARM] Assistant: <first 80 chars>...`
+- Agentic resubmit prompts → `[WARM] (agentic resubmit)`
+
+### Integration
+
+- `EvictStaleContext()` runs at the top of `SendMessageAsync` (before user message is added, after `StripContextNotes`), only when `deferCompression` is false.
+- Complementary to the existing squeeze algorithm — eviction runs first, then squeeze handles remaining pressure.
+- Logging: single summary line `[CONTEXT] Eviction: N warm-compressed, M cold-collapsed, K dropped` — only emitted when at least one message was affected.
+
 ## Shell Shortcuts
 
 - `/reload` — clears cached DevMind.md, reloads on next Ask
@@ -485,7 +601,7 @@ Squeeze runs before the hard-trim (`TrimHistoryToFit`) and after each agentic tu
 ## Feature Roadmap
 
 1. **READ outline** — When manually typing READ, display method/property/class outline alongside line count.
-2. **Diff preview** — When the LLM suggests code changes, show a diff view before applying.
+2. ~~**Diff preview**~~ — **Implemented v6.0.74**. Inline diff preview cards (`DiffPreviewCard`) with Apply/Skip buttons. `DiffBatchBar` for bulk actions. Three-phase PATCH pipeline (resolve → auto-apply → preview). Controlled by `AlwaysConfirmPatch` setting.
 3. **Syntax highlighting** — Color-code fenced code blocks in `OutputBox` using span-level `Run` coloring.
 4. **Multi-turn context control** — Button to include/exclude file context per message.
 5. **Self-modification** — DevMind building DevMind through its own UI.

@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v5.0.65
+// File: DevMindToolWindowControl.xaml.cs  v5.0.67
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -118,10 +118,12 @@ namespace DevMind
 
         private void InitOutputDocument()
         {
+            OutputBox.IsUndoEnabled = false;
             OutputBox.Document.Blocks.Clear();
             _spacerParagraph = new Paragraph { LineHeight = 1.0, Margin = new Thickness(0, 2000, 0, 0) };
             OutputBox.Document.Blocks.Add(_spacerParagraph);
             OutputBox.Document.Blocks.Add(new Paragraph { Margin = new Thickness(0) });
+            OutputBox.IsUndoEnabled = true;
         }
 
         private void AppendOutput(string text, OutputColor color = OutputColor.Normal)
@@ -427,9 +429,13 @@ namespace DevMind
                 return;
             }
 
-            // Reset agentic depth for user-initiated calls; preserve it for agentic re-triggers
+            // Reset agentic depth for user-initiated calls; preserve it for agentic re-triggers.
+            // Increment turn counter so tiered eviction ages previous turns correctly.
             if (!_shellLoopPending)
+            {
                 _agenticDepth = 0;
+                _llmClient.IncrementTurn();
+            }
 
             // Known /command handlers — must be checked before the generic shell router below
             if (text.Equals("/stats", StringComparison.OrdinalIgnoreCase))

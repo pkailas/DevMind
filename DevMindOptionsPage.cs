@@ -1,4 +1,4 @@
-// File: DevMindOptionsPage.cs  v5.7
+// File: DevMindOptionsPage.cs  v5.8
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -19,6 +19,19 @@ namespace DevMind
         LmStudio,
         [Description("Custom")]
         Custom
+    }
+
+    /// <summary>
+    /// Controls how aggressively old context is compressed via tiered eviction.
+    /// </summary>
+    public enum ContextEvictionMode
+    {
+        [Description("Off")]
+        Off,
+        [Description("Balanced")]
+        Balanced,
+        [Description("Aggressive")]
+        Aggressive
     }
 
     /// <summary>
@@ -189,6 +202,17 @@ namespace DevMind
         [Description("When enabled, all PATCH operations pause for confirmation — even exact matches. When disabled, only fuzzy-matched patches require confirmation.")]
         [DefaultValue(false)]
         public bool AlwaysConfirmPatch { get; set; } = false;
+
+        /// <summary>
+        /// Controls how aggressively old context is compressed via tiered eviction.
+        /// Off = no eviction. Balanced = moderate compression of old turns.
+        /// Aggressive = tight compression for long tasks.
+        /// </summary>
+        [Category("Context Management")]
+        [DisplayName("Context Eviction")]
+        [Description("Controls how aggressively old context is compressed. Off = no eviction. Balanced = moderate compression of old turns. Aggressive = tight compression for long tasks.")]
+        [DefaultValue(ContextEvictionMode.Balanced)]
+        public ContextEvictionMode ContextEviction { get; set; } = ContextEvictionMode.Balanced;
 
     }
 }

@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v5.46
+// File: LlmClient.cs  v5.47
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -113,6 +113,7 @@ namespace DevMind
         internal readonly FileContentCache _fileCache = new FileContentCache();
         private string _taskScratchpad = "";
         private const int ScratchpadMaxTokens = 200;
+        private int _currentTurn;
         private string _baseUrl;
         private string _apiKey;
         private int _contextSize = 13372; // fallback default
@@ -399,10 +400,19 @@ namespace DevMind
             _compressionLog.Clear();
             StripContextNotes();
 
+            // Tiered context eviction — compress/drop stale turns before adding the new message.
+            // Runs before the existing squeeze passes so it can reduce token pressure early.
+            if (!deferCompression)
+            {
+                string evictionMsg = EvictStaleContext();
+                if (evictionMsg != null)
+                    onToken(evictionMsg);
+            }
+
             // PreSqueezeOversizedRead intentionally disabled: the current message must reach the
             // LLM with full file content so it can generate PATCH directives. Post-turn compression
             // (CompressLastUserReadBlocks) outlines READ blocks AFTER the LLM responds.
-            _conversationHistory.Add(new ChatMessage("user", userMessage));
+            _conversationHistory.Add(new ChatMessage("user", userMessage, _currentTurn));
 
             if (!deferCompression)
             {
@@ -572,7 +582,7 @@ namespace DevMind
                     }
                 }
 
-                _conversationHistory.Add(new ChatMessage("assistant", fullResponse.ToString()));
+                _conversationHistory.Add(new ChatMessage("assistant", fullResponse.ToString(), _currentTurn));
                 onComplete();
             }
             catch (OperationCanceledException)
@@ -606,6 +616,15 @@ namespace DevMind
         /// <summary>Gets the current task scratchpad content.</summary>
         public string TaskScratchpad => _taskScratchpad;
 
+        /// <summary>Gets the current turn number.</summary>
+        public int CurrentTurn => _currentTurn;
+
+        /// <summary>
+        /// Advances the turn counter. Call this once per user-initiated send from the input box.
+        /// Do NOT call for agentic resubmits — those share the current turn.
+        /// </summary>
+        public void IncrementTurn() => _currentTurn++;
+
         /// <summary>
         /// Clears the conversation history and resets to the system prompt only.
         /// </summary>
@@ -616,7 +635,10 @@ namespace DevMind
             _conversationHistory.Clear();
             _conversationHistory.Add(new ChatMessage("system", GetSystemPrompt()));
             if (!preserveScratchpad)
+            {
                 _taskScratchpad = "";
+                _currentTurn = 0;
+            }
         }
 
         /// <summary>
@@ -676,6 +698,489 @@ namespace DevMind
         }
 
         private static readonly Regex _reWarnings = new Regex(@"(\d+)\s+Warning", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        // ── Tiered Context Eviction ─────────────────────────────────────────────
+
+        /// <summary>
+        /// Compresses or drops stale messages based on their age relative to the current turn.
+        /// Three tiers: HOT (full fidelity), WARM (one-line summaries), COLD (entire turn collapsed).
+        /// Called at the top of SendMessageAsync before building the request payload.
+        /// Returns a log string to emit via onToken, or null if nothing changed.
+        /// </summary>
+        public string EvictStaleContext()
+        {
+            var mode = DevMindOptions.Instance.ContextEviction;
+
+            // Diagnostic: always log entry into eviction, regardless of mode or outcome.
+            var diagLog = new System.Text.StringBuilder();
+            diagLog.AppendLine($"\n[CONTEXT] Eviction check: turn={_currentTurn}, mode={mode}, message count={_conversationHistory.Count}");
+
+            // Log per-message turn tags
+            var turnTags = new List<int>();
+            for (int d = 0; d < _conversationHistory.Count; d++)
+                turnTags.Add(_conversationHistory[d].Turn);
+            diagLog.AppendLine($"[CONTEXT] Message turns: [{string.Join(",", turnTags)}]");
+
+            if (mode == ContextEvictionMode.Off)
+            {
+                System.Diagnostics.Debug.WriteLine(diagLog.ToString());
+                return diagLog.ToString();
+            }
+
+            // Tier boundaries: age = _currentTurn - message.Turn
+            //   HOT:  age 0..hotMax    — full fidelity
+            //   WARM: age hotMax+1..warmMax — summarize
+            //   COLD: age warmMax+1..coldMax — collapse entire turn
+            //   DROP: age > coldMax   — remove entirely
+            int hotMax, warmMax, coldMax;
+            if (mode == ContextEvictionMode.Aggressive)
+            {
+                hotMax  = 0;  // current turn only
+                warmMax = 2;  // next 2
+                coldMax = 4;  // next 2
+            }
+            else // Balanced
+            {
+                hotMax  = 1;  // current turn + 1 previous
+                warmMax = 4;  // next 3
+                coldMax = 7;  // next 3
+            }
+
+            int warmed = 0, colded = 0, dropped = 0;
+            int lastIndex = _conversationHistory.Count - 1;
+
+            // Build per-turn action map: for each turn number, determine the tier.
+            // Then process messages from oldest to newest (skip system [0] and current user [lastIndex]).
+            // We process in two passes:
+            //   Pass 1: Identify COLD turns and collapse them
+            //   Pass 2: Summarize WARM messages
+
+            // Collect turn groups for cold collapse (need all messages in a turn to build summary)
+            var turnMessages = new Dictionary<int, List<int>>(); // turn → list of message indices
+            for (int i = 1; i <= lastIndex; i++)
+            {
+                var msg = _conversationHistory[i];
+                int turn = msg.Turn;
+                if (!turnMessages.ContainsKey(turn))
+                    turnMessages[turn] = new List<int>();
+                turnMessages[turn].Add(i);
+            }
+
+            // Process turns from oldest to newest
+            var turnsToProcess = new List<int>(turnMessages.Keys);
+            turnsToProcess.Sort();
+
+            // Collect indices to remove (DROP tier) — process in reverse later
+            var indicesToRemove = new List<int>();
+
+            foreach (int turn in turnsToProcess)
+            {
+                int age = _currentTurn - turn;
+                var indices = turnMessages[turn];
+
+                if (age <= hotMax)
+                    continue; // HOT — leave unchanged
+
+                // Check if this turn's first user message is the user's original prompt for
+                // the current task turn — if so, keep it at warm minimum (never drop/cold).
+                bool hasPinnedContent = false;
+                foreach (int idx in indices)
+                {
+                    var msg = _conversationHistory[idx];
+                    if (IsPinnedMessage(msg))
+                    {
+                        hasPinnedContent = true;
+                        break;
+                    }
+                }
+
+                if (age > coldMax && !hasPinnedContent)
+                {
+                    // DROP — mark all messages in this turn for removal
+                    foreach (int idx in indices)
+                    {
+                        if (idx == 0) continue; // never drop system
+                        indicesToRemove.Add(idx);
+                        dropped++;
+                    }
+                }
+                else if (age > warmMax && !hasPinnedContent)
+                {
+                    // COLD — collapse entire turn to one line
+                    string coldSummary = BuildColdTurnSummary(turn, indices);
+                    if (coldSummary != null)
+                    {
+                        // Replace the first message in this turn with the cold summary,
+                        // mark the rest for removal
+                        var firstMsg = _conversationHistory[indices[0]];
+                        if (!firstMsg.Content.StartsWith("[COLD]", StringComparison.Ordinal))
+                        {
+                            _conversationHistory[indices[0]] = new ChatMessage(
+                                firstMsg.Role, coldSummary, firstMsg.Turn);
+                            colded++;
+
+                            for (int k = 1; k < indices.Count; k++)
+                            {
+                                indicesToRemove.Add(indices[k]);
+                                colded++;
+                            }
+                        }
+                    }
+                }
+                else if (age > hotMax)
+                {
+                    // WARM — summarize individual messages
+                    foreach (int idx in indices)
+                    {
+                        var msg = _conversationHistory[idx];
+                        if (IsPinnedMessage(msg)) continue;
+                        if (msg.Content.StartsWith("[WARM]", StringComparison.Ordinal)) continue;
+                        if (msg.Content.StartsWith("[COLD]", StringComparison.Ordinal)) continue;
+
+                        string warmSummary = BuildWarmSummary(msg);
+                        if (warmSummary != null)
+                        {
+                            _conversationHistory[idx] = new ChatMessage(msg.Role, warmSummary, msg.Turn);
+                            warmed++;
+                        }
+                    }
+                }
+            }
+
+            // Remove DROP messages in reverse index order to preserve indices
+            if (indicesToRemove.Count > 0)
+            {
+                indicesToRemove.Sort();
+                for (int i = indicesToRemove.Count - 1; i >= 0; i--)
+                {
+                    int idx = indicesToRemove[i];
+                    if (idx > 0 && idx < _conversationHistory.Count)
+                        _conversationHistory.RemoveAt(idx);
+                }
+            }
+
+            int total = warmed + colded + dropped;
+            if (total == 0)
+            {
+                diagLog.AppendLine("[CONTEXT] Eviction result: no messages affected");
+                return diagLog.ToString();
+            }
+
+            diagLog.AppendLine($"[CONTEXT] Eviction: {warmed} messages warm-compressed, {colded} messages cold-collapsed, {dropped} messages dropped");
+            return diagLog.ToString();
+        }
+
+        /// <summary>
+        /// Returns true if the message should never be evicted regardless of age.
+        /// Pinned: system prompt, SCRATCHPAD content, DevMind.md content.
+        /// </summary>
+        private bool IsPinnedMessage(ChatMessage msg)
+        {
+            if (msg.Role == "system") return true;
+
+            string c = msg.Content;
+            // SCRATCHPAD state
+            if (c.IndexOf("[TASK STATE]", StringComparison.Ordinal) >= 0) return true;
+            if (c.IndexOf("SCRATCHPAD:", StringComparison.Ordinal) >= 0) return true;
+
+            // DevMind.md injected content (loaded at conversation start)
+            if (c.IndexOf("[DevMind.md]", StringComparison.Ordinal) >= 0) return true;
+
+            return false;
+        }
+
+        /// <summary>
+        /// Builds a one-line WARM summary for a single message based on its content type.
+        /// Returns null if the message should not be summarized (already compressed, etc.).
+        /// </summary>
+        private static string BuildWarmSummary(ChatMessage msg)
+        {
+            string c = msg.Content;
+
+            // Already compressed
+            if (c.StartsWith("[SQUEEZED]", StringComparison.Ordinal))
+                return null;
+
+            if (msg.Role == "user")
+            {
+                // READ blocks
+                if (c.Contains("[READ:"))
+                {
+                    var files = new List<string>();
+                    int searchFrom = 0;
+                    int totalLines = 0;
+                    while (true)
+                    {
+                        int tagStart = c.IndexOf("[READ:", searchFrom, StringComparison.Ordinal);
+                        if (tagStart < 0) break;
+                        int tagEnd = c.IndexOf(']', tagStart);
+                        if (tagEnd < 0) break;
+                        string filename = c.Substring(tagStart + 6, tagEnd - tagStart - 6);
+                        if (!string.Equals(filename, "SUPERSEDED", StringComparison.OrdinalIgnoreCase) &&
+                            !string.Equals(filename, "OUTLINE", StringComparison.OrdinalIgnoreCase))
+                        {
+                            // Count lines in the block content
+                            int cs = tagEnd + 1;
+                            if (cs < c.Length && c[cs] == '\n') cs++;
+                            int nextTag = c.IndexOf("\n[", cs, StringComparison.Ordinal);
+                            int blockEnd = nextTag >= 0 ? nextTag : c.Length;
+                            int lines = c.Substring(cs, blockEnd - cs).Split('\n').Length;
+                            totalLines += lines;
+
+                            // Check for line-range suffix
+                            var rangeMatch = Regex.Match(filename, @":(\d+)-(\d+)$");
+                            if (rangeMatch.Success)
+                            {
+                                string baseFile = filename.Substring(0, rangeMatch.Index);
+                                files.Add($"{baseFile}:{rangeMatch.Groups[1].Value}-{rangeMatch.Groups[2].Value}");
+                            }
+                            else
+                            {
+                                files.Add(filename);
+                            }
+                        }
+                        searchFrom = tagEnd + 1;
+                    }
+                    if (files.Count > 0)
+                    {
+                        bool hasRange = files.Exists(f => f.Contains(":"));
+                        if (hasRange)
+                            return $"[WARM] READ {string.Join(", ", files)} — {totalLines} lines loaded";
+                        // Build outline list from existing content if available
+                        return $"[WARM] READ {string.Join(", ", files)} — {totalLines} lines";
+                    }
+                }
+
+                // PATCH results
+                if (c.Contains("[PATCH-RESULT:"))
+                {
+                    int tagStart = c.IndexOf("[PATCH-RESULT:", StringComparison.Ordinal);
+                    int tagEnd = c.IndexOf(']', tagStart);
+                    string filename = tagStart >= 0 && tagEnd > tagStart
+                        ? c.Substring(tagStart + 14, tagEnd - tagStart - 14) : "unknown";
+                    bool applied = c.IndexOf("Applied", StringComparison.OrdinalIgnoreCase) >= 0;
+                    bool skipped = c.IndexOf("SKIPPED", StringComparison.OrdinalIgnoreCase) >= 0;
+                    if (skipped)
+                        return $"[WARM] PATCH {filename} — skipped by user";
+                    return $"[WARM] PATCH {filename} — applied";
+                }
+
+                // SHELL results
+                if (c.Contains("[SHELL-RESULT:"))
+                {
+                    int tagStart = c.IndexOf("[SHELL-RESULT:", StringComparison.Ordinal);
+                    int tagEnd = c.IndexOf(']', tagStart);
+                    string command = tagStart >= 0 && tagEnd > tagStart
+                        ? c.Substring(tagStart + 14, tagEnd - tagStart - 14) : "unknown";
+                    if (command.Length > 40) command = command.Substring(0, 40) + "...";
+                    bool success = c.IndexOf("Build succeeded", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                   c.IndexOf("0 Error(s)", StringComparison.OrdinalIgnoreCase) >= 0;
+                    bool failed = c.IndexOf("FAILED", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                  c.IndexOf("error", StringComparison.OrdinalIgnoreCase) >= 0;
+                    int exitCode = success ? 0 : (failed ? 1 : 0);
+                    int errorCount = 0;
+                    if (failed)
+                    {
+                        foreach (var line in c.Split('\n'))
+                            if (line.IndexOf("error", StringComparison.OrdinalIgnoreCase) >= 0)
+                                errorCount++;
+                    }
+                    string outcome = success ? "succeeded" : (failed ? $"failed, {errorCount} errors" : "succeeded");
+                    return $"[WARM] SHELL: {command} — exit code {exitCode} ({outcome})";
+                }
+
+                // GREP/FIND results
+                if (c.Contains("[GREP:") || c.Contains("[FIND:"))
+                {
+                    bool isGrep = c.Contains("[GREP:");
+                    string tag = isGrep ? "[GREP:" : "[FIND:";
+                    int tagStart = c.IndexOf(tag, StringComparison.Ordinal);
+                    int tagEnd = c.IndexOf(']', tagStart);
+                    string pattern = tagStart >= 0 && tagEnd > tagStart
+                        ? c.Substring(tagStart + tag.Length, tagEnd - tagStart - tag.Length) : "?";
+                    int matchCount = c.Split('\n').Length - 1; // rough estimate
+                    return $"[WARM] {(isGrep ? "GREP" : "FIND")} \"{pattern}\" — {matchCount} matches";
+                }
+
+                // FILE created
+                if (c.Contains("[FILE:"))
+                {
+                    int tagStart = c.IndexOf("[FILE:", StringComparison.Ordinal);
+                    int tagEnd = c.IndexOf(']', tagStart);
+                    string filename = tagStart >= 0 && tagEnd > tagStart
+                        ? c.Substring(tagStart + 6, tagEnd - tagStart - 6) : "unknown";
+                    int lineCount = c.Split('\n').Length;
+                    return $"[WARM] FILE {filename} — created ({lineCount} lines)";
+                }
+
+                // RENAME
+                if (c.Contains("[RENAME]"))
+                {
+                    int idx = c.IndexOf("[RENAME]", StringComparison.Ordinal);
+                    string rest = c.Substring(idx + 8).Trim();
+                    if (rest.Length > 80) rest = rest.Substring(0, 80);
+                    return $"[WARM] RENAME {rest}";
+                }
+
+                // DELETE
+                if (c.Contains("[DELETE]"))
+                {
+                    int idx = c.IndexOf("[DELETE]", StringComparison.Ordinal);
+                    string rest = c.Substring(idx + 8).Trim();
+                    if (rest.Length > 60) rest = rest.Substring(0, 60);
+                    return $"[WARM] DELETE {rest}";
+                }
+
+                // DIFF results
+                if (c.Contains("[DIFF:"))
+                {
+                    int tagStart = c.IndexOf("[DIFF:", StringComparison.Ordinal);
+                    int tagEnd = c.IndexOf(']', tagStart);
+                    string filename = tagStart >= 0 && tagEnd > tagStart
+                        ? c.Substring(tagStart + 6, tagEnd - tagStart - 6) : "unknown";
+                    int changeCount = 0;
+                    foreach (var line in c.Split('\n'))
+                        if (line.StartsWith("+") || line.StartsWith("-")) changeCount++;
+                    return $"[WARM] DIFF {filename} — {changeCount} changes shown";
+                }
+
+                // TEST results
+                if (c.Contains("TEST RESULTS:"))
+                {
+                    int idx = c.IndexOf("TEST RESULTS:", StringComparison.Ordinal);
+                    int eol = c.IndexOf('\n', idx);
+                    string summary = eol > idx ? c.Substring(idx + 14, eol - idx - 14).Trim()
+                                               : c.Substring(idx + 14).Trim();
+                    return $"[WARM] TEST — {summary}";
+                }
+
+                // Agentic resubmit prompts — drop entirely
+                if (c.StartsWith("The build", StringComparison.OrdinalIgnoreCase) ||
+                    c.StartsWith("Build output", StringComparison.OrdinalIgnoreCase) ||
+                    c.Contains("[PATCH-RESULT:") && c.Contains("Build"))
+                    return "[WARM] (agentic resubmit)";
+
+                // Generic user message — keep first 80 chars
+                string trimmed = c.Trim();
+                if (trimmed.Length > 80) trimmed = trimmed.Substring(0, 80) + "...";
+                return $"[WARM] User: {trimmed}";
+            }
+
+            if (msg.Role == "assistant")
+            {
+                string trimmed = c.Trim();
+                if (trimmed.Length > 80) trimmed = trimmed.Substring(0, 80) + "...";
+                return $"[WARM] Assistant: {trimmed}";
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Collapses all messages in a turn into a single COLD summary line.
+        /// Format: [COLD] Turn N: comma-separated list of actions
+        /// </summary>
+        private string BuildColdTurnSummary(int turn, List<int> indices)
+        {
+            var actions = new List<string>();
+
+            foreach (int idx in indices)
+            {
+                if (idx < 0 || idx >= _conversationHistory.Count) continue;
+                var msg = _conversationHistory[idx];
+                string c = msg.Content;
+
+                // Already cold
+                if (c.StartsWith("[COLD]", StringComparison.Ordinal))
+                    return null; // already collapsed
+
+                // Count READs
+                int readCount = 0;
+                int searchFrom = 0;
+                string lastReadFile = null;
+                while (true)
+                {
+                    int tagStart = c.IndexOf("[READ:", searchFrom, StringComparison.Ordinal);
+                    if (tagStart < 0) break;
+                    int tagEnd = c.IndexOf(']', tagStart);
+                    if (tagEnd < 0) break;
+                    string fn = c.Substring(tagStart + 6, tagEnd - tagStart - 6);
+                    if (!string.Equals(fn, "SUPERSEDED", StringComparison.OrdinalIgnoreCase) &&
+                        !string.Equals(fn, "OUTLINE", StringComparison.OrdinalIgnoreCase))
+                    {
+                        readCount++;
+                        lastReadFile = Regex.Replace(fn, @":\d+(?:-\d+)?$", "");
+                    }
+                    searchFrom = tagEnd + 1;
+                }
+                if (readCount > 0)
+                    actions.Add(readCount == 1 ? $"READ {lastReadFile}" : $"READ {readCount} files");
+
+                // PATCH
+                int patchCount = 0;
+                searchFrom = 0;
+                while ((searchFrom = c.IndexOf("[PATCH", searchFrom, StringComparison.Ordinal)) >= 0)
+                {
+                    patchCount++;
+                    searchFrom += 6;
+                }
+                if (patchCount > 0)
+                    actions.Add($"PATCH {patchCount} block{(patchCount == 1 ? "" : "s")}");
+
+                // SHELL
+                if (c.Contains("[SHELL"))
+                {
+                    bool buildOk = c.IndexOf("Build succeeded", StringComparison.OrdinalIgnoreCase) >= 0;
+                    bool buildFail = c.IndexOf("Build FAILED", StringComparison.OrdinalIgnoreCase) >= 0;
+                    actions.Add(buildOk ? "build succeeded" : (buildFail ? "build failed" : "shell command"));
+                }
+
+                // FILE
+                if (c.Contains("[FILE:") || c.Contains("FILE:"))
+                {
+                    if (msg.Role == "user" || c.Contains("Created:"))
+                        actions.Add("file created");
+                }
+
+                // GREP/FIND
+                if (c.Contains("[GREP:")) actions.Add("GREP search");
+                if (c.Contains("[FIND:")) actions.Add("FIND search");
+
+                // DELETE/RENAME
+                if (c.Contains("[DELETE]")) actions.Add("file deleted");
+                if (c.Contains("[RENAME]")) actions.Add("file renamed");
+
+                // TEST
+                if (c.Contains("TEST RESULTS:")) actions.Add("tests run");
+
+                // WARM/SQUEEZED — already summarized, extract short form
+                if (c.StartsWith("[WARM]", StringComparison.Ordinal))
+                {
+                    string warmContent = c.Substring(6).Trim();
+                    if (warmContent.Length > 40) warmContent = warmContent.Substring(0, 40);
+                    actions.Add(warmContent);
+                }
+
+                // Assistant text (if nothing else matched)
+                if (msg.Role == "assistant" && actions.Count == 0)
+                {
+                    string snippet = c.Trim();
+                    if (snippet.Length > 40) snippet = snippet.Substring(0, 40) + "...";
+                    actions.Add($"response: {snippet}");
+                }
+            }
+
+            if (actions.Count == 0)
+                actions.Add("(empty turn)");
+
+            // Deduplicate
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var unique = new List<string>();
+            foreach (var a in actions)
+                if (seen.Add(a)) unique.Add(a);
+
+            return $"[COLD] Turn {turn}: {string.Join(", ", unique)}";
+        }
 
         /// <summary>
         /// Runs all five compression phases (0a, 0b, 0c, 4, 2) against the current conversation
@@ -806,8 +1311,9 @@ namespace DevMind
                     int charPos = locs[k].charPos;
 
                     // Read the current (possibly already partially-modified) message content.
-                    string content = _conversationHistory[msgIdx].Content;
-                    string role    = _conversationHistory[msgIdx].Role;
+                    var existingMsg = _conversationHistory[msgIdx];
+                    string content = existingMsg.Content;
+                    string role    = existingMsg.Role;
 
                     // Bounds check: charPos may have drifted out of range after delta adjustments.
                     if (charPos < 0 || charPos >= content.Length)
@@ -836,7 +1342,7 @@ namespace DevMind
                     string replacement = $"[SQUEEZED][READ:SUPERSEDED] {filename} — see later turn for current content";
                     string newContent  = content.Substring(0, charPos) + replacement + content.Substring(blockEnd);
 
-                    _conversationHistory[msgIdx] = new ChatMessage(role, newContent);
+                    _conversationHistory[msgIdx] = new ChatMessage(role, newContent, existingMsg.Turn);
 
                     // Adjust charPos offsets for any occurrences that live in the same message
                     // and come after the replaced block — the replacement may change string length.
@@ -949,8 +1455,9 @@ namespace DevMind
                     int msgIdx  = locs[k].msgIdx;
                     int charPos = locs[k].charPos;
 
-                    string content = _conversationHistory[msgIdx].Content;
-                    string role    = _conversationHistory[msgIdx].Role;
+                    var existingPatchMsg = _conversationHistory[msgIdx];
+                    string content = existingPatchMsg.Content;
+                    string role    = existingPatchMsg.Role;
 
                     int tagEnd = content.IndexOf(']', charPos);
                     if (tagEnd < 0) continue;
@@ -970,7 +1477,7 @@ namespace DevMind
                     string replacement = $"[SQUEEZED][PATCH:CHAIN] {filename} — patch superseded, see later turn for current state";
                     string newContent  = content.Substring(0, charPos) + replacement + content.Substring(blockEnd);
 
-                    _conversationHistory[msgIdx] = new ChatMessage(role, newContent);
+                    _conversationHistory[msgIdx] = new ChatMessage(role, newContent, existingPatchMsg.Turn);
 
                     int delta = replacement.Length - oldBlock.Length;
 
@@ -1076,7 +1583,7 @@ namespace DevMind
                     squeezed = $"[SQUEEZED][PATCH] Applied to {filename} — changes applied.";
                 }
 
-                _conversationHistory[i] = new ChatMessage(msg.Role, squeezed);
+                _conversationHistory[i] = new ChatMessage(msg.Role, squeezed, msg.Turn);
                 _compressionLog.Add(filename);
                 count++;
             }
@@ -1148,7 +1655,7 @@ namespace DevMind
                     string replacement = BuildShellSummary(command, oldBlock);
                     string newContent  = content.Substring(0, tagStart) + replacement + content.Substring(blockEnd);
 
-                    _conversationHistory[i] = new ChatMessage(msg.Role, newContent);
+                    _conversationHistory[i] = new ChatMessage(msg.Role, newContent, msg.Turn);
 
                     totalSaved += savedTokens - EstimateTokens(replacement);
                     totalCompressed++;
@@ -1677,7 +2184,7 @@ namespace DevMind
                     squeezed = sbAll.ToString();
                 }
 
-                _conversationHistory[i] = new ChatMessage(msg.Role, squeezed);
+                _conversationHistory[i] = new ChatMessage(msg.Role, squeezed, msg.Turn);
                 foreach (var b in blocks)
                     _compressionLog.Add(b.filename);
                 count++;
@@ -1772,7 +2279,7 @@ namespace DevMind
                 logParts.Add($"{b.filename} ({tokensBefore} tokens → {tokensAfter} tokens)");
             }
 
-            _conversationHistory[targetIndex] = new ChatMessage(msg.Role, sb.ToString());
+            _conversationHistory[targetIndex] = new ChatMessage(msg.Role, sb.ToString(), msg.Turn);
 
             logParts.Reverse(); // restore natural reading order
             return $"\n[CONTEXT] Post-turn outline: {string.Join(", ", logParts)}\n";
@@ -1960,7 +2467,7 @@ namespace DevMind
                     + string.Join("\n", tailLines);
 
                 string newContent = current.Substring(0, cs) + truncated + current.Substring(blockEnd);
-                _conversationHistory[lastIndex] = new ChatMessage(currentMsg.Role, newContent);
+                _conversationHistory[lastIndex] = new ChatMessage(currentMsg.Role, newContent, currentMsg.Turn);
 
                 _compressionLog.Add(filename);
                 truncatedFiles.Add($"{filename} ({origLines}→{BudgetGuardKeepHead + BudgetGuardKeepTail} lines)");
@@ -2018,7 +2525,7 @@ namespace DevMind
                 // Find the blank line that terminates the note header
                 int blankLine = content.IndexOf("\n\n", marker.Length, StringComparison.Ordinal);
                 if (blankLine >= 0)
-                    _conversationHistory[i] = new ChatMessage("user", content.Substring(blankLine + 2));
+                    _conversationHistory[i] = new ChatMessage("user", content.Substring(blankLine + 2), msg.Turn);
             }
         }
 
@@ -2068,7 +2575,7 @@ namespace DevMind
             string note = $"[CONTEXT NOTE] {unique.Count} block(s) compressed. Affected: {affected}. Use READ to reload any file you need.\n\n";
 
             var current = _conversationHistory[last];
-            _conversationHistory[last] = new ChatMessage(current.Role, note + current.Content);
+            _conversationHistory[last] = new ChatMessage(current.Role, note + current.Content, current.Turn);
         }
 
         private string BuildRequestJson(string modelName)
@@ -2136,15 +2643,20 @@ namespace DevMind
         /// <summary>The text content of the message.</summary>
         public string Content { get; }
 
+        /// <summary>The turn number this message belongs to. Used by tiered context eviction.</summary>
+        public int Turn { get; }
+
         /// <summary>
         /// Initializes a new instance of the <see cref="ChatMessage"/> class.
         /// </summary>
         /// <param name="role">The role (system, user, or assistant).</param>
         /// <param name="content">The message text.</param>
-        public ChatMessage(string role, string content)
+        /// <param name="turn">The turn number (0 for system prompt, incremented per user-initiated send).</param>
+        public ChatMessage(string role, string content, int turn = 0)
         {
             Role = role;
             Content = content;
+            Turn = turn;
         }
     }
 }
