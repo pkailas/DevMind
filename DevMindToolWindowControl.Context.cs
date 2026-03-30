@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.Context.cs  v5.18
+// File: DevMindToolWindowControl.Context.cs  v5.19
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -395,6 +395,13 @@ namespace DevMind
                         continue;
                     }
 
+                    // Intercept git commands: "git log [N]" and "git diff [args]"
+                    if (hint.StartsWith("git ", StringComparison.OrdinalIgnoreCase))
+                    {
+                        await ApplyReadGitCommandAsync(hint);
+                        continue;
+                    }
+
                     // Isolate filename — take first whitespace-delimited token only.
                     // Handles "READ AgenticExecutor.cs and fix the bug" → "AgenticExecutor.cs"
                     int spaceIdx = hint.IndexOf(' ');
@@ -767,6 +774,137 @@ namespace DevMind
                         queue.Enqueue(sub);
                 }
             }
+        }
+
+        // ── READ git log / READ git diff ─────────────────────────────────────
+
+        /// <summary>
+        /// Handles "git log [N]" and "git diff [args]" READ variants.
+        /// Runs the appropriate git command and injects output into _readContext.
+        /// </summary>
+        private async Task ApplyReadGitCommandAsync(string gitArgs)
+        {
+            string gitRoot = await FindGitRootAsync();
+            if (gitRoot == null)
+            {
+                string msg = "[READ] git: not a git repository\n";
+                AppendOutput(msg, OutputColor.Error);
+                _readContext = (_readContext ?? "") + msg + "\n";
+                return;
+            }
+
+            string command;
+            string header;
+
+            if (gitArgs.StartsWith("git log", StringComparison.OrdinalIgnoreCase))
+            {
+                string countPart = gitArgs.Substring("git log".Length).Trim();
+                int count = 10;
+                if (!string.IsNullOrEmpty(countPart))
+                    int.TryParse(countPart, out count);
+                count = Math.Max(1, Math.Min(count, 50));
+                command = $"git log --oneline --no-decorate -{count}";
+                header = $"[READ] git log (last {count} commits)";
+            }
+            else if (gitArgs.StartsWith("git diff", StringComparison.OrdinalIgnoreCase))
+            {
+                string diffArgs = gitArgs.Substring("git diff".Length).Trim();
+                if (string.IsNullOrEmpty(diffArgs))
+                {
+                    command = "git diff";
+                    header = "[READ] git diff (working changes)";
+                }
+                else if (diffArgs.Equals("--staged", StringComparison.OrdinalIgnoreCase) ||
+                         diffArgs.Equals("--cached", StringComparison.OrdinalIgnoreCase))
+                {
+                    command = $"git diff {diffArgs}";
+                    header = "[READ] git diff --staged";
+                }
+                else
+                {
+                    // Could be a commit ref (HEAD~1, hash) or a filename
+                    // Pass through safely — git will validate the argument
+                    command = $"git diff {diffArgs}";
+                    header = $"[READ] git diff {diffArgs}";
+                }
+            }
+            else
+            {
+                AppendOutput($"[READ] Unrecognized git command: {gitArgs}\n", OutputColor.Error);
+                return;
+            }
+
+            // Run the git command
+            string savedDir = _terminalWorkingDir;
+            _terminalWorkingDir = gitRoot;
+            var (output, exitCode) = await RunShellCommandCaptureAsync(command);
+            _terminalWorkingDir = savedDir;
+
+            if (exitCode != 0)
+            {
+                string errMsg = $"{header}\n(error — exit code {exitCode})\n{output}\n";
+                AppendOutput(errMsg, OutputColor.Error);
+                _readContext = (_readContext ?? "") + errMsg + "\n";
+                return;
+            }
+
+            // Truncate diff output at 500 lines
+            const int MaxDiffLines = 500;
+            var outputLines = output.Split('\n');
+            string truncatedOutput;
+            if (outputLines.Length > MaxDiffLines)
+            {
+                int omitted = outputLines.Length - MaxDiffLines;
+                truncatedOutput = string.Join("\n", outputLines.Take(MaxDiffLines))
+                    + $"\n[... {omitted} lines omitted — use READ git diff <filename> for specific files]";
+            }
+            else
+            {
+                truncatedOutput = output;
+            }
+
+            if (string.IsNullOrWhiteSpace(truncatedOutput))
+                truncatedOutput = "(no output)";
+
+            string contextBlock = $"{header}\n```\n{truncatedOutput}\n```\n\n";
+            _readContext = (_readContext ?? "") + contextBlock;
+            AppendOutput($"{header}\n", OutputColor.Success);
+        }
+
+        /// <summary>
+        /// Finds the git repository root by walking up from the project directory
+        /// or _terminalWorkingDir. Returns null if no .git directory is found.
+        /// </summary>
+        private async Task<string> FindGitRootAsync()
+        {
+            string startDir = null;
+            try
+            {
+                // Prefer project directory via DTE
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                var dte = await VS.GetServiceAsync<DTE, DTE>();
+                var project = dte?.ActiveDocument?.ProjectItem?.ContainingProject;
+                if (project?.FullName != null)
+                    startDir = Path.GetDirectoryName(project.FullName);
+                if (string.IsNullOrEmpty(startDir) && dte?.Solution?.FileName != null)
+                    startDir = Path.GetDirectoryName(dte.Solution.FileName);
+            }
+            catch { }
+
+            if (string.IsNullOrEmpty(startDir))
+                startDir = _terminalWorkingDir;
+
+            // Walk up looking for .git
+            string dir = startDir;
+            while (!string.IsNullOrEmpty(dir))
+            {
+                if (Directory.Exists(Path.Combine(dir, ".git")))
+                    return dir;
+                string parent = Path.GetDirectoryName(dir);
+                if (parent == dir) break;
+                dir = parent;
+            }
+            return null;
         }
 
         private static string BuildMessageWithContext(

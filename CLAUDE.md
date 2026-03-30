@@ -192,6 +192,8 @@ SHELL: dotnet build
 READ Program.cs
 READ Program.cs:100-150    — targeted line range (1-based, inclusive)
 READ! Program.cs           — force full content (bypasses outline-first for large files)
+READ git log [N]           — recent commit history (default 10, max 50)
+READ git diff [ref]        — working changes, staged changes, or diff against a commit
 ```
 - Files ≥ 100 lines receive an **outline** (class/method/property declarations) instead of full content by default, to conserve tokens.
 - `READ!` bypasses the threshold and forces full content.
@@ -199,6 +201,17 @@ READ! Program.cs           — force full content (bypasses outline-first for la
 - When the model responds with only READ requests (no PATCH/SHELL/FILE), DevMind auto-loads the files and resubmits the original prompt.
 - `_pendingResubmitPrompt` stores the original prompt; cleared after use or on cancel.
 - If the file is not found, READ returns a list of `*.cs` files in the project directory so you can identify the correct filename.
+
+#### Git READ Variants
+- `READ git log` — runs `git log --oneline --no-decorate -10` in the project root. Optional count: `READ git log 20` (max 50).
+- `READ git diff` — runs `git diff` (unstaged working changes). Accepts optional arguments:
+  - `READ git diff --staged` — staged changes only
+  - `READ git diff HEAD~1` — diff against a commit reference
+  - `READ git diff <filename>` — diff for a specific file
+- Git diff output is capped at 500 lines; if exceeded, truncated with guidance to narrow the scope.
+- Project root is detected by walking up from the active project directory looking for `.git`. If no git repository is found, returns `[READ] git: not a git repository`.
+- Git reads inject into `_readContext` and participate in context budget, eviction, and dedup like regular READ blocks.
+- A git-read-only response triggers auto-resubmit via `IsReadOnly` — same path as file READ.
 
 ### GREP — Search File for Pattern
 ```
@@ -672,5 +685,5 @@ During LLM generation, the status bar displays `Generating... (N tokens)` showin
 8. ~~**RENAME directive**~~ — **Implemented**. `RENAME OldFile.cs NewFile.cs`. Renames file on disk, closes old editor tab, opens new file. Does not update project references (separate concern).
 9. ~~**DELETE directive**~~ — **Implemented v6.0.65**. `DELETE filename.cs`. Removes file from disk, closes open editor tab. Does not update `.csproj` references (separate concern).
 10. ~~**FIND directive**~~ — **Implemented v6.0.64**. `FIND: "pattern" *.cs`. Cross-file search by glob pattern. Returns filename + line number + match for each hit across all matching files, capped at 100. Solves the "where is this used?" problem without sequential READs.
-11. ~~**TEST directive**~~ — **Implemented**. `TEST ProjectName.csproj [filter]`. Runs `dotnet test` and returns a compact summary: pass/fail/skip counts, failed test names + error messages (capped at 10). Much cheaper on context than `SHELL: dotnet test`. Feeds back into the agentic loop so the model can fix failing tests.
+11. ~~**TEST directive**~~ — **Implemented**. `TEST ProjectName.csproj [filter]`. Runs `dotnet test` and returns a compact summary: pass/fail/skip counts, failed test names + error messages (capped at 10). When no tests are found, emits clear messaging: `[TEST] No tests found matching filter "..." in Project.csproj` or `[TEST] No tests found in Project.csproj — verify the project references MSTest.TestFramework`. Much cheaper on context than `SHELL: dotnet test`. Feeds back into the agentic loop so the model can fix failing tests.
 12. ~~**DIFF directive**~~ — **Implemented**. `DIFF Program.cs`. Shows changes since conversation start as a unified-style diff. Uses LCS-based algorithm for small files, positional fallback for large files. Helps the model verify cumulative modifications across multiple agentic turns.

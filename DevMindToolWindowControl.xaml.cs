@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v5.0.68
+// File: DevMindToolWindowControl.xaml.cs  v5.0.69
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -818,7 +818,10 @@ namespace DevMind
                 "SHELL: <command>\n\n" +
                 "READ <filename>  — full if <100 lines, outline otherwise\n" +
                 "READ <filename>:<start>-<end>  — targeted line range (1-based)\n" +
-                "READ! <filename>  — force full content (expensive)\n\n" +
+                "READ! <filename>  — force full content (expensive)\n" +
+                "READ git log [N]  — show recent commit history (default 10, max 50)\n" +
+                "READ git diff [ref]  — show working changes, staged changes, or diff against a commit\n" +
+                "  Examples: READ git diff, READ git diff --staged, READ git diff HEAD~1, READ git diff filename.cs\n\n" +
                 "### GREP — Search File for Pattern\n" +
                 "GREP: \"pattern\" filename\n" +
                 "GREP: \"pattern\" filename:100-200\n\n" +

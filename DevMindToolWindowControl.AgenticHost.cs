@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.AgenticHost.cs  v1.9.1
+// File: DevMindToolWindowControl.AgenticHost.cs  v1.9.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -196,6 +196,13 @@ namespace DevMind
         async Task<string> IAgenticHost.LoadFileContentAsync(
             string fileName, int rangeStart, int rangeEnd, bool forceFullRead)
         {
+            // Handle git commands: FileName starts with "git log" or "git diff"
+            if (fileName.StartsWith("git ", StringComparison.OrdinalIgnoreCase))
+            {
+                await ApplyReadCommandAsync($"READ {fileName}", showOutline: false);
+                return string.Empty;
+            }
+
             // Resolve file path and capture original snapshot (for DIFF support) before reading
             try
             {

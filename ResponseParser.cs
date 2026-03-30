@@ -1,4 +1,4 @@
-// File: ResponseParser.cs  v5.8.0
+// File: ResponseParser.cs  v5.1.9.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -49,6 +49,10 @@ namespace DevMind
         private static readonly Regex _readLine       = new Regex(@"^READ\s+(\S+\.\S+?)(?::(\d+)(?:-(\d+))?)?\s*$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
         // Matches READ! filename — force full content regardless of file size
         private static readonly Regex _forceReadLine  = new Regex(@"^READ!\s+(\S+\.\S+?)\s*$",    RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        // Matches READ git log [N] — recent commit history
+        private static readonly Regex _gitLogLine     = new Regex(@"^READ\s+git\s+log(?:\s+(\d+))?\s*$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        // Matches READ git diff [args] — working changes, staged, or commit diff
+        private static readonly Regex _gitDiffLine    = new Regex(@"^READ\s+git\s+diff(?:\s+(.+))?\s*$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
         // Matches SCRATCHPAD: block start (must be on its own line)
         private static readonly Regex _scratchpadStart = new Regex(@"^SCRATCHPAD:\s*$",            RegexOptions.Compiled | RegexOptions.IgnoreCase);
         // Matches END_SCRATCHPAD terminator
@@ -251,6 +255,36 @@ namespace DevMind
                     lastShellCommand = cmd;
                 }
                 return; // stay in TopLevel
+            }
+
+            // READ git log [N] — encode full command in FileName for pass-through
+            m = _gitLogLine.Match(line);
+            if (m.Success)
+            {
+                FlushText(blocks, textBuf);
+                string count = m.Groups[1].Success ? m.Groups[1].Value : "";
+                string gitFileName = string.IsNullOrEmpty(count) ? "git log" : $"git log {count}";
+                blocks.Add(new ResponseBlock
+                {
+                    Type     = BlockType.ReadRequest,
+                    FileName = gitFileName
+                });
+                return;
+            }
+
+            // READ git diff [args] — encode full command in FileName for pass-through
+            m = _gitDiffLine.Match(line);
+            if (m.Success)
+            {
+                FlushText(blocks, textBuf);
+                string args = m.Groups[1].Success ? m.Groups[1].Value.Trim() : "";
+                string gitFileName = string.IsNullOrEmpty(args) ? "git diff" : $"git diff {args}";
+                blocks.Add(new ResponseBlock
+                {
+                    Type     = BlockType.ReadRequest,
+                    FileName = gitFileName
+                });
+                return;
             }
 
             // READ! <filename>  (checked before plain READ)
@@ -476,9 +510,10 @@ namespace DevMind
                 return;
             }
 
-            // READ — implicit termination
+            // READ — implicit termination (includes git log/diff variants)
             bool isRead = (!hasActionableBlocks) &&
-                          (_forceReadLine.IsMatch(line) || _readLine.IsMatch(line));
+                          (_gitLogLine.IsMatch(line) || _gitDiffLine.IsMatch(line) ||
+                           _forceReadLine.IsMatch(line) || _readLine.IsMatch(line));
             if (isRead)
             {
                 EmitFileBlock(blocks, currentFileName,
@@ -730,9 +765,10 @@ namespace DevMind
                 return;
             }
 
-            // READ / READ! — implicit termination (only when no actionable blocks)
+            // READ / READ! / READ git — implicit termination (only when no actionable blocks)
             bool isRead = !hasActionableBlocks &&
-                          (_forceReadLine.IsMatch(line) || _readLine.IsMatch(line));
+                          (_gitLogLine.IsMatch(line) || _gitDiffLine.IsMatch(line) ||
+                           _forceReadLine.IsMatch(line) || _readLine.IsMatch(line));
             if (isRead)
             {
                 EmitScratchpadBlock(blocks, scratchBuf);
