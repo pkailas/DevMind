@@ -62,6 +62,7 @@ namespace DevMind
         private Action _batchOnComplete;
         private bool _suppressDisplay;
         private bool _diffPreviewPending;
+        private int _streamingTokenCount;
         private int _patchCount = 0;
         private int _undoCount = 0;
         private int _readFileCount = 0;
@@ -770,6 +771,7 @@ namespace DevMind
             };
             _thinkingTimer.Start();
             _cts = new CancellationTokenSource();
+            _streamingTokenCount = 0;
 
             // Reset display-suppression state
             _suppressDisplay = false;
@@ -961,14 +963,16 @@ namespace DevMind
                                     }
                                 }
 
+                                _streamingTokenCount++;
+
                                 if (_suppressDisplay) return;
 
                                 if (_thinkingTimer != null)
                                 {
                                     _thinkingTimer.Stop();
                                     _thinkingTimer = null;
-                                    StatusText.Text = "Generating...";
                                 }
+                                StatusText.Text = $"Generating... ({_streamingTokenCount} tokens)";
                                 streamRun.Text += visible;
                                 OutputBox.ScrollToEnd();
                             }));

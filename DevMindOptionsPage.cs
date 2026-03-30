@@ -214,5 +214,15 @@ namespace DevMind
         [DefaultValue(ContextEvictionMode.Balanced)]
         public ContextEvictionMode ContextEviction { get; set; } = ContextEvictionMode.Balanced;
 
+        /// <summary>
+        /// When enabled, shows detailed diagnostic logging in the output panel
+        /// including eviction details, turn tracking, and pinned message status.
+        /// </summary>
+        [Category("Context Management")]
+        [DisplayName("Show Debug Output")]
+        [Description("When enabled, shows detailed diagnostic logging in the output panel including eviction details, turn tracking, and pinned message status.")]
+        [DefaultValue(false)]
+        public bool ShowDebugOutput { get; set; } = false;
+
     }
 }

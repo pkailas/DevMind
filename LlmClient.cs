@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v5.47
+// File: LlmClient.cs  v5.50
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -710,21 +710,24 @@ namespace DevMind
         public string EvictStaleContext()
         {
             var mode = DevMindOptions.Instance.ContextEviction;
+            bool showDebug = DevMindOptions.Instance.ShowDebugOutput;
 
-            // Diagnostic: always log entry into eviction, regardless of mode or outcome.
             var diagLog = new System.Text.StringBuilder();
-            diagLog.AppendLine($"\n[CONTEXT] Eviction check: turn={_currentTurn}, mode={mode}, message count={_conversationHistory.Count}");
 
-            // Log per-message turn tags
-            var turnTags = new List<int>();
-            for (int d = 0; d < _conversationHistory.Count; d++)
-                turnTags.Add(_conversationHistory[d].Turn);
-            diagLog.AppendLine($"[CONTEXT] Message turns: [{string.Join(",", turnTags)}]");
+            if (showDebug)
+            {
+                diagLog.AppendLine($"\n[CONTEXT] Eviction check: turn={_currentTurn}, mode={mode}, message count={_conversationHistory.Count}");
+
+                var turnTags = new List<int>();
+                for (int d = 0; d < _conversationHistory.Count; d++)
+                    turnTags.Add(_conversationHistory[d].Turn);
+                diagLog.AppendLine($"[CONTEXT] Message turns: [{string.Join(",", turnTags)}]");
+            }
 
             if (mode == ContextEvictionMode.Off)
             {
-                System.Diagnostics.Debug.WriteLine(diagLog.ToString());
-                return diagLog.ToString();
+                System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] Eviction: mode=Off, skipped");
+                return showDebug ? diagLog.ToString() : null;
             }
 
             // Tier boundaries: age = _currentTurn - message.Turn
@@ -770,8 +773,9 @@ namespace DevMind
             var turnsToProcess = new List<int>(turnMessages.Keys);
             turnsToProcess.Sort();
 
-            // Collect indices to remove (DROP tier) — process in reverse later
+            // Collect indices to remove (DROP + COLD extras) — process in reverse later
             var indicesToRemove = new List<int>();
+            var dropTierIndices = new List<int>();  // DROP-only, for debug output
 
             foreach (int turn in turnsToProcess)
             {
@@ -801,6 +805,7 @@ namespace DevMind
                     {
                         if (idx == 0) continue; // never drop system
                         indicesToRemove.Add(idx);
+                        dropTierIndices.Add(idx);
                         dropped++;
                     }
                 }
@@ -862,26 +867,65 @@ namespace DevMind
             int total = warmed + colded + dropped;
             if (total == 0)
             {
-                diagLog.AppendLine("[CONTEXT] Eviction result: no messages affected");
-                return diagLog.ToString();
+                if (showDebug)
+                    diagLog.AppendLine("[CONTEXT] Eviction result: no messages affected");
+                return diagLog.Length > 0 ? diagLog.ToString() : null;
             }
 
             diagLog.AppendLine($"[CONTEXT] Eviction: {warmed} messages warm-compressed, {colded} messages cold-collapsed, {dropped} messages dropped");
+
+            // Detailed debug output — per-tier index lists and pinned message inventory
+            if (showDebug)
+            {
+                var pinnedList = new List<string>();
+                var hotList = new List<int>();
+                var warmList = new List<int>();
+                var coldList = new List<int>();
+                var droppedList = new List<int>();
+
+                for (int i = 0; i < _conversationHistory.Count; i++)
+                {
+                    var msg = _conversationHistory[i];
+                    if (IsPinnedMessage(msg))
+                    {
+                        string reason = msg.Role == "system" ? "system prompt"
+                            : msg.Content.IndexOf("[TASK STATE]", StringComparison.Ordinal) >= 0 ? "SCRATCHPAD"
+                            : msg.Content.IndexOf("[DevMind.md]", StringComparison.Ordinal) >= 0 ? "DevMind.md"
+                            : "pinned";
+                        pinnedList.Add($"idx {i}: {reason}");
+                    }
+
+                    int age = _currentTurn - msg.Turn;
+                    if (msg.Content.StartsWith("[COLD]", StringComparison.Ordinal))
+                        coldList.Add(i);
+                    else if (msg.Content.StartsWith("[WARM]", StringComparison.Ordinal))
+                        warmList.Add(i);
+                    else if (age <= hotMax)
+                        hotList.Add(i);
+                }
+
+                // indicesToRemove was already processed; capture for debug
+                diagLog.AppendLine($"[DEBUG] Pinned messages: [{string.Join(", ", pinnedList)}]");
+                diagLog.AppendLine($"[DEBUG] Hot: [{string.Join(", ", hotList)}]");
+                diagLog.AppendLine($"[DEBUG] Warm: [{string.Join(", ", warmList)}]");
+                diagLog.AppendLine($"[DEBUG] Cold: [{string.Join(", ", coldList)}]");
+                diagLog.AppendLine($"[DEBUG] Dropped: [{string.Join(", ", dropTierIndices)}]");
+            }
+
             return diagLog.ToString();
         }
 
         /// <summary>
         /// Returns true if the message should never be evicted regardless of age.
-        /// Pinned: system prompt, SCRATCHPAD content, DevMind.md content.
+        /// Pinned: system prompt, [TASK STATE] marker, DevMind.md content.
         /// </summary>
         private bool IsPinnedMessage(ChatMessage msg)
         {
             if (msg.Role == "system") return true;
 
             string c = msg.Content;
-            // SCRATCHPAD state
+            // Injected task-state marker (added at API-request time, not stored in history)
             if (c.IndexOf("[TASK STATE]", StringComparison.Ordinal) >= 0) return true;
-            if (c.IndexOf("SCRATCHPAD:", StringComparison.Ordinal) >= 0) return true;
 
             // DevMind.md injected content (loaded at conversation start)
             if (c.IndexOf("[DevMind.md]", StringComparison.Ordinal) >= 0) return true;
@@ -1239,6 +1283,7 @@ namespace DevMind
             // Path.GetFileName() in ApplyReadCommandAsync() — never a relative or absolute path.
             // Therefore grouping on the raw extracted filename is always correct; no normalization needed.
             var occurrences = new Dictionary<string, List<(int msgIdx, int charPos)>>(StringComparer.OrdinalIgnoreCase);
+            bool showDebug = DevMindOptions.Instance.ShowDebugOutput;
             var debugLines = new List<string>();
 
             for (int i = 1; i < lastIndex; i++)
@@ -1253,7 +1298,7 @@ namespace DevMind
                 {
                     if (searchFrom < 0 || searchFrom >= content.Length)
                     {
-                        debugLines.Add($"[CONTEXT] DeduplicateReadBlocks: searchFrom ({searchFrom}) out of range in message {i}, skipping scan");
+                        if (showDebug) debugLines.Add($"[CONTEXT] DeduplicateReadBlocks: searchFrom ({searchFrom}) out of range in message {i}, skipping scan");
                         break;
                     }
 
@@ -1275,7 +1320,7 @@ namespace DevMind
                     // BUG 2 guard: skip malformed tags where the filename is null or whitespace.
                     if (string.IsNullOrWhiteSpace(filename))
                     {
-                        debugLines.Add($"[CONTEXT:DEBUG] Skipped empty filename in READ tag at message index {i}");
+                        if (showDebug) debugLines.Add($"[CONTEXT:DEBUG] Skipped empty filename in READ tag at message index {i}");
                         searchFrom = tagEnd + 1;
                         continue;
                     }
@@ -1318,7 +1363,7 @@ namespace DevMind
                     // Bounds check: charPos may have drifted out of range after delta adjustments.
                     if (charPos < 0 || charPos >= content.Length)
                     {
-                        debugLines.Add($"[CONTEXT] DeduplicateReadBlocks: charPos ({charPos}) out of range for message {msgIdx} (len={content.Length}), skipping {filename}");
+                        if (showDebug) debugLines.Add($"[CONTEXT] DeduplicateReadBlocks: charPos ({charPos}) out of range for message {msgIdx} (len={content.Length}), skipping {filename}");
                         continue;
                     }
 

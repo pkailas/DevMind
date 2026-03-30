@@ -426,6 +426,7 @@ Fields: `_suppressDisplay`.
 | `FirstTokenTimeoutMinutes` | `5` | Max minutes to wait for the first token (covers prompt-ingestion phase) |
 | `RequestTimeoutMinutes` | `10` | Max minutes for a complete LLM response; sets `HttpClient.Timeout` |
 | `ContextEviction` | `Balanced` | `Off` / `Balanced` / `Aggressive` — tiered eviction of stale context turns |
+| `ShowDebugOutput` | `false` | Enable debug logging to OutputBox for context management and directive execution |
 
 Settings are accessed via `DevMindOptions.Instance` (synchronous) or `GetLiveInstanceAsync()` (async). The `DevMindOptions.Saved` event fires when the user saves options, triggering `LlmClient.Configure()` and a background connection test.
 
@@ -552,6 +553,39 @@ Each message type gets a specific summary format:
 - Logging: single summary line `[CONTEXT] Eviction: N warm-compressed, M cold-collapsed, K dropped` — only emitted when at least one message was affected.
 
 ## Shell Shortcuts
+
+
+The `ContextEviction` setting controls how aggressively stale context turns are compressed or dropped:
+
+| Mode | HOT Turns | WARM Turns | COLD Turns | DROP Age |
+|------|-----------|------------|------------|----------|
+| Off | All | — | — | Never |
+| Balanced | current + 1 | next 3 | next 3 | 8+ |
+| Aggressive | current only | next 2 | next 2 | 5+ |
+
+- **HOT**: Full fidelity — messages unchanged
+- **WARM**: Compressed to one-line summary per message
+- **COLD**: Entire turn collapsed to single line
+- **DROP**: Removed entirely from context
+
+- System prompt (index 0)
+- DevMind.md content (`[DevMind.md]` marker)
+- SCRATCHPAD state (`[TASK STATE]` marker)
+
+
+The `ShowDebugOutput` setting (default `false`) enables verbose debug logging to the OutputBox:
+
+- Context eviction summary: `[CONTEXT] Eviction: N warm-compressed, M cold-collapsed, K dropped`
+- Directive execution details: `[DEBUG] FILE: created X.cs (N lines)`, `[DEBUG] PATCH: applied to Y.cs`
+- LLM client events: connection status, token counts, context budget calculations
+- Agentic pipeline tracing: parser output, classifier decisions, executor actions
+
+Enable when troubleshooting context management or directive execution issues.
+
+
+During LLM generation, the status bar displays `Generating... (N tokens)` showing the real-time token count. This updates with each SSE token received, giving visibility into response length and helping identify unusually long generations.
+
+
 
 - `/reload` — clears cached DevMind.md, reloads on next Ask
 - `/context` — shows currently loaded READ files

@@ -12,7 +12,7 @@ This is a Visual Studio extension (VSIX) that provides a local LLM coding assist
 ## Architecture
 - **Entry point**: `DevMindPackage.cs` registers the tool window, options page, and commands.
 - **UI**: `DevMindToolWindowControl.xaml/.cs` — single-stream WPF output (RichTextBox), input bar, toolbar, terminal strip. No third-party markdown renderers — plain `Run`/`Paragraph` appends only.
-- **Partial classes**: `.AgenticHost.cs` (IAgenticHost bridge to VS/UI), `.Context.cs` (editor context, READ, file search), `.Patch.cs` (PATCH parsing, matching, UNDO), `.Shell.cs` (shell execution).
+- **Partial classes**: `.AgenticHost.cs` (IAgenticHost bridge to VS/UI), `.Context.cs` (editor context, READ, file search), `.Patch.cs` (PATCH parsing, matching, UNDO, markdown fence stripping fix for FILE directive), `.Shell.cs` (shell execution).
 - **Agentic pipeline**: `ResponseParser` → `ResponseClassifier` → `AgenticActionResolver` → `AgenticExecutor` → `IAgenticHost`. Only `AgenticExecutor` has side effects.
 - **LLM client**: `LlmClient.cs` — SSE streaming to OpenAI-compatible `/v1/chat/completions`. Context budget auto-detected. Squeeze algorithm compresses history. Tiered context eviction (HOT/WARM/COLD/DROP) based on turn age.
 - **Diff preview**: `DiffPreviewCard.xaml/.cs` + `DiffBatchBar.xaml/.cs` — inline diff cards in OutputBox for PATCH confirmation. Three-phase pipeline: resolve → auto-apply exact → preview fuzzy.

@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.Patch.cs  v5.15
+// File: DevMindToolWindowControl.Patch.cs  v5.16
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -267,21 +267,42 @@ namespace DevMind
             if (lines.Count == 0) return text;
 
             // Strip leading opening fence — matches ```  or ```csharp etc.
-            if (Regex.IsMatch(lines[0], @"^\s*```\w*\s*$"))
+            bool hadOpeningFence = Regex.IsMatch(lines[0], @"^\s*```\w*\s*$");
+            if (hadOpeningFence)
                 lines.RemoveAt(0);
 
             if (lines.Count == 0) return string.Empty;
 
-            // Strip trailing closing fence — matches only bare ```.
-            // Search from the end, skipping empty/whitespace-only lines, so a
-            // trailing newline in FILE block content doesn't hide the fence.
-            for (int i = lines.Count - 1; i >= 0; i--)
+            // Strip closing fence and everything after it.
+            // When the model wraps FILE content in fences, natural language text
+            // (e.g. "Now let me create the next file...") can appear after the
+            // closing ```.  We search from the end for the closing fence and
+            // discard it plus all trailing lines.
+            // Only strip if we found an opening fence — otherwise interior ```
+            // lines are left untouched.
+            if (hadOpeningFence)
             {
-                if (string.IsNullOrWhiteSpace(lines[i]))
-                    continue;
-                if (Regex.IsMatch(lines[i], @"^\s*```\s*$"))
-                    lines.RemoveAt(i);
-                break;
+                for (int i = lines.Count - 1; i >= 0; i--)
+                {
+                    if (Regex.IsMatch(lines[i], @"^\s*```\s*$"))
+                    {
+                        // Remove the fence and everything after it.
+                        lines.RemoveRange(i, lines.Count - i);
+                        break;
+                    }
+                }
+            }
+            else
+            {
+                // No opening fence — legacy behavior: only strip a trailing bare ```.
+                for (int i = lines.Count - 1; i >= 0; i--)
+                {
+                    if (string.IsNullOrWhiteSpace(lines[i]))
+                        continue;
+                    if (Regex.IsMatch(lines[i], @"^\s*```\s*$"))
+                        lines.RemoveAt(i);
+                    break;
+                }
             }
 
             return string.Join("\n", lines);
