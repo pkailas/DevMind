@@ -1805,13 +1805,6 @@ namespace DevMind
                 if (openIdx >= 0)
                     code = code.Substring(0, openIdx).Trim();
 
-                // Strip markdown section headings — models occasionally emit "## Fix 2:" etc.
-                // inside FILE blocks; they are not valid C# and cause CS1024 build errors.
-                var fileHeadingWarnings = new List<string>();
-                code = StripMarkdownHeadingLines(code, fileHeadingWarnings);
-                foreach (var w in fileHeadingWarnings)
-                    AppendOutput($"[WARNING] Stripped markdown heading from FILE content: {w}\n", OutputColor.Error);
-
                 File.WriteAllText(fullPath, code.Trim(), Encoding.UTF8);
 
                 try

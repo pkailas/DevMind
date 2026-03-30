@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.Patch.cs  v5.16
+// File: DevMindToolWindowControl.Patch.cs  v5.17
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -224,26 +224,6 @@ namespace DevMind
             return (bestStart, bestEnd, bestSim);
         }
 
-        /// <summary>
-        /// Removes markdown section heading lines (e.g. "## Fix 2:", "# Header", "### Note")
-        /// that the model occasionally emits inside FILE/PATCH blocks. These lines are not
-        /// valid C# and cause CS1024 build errors when written to source files.
-        /// Populates <paramref name="strippedLines"/> with each removed line (trimmed) so the
-        /// caller can log warnings via AppendOutput.
-        /// </summary>
-        private static string StripMarkdownHeadingLines(string text, IList<string> strippedLines)
-        {
-            var lines = text.Split('\n');
-            var kept  = new List<string>();
-            foreach (var line in lines)
-            {
-                if (Regex.IsMatch(line, @"^\s*#{1,6}\s+\S"))
-                    strippedLines.Add(line.Trim());
-                else
-                    kept.Add(line);
-            }
-            return string.Join("\n", kept);
-        }
 
         /// <summary>
         /// Removes lines that are solely markdown code fence markers (``` with optional language tag).
@@ -470,18 +450,7 @@ namespace DevMind
                     return null;
                 }
 
-                // Strip markdown section headings — models occasionally emit "## Fix 2:" etc.
-                // inside PATCH blocks; they are not valid C# and cause CS1024 build errors.
-                var blocks = new List<(string findText, string replaceText)>(rawBlocks.Count);
-                foreach (var (rawFind, rawReplace) in rawBlocks)
-                {
-                    var headingWarnings = new List<string>();
-                    string cleanFind    = StripMarkdownHeadingLines(rawFind,    headingWarnings);
-                    string cleanReplace = StripMarkdownHeadingLines(rawReplace, headingWarnings);
-                    foreach (var w in headingWarnings)
-                        AppendOutput($"[WARNING] Stripped markdown heading from PATCH content: {w}\n", OutputColor.Error);
-                    blocks.Add((cleanFind, cleanReplace));
-                }
+                var blocks = rawBlocks;
 
                 // Resolve file path — support partial path hints (e.g. "Services/Foo.cs")
                 string normalizedFileName = fileName.Replace('\\', '/');
@@ -854,16 +823,7 @@ namespace DevMind
                     return null;
                 }
 
-                var blocks = new List<(string findText, string replaceText)>(rawBlocks.Count);
-                foreach (var (rawFind, rawReplace) in rawBlocks)
-                {
-                    var headingWarnings = new List<string>();
-                    string cleanFind    = StripMarkdownHeadingLines(rawFind,    headingWarnings);
-                    string cleanReplace = StripMarkdownHeadingLines(rawReplace, headingWarnings);
-                    foreach (var w in headingWarnings)
-                        AppendOutput($"[WARNING] Stripped markdown heading from PATCH content: {w}\n", OutputColor.Error);
-                    blocks.Add((cleanFind, cleanReplace));
-                }
+                var blocks = rawBlocks;
 
                 string normalizedFileName = fileName.Replace('\\', '/');
                 string fileNameOnly;
