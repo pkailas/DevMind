@@ -514,6 +514,8 @@ Squeeze runs before the hard-trim (`TrimHistoryToFit`) and after each agentic tu
 
 ## Tiered Context Eviction (v6.0.84+)
 
+~~## Tiered Context Eviction (v6.0.84+)~~ — **Implemented v6.0.91**. Tiered context eviction (HOT/WARM/COLD/DROP) with Off/Balanced/Aggressive modes shipped.
+
 Before each `SendMessageAsync`, `EvictStaleContext()` compresses or drops stale messages based on their age relative to the current turn. Controlled by `ContextEviction` setting (`Off` / `Balanced` / `Aggressive`).
 
 ### Turn Tracking
