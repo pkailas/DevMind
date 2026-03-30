@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.Context.cs  v5.17
+// File: DevMindToolWindowControl.Context.cs  v5.18
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -163,8 +163,27 @@ namespace DevMind
             };
         }
 
-        // ── DevMind.md context ────────────────────────────────────────────────
+        // ── Project context file discovery ───────────────────────────────────
 
+        // Priority order for primary context file discovery
+        private static readonly string[] _contextFilePriority = { "DevMind.md", "AGENTS.md", "CLAUDE.md" };
+
+        // Supplemental files to check when DevMind.md is the primary
+        private static readonly string[] _supplementalFiles = { "AGENTS.md", "CLAUDE.md" };
+
+        // Currently loaded .agent.md profile name (null = none loaded)
+        private string _loadedAgentProfile;
+
+        // Currently loaded .agent.md profile content (injected as supplemental)
+        private string _agentProfileContent;
+
+        /// <summary>
+        /// Discovers and loads project context files using the priority chain:
+        /// DevMind.md → AGENTS.md → CLAUDE.md. If DevMind.md is the primary,
+        /// AGENTS.md / CLAUDE.md are appended as supplemental context.
+        /// Returns the combined context string, or null if no files found.
+        /// Logs discovery results via AppendOutput.
+        /// </summary>
         private async Task<string> LoadDevMindContextAsync()
         {
             try
@@ -174,16 +193,177 @@ namespace DevMind
                 string solutionDir = System.IO.Path.GetDirectoryName(dte?.Solution?.FullName);
                 if (string.IsNullOrEmpty(solutionDir)) return null;
 
-                string mdPath = Directory.GetFiles(solutionDir, "DevMind.md",
-                    SearchOption.TopDirectoryOnly)
-                    .FirstOrDefault();
+                // Find primary context file
+                string primaryName = null;
+                string primaryContent = null;
+                foreach (string candidate in _contextFilePriority)
+                {
+                    string path = Path.Combine(solutionDir, candidate);
+                    if (File.Exists(path))
+                    {
+                        primaryName = candidate;
+                        primaryContent = File.ReadAllText(path);
+                        break;
+                    }
+                }
 
-                return mdPath != null ? File.ReadAllText(mdPath) : null;
+                if (primaryName == null)
+                {
+                    AppendOutput("[CONTEXT] No project context file found (searched: DevMind.md, AGENTS.md, CLAUDE.md)\n", OutputColor.Dim);
+                    return null;
+                }
+
+                AppendOutput($"[CONTEXT] Primary: {primaryName} loaded\n", OutputColor.Dim);
+
+                // Supplemental: only when DevMind.md is the primary
+                if (string.Equals(primaryName, "DevMind.md", StringComparison.OrdinalIgnoreCase))
+                {
+                    foreach (string suppName in _supplementalFiles)
+                    {
+                        string suppPath = Path.Combine(solutionDir, suppName);
+                        if (File.Exists(suppPath))
+                        {
+                            string suppContent = File.ReadAllText(suppPath);
+                            if (!string.IsNullOrWhiteSpace(suppContent))
+                            {
+                                primaryContent += $"\n\n[SUPPLEMENTAL: {suppName}]\n{suppContent}";
+                                AppendOutput($"[CONTEXT] Supplemental: {suppName} loaded\n", OutputColor.Dim);
+                            }
+                        }
+                    }
+                }
+
+                return primaryContent;
             }
             catch
             {
                 return null;
             }
+        }
+
+        // ── .github/agents/*.agent.md support ────────────────────────────────
+
+        /// <summary>
+        /// Returns the solution root directory, or null if unavailable.
+        /// </summary>
+        private async Task<string> GetSolutionDirectoryAsync()
+        {
+            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+            var dte = await VS.GetServiceAsync<EnvDTE.DTE, EnvDTE.DTE>();
+            return Path.GetDirectoryName(dte?.Solution?.FullName);
+        }
+
+        /// <summary>
+        /// Lists available .agent.md files in .github/agents/ directory.
+        /// </summary>
+        private async Task HandleAgentsListCommandAsync()
+        {
+            try
+            {
+                string solutionDir = await GetSolutionDirectoryAsync();
+                if (string.IsNullOrEmpty(solutionDir))
+                {
+                    AppendOutput("[AGENTS] No solution open.\n", OutputColor.Error);
+                    return;
+                }
+
+                string agentsDir = Path.Combine(solutionDir, ".github", "agents");
+                if (!Directory.Exists(agentsDir))
+                {
+                    AppendOutput("[AGENTS] No .github/agents/ directory found.\n", OutputColor.Dim);
+                    return;
+                }
+
+                var agentFiles = Directory.GetFiles(agentsDir, "*.agent.md");
+                if (agentFiles.Length == 0)
+                {
+                    AppendOutput("[AGENTS] No .agent.md files found in .github/agents/\n", OutputColor.Dim);
+                    return;
+                }
+
+                AppendOutput($"[AGENTS] Available agent profiles ({agentFiles.Length}):\n", OutputColor.Dim);
+                foreach (string file in agentFiles)
+                {
+                    string name = Path.GetFileName(file).Replace(".agent.md", "");
+                    string marker = string.Equals(name, _loadedAgentProfile, StringComparison.OrdinalIgnoreCase)
+                        ? " (loaded)" : "";
+                    AppendOutput($"  - {name}{marker}\n", OutputColor.Dim);
+                }
+
+                if (_loadedAgentProfile == null)
+                    AppendOutput("Use /agent load <name> to load a profile.\n", OutputColor.Dim);
+            }
+            catch (Exception ex)
+            {
+                AppendOutput($"[AGENTS] Error: {ex.Message}\n", OutputColor.Error);
+            }
+        }
+
+        /// <summary>
+        /// Loads a specific .agent.md profile. Strips YAML frontmatter and stores
+        /// the content for injection as supplemental context.
+        /// </summary>
+        private async Task HandleAgentLoadCommandAsync(string name)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(name))
+                {
+                    AppendOutput("[AGENT] Usage: /agent load <name>\n", OutputColor.Error);
+                    return;
+                }
+
+                string solutionDir = await GetSolutionDirectoryAsync();
+                if (string.IsNullOrEmpty(solutionDir))
+                {
+                    AppendOutput("[AGENT] No solution open.\n", OutputColor.Error);
+                    return;
+                }
+
+                string agentFile = Path.Combine(solutionDir, ".github", "agents", $"{name}.agent.md");
+                if (!File.Exists(agentFile))
+                {
+                    AppendOutput($"[AGENT] Profile not found: {name}.agent.md\n", OutputColor.Error);
+                    return;
+                }
+
+                string raw = File.ReadAllText(agentFile);
+                string content = StripYamlFrontmatter(raw);
+
+                _loadedAgentProfile = name;
+                _agentProfileContent = content;
+
+                // Force context reload so the profile is included on next Ask
+                _devMindContext = null;
+
+                AppendOutput($"[CONTEXT] Agent profile: {name} loaded from .github/agents/{name}.agent.md\n", OutputColor.Dim);
+            }
+            catch (Exception ex)
+            {
+                AppendOutput($"[AGENT] Error: {ex.Message}\n", OutputColor.Error);
+            }
+        }
+
+        /// <summary>
+        /// Strips YAML frontmatter (between opening --- and closing --- lines)
+        /// from a markdown document. Returns the remaining content.
+        /// </summary>
+        private static string StripYamlFrontmatter(string content)
+        {
+            if (content == null) return null;
+            string trimmed = content.TrimStart();
+            if (!trimmed.StartsWith("---")) return content;
+
+            // Find the closing ---
+            int firstNewline = trimmed.IndexOf('\n');
+            if (firstNewline < 0) return content;
+
+            int closingDash = trimmed.IndexOf("\n---", firstNewline, StringComparison.Ordinal);
+            if (closingDash < 0) return content;
+
+            // Skip past the closing --- line
+            int afterClosing = trimmed.IndexOf('\n', closingDash + 4);
+            return afterClosing >= 0 ? trimmed.Substring(afterClosing + 1) : "";
         }
 
         // ── READ command ──────────────────────────────────────────────────────

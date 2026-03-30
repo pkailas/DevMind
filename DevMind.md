@@ -11,6 +11,7 @@ This is a Visual Studio extension (VSIX) that provides a local LLM coding assist
 
 ## Architecture
 - **Entry point**: `DevMindPackage.cs` registers the tool window, options page, and commands.
+- **Agent context file compatibility**: Supports DevMind.md (primary), AGENTS.md (GitHub Copilot), CLAUDE.md (Claude Code) with discovery chain fallback. Agent profiles in `.github/agents/*.agent.md` loadable via `/agents` and `/agent load <name>` commands.
 - **UI**: `DevMindToolWindowControl.xaml/.cs` — single-stream WPF output (RichTextBox), input bar, toolbar, terminal strip. No third-party markdown renderers — plain `Run`/`Paragraph` appends only.
 - **Partial classes**: `.AgenticHost.cs` (IAgenticHost bridge to VS/UI), `.Context.cs` (editor context, READ, file search), `.Patch.cs` (PATCH parsing, matching, UNDO, markdown fence stripping fix for FILE directive), `.Shell.cs` (shell execution).
 - **Agentic pipeline**: `ResponseParser` → `ResponseClassifier` → `AgenticActionResolver` → `AgenticExecutor` → `IAgenticHost`. Only `AgenticExecutor` has side effects.

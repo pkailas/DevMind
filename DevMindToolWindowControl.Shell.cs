@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.Shell.cs  v5.5
+// File: DevMindToolWindowControl.Shell.cs  v5.6
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -59,12 +59,35 @@ namespace DevMind
 
             AppendOutput($"\n> {command}\n", OutputColor.Input);
 
-            // /reload interception — clears cached DevMind.md so it's re-read on next Ask
+            // /reload interception — clears cached context so it's re-discovered on next Ask
             if (command.Equals("/reload", StringComparison.OrdinalIgnoreCase) ||
                 command.Equals("reload", StringComparison.OrdinalIgnoreCase))
             {
                 _devMindContext = null;
-                AppendOutput("DevMind.md context cleared — will reload on next Ask.\n", OutputColor.Dim);
+                AppendOutput("Project context cleared — will reload on next Ask.\n", OutputColor.Dim);
+                return;
+            }
+
+            // /agents — list available .agent.md profiles
+            if (command.Equals("/agents", StringComparison.OrdinalIgnoreCase) ||
+                command.Equals("agents", StringComparison.OrdinalIgnoreCase))
+            {
+#pragma warning disable VSSDK007
+                _ = ThreadHelper.JoinableTaskFactory.RunAsync(async delegate { await HandleAgentsListCommandAsync(); });
+#pragma warning restore VSSDK007
+                return;
+            }
+
+            // /agent load <name> — load a specific agent profile
+            if (command.StartsWith("/agent load ", StringComparison.OrdinalIgnoreCase) ||
+                command.StartsWith("agent load ", StringComparison.OrdinalIgnoreCase))
+            {
+                string name = command.StartsWith("/agent")
+                    ? command.Substring("/agent load ".Length).Trim()
+                    : command.Substring("agent load ".Length).Trim();
+#pragma warning disable VSSDK007
+                _ = ThreadHelper.JoinableTaskFactory.RunAsync(async delegate { await HandleAgentLoadCommandAsync(name); });
+#pragma warning restore VSSDK007
                 return;
             }
 

@@ -554,8 +554,34 @@ Each message type gets a specific summary format:
 - Complementary to the existing squeeze algorithm — eviction runs first, then squeeze handles remaining pressure.
 - Logging: single summary line `[CONTEXT] Eviction: N warm-compressed, M cold-collapsed, K dropped` — only emitted when at least one message was affected.
 
-## Shell Shortcuts
+## Agent Context File Compatibility
 
+DevMind supports multiple agent context file formats for maximum compatibility with different LLM tooling ecosystems:
+
+### Discovery Chain
+
+On startup, DevMind searches for context files in this priority order:
+1. `DevMind.md` (primary, project-specific context)
+2. `AGENTS.md` (GitHub Copilot compatibility)
+3. `CLAUDE.md` (Claude Code compatibility)
+
+The first file found is loaded as the primary context. Additional files are loaded as supplemental context and appended to the system prompt.
+
+### Agent Profile Files
+
+DevMind also supports `.agent.md` profile files in `.github/agents/`:
+- Files matching `*.agent.md` in `.github/agents/` are discovered as named profiles
+- Use `/agents` to list all available agent profiles
+- Use `/agent load <profile-name>` to load a specific profile (e.g., `/agent load reviewer`)
+- Loaded profiles are appended to context and remain active for the session
+
+### Shell Shortcuts
+
+- `/agents` — list all available agent profiles in `.github/agents/`
+- `/agent load <name>` — load a specific agent profile by name
+- `/reload` — clears cached DevMind.md, reloads on next Ask
+- `/context` — shows currently loaded READ files
+- `/context clear` — wipes READ context without restarting
 
 The `ContextEviction` setting controls how aggressively stale context turns are compressed or dropped:
 

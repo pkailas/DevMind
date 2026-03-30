@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v5.0.67
+// File: DevMindToolWindowControl.xaml.cs  v5.0.68
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -733,14 +733,16 @@ namespace DevMind
                 _pendingShellContext = null;
             }
 
-            // Lazy-load DevMind.md context once per session
+            // Lazy-load project context once per session (DevMind.md / AGENTS.md / CLAUDE.md)
             if (_devMindContext == null)
             {
                 string loaded = await LoadDevMindContextAsync();
                 if (loaded != null)
                 {
                     _devMindContext = loaded;
-                    AppendOutput("📄 DevMind.md loaded.\n", OutputColor.Dim);
+                    // Append loaded agent profile if one was selected
+                    if (!string.IsNullOrEmpty(_agentProfileContent))
+                        _devMindContext += $"\n\n[AGENT PROFILE: {_loadedAgentProfile}]\n{_agentProfileContent}";
                 }
                 else
                 {
