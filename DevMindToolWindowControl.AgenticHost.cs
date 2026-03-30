@@ -687,7 +687,7 @@ namespace DevMind
                 if (File.Exists(trxFile))
                 {
                     string trxContent = File.ReadAllText(trxFile);
-                    string summary = ParseTrxSummary(trxContent, MaxFailedTests);
+                    string summary = ParseTrxSummary(trxContent, MaxFailedTests, resolvedProject, filter);
                     try { File.Delete(trxFile); } catch { }
                     return summary;
                 }
@@ -704,7 +704,7 @@ namespace DevMind
         /// Parses a TRX XML file and returns a compact test results summary.
         /// Only failed tests show details; passed/skipped get summary counts only.
         /// </summary>
-        private static string ParseTrxSummary(string trxXml, int maxFailedTests)
+        private static string ParseTrxSummary(string trxXml, int maxFailedTests, string project, string filter)
         {
             // TRX files use the VS test results namespace
             XDocument doc = XDocument.Parse(trxXml);
@@ -717,6 +717,17 @@ namespace DevMind
             int failed  = counters != null ? (int?)counters.Attribute("failed")  ?? 0 : 0;
             int skipped = total - passed - failed;
             if (skipped < 0) skipped = 0;
+
+            // Handle zero tests found
+            if (total == 0)
+            {
+                string projectShort = Path.GetFileName(project);
+                if (!string.IsNullOrWhiteSpace(filter))
+                {
+                    return $"[TEST] No tests found matching filter \"{filter.Trim('\"')}\" in {projectShort}";
+                }
+                return $"[TEST] No tests found in {projectShort} — verify the project references MSTest.TestFramework or another test framework";
+            }
 
             // Duration from TestRun summary
             double totalSecs = 0;
