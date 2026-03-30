@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v5.50
+// File: LlmClient.cs  v5.51
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -1360,12 +1360,11 @@ namespace DevMind
                     string content = existingMsg.Content;
                     string role    = existingMsg.Role;
 
-                    // Bounds check: charPos may have drifted out of range after delta adjustments.
+                    // Bounds check: charPos is -1 when the entry was inside a replaced block
+                    // (invalidated during delta adjustment), or may be out of range after
+                    // warm compression modified the message. Both are benign — skip silently.
                     if (charPos < 0 || charPos >= content.Length)
-                    {
-                        if (showDebug) debugLines.Add($"[CONTEXT] DeduplicateReadBlocks: charPos ({charPos}) out of range for message {msgIdx} (len={content.Length}), skipping {filename}");
                         continue;
-                    }
 
                     int tagEnd = content.IndexOf(']', charPos);
                     if (tagEnd < 0) continue;
@@ -1398,15 +1397,23 @@ namespace DevMind
                     //       their own deduplication loop runs later.
                     int delta = replacement.Length - oldBlock.Length;
 
-                    // (a) Same-filename adjustments
+                    // (a) Same-filename adjustments — entries inside the replaced range
+                    //     [charPos, blockEnd) are invalidated (set to -1) because their
+                    //     [READ:] tag was embedded content that no longer exists.
+                    //     Entries after blockEnd are shifted by delta.
                     for (int j = k + 1; j < locs.Count; j++)
                     {
                         if (locs[j].msgIdx == msgIdx && locs[j].charPos > charPos)
-                            locs[j] = (locs[j].msgIdx, locs[j].charPos + delta);
+                        {
+                            if (locs[j].charPos < blockEnd)
+                                locs[j] = (locs[j].msgIdx, -1);
+                            else
+                                locs[j] = (locs[j].msgIdx, locs[j].charPos + delta);
+                        }
                     }
 
-                    // (b) Cross-filename adjustments — fix positions for every other filename
-                    //     whose occurrences in this same message would have shifted.
+                    // (b) Cross-filename adjustments — same logic: invalidate entries
+                    //     inside the replaced range, shift entries after it.
                     if (delta != 0)
                     {
                         foreach (var otherKvp in occurrences)
@@ -1417,7 +1424,12 @@ namespace DevMind
                             for (int j = 0; j < otherLocs.Count; j++)
                             {
                                 if (otherLocs[j].msgIdx == msgIdx && otherLocs[j].charPos > charPos)
-                                    otherLocs[j] = (otherLocs[j].msgIdx, otherLocs[j].charPos + delta);
+                                {
+                                    if (otherLocs[j].charPos < blockEnd)
+                                        otherLocs[j] = (otherLocs[j].msgIdx, -1);
+                                    else
+                                        otherLocs[j] = (otherLocs[j].msgIdx, otherLocs[j].charPos + delta);
+                                }
                             }
                         }
                     }
