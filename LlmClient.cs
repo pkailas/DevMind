@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v5.51
+// File: LlmClient.cs  v5.55
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -109,6 +109,7 @@ namespace DevMind
         private HttpClient _httpClient;
         private readonly List<ChatMessage> _conversationHistory;
         private readonly List<string> _compressionLog = new List<string>();
+        private readonly List<string> _pendingDebugLog = new List<string>();
         private const string DefaultSystemPrompt = "You are a helpful coding assistant. Be concise and precise.";
         internal readonly FileContentCache _fileCache = new FileContentCache();
         private string _taskScratchpad = "";
@@ -178,6 +179,10 @@ namespace DevMind
         {
             _baseUrl = endpointUrl?.TrimEnd('/') ?? "http://127.0.0.1:1234/v1";
             _apiKey  = apiKey;
+            string apiKeyState = _apiKey == null ? "null" : _apiKey.Length == 0 ? "empty" : $"set (length={_apiKey.Length})";
+            Debug.WriteLine($"[DevMind TRACE] Configure() called — _apiKey is {apiKeyState}, endpoint={_baseUrl}");
+            if (DevMindOptions.Instance.ShowDebugOutput)
+                _pendingDebugLog.Add($"\n[DEBUG] Configure() — API key: {apiKeyState}, endpoint: {_baseUrl}\n");
             ApplyHttpClientSettings(_httpClient);
             _contextDetectionTask = DetectContextSizeAsync();
         }
@@ -190,11 +195,17 @@ namespace DevMind
             client.Timeout = TimeSpan.FromMinutes(DevMindOptions.Instance.RequestTimeoutMinutes);
             client.DefaultRequestHeaders.Clear();
             client.DefaultRequestHeaders.Add("Accept", "text/event-stream");
+            Debug.WriteLine($"[DevMind TRACE] ApplyHttpClientSettings — _apiKey is {(_apiKey == null ? "null" : _apiKey.Length == 0 ? "empty" : $"set (length={_apiKey.Length})")}");
             if (!string.IsNullOrEmpty(_apiKey))
             {
                 client.DefaultRequestHeaders.Authorization =
                     new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _apiKey);
             }
+            var authHeader = client.DefaultRequestHeaders.Authorization;
+            bool authSet = authHeader != null;
+            Debug.WriteLine($"[DevMind TRACE] ApplyHttpClientSettings — Authorization header {(authSet ? $"SET: scheme={authHeader.Scheme}, param length={authHeader.Parameter?.Length ?? 0}" : "NOT SET (null)")}");
+            if (DevMindOptions.Instance.ShowDebugOutput)
+                _pendingDebugLog.Add($"\n[DEBUG] ApplyHttpClientSettings() — Authorization header: {(authSet ? "SET" : "NOT SET")}\n");
         }
 
         /// <summary>
@@ -254,6 +265,21 @@ namespace DevMind
         public async Task DetectContextSizeAsync()
         {
             var opts = DevMindOptions.Instance;
+
+            int manual = opts?.ManualContextSize ?? 0;
+            if (manual > 0)
+            {
+                _contextSize = manual;
+                _budget = new ContextBudget(_contextSize);
+                Debug.WriteLine($"[DevMind] Using manual context size: {_contextSize}");
+                if (DevMindOptions.Instance.ShowDebugOutput)
+                    _pendingDebugLog.Add($"\n[DEBUG] DetectContextSizeAsync() — manual context override: {_contextSize:N0} tokens\n");
+                return;
+            }
+
+            if (DevMindOptions.Instance.ShowDebugOutput)
+                _pendingDebugLog.Add($"\n[DEBUG] DetectContextSizeAsync() — auto-detecting context size (no manual override)\n");
+
             LlmServerType serverType = opts?.ServerType ?? LlmServerType.LlamaServer;
 
             string serverRoot = _baseUrl.EndsWith("/v1", StringComparison.OrdinalIgnoreCase)
@@ -392,6 +418,14 @@ namespace DevMind
                     onToken($"\n[CONTEXT] Warning: context-size detection timed out — using fallback {_contextSize:N0} tokens.\n");
             }
             _contextDetectionTask = null; // clear after first message; re-set on next Configure()
+
+            // Flush buffered debug messages from Configure/DetectContextSize/ApplyHttpClientSettings.
+            if (_pendingDebugLog.Count > 0)
+            {
+                foreach (string msg in _pendingDebugLog)
+                    onToken(msg);
+                _pendingDebugLog.Clear();
+            }
 
             UpdateSystemPrompt();
 

@@ -1,4 +1,4 @@
-# CLAUDE.md — DevMind Developer Reference  v1.8
+# CLAUDE.md — DevMind Developer Reference  v1.9
 
 ## Project Overview
 
@@ -146,7 +146,9 @@ All UI updates must be dispatched to the main thread. The `onToken`, `onComplete
 
 ## LLM Directives
 
-The model communicates actions through directives, all injected into the system prompt at runtime:
+The model communicates actions through directives, all injected into the system prompt at runtime.
+
+**IMPORTANT: Always use the exact directive syntax shown in the examples below. Do not use markdown code fences for file edits — use PATCH with FIND:/REPLACE: pairs. Do not use alternative diff formats.**
 
 ### FILE: / END_FILE — Create New Files
 ```
@@ -159,6 +161,23 @@ END_FILE
 - `END_FILE` (or an implicit directive-line terminator) ends capture mode. File content is written to disk by `AgenticExecutor` → `IAgenticHost.SaveFileAsync` after streaming completes — **not** during streaming.
 - `SaveFileAsync` calls `StripOuterCodeFence()` before writing, removing any wrapping ` ``` ` fence the model may have emitted around the file content.
 - Multiple `FILE:` blocks can appear in a single response.
+
+**Example:**
+```
+FILE: Models/BenchmarkResult.cs
+using System;
+
+namespace DevMind.Models
+{
+    public class BenchmarkResult
+    {
+        public string PromptName { get; set; }
+        public double TimeToFirstTokenMs { get; set; }
+        public double TotalTimeMs { get; set; }
+    }
+}
+END_FILE
+```
 
 ### PATCH — Edit Existing Files
 ```
@@ -179,6 +198,23 @@ END_PATCH
 - Auto-READ — target file is loaded into context before patching if not already present.
 - UNDO stack — 10-deep timestamped backups in `%TEMP%\DevMind\`.
 
+**Example:**
+```
+PATCH DevMindToolWindowControl.xaml.cs
+FIND:
+        private void ClearButton_Click(object sender, RoutedEventArgs e)
+        {
+            OutputTextBlock.Text = "";
+        }
+REPLACE:
+        private void ClearButton_Click(object sender, RoutedEventArgs e)
+        {
+            OutputTextBlock.Text = "";
+            _messageHistory.Clear();
+        }
+END_PATCH
+```
+
 ### SHELL: — Run Commands
 ```
 SHELL: dotnet build
@@ -186,6 +222,11 @@ SHELL: dotnet build
 - Executed via `RunShellCommandCaptureAsync()`.
 - Output captured and fed back into the agentic loop.
 - Consecutive duplicate commands are deduplicated.
+
+**Example:**
+```
+SHELL: dotnet build --no-restore
+```
 
 ### READ — Request File Context
 ```
@@ -201,6 +242,12 @@ READ git diff [ref]        — working changes, staged changes, or diff against 
 - When the model responds with only READ requests (no PATCH/SHELL/FILE), DevMind auto-loads the files and resubmits the original prompt.
 - `_pendingResubmitPrompt` stores the original prompt; cleared after use or on cancel.
 - If the file is not found, READ returns a list of `*.cs` files in the project directory so you can identify the correct filename.
+
+**Example:**
+```
+READ LlmClient.cs
+READ DevMindToolWindowControl.xaml.cs:100-200
+```
 
 #### Git READ Variants
 - `READ git log` — runs `git log --oneline --no-decorate -10` in the project root. Optional count: `READ git log 20` (max 50).

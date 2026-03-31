@@ -1,4 +1,4 @@
-# DevMind Project Context
+# DevMind Project Context  v1.1
 
 ## Project
 - **Product**: DevMind
@@ -30,6 +30,53 @@ This is a Visual Studio extension (VSIX) that provides a local LLM coding assist
 
 ## Directives
 The LLM communicates actions through these directives: `FILE:/END_FILE` (create files), `PATCH/END_PATCH` (edit files with FIND/REPLACE), `SHELL:` (run commands), `READ` (request file context), `GREP:` (single-file search), `FIND:` (cross-file search), `DELETE` (remove file), `RENAME` (rename file), `DIFF` (show changes), `TEST` (run tests), `SCRATCHPAD:/END_SCRATCHPAD` (state tracking), `DONE` (task completion).
+
+**IMPORTANT: Always use the exact directive syntax shown in the examples below. Do not use markdown code fences for file edits — use PATCH with FIND:/REPLACE: pairs. Do not use alternative diff formats.**
+
+### FILE: / END_FILE — Create New Files
+```
+FILE: Models/BenchmarkResult.cs
+using System;
+
+namespace DevMind.Models
+{
+    public class BenchmarkResult
+    {
+        public string PromptName { get; set; }
+        public double TimeToFirstTokenMs { get; set; }
+        public double TotalTimeMs { get; set; }
+    }
+}
+END_FILE
+```
+
+### PATCH / END_PATCH — Edit Existing Files
+```
+PATCH DevMindToolWindowControl.xaml.cs
+FIND:
+        private void ClearButton_Click(object sender, RoutedEventArgs e)
+        {
+            OutputTextBlock.Text = "";
+        }
+REPLACE:
+        private void ClearButton_Click(object sender, RoutedEventArgs e)
+        {
+            OutputTextBlock.Text = "";
+            _messageHistory.Clear();
+        }
+END_PATCH
+```
+
+### READ — Request File Context
+```
+READ LlmClient.cs
+READ DevMindToolWindowControl.xaml.cs:100-200
+```
+
+### SHELL: — Run Commands
+```
+SHELL: dotnet build --no-restore
+```
 
 ## Key Files
 | File | Purpose |

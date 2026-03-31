@@ -1,4 +1,4 @@
-// File: DevMindOptionsPage.cs  v5.8
+// File: DevMindOptionsPage.cs  v5.9
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -121,6 +121,16 @@ namespace DevMind
         [Description("Endpoint path for context-size detection when Server Type is Custom (e.g., /api/info). Must return JSON with n_ctx at root or in default_generation_settings.")]
         [DefaultValue("")]
         public string CustomContextEndpoint { get; set; } = "";
+
+        /// <summary>
+        /// Override auto-detected context size. Set to 0 to use auto-detection.
+        /// Useful for cloud APIs (e.g., OpenRouter) that don't expose context size endpoints.
+        /// </summary>
+        [Category("Connection")]
+        [DisplayName("Manual Context Size")]
+        [Description("Override auto-detected context size. Set to 0 to use auto-detection. Useful for cloud APIs (e.g., OpenRouter) that don't expose context size endpoints.")]
+        [DefaultValue(0)]
+        public int ManualContextSize { get; set; } = 0;
 
         /// <summary>
         /// The model name to use. Leave empty to use the server's default model.
