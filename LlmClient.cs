@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v5.55
+// File: LlmClient.cs  v6.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -108,13 +108,19 @@ namespace DevMind
     {
         private HttpClient _httpClient;
         private readonly List<ChatMessage> _conversationHistory;
-        private readonly List<string> _compressionLog = new List<string>();
         private readonly List<string> _pendingDebugLog = new List<string>();
         private const string DefaultSystemPrompt = "You are a helpful coding assistant. Be concise and precise.";
         internal readonly FileContentCache _fileCache = new FileContentCache();
         private string _taskScratchpad = "";
         private const int ScratchpadMaxTokens = 200;
         private int _currentTurn;
+
+        /// <summary>
+        /// Tracks filenames (case-insensitive) that have been fully read this session.
+        /// When a file IS in this set, subsequent READs produce an outline instead of full content.
+        /// Cleared on ClearHistory().
+        /// </summary>
+        internal readonly HashSet<string> _filesReadThisSession = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private string _baseUrl;
         private string _apiKey;
         private int _contextSize = 13372; // fallback default
@@ -183,7 +189,7 @@ namespace DevMind
             Debug.WriteLine($"[DevMind TRACE] Configure() called — _apiKey is {apiKeyState}, endpoint={_baseUrl}");
             if (DevMindOptions.Instance.ShowDebugOutput)
                 _pendingDebugLog.Add($"\n[DEBUG] Configure() — API key: {apiKeyState}, endpoint: {_baseUrl}\n");
-            ApplyHttpClientSettings(_httpClient);
+            RecreateHttpClient();
             _contextDetectionTask = DetectContextSizeAsync();
         }
 
@@ -393,9 +399,8 @@ namespace DevMind
         /// <param name="onToken">Called for each streamed token fragment.</param>
         /// <param name="onComplete">Called when the full response has been received.</param>
         /// <param name="onError">Called if an error occurs during the request.</param>
-        /// <param name="deferCompression">When true, all compression phases (0a, 0b, 0c, 4, 2) and
-        /// the Level 3 budget guard are skipped. Pass true during agentic iterations to preserve the
-        /// llama-server KV cache. Call RunDeferredCompression() after the loop completes.</param>
+        /// <param name="deferCompression">When true, eviction and budget management are skipped.
+        /// Pass true during agentic iterations to preserve the KV cache prefix.</param>
         /// <param name="cancellationToken">Cancellation token to abort the request.</param>
         public async Task SendMessageAsync(
             string userMessage,
@@ -429,13 +434,12 @@ namespace DevMind
 
             UpdateSystemPrompt();
 
-            // Clear compression log and strip old context notes before any compression runs,
-            // including pre-squeeze (so pre-squeeze entries survive into InjectContextNote).
-            _compressionLog.Clear();
-            StripContextNotes();
+            // ── Append-only context management ─────────────────────────────────────
+            // What you store is what you send. What you send is what the cache sees.
+            // No post-append modifications. Budget managed by DROP (removing turns)
+            // and pre-append truncation only.
 
-            // Tiered context eviction — compress/drop stale turns before adding the new message.
-            // Runs before the existing squeeze passes so it can reduce token pressure early.
+            // Drop stale turns before adding the new message
             if (!deferCompression)
             {
                 string evictionMsg = EvictStaleContext();
@@ -443,70 +447,51 @@ namespace DevMind
                     onToken(evictionMsg);
             }
 
-            // PreSqueezeOversizedRead intentionally disabled: the current message must reach the
-            // LLM with full file content so it can generate PATCH directives. Post-turn compression
-            // (CompressLastUserReadBlocks) outlines READ blocks AFTER the LLM responds.
-            _conversationHistory.Add(new ChatMessage("user", userMessage, _currentTurn));
-
+            // Pre-append budget guard: truncate oversized READs before adding to history
             if (!deferCompression)
             {
-                // Phase 0a–0c: unconditional — always run regardless of budget state.
-                // These methods collapse stale/duplicate blocks that waste tokens with no value.
+                string budgetMsg = null;
+                userMessage = ApplyPreAppendBudgetGuard(userMessage, out budgetMsg);
+                if (budgetMsg != null)
+                    onToken(budgetMsg);
+            }
 
-                // Phase 0a: deduplicate stale READ copies — runs before all other compression
-                string dedupMsg = DeduplicateReadBlocks();
-                if (dedupMsg != null)
-                    onToken(dedupMsg);
+            // Append user message — immutable from this point forward
+            _conversationHistory.Add(new ChatMessage("user", userMessage, _currentTurn));
 
-                // Phase 0b: collapse stale PATCH snapshots for files patched multiple times
-                string chainMsg = CollapsePatchChains();
-                if (chainMsg != null)
-                    onToken(chainMsg);
-
-                // Phase 0c: eagerly compress shell output older than 1 prior turn
-                var (shellMsg0c, _) = CompressStaleShellBlocks(includeRecentTurn: false);
-                if (shellMsg0c != null)
-                    onToken(shellMsg0c);
-
-                // Assess budget after unconditional passes so squeeze/trim fire on actual pressure.
-                _budget.Assess(_conversationHistory, EstimateTokens);
-
-                // Phase 4: squeeze PATCH, SHELL, and READ blocks — fires on soft or hard pressure.
-                int patchCount = 0, shellCount = 0, readCount = 0;
-                if (_budget.IsWorkingHistoryOverSoft)
-                {
-                    patchCount = SqueezePatchResults();
-                    var (_, shellCountPhase4) = CompressStaleShellBlocks(includeRecentTurn: true);
-                    shellCount = shellCountPhase4;
-                    readCount  = SqueezeReadContent();
-                    int totalSqueezed = patchCount + shellCount + readCount;
-                    if (totalSqueezed > 0)
-                        onToken($"\n[CONTEXT] Squeezed {totalSqueezed} block(s) — {patchCount} PATCH, {shellCount} SHELL, {readCount} READ.\n");
-                }
-
-                // Phase 2: sliding window trim — fires on hard pressure or total history hard limit.
+            // ── Always-on budget guard ────────────────────────────────────────────
+            // Runs on EVERY call including agentic resubmits (deferCompression=true).
+            // Context grows fast during agentic iterations; without this guard the
+            // window fills up and crashes before TrimConversationHistory can fire.
+            {
                 _budget.Assess(_conversationHistory, EstimateTokens);
                 int totalHistoryTokens = _budget.SystemPromptUsed + _budget.WorkingHistoryUsed + _budget.ProtectedTurnsUsed
                     + EstimateTokens(_conversationHistory[_conversationHistory.Count - 1].Content);
-                bool overHardLimit = totalHistoryTokens > _budget.HistoryHardLimit;
-                if (_budget.IsWorkingHistoryOverHard || overHardLimit)
+
+                bool overHard = totalHistoryTokens > (int)(_budget.HistoryHardLimit * 0.95);
+                bool overSoft = totalHistoryTokens > (int)(_budget.HistoryHardLimit * 0.80);
+
+                if (overHard)
                 {
-                    int trimmed = TrimConversationHistory(MaxConversationTurns);
+                    // Hard budget (95%): drop 4 oldest turns aggressively without summaries
+                    int trimmed = TrimOldestTurns(4, withSummaries: false);
                     if (trimmed > 0)
                     {
-                        int kept = (_conversationHistory.Count - 2) / 2;
-                        onToken($"\n[CONTEXT] History trimmed to {kept} turns (removed {trimmed} messages).\n");
+                        int kept = Math.Max(0, (_conversationHistory.Count - 2) / 2);
+                        onToken($"\n[CONTEXT] Hard trim: dropped {trimmed} messages — {kept} turns remaining.\n");
                     }
                 }
-
-                // Phase 3 (Level 3) budget guard — truncate current-turn READ content if still over hard limit.
-                string level3Msg = ApplyBudgetGuardLevel3();
-                if (level3Msg != null)
-                    onToken(level3Msg);
+                else if (overSoft)
+                {
+                    // Soft budget (80%): drop 2 oldest turns with summaries
+                    int trimmed = TrimOldestTurns(2, withSummaries: true);
+                    if (trimmed > 0)
+                    {
+                        int kept = Math.Max(0, (_conversationHistory.Count - 2) / 2);
+                        onToken($"\n[CONTEXT] Soft trim: dropped {trimmed} messages — {kept} turns remaining.\n");
+                    }
+                }
             }
-
-            // Inject [CONTEXT NOTE] into current user message as LLM steering signal
-            InjectContextNote();
 
             // Budget display — bucket breakdown
             _budget.Assess(_conversationHistory, EstimateTokens);
@@ -537,6 +522,7 @@ namespace DevMind
 
             string modelName = DevMindOptions.Instance.ModelName;
             string requestJson = BuildRequestJson(modelName);
+
             string url = _baseUrl + "/chat/completions";
 
             var request = new HttpRequestMessage(HttpMethod.Post, url)
@@ -591,12 +577,23 @@ namespace DevMind
                         }
                     }
 
+                    // Phase 2 (after first token): race each read against a short
+                    // cancellation-aware delay so Stop responds promptly even when
+                    // the server holds the connection open between SSE lines.
+                    if (firstTokenReceived)
+                    {
+                        while (!readTask.IsCompleted)
+                        {
+                            var pollTask = Task.Delay(500, cancellationToken);
+                            await Task.WhenAny(readTask, pollTask).ConfigureAwait(false);
+                            cancellationToken.ThrowIfCancellationRequested();
+                        }
+                    }
+
                     string line = await readTask.ConfigureAwait(false);
                     if (line == null)
                         break;
 
-                    // Phase 2 (after first token): only user-cancellation is checked;
-                    // HttpClient.Timeout enforces the total request ceiling.
                     cancellationToken.ThrowIfCancellationRequested();
 
                     if (!line.StartsWith("data: ", StringComparison.Ordinal))
@@ -668,6 +665,7 @@ namespace DevMind
         {
             _conversationHistory.Clear();
             _conversationHistory.Add(new ChatMessage("system", GetSystemPrompt()));
+            _filesReadThisSession.Clear();
             if (!preserveScratchpad)
             {
                 _taskScratchpad = "";
@@ -723,6 +721,10 @@ namespace DevMind
             string prompt = GetSystemPrompt();
             if (_conversationHistory.Count > 0 && _conversationHistory[0].Role == "system")
             {
+                // Skip replacement if the prompt text is identical — preserves the KV cache prefix.
+                if (string.Equals(_conversationHistory[0].Content, prompt, StringComparison.Ordinal))
+                    return;
+
                 _conversationHistory[0] = new ChatMessage("system", prompt);
             }
             else
@@ -736,9 +738,9 @@ namespace DevMind
         // ── Tiered Context Eviction ─────────────────────────────────────────────
 
         /// <summary>
-        /// Compresses or drops stale messages based on their age relative to the current turn.
-        /// Three tiers: HOT (full fidelity), WARM (one-line summaries), COLD (entire turn collapsed).
-        /// Called at the top of SendMessageAsync before building the request payload.
+        /// Drops stale messages based on their age relative to the current turn.
+        /// Append-only: messages are only REMOVED, never rewritten. No warm/cold tiers.
+        /// Drop summaries are inserted so the model knows what was removed.
         /// Returns a log string to emit via onToken, or null if nothing changed.
         /// </summary>
         public string EvictStaleContext()
@@ -751,11 +753,6 @@ namespace DevMind
             if (showDebug)
             {
                 diagLog.AppendLine($"\n[CONTEXT] Eviction check: turn={_currentTurn}, mode={mode}, message count={_conversationHistory.Count}");
-
-                var turnTags = new List<int>();
-                for (int d = 0; d < _conversationHistory.Count; d++)
-                    turnTags.Add(_conversationHistory[d].Turn);
-                diagLog.AppendLine($"[CONTEXT] Message turns: [{string.Join(",", turnTags)}]");
             }
 
             if (mode == ContextEvictionMode.Off)
@@ -764,186 +761,60 @@ namespace DevMind
                 return showDebug ? diagLog.ToString() : null;
             }
 
-            // Tier boundaries: age = _currentTurn - message.Turn
-            //   HOT:  age 0..hotMax    — full fidelity
-            //   WARM: age hotMax+1..warmMax — summarize
-            //   COLD: age warmMax+1..coldMax — collapse entire turn
-            //   DROP: age > coldMax   — remove entirely
-            int hotMax, warmMax, coldMax;
-            if (mode == ContextEvictionMode.Aggressive)
-            {
-                hotMax  = 0;  // current turn only
-                warmMax = 2;  // next 2
-                coldMax = 4;  // next 2
-            }
-            else // Balanced
-            {
-                hotMax  = 1;  // current turn + 1 previous
-                warmMax = 4;  // next 3
-                coldMax = 7;  // next 3
-            }
+            // Drop age: messages older than this are removed entirely.
+            // No warm/cold tiers — append-only means we only DROP, never rewrite.
+            int dropAge = mode == ContextEvictionMode.Aggressive ? 5 : 8;
 
-            int warmed = 0, colded = 0, dropped = 0;
-            int lastIndex = _conversationHistory.Count - 1;
+            int dropped = 0;
+            var indicesToRemove = new List<int>();
+            var dropSummaryParts = new List<string>();
 
-            // Build per-turn action map: for each turn number, determine the tier.
-            // Then process messages from oldest to newest (skip system [0] and current user [lastIndex]).
-            // We process in two passes:
-            //   Pass 1: Identify COLD turns and collapse them
-            //   Pass 2: Summarize WARM messages
-
-            // Collect turn groups for cold collapse (need all messages in a turn to build summary)
-            var turnMessages = new Dictionary<int, List<int>>(); // turn → list of message indices
-            for (int i = 1; i <= lastIndex; i++)
+            for (int i = 1; i < _conversationHistory.Count; i++)
             {
                 var msg = _conversationHistory[i];
-                int turn = msg.Turn;
-                if (!turnMessages.ContainsKey(turn))
-                    turnMessages[turn] = new List<int>();
-                turnMessages[turn].Add(i);
+                int age = _currentTurn - msg.Turn;
+
+                if (age <= dropAge) continue;
+                if (IsPinnedMessage(msg)) continue;
+
+                // Build snippet before dropping
+                string snippet = BuildDropSnippet(msg);
+                if (snippet != null) dropSummaryParts.Add(snippet);
+
+                indicesToRemove.Add(i);
+                dropped++;
             }
 
-            // Process turns from oldest to newest
-            var turnsToProcess = new List<int>(turnMessages.Keys);
-            turnsToProcess.Sort();
-
-            // Collect indices to remove (DROP + COLD extras) — process in reverse later
-            var indicesToRemove = new List<int>();
-            var dropTierIndices = new List<int>();  // DROP-only, for debug output
-
-            foreach (int turn in turnsToProcess)
-            {
-                int age = _currentTurn - turn;
-                var indices = turnMessages[turn];
-
-                if (age <= hotMax)
-                    continue; // HOT — leave unchanged
-
-                // Check if this turn's first user message is the user's original prompt for
-                // the current task turn — if so, keep it at warm minimum (never drop/cold).
-                bool hasPinnedContent = false;
-                foreach (int idx in indices)
-                {
-                    var msg = _conversationHistory[idx];
-                    if (IsPinnedMessage(msg))
-                    {
-                        hasPinnedContent = true;
-                        break;
-                    }
-                }
-
-                if (age > coldMax && !hasPinnedContent)
-                {
-                    // DROP — mark all messages in this turn for removal
-                    foreach (int idx in indices)
-                    {
-                        if (idx == 0) continue; // never drop system
-                        indicesToRemove.Add(idx);
-                        dropTierIndices.Add(idx);
-                        dropped++;
-                    }
-                }
-                else if (age > warmMax && !hasPinnedContent)
-                {
-                    // COLD — collapse entire turn to one line
-                    string coldSummary = BuildColdTurnSummary(turn, indices);
-                    if (coldSummary != null)
-                    {
-                        // Replace the first message in this turn with the cold summary,
-                        // mark the rest for removal
-                        var firstMsg = _conversationHistory[indices[0]];
-                        if (!firstMsg.Content.StartsWith("[COLD]", StringComparison.Ordinal))
-                        {
-                            _conversationHistory[indices[0]] = new ChatMessage(
-                                firstMsg.Role, coldSummary, firstMsg.Turn);
-                            colded++;
-
-                            for (int k = 1; k < indices.Count; k++)
-                            {
-                                indicesToRemove.Add(indices[k]);
-                                colded++;
-                            }
-                        }
-                    }
-                }
-                else if (age > hotMax)
-                {
-                    // WARM — summarize individual messages
-                    foreach (int idx in indices)
-                    {
-                        var msg = _conversationHistory[idx];
-                        if (IsPinnedMessage(msg)) continue;
-                        if (msg.Content.StartsWith("[WARM]", StringComparison.Ordinal)) continue;
-                        if (msg.Content.StartsWith("[COLD]", StringComparison.Ordinal)) continue;
-
-                        string warmSummary = BuildWarmSummary(msg);
-                        if (warmSummary != null)
-                        {
-                            _conversationHistory[idx] = new ChatMessage(msg.Role, warmSummary, msg.Turn);
-                            warmed++;
-                        }
-                    }
-                }
-            }
-
-            // Remove DROP messages in reverse index order to preserve indices
+            // Remove in reverse index order to preserve indices
             if (indicesToRemove.Count > 0)
             {
-                indicesToRemove.Sort();
                 for (int i = indicesToRemove.Count - 1; i >= 0; i--)
                 {
                     int idx = indicesToRemove[i];
                     if (idx > 0 && idx < _conversationHistory.Count)
                         _conversationHistory.RemoveAt(idx);
                 }
+
+                // Insert drop summary so the model knows what happened
+                if (dropSummaryParts.Count > 0)
+                {
+                    string summary = $"[DROPPED] {dropped} message(s) evicted: {string.Join(", ", dropSummaryParts)}";
+                    _conversationHistory.Insert(1, new ChatMessage("system", summary));
+                }
             }
 
-            int total = warmed + colded + dropped;
-            if (total == 0)
+            if (dropped == 0)
             {
                 if (showDebug)
                     diagLog.AppendLine("[CONTEXT] Eviction result: no messages affected");
                 return diagLog.Length > 0 ? diagLog.ToString() : null;
             }
 
-            diagLog.AppendLine($"[CONTEXT] Eviction: {warmed} messages warm-compressed, {colded} messages cold-collapsed, {dropped} messages dropped");
+            diagLog.AppendLine($"[CONTEXT] Eviction: {dropped} message(s) dropped");
 
-            // Detailed debug output — per-tier index lists and pinned message inventory
             if (showDebug)
             {
-                var pinnedList = new List<string>();
-                var hotList = new List<int>();
-                var warmList = new List<int>();
-                var coldList = new List<int>();
-                var droppedList = new List<int>();
-
-                for (int i = 0; i < _conversationHistory.Count; i++)
-                {
-                    var msg = _conversationHistory[i];
-                    if (IsPinnedMessage(msg))
-                    {
-                        string reason = msg.Role == "system" ? "system prompt"
-                            : msg.Content.IndexOf("[TASK STATE]", StringComparison.Ordinal) >= 0 ? "SCRATCHPAD"
-                            : msg.Content.IndexOf("[DevMind.md]", StringComparison.Ordinal) >= 0 ? "DevMind.md"
-                            : "pinned";
-                        pinnedList.Add($"idx {i}: {reason}");
-                    }
-
-                    int age = _currentTurn - msg.Turn;
-                    if (msg.Content.StartsWith("[COLD]", StringComparison.Ordinal))
-                        coldList.Add(i);
-                    else if (msg.Content.StartsWith("[WARM]", StringComparison.Ordinal))
-                        warmList.Add(i);
-                    else if (age <= hotMax)
-                        hotList.Add(i);
-                }
-
-                // indicesToRemove was already processed; capture for debug
-                diagLog.AppendLine($"[DEBUG] Pinned messages: [{string.Join(", ", pinnedList)}]");
-                diagLog.AppendLine($"[DEBUG] Hot: [{string.Join(", ", hotList)}]");
-                diagLog.AppendLine($"[DEBUG] Warm: [{string.Join(", ", warmList)}]");
-                diagLog.AppendLine($"[DEBUG] Cold: [{string.Join(", ", coldList)}]");
-                diagLog.AppendLine($"[DEBUG] Dropped: [{string.Join(", ", dropTierIndices)}]");
+                diagLog.AppendLine($"[DEBUG] Dropped indices: [{string.Join(", ", indicesToRemove)}]");
             }
 
             return diagLog.ToString();
@@ -951,820 +822,25 @@ namespace DevMind
 
         /// <summary>
         /// Returns true if the message should never be evicted regardless of age.
-        /// Pinned: system prompt, [TASK STATE] marker, DevMind.md content.
+        /// Pinned: system prompt, DevMind.md content.
         /// </summary>
         private bool IsPinnedMessage(ChatMessage msg)
         {
             if (msg.Role == "system") return true;
 
             string c = msg.Content;
-            // Injected task-state marker (added at API-request time, not stored in history)
-            if (c.IndexOf("[TASK STATE]", StringComparison.Ordinal) >= 0) return true;
-
-            // DevMind.md injected content (loaded at conversation start)
             if (c.IndexOf("[DevMind.md]", StringComparison.Ordinal) >= 0) return true;
 
             return false;
         }
 
         /// <summary>
-        /// Builds a one-line WARM summary for a single message based on its content type.
-        /// Returns null if the message should not be summarized (already compressed, etc.).
-        /// </summary>
-        private static string BuildWarmSummary(ChatMessage msg)
-        {
-            string c = msg.Content;
-
-            // Already compressed
-            if (c.StartsWith("[SQUEEZED]", StringComparison.Ordinal))
-                return null;
-
-            if (msg.Role == "user")
-            {
-                // READ blocks
-                if (c.Contains("[READ:"))
-                {
-                    var files = new List<string>();
-                    int searchFrom = 0;
-                    int totalLines = 0;
-                    while (true)
-                    {
-                        int tagStart = c.IndexOf("[READ:", searchFrom, StringComparison.Ordinal);
-                        if (tagStart < 0) break;
-                        int tagEnd = c.IndexOf(']', tagStart);
-                        if (tagEnd < 0) break;
-                        string filename = c.Substring(tagStart + 6, tagEnd - tagStart - 6);
-                        if (!string.Equals(filename, "SUPERSEDED", StringComparison.OrdinalIgnoreCase) &&
-                            !string.Equals(filename, "OUTLINE", StringComparison.OrdinalIgnoreCase))
-                        {
-                            // Count lines in the block content
-                            int cs = tagEnd + 1;
-                            if (cs < c.Length && c[cs] == '\n') cs++;
-                            int nextTag = c.IndexOf("\n[", cs, StringComparison.Ordinal);
-                            int blockEnd = nextTag >= 0 ? nextTag : c.Length;
-                            int lines = c.Substring(cs, blockEnd - cs).Split('\n').Length;
-                            totalLines += lines;
-
-                            // Check for line-range suffix
-                            var rangeMatch = Regex.Match(filename, @":(\d+)-(\d+)$");
-                            if (rangeMatch.Success)
-                            {
-                                string baseFile = filename.Substring(0, rangeMatch.Index);
-                                files.Add($"{baseFile}:{rangeMatch.Groups[1].Value}-{rangeMatch.Groups[2].Value}");
-                            }
-                            else
-                            {
-                                files.Add(filename);
-                            }
-                        }
-                        searchFrom = tagEnd + 1;
-                    }
-                    if (files.Count > 0)
-                    {
-                        bool hasRange = files.Exists(f => f.Contains(":"));
-                        if (hasRange)
-                            return $"[WARM] READ {string.Join(", ", files)} — {totalLines} lines loaded";
-                        // Build outline list from existing content if available
-                        return $"[WARM] READ {string.Join(", ", files)} — {totalLines} lines";
-                    }
-                }
-
-                // PATCH results
-                if (c.Contains("[PATCH-RESULT:"))
-                {
-                    int tagStart = c.IndexOf("[PATCH-RESULT:", StringComparison.Ordinal);
-                    int tagEnd = c.IndexOf(']', tagStart);
-                    string filename = tagStart >= 0 && tagEnd > tagStart
-                        ? c.Substring(tagStart + 14, tagEnd - tagStart - 14) : "unknown";
-                    bool applied = c.IndexOf("Applied", StringComparison.OrdinalIgnoreCase) >= 0;
-                    bool skipped = c.IndexOf("SKIPPED", StringComparison.OrdinalIgnoreCase) >= 0;
-                    if (skipped)
-                        return $"[WARM] PATCH {filename} — skipped by user";
-                    return $"[WARM] PATCH {filename} — applied";
-                }
-
-                // SHELL results
-                if (c.Contains("[SHELL-RESULT:"))
-                {
-                    int tagStart = c.IndexOf("[SHELL-RESULT:", StringComparison.Ordinal);
-                    int tagEnd = c.IndexOf(']', tagStart);
-                    string command = tagStart >= 0 && tagEnd > tagStart
-                        ? c.Substring(tagStart + 14, tagEnd - tagStart - 14) : "unknown";
-                    if (command.Length > 40) command = command.Substring(0, 40) + "...";
-                    bool success = c.IndexOf("Build succeeded", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                                   c.IndexOf("0 Error(s)", StringComparison.OrdinalIgnoreCase) >= 0;
-                    bool failed = c.IndexOf("FAILED", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                                  c.IndexOf("error", StringComparison.OrdinalIgnoreCase) >= 0;
-                    int exitCode = success ? 0 : (failed ? 1 : 0);
-                    int errorCount = 0;
-                    if (failed)
-                    {
-                        foreach (var line in c.Split('\n'))
-                            if (line.IndexOf("error", StringComparison.OrdinalIgnoreCase) >= 0)
-                                errorCount++;
-                    }
-                    string outcome = success ? "succeeded" : (failed ? $"failed, {errorCount} errors" : "succeeded");
-                    return $"[WARM] SHELL: {command} — exit code {exitCode} ({outcome})";
-                }
-
-                // GREP/FIND results
-                if (c.Contains("[GREP:") || c.Contains("[FIND:"))
-                {
-                    bool isGrep = c.Contains("[GREP:");
-                    string tag = isGrep ? "[GREP:" : "[FIND:";
-                    int tagStart = c.IndexOf(tag, StringComparison.Ordinal);
-                    int tagEnd = c.IndexOf(']', tagStart);
-                    string pattern = tagStart >= 0 && tagEnd > tagStart
-                        ? c.Substring(tagStart + tag.Length, tagEnd - tagStart - tag.Length) : "?";
-                    int matchCount = c.Split('\n').Length - 1; // rough estimate
-                    return $"[WARM] {(isGrep ? "GREP" : "FIND")} \"{pattern}\" — {matchCount} matches";
-                }
-
-                // FILE created
-                if (c.Contains("[FILE:"))
-                {
-                    int tagStart = c.IndexOf("[FILE:", StringComparison.Ordinal);
-                    int tagEnd = c.IndexOf(']', tagStart);
-                    string filename = tagStart >= 0 && tagEnd > tagStart
-                        ? c.Substring(tagStart + 6, tagEnd - tagStart - 6) : "unknown";
-                    int lineCount = c.Split('\n').Length;
-                    return $"[WARM] FILE {filename} — created ({lineCount} lines)";
-                }
-
-                // RENAME
-                if (c.Contains("[RENAME]"))
-                {
-                    int idx = c.IndexOf("[RENAME]", StringComparison.Ordinal);
-                    string rest = c.Substring(idx + 8).Trim();
-                    if (rest.Length > 80) rest = rest.Substring(0, 80);
-                    return $"[WARM] RENAME {rest}";
-                }
-
-                // DELETE
-                if (c.Contains("[DELETE]"))
-                {
-                    int idx = c.IndexOf("[DELETE]", StringComparison.Ordinal);
-                    string rest = c.Substring(idx + 8).Trim();
-                    if (rest.Length > 60) rest = rest.Substring(0, 60);
-                    return $"[WARM] DELETE {rest}";
-                }
-
-                // DIFF results
-                if (c.Contains("[DIFF:"))
-                {
-                    int tagStart = c.IndexOf("[DIFF:", StringComparison.Ordinal);
-                    int tagEnd = c.IndexOf(']', tagStart);
-                    string filename = tagStart >= 0 && tagEnd > tagStart
-                        ? c.Substring(tagStart + 6, tagEnd - tagStart - 6) : "unknown";
-                    int changeCount = 0;
-                    foreach (var line in c.Split('\n'))
-                        if (line.StartsWith("+") || line.StartsWith("-")) changeCount++;
-                    return $"[WARM] DIFF {filename} — {changeCount} changes shown";
-                }
-
-                // TEST results
-                if (c.Contains("TEST RESULTS:"))
-                {
-                    int idx = c.IndexOf("TEST RESULTS:", StringComparison.Ordinal);
-                    int eol = c.IndexOf('\n', idx);
-                    string summary = eol > idx ? c.Substring(idx + 14, eol - idx - 14).Trim()
-                                               : c.Substring(idx + 14).Trim();
-                    return $"[WARM] TEST — {summary}";
-                }
-
-                // Agentic resubmit prompts — drop entirely
-                if (c.StartsWith("The build", StringComparison.OrdinalIgnoreCase) ||
-                    c.StartsWith("Build output", StringComparison.OrdinalIgnoreCase) ||
-                    c.Contains("[PATCH-RESULT:") && c.Contains("Build"))
-                    return "[WARM] (agentic resubmit)";
-
-                // Generic user message — keep first 80 chars
-                string trimmed = c.Trim();
-                if (trimmed.Length > 80) trimmed = trimmed.Substring(0, 80) + "...";
-                return $"[WARM] User: {trimmed}";
-            }
-
-            if (msg.Role == "assistant")
-            {
-                string trimmed = c.Trim();
-                if (trimmed.Length > 80) trimmed = trimmed.Substring(0, 80) + "...";
-                return $"[WARM] Assistant: {trimmed}";
-            }
-
-            return null;
-        }
-
-        /// <summary>
-        /// Collapses all messages in a turn into a single COLD summary line.
-        /// Format: [COLD] Turn N: comma-separated list of actions
-        /// </summary>
-        private string BuildColdTurnSummary(int turn, List<int> indices)
-        {
-            var actions = new List<string>();
-
-            foreach (int idx in indices)
-            {
-                if (idx < 0 || idx >= _conversationHistory.Count) continue;
-                var msg = _conversationHistory[idx];
-                string c = msg.Content;
-
-                // Already cold
-                if (c.StartsWith("[COLD]", StringComparison.Ordinal))
-                    return null; // already collapsed
-
-                // Count READs
-                int readCount = 0;
-                int searchFrom = 0;
-                string lastReadFile = null;
-                while (true)
-                {
-                    int tagStart = c.IndexOf("[READ:", searchFrom, StringComparison.Ordinal);
-                    if (tagStart < 0) break;
-                    int tagEnd = c.IndexOf(']', tagStart);
-                    if (tagEnd < 0) break;
-                    string fn = c.Substring(tagStart + 6, tagEnd - tagStart - 6);
-                    if (!string.Equals(fn, "SUPERSEDED", StringComparison.OrdinalIgnoreCase) &&
-                        !string.Equals(fn, "OUTLINE", StringComparison.OrdinalIgnoreCase))
-                    {
-                        readCount++;
-                        lastReadFile = Regex.Replace(fn, @":\d+(?:-\d+)?$", "");
-                    }
-                    searchFrom = tagEnd + 1;
-                }
-                if (readCount > 0)
-                    actions.Add(readCount == 1 ? $"READ {lastReadFile}" : $"READ {readCount} files");
-
-                // PATCH
-                int patchCount = 0;
-                searchFrom = 0;
-                while ((searchFrom = c.IndexOf("[PATCH", searchFrom, StringComparison.Ordinal)) >= 0)
-                {
-                    patchCount++;
-                    searchFrom += 6;
-                }
-                if (patchCount > 0)
-                    actions.Add($"PATCH {patchCount} block{(patchCount == 1 ? "" : "s")}");
-
-                // SHELL
-                if (c.Contains("[SHELL"))
-                {
-                    bool buildOk = c.IndexOf("Build succeeded", StringComparison.OrdinalIgnoreCase) >= 0;
-                    bool buildFail = c.IndexOf("Build FAILED", StringComparison.OrdinalIgnoreCase) >= 0;
-                    actions.Add(buildOk ? "build succeeded" : (buildFail ? "build failed" : "shell command"));
-                }
-
-                // FILE
-                if (c.Contains("[FILE:") || c.Contains("FILE:"))
-                {
-                    if (msg.Role == "user" || c.Contains("Created:"))
-                        actions.Add("file created");
-                }
-
-                // GREP/FIND
-                if (c.Contains("[GREP:")) actions.Add("GREP search");
-                if (c.Contains("[FIND:")) actions.Add("FIND search");
-
-                // DELETE/RENAME
-                if (c.Contains("[DELETE]")) actions.Add("file deleted");
-                if (c.Contains("[RENAME]")) actions.Add("file renamed");
-
-                // TEST
-                if (c.Contains("TEST RESULTS:")) actions.Add("tests run");
-
-                // WARM/SQUEEZED — already summarized, extract short form
-                if (c.StartsWith("[WARM]", StringComparison.Ordinal))
-                {
-                    string warmContent = c.Substring(6).Trim();
-                    if (warmContent.Length > 40) warmContent = warmContent.Substring(0, 40);
-                    actions.Add(warmContent);
-                }
-
-                // Assistant text (if nothing else matched)
-                if (msg.Role == "assistant" && actions.Count == 0)
-                {
-                    string snippet = c.Trim();
-                    if (snippet.Length > 40) snippet = snippet.Substring(0, 40) + "...";
-                    actions.Add($"response: {snippet}");
-                }
-            }
-
-            if (actions.Count == 0)
-                actions.Add("(empty turn)");
-
-            // Deduplicate
-            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var unique = new List<string>();
-            foreach (var a in actions)
-                if (seen.Add(a)) unique.Add(a);
-
-            return $"[COLD] Turn {turn}: {string.Join(", ", unique)}";
-        }
-
-        /// <summary>
-        /// Runs all five compression phases (0a, 0b, 0c, 4, 2) against the current conversation
-        /// history. Call this after an agentic loop completes to keep history lean for the next
-        /// user-initiated turn, without invalidating the KV cache during agentic iterations.
-        /// Returns a log string summarising what was compressed, or null if nothing changed.
-        /// </summary>
-        public string RunDeferredCompression()
-        {
-            var log = new StringBuilder();
-
-            string dedupMsg = DeduplicateReadBlocks();
-            if (dedupMsg != null) log.Append(dedupMsg);
-
-            string chainMsg = CollapsePatchChains();
-            if (chainMsg != null) log.Append(chainMsg);
-
-            var (shellMsg0c, _) = CompressStaleShellBlocks(includeRecentTurn: false);
-            if (shellMsg0c != null) log.Append(shellMsg0c);
-
-            _budget.Assess(_conversationHistory, EstimateTokens);
-
-            if (_budget.IsWorkingHistoryOverSoft)
-            {
-                int patchCount = SqueezePatchResults();
-                var (_, shellCount) = CompressStaleShellBlocks(includeRecentTurn: true);
-                int readCount = SqueezeReadContent();
-                int totalSqueezed = patchCount + shellCount + readCount;
-                if (totalSqueezed > 0)
-                    log.Append($"\n[CONTEXT] Deferred squeeze: {totalSqueezed} block(s) — {patchCount} PATCH, {shellCount} SHELL, {readCount} READ.\n");
-            }
-
-            // Phase 2 (TrimConversationHistory) is intentionally skipped here because it assumes
-            // [Count-1] is a pending (unanswered) user message. After agentic loop completion,
-            // the last entry is an assistant response, so the index math would be incorrect.
-            // The trim will fire on the next SendMessageAsync call when the new user message is present.
-
-            return log.Length > 0 ? log.ToString() : null;
-        }
-
-        /// <summary>
-        /// Deduplicates [READ:filename] blocks across prior conversation history.
-        /// For each filename that appears in more than one prior user message, all occurrences
-        /// except the newest are replaced with a one-line superseded marker. This runs before
-        /// all other squeeze phases so that SqueezeReadContent only processes genuinely unique reads.
-        /// Returns a log string to emit via onToken, or null if nothing was deduplicated.
-        /// </summary>
-        private string DeduplicateReadBlocks()
-        {
-            int lastIndex = _conversationHistory.Count - 1;
-
-            // Collect all unsqueezed [READ:filename] occurrences in prior messages [1..lastIndex-1].
-            // Key = filename (case-insensitive), Value = list of (messageIndex, charPositionOfTag).
-            //
-            // Path-consistency assumption: tags are ALWAYS written as [READ:{fileNameOnly}] using
-            // Path.GetFileName() in ApplyReadCommandAsync() — never a relative or absolute path.
-            // Therefore grouping on the raw extracted filename is always correct; no normalization needed.
-            var occurrences = new Dictionary<string, List<(int msgIdx, int charPos)>>(StringComparer.OrdinalIgnoreCase);
-            bool showDebug = DevMindOptions.Instance.ShowDebugOutput;
-            var debugLines = new List<string>();
-
-            for (int i = 1; i < lastIndex; i++)
-            {
-                var msg = _conversationHistory[i];
-                if (msg.Role != "user") continue;
-
-                string content = msg.Content;
-                int searchFrom = 0;
-
-                while (true)
-                {
-                    if (searchFrom < 0 || searchFrom >= content.Length)
-                    {
-                        if (showDebug) debugLines.Add($"[CONTEXT] DeduplicateReadBlocks: searchFrom ({searchFrom}) out of range in message {i}, skipping scan");
-                        break;
-                    }
-
-                    int tagStart = content.IndexOf("[READ:", searchFrom, StringComparison.Ordinal);
-                    if (tagStart < 0) break;
-
-                    // Skip blocks already compressed by a prior squeeze pass:
-                    // [SQUEEZED][READ:...] — [SQUEEZED] is exactly 10 chars.
-                    bool isSqueezed = tagStart >= 10 &&
-                        string.Equals(content.Substring(tagStart - 10, 10), "[SQUEEZED]", StringComparison.Ordinal);
-
-                    int tagEnd = content.IndexOf(']', tagStart);
-                    if (tagEnd < 0) break;
-
-                    string filename = content.Substring(tagStart + 6, tagEnd - tagStart - 6);
-                    // Strip line-range suffix so [READ:file.cs:400-450] groups with [READ:file.cs]
-                    filename = Regex.Replace(filename, @":\d+(?:-\d+)?$", "");
-
-                    // BUG 2 guard: skip malformed tags where the filename is null or whitespace.
-                    if (string.IsNullOrWhiteSpace(filename))
-                    {
-                        if (showDebug) debugLines.Add($"[CONTEXT:DEBUG] Skipped empty filename in READ tag at message index {i}");
-                        searchFrom = tagEnd + 1;
-                        continue;
-                    }
-
-                    // Skip already-superseded inline markers from previous dedup passes.
-                    if (!isSqueezed && !string.Equals(filename, "SUPERSEDED", StringComparison.OrdinalIgnoreCase))
-                    {
-                        if (!occurrences.ContainsKey(filename))
-                            occurrences[filename] = new List<(int, int)>();
-                        occurrences[filename].Add((i, tagStart));
-                    }
-
-                    searchFrom = tagEnd + 1;
-                }
-            }
-
-            // For each filename with more than one occurrence, supersede all but the newest.
-            var logLines = new List<string>();
-
-            foreach (var kvp in occurrences)
-            {
-                string filename = kvp.Key;
-                var locs = kvp.Value; // already in discovery order (ascending msgIdx, charPos)
-
-                if (locs.Count <= 1) continue;
-
-                int totalSaved = 0;
-
-                // All entries except the last are stale.
-                for (int k = 0; k < locs.Count - 1; k++)
-                {
-                    int msgIdx = locs[k].msgIdx;
-                    int charPos = locs[k].charPos;
-
-                    // Read the current (possibly already partially-modified) message content.
-                    var existingMsg = _conversationHistory[msgIdx];
-                    string content = existingMsg.Content;
-                    string role    = existingMsg.Role;
-
-                    // Bounds check: charPos is -1 when the entry was inside a replaced block
-                    // (invalidated during delta adjustment), or may be out of range after
-                    // warm compression modified the message. Both are benign — skip silently.
-                    if (charPos < 0 || charPos >= content.Length)
-                        continue;
-
-                    int tagEnd = content.IndexOf(']', charPos);
-                    if (tagEnd < 0) continue;
-
-                    // Block content starts right after the closing ']', optionally after a newline.
-                    int contentStart = tagEnd + 1;
-                    if (contentStart < content.Length && content[contentStart] == '\n')
-                        contentStart++;
-
-                    // Block ends at the next '\n[' sequence (start of next tag) or end of string.
-                    int nextTag = contentStart < content.Length
-                        ? content.IndexOf("\n[", contentStart, StringComparison.Ordinal)
-                        : -1;
-                    int blockEnd = nextTag >= 0 ? nextTag : content.Length;
-
-                    string oldBlock    = content.Substring(charPos, blockEnd - charPos);
-                    int    savedTokens = EstimateTokens(oldBlock);
-
-                    string replacement = $"[SQUEEZED][READ:SUPERSEDED] {filename} — see later turn for current content";
-                    string newContent  = content.Substring(0, charPos) + replacement + content.Substring(blockEnd);
-
-                    _conversationHistory[msgIdx] = new ChatMessage(role, newContent, existingMsg.Turn);
-
-                    // Adjust charPos offsets for any occurrences that live in the same message
-                    // and come after the replaced block — the replacement may change string length.
-                    // This must cover:
-                    //   (a) other stale/kept entries for the SAME filename in this message, and
-                    //   (b) entries for OTHER filenames in this message whose blocks follow the
-                    //       replaced block — otherwise their stored charPos would be stale when
-                    //       their own deduplication loop runs later.
-                    int delta = replacement.Length - oldBlock.Length;
-
-                    // (a) Same-filename adjustments — entries inside the replaced range
-                    //     [charPos, blockEnd) are invalidated (set to -1) because their
-                    //     [READ:] tag was embedded content that no longer exists.
-                    //     Entries after blockEnd are shifted by delta.
-                    for (int j = k + 1; j < locs.Count; j++)
-                    {
-                        if (locs[j].msgIdx == msgIdx && locs[j].charPos > charPos)
-                        {
-                            if (locs[j].charPos < blockEnd)
-                                locs[j] = (locs[j].msgIdx, -1);
-                            else
-                                locs[j] = (locs[j].msgIdx, locs[j].charPos + delta);
-                        }
-                    }
-
-                    // (b) Cross-filename adjustments — same logic: invalidate entries
-                    //     inside the replaced range, shift entries after it.
-                    if (delta != 0)
-                    {
-                        foreach (var otherKvp in occurrences)
-                        {
-                            if (string.Equals(otherKvp.Key, filename, StringComparison.OrdinalIgnoreCase))
-                                continue;
-                            var otherLocs = otherKvp.Value;
-                            for (int j = 0; j < otherLocs.Count; j++)
-                            {
-                                if (otherLocs[j].msgIdx == msgIdx && otherLocs[j].charPos > charPos)
-                                {
-                                    if (otherLocs[j].charPos < blockEnd)
-                                        otherLocs[j] = (otherLocs[j].msgIdx, -1);
-                                    else
-                                        otherLocs[j] = (otherLocs[j].msgIdx, otherLocs[j].charPos + delta);
-                                }
-                            }
-                        }
-                    }
-
-                    totalSaved += savedTokens - EstimateTokens(replacement);
-                }
-
-                if (totalSaved > 0)
-                {
-                    logLines.Add($"[CONTEXT] Deduplicated READ: {filename} (saved ~{totalSaved} tokens)");
-                    _compressionLog.Add(filename);
-                }
-            }
-
-            var allLines = new List<string>();
-            allLines.AddRange(debugLines);
-            allLines.AddRange(logLines);
-            return allLines.Count > 0 ? string.Join("\n", allLines) + "\n" : null;
-        }
-
-        /// <summary>
-        /// Collapses repeated PATCH-RESULT blocks for the same file across conversation history.
-        /// When the agentic loop patches a file multiple times, every intermediate post-patch
-        /// snapshot is stale — only the most recent one matters. All older occurrences are replaced
-        /// with a compact chain marker so SqueezePatchResults() only ever sees the current snapshot.
-        /// Returns a log string to emit via onToken, or null if nothing was collapsed.
-        /// </summary>
-        private string CollapsePatchChains()
-        {
-            int lastIndex = _conversationHistory.Count - 1;
-
-            // Collect all [PATCH-RESULT:filename] occurrences in prior messages [1..lastIndex-1].
-            // Key = filename (case-insensitive), Value = list of (messageIndex, charPositionOfTag).
-            // The chain marker [SQUEEZED][PATCH:CHAIN] does NOT contain "[PATCH-RESULT:", so
-            // already-collapsed blocks are invisible to this scan — idempotency is free.
-            var occurrences = new Dictionary<string, List<(int msgIdx, int charPos)>>(StringComparer.OrdinalIgnoreCase);
-
-            for (int i = 1; i < lastIndex; i++)
-            {
-                var msg = _conversationHistory[i];
-                if (msg.Role != "user") continue;
-                if (!msg.Content.Contains("[PATCH-RESULT:")) continue;
-
-                string content = msg.Content;
-                int searchFrom = 0;
-
-                while (true)
-                {
-                    int tagStart = content.IndexOf("[PATCH-RESULT:", searchFrom, StringComparison.Ordinal);
-                    if (tagStart < 0) break;
-
-                    int tagEnd = content.IndexOf(']', tagStart);
-                    if (tagEnd < 0) break;
-
-                    string filename = content.Substring(tagStart + 14, tagEnd - tagStart - 14);
-
-                    if (!occurrences.ContainsKey(filename))
-                        occurrences[filename] = new List<(int, int)>();
-                    occurrences[filename].Add((i, tagStart));
-
-                    searchFrom = tagEnd + 1;
-                }
-            }
-
-            var logLines = new List<string>();
-
-            foreach (var kvp in occurrences)
-            {
-                string filename = kvp.Key;
-                var locs = kvp.Value; // discovery order: ascending msgIdx, charPos
-
-                if (locs.Count <= 1) continue;
-
-                int totalSaved = 0;
-                int collapsed  = 0;
-
-                // All entries except the last carry stale post-patch snapshots.
-                for (int k = 0; k < locs.Count - 1; k++)
-                {
-                    int msgIdx  = locs[k].msgIdx;
-                    int charPos = locs[k].charPos;
-
-                    var existingPatchMsg = _conversationHistory[msgIdx];
-                    string content = existingPatchMsg.Content;
-                    string role    = existingPatchMsg.Role;
-
-                    int tagEnd = content.IndexOf(']', charPos);
-                    if (tagEnd < 0) continue;
-
-                    // Block content starts right after the closing ']', optionally after a newline.
-                    int contentStart = tagEnd + 1;
-                    if (contentStart < content.Length && content[contentStart] == '\n')
-                        contentStart++;
-
-                    // Block ends at the next '\n[' sequence (start of next tag) or end of string.
-                    int nextTag  = content.IndexOf("\n[", contentStart, StringComparison.Ordinal);
-                    int blockEnd = nextTag >= 0 ? nextTag : content.Length;
-
-                    string oldBlock    = content.Substring(charPos, blockEnd - charPos);
-                    int    savedTokens = EstimateTokens(oldBlock);
-
-                    string replacement = $"[SQUEEZED][PATCH:CHAIN] {filename} — patch superseded, see later turn for current state";
-                    string newContent  = content.Substring(0, charPos) + replacement + content.Substring(blockEnd);
-
-                    _conversationHistory[msgIdx] = new ChatMessage(role, newContent, existingPatchMsg.Turn);
-
-                    int delta = replacement.Length - oldBlock.Length;
-
-                    // (a) Same-filename: adjust positions for remaining stale and kept entries
-                    //     in this same message.
-                    for (int j = k + 1; j < locs.Count; j++)
-                    {
-                        if (locs[j].msgIdx == msgIdx && locs[j].charPos > charPos)
-                            locs[j] = (locs[j].msgIdx, locs[j].charPos + delta);
-                    }
-
-                    // (b) Cross-filename: adjust positions for every other filename's occurrences
-                    //     in this same message that follow the replaced block.
-                    if (delta != 0)
-                    {
-                        foreach (var otherKvp in occurrences)
-                        {
-                            if (string.Equals(otherKvp.Key, filename, StringComparison.OrdinalIgnoreCase))
-                                continue;
-                            var otherLocs = otherKvp.Value;
-                            for (int j = 0; j < otherLocs.Count; j++)
-                            {
-                                if (otherLocs[j].msgIdx == msgIdx && otherLocs[j].charPos > charPos)
-                                    otherLocs[j] = (otherLocs[j].msgIdx, otherLocs[j].charPos + delta);
-                            }
-                        }
-                    }
-
-                    totalSaved += savedTokens - EstimateTokens(replacement);
-                    collapsed++;
-                }
-
-                if (collapsed > 0)
-                {
-                    logLines.Add($"[CONTEXT] Collapsed patch chain: {filename} — {collapsed} patch{(collapsed == 1 ? "" : "es")} merged (saved ~{totalSaved} tokens)");
-                    _compressionLog.Add(filename);
-                }
-            }
-
-            return logLines.Count > 0 ? string.Join("\n", logLines) + "\n" : null;
-        }
-
-        /// <summary>
-        /// Replaces old PATCH result blocks in non-current user messages with compact summaries.
-        /// Returns the number of messages squeezed.
-        /// </summary>
-        private int SqueezePatchResults()
-        {
-            int count = 0;
-            int lastIndex = _conversationHistory.Count - 1;
-
-            for (int i = 1; i < lastIndex; i++)
-            {
-                var msg = _conversationHistory[i];
-                if (msg.Role != "user") continue;
-                if (!msg.Content.Contains("[PATCH-RESULT:")) continue;
-                if (msg.Content.StartsWith("[SQUEEZED]", StringComparison.Ordinal)) continue;
-
-                string original = msg.Content;
-
-                int tagStart = original.IndexOf("[PATCH-RESULT:", StringComparison.Ordinal);
-                int tagEnd   = original.IndexOf(']', tagStart);
-                string filename = tagStart >= 0 && tagEnd > tagStart
-                    ? original.Substring(tagStart + 14, tagEnd - tagStart - 14)
-                    : "unknown";
-
-                string squeezed;
-                if (original.IndexOf("Applied", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                    original.IndexOf("succeeded", StringComparison.OrdinalIgnoreCase) >= 0)
-                {
-                    string replaceSnippet = "changes applied";
-                    int replaceIdx = original.IndexOf("REPLACE:", StringComparison.OrdinalIgnoreCase);
-                    if (replaceIdx >= 0)
-                    {
-                        int contentStart = original.IndexOf('\n', replaceIdx);
-                        if (contentStart >= 0 && contentStart < original.Length - 1)
-                        {
-                            string raw = original.Substring(contentStart + 1).TrimStart();
-                            replaceSnippet = (raw.Length > 80 ? raw.Substring(0, 80) : raw)
-                                .Replace('\n', ' ').Trim();
-                        }
-                    }
-                    squeezed = $"[SQUEEZED][PATCH] Applied to {filename} — {replaceSnippet}.";
-                }
-                else if (original.IndexOf("FAILED", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                         original.IndexOf("error", StringComparison.OrdinalIgnoreCase) >= 0)
-                {
-                    string errorLine = "(unknown error)";
-                    foreach (var line in original.Split('\n'))
-                    {
-                        if (line.IndexOf("error", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                            line.IndexOf("FAILED", StringComparison.OrdinalIgnoreCase) >= 0)
-                        {
-                            errorLine = line.Trim();
-                            if (errorLine.Length > 120) errorLine = errorLine.Substring(0, 120);
-                            break;
-                        }
-                    }
-                    squeezed = $"[SQUEEZED][PATCH] FAILED on {filename}: {errorLine}.";
-                }
-                else
-                {
-                    squeezed = $"[SQUEEZED][PATCH] Applied to {filename} — changes applied.";
-                }
-
-                _conversationHistory[i] = new ChatMessage(msg.Role, squeezed, msg.Turn);
-                _compressionLog.Add(filename);
-                count++;
-            }
-
-            return count;
-        }
-
-        /// <summary>
-        /// Compresses [SHELL-RESULT:] blocks in prior turns, replacing each block inline
-        /// (preserving surrounding message content such as PATCH-RESULT blocks and agentic headers)
-        /// with a compact summary keyed on build outcome.
-        /// When <paramref name="includeRecentTurn"/> is false (Phase 0c, unconditional), the most
-        /// recent prior user+assistant pair is protected so the LLM retains fresh shell context.
-        /// When <paramref name="includeRecentTurn"/> is true (Phase 4, soft-pressure), all prior
-        /// turns are eligible, extending coverage to the most recent pair.
-        /// Returns a log string and the count of compressed blocks.
-        /// </summary>
-        private (string logMsg, int count) CompressStaleShellBlocks(bool includeRecentTurn = false)
-        {
-            int lastIndex = _conversationHistory.Count - 1;
-
-            // History layout:
-            //   [0]=system  [1..lastIndex-3]=older turns  [lastIndex-2]=last prior user
-            //   [lastIndex-1]=last prior assistant  [lastIndex]=current user (just added)
-            // Phase 0c: scan [1..lastIndex-3] — protect the most recent prior pair.
-            // Phase 4:  scan [1..lastIndex-1] — cover the most recent prior pair too.
-            int scanEnd = includeRecentTurn ? lastIndex : lastIndex - 2;
-            if (scanEnd <= 1) return (null, 0);
-
-            int totalCompressed = 0;
-            int totalSaved      = 0;
-
-            for (int i = 1; i < scanEnd; i++)
-            {
-                var msg = _conversationHistory[i];
-                if (msg.Role != "user") continue;
-                if (!msg.Content.Contains("[SHELL-RESULT:")) continue;
-                // Messages already fully squeezed to a single one-liner start with [SQUEEZED].
-                if (msg.Content.StartsWith("[SQUEEZED]", StringComparison.Ordinal)) continue;
-
-                // Replace each [SHELL-RESULT:] block in the message one at a time.
-                // After each replacement the block no longer contains "[SHELL-RESULT:", so
-                // re-scanning from the start naturally moves to the next uncompressed block.
-                // This avoids stale charPos tracking across multiple blocks in one message.
-                while (true)
-                {
-                    string content = _conversationHistory[i].Content;
-
-                    int tagStart = content.IndexOf("[SHELL-RESULT:", StringComparison.Ordinal);
-                    if (tagStart < 0) break;
-
-                    int tagEnd = content.IndexOf(']', tagStart);
-                    if (tagEnd < 0) break;
-
-                    string command = content.Substring(tagStart + 14, tagEnd - tagStart - 14);
-
-                    // Block content starts right after the closing ']', optionally after a newline.
-                    int contentStart = tagEnd + 1;
-                    if (contentStart < content.Length && content[contentStart] == '\n')
-                        contentStart++;
-
-                    // Block ends at the next '\n[' sequence (start of next tag) or end of string.
-                    int nextTag  = content.IndexOf("\n[", contentStart, StringComparison.Ordinal);
-                    int blockEnd = nextTag >= 0 ? nextTag : content.Length;
-
-                    string oldBlock    = content.Substring(tagStart, blockEnd - tagStart);
-                    int    savedTokens = EstimateTokens(oldBlock);
-
-                    string replacement = BuildShellSummary(command, oldBlock);
-                    string newContent  = content.Substring(0, tagStart) + replacement + content.Substring(blockEnd);
-
-                    _conversationHistory[i] = new ChatMessage(msg.Role, newContent, msg.Turn);
-
-                    totalSaved += savedTokens - EstimateTokens(replacement);
-                    totalCompressed++;
-                    _compressionLog.Add(command.Length > 30 ? command.Substring(0, 30) + "…" : command);
-                }
-            }
-
-            if (totalCompressed == 0) return (null, 0);
-            return ($"\n[CONTEXT] Compressed {totalCompressed} shell block(s) (saved ~{totalSaved} tokens)\n", totalCompressed);
-        }
-
-        /// <summary>
         /// Classifies a [SHELL-RESULT:] block and returns a compact summary string.
+        /// Used for pre-append compression — classify shell output before adding to history.
         /// Classification priority: build success > build failure > non-build error > success.
         /// </summary>
         private string BuildShellSummary(string command, string blockContent)
         {
-            // Build success: MSBuild reports "Build succeeded" or "0 Error(s)".
             bool isBuildSuccess =
                 blockContent.IndexOf("Build succeeded", StringComparison.OrdinalIgnoreCase) >= 0 ||
                 blockContent.IndexOf("0 Error(s)", StringComparison.OrdinalIgnoreCase) >= 0;
@@ -2190,210 +1266,30 @@ namespace DevMind
             }
         }
 
-        /// <summary>
-        /// Replaces old READ file blocks in non-current user messages with structured outlines.
-        /// For .cs files: uses GenerateCSharpOutline — namespace, types, signatures, /// docs.
-        /// For other types: file-appropriate outline format.
-        /// Returns the number of messages squeezed.
-        /// </summary>
-        private int SqueezeReadContent()
-        {
-            int count     = 0;
-            int lastIndex = _conversationHistory.Count - 1;
-
-            for (int i = 1; i < lastIndex; i++)
-            {
-                var msg = _conversationHistory[i];
-                if (msg.Role != "user") continue;
-                if (!msg.Content.Contains("[READ:")) continue;
-                if (msg.Content.StartsWith("[SQUEEZED]", StringComparison.Ordinal)) continue;
-
-                string original = msg.Content;
-
-                // Collect all non-compressed, non-superseded READ blocks in this message.
-                var blocks = new List<(string filename, int lineCount, string outline)>();
-                int searchFrom = 0;
-
-                while (true)
-                {
-                    int tagStart = original.IndexOf("[READ:", searchFrom, StringComparison.Ordinal);
-                    if (tagStart < 0) break;
-
-                    int tagEnd = original.IndexOf(']', tagStart);
-                    if (tagEnd < 0) break;
-
-                    string filename = original.Substring(tagStart + 6, tagEnd - tagStart - 6);
-                    // Strip line-range suffix so [READ:file.cs:400-450] is treated as file.cs
-                    filename = Regex.Replace(filename, @":\d+(?:-\d+)?$", "");
-
-                    // Skip inline blocks already compressed by earlier squeeze phases.
-                    bool isSqueezedTag = tagStart >= 10 &&
-                        string.Equals(original.Substring(tagStart - 10, 10), "[SQUEEZED]", StringComparison.Ordinal);
-
-                    if (!isSqueezedTag &&
-                        !string.Equals(filename, "SUPERSEDED", StringComparison.OrdinalIgnoreCase) &&
-                        !string.Equals(filename, "OUTLINE",    StringComparison.OrdinalIgnoreCase))
-                    {
-                        int contentStart = tagEnd + 1;
-                        if (contentStart < original.Length && original[contentStart] == '\n')
-                            contentStart++;
-
-                        int nextTag  = original.IndexOf("\n[", contentStart, StringComparison.Ordinal);
-                        int blockEnd = nextTag >= 0 ? nextTag : original.Length;
-
-                        string blockContent = original.Substring(contentStart, blockEnd - contentStart);
-                        int    lineCount    = blockContent.Split('\n').Length;
-                        string outline      = GenerateOutline(filename, blockContent);
-
-                        blocks.Add((filename, lineCount, outline));
-                    }
-
-                    searchFrom = tagEnd + 1;
-                }
-
-                if (blocks.Count == 0) continue;
-
-                // Build squeezed message. Single file uses spec format directly.
-                // Multiple files use a single [READ:OUTLINE] header to avoid creating
-                // secondary [READ:] tags that DeduplicateReadBlocks might misinterpret.
-                string squeezed;
-                if (blocks.Count == 1)
-                {
-                    var b = blocks[0];
-                    squeezed = $"[SQUEEZED][READ:OUTLINE] {b.filename} ({b.lineCount} lines → outline)\n{b.outline}";
-                }
-                else
-                {
-                    int totalLines = 0;
-                    var fileNames  = new List<string>();
-                    foreach (var b in blocks) { totalLines += b.lineCount; fileNames.Add(b.filename); }
-
-                    var sbAll = new StringBuilder();
-                    sbAll.Append($"[SQUEEZED][READ:OUTLINE] {string.Join(", ", fileNames)} ({totalLines} lines total → outlines)");
-                    foreach (var b in blocks)
-                        sbAll.Append($"\n=== {b.filename} ({b.lineCount} lines) ===\n{b.outline}");
-                    squeezed = sbAll.ToString();
-                }
-
-                _conversationHistory[i] = new ChatMessage(msg.Role, squeezed, msg.Turn);
-                foreach (var b in blocks)
-                    _compressionLog.Add(b.filename);
-                count++;
-            }
-
-            return count;
-        }
+        private const int BudgetGuardKeepHead = 200;
+        private const int BudgetGuardKeepTail = 50;
 
         /// <summary>
-        /// <summary>
-        /// Immediately outline-compresses all uncompressed [READ:] blocks in the most recent
-        /// user message in conversation history. Called by the agentic loop between turns so
-        /// the LLM receives full file content for the current turn but history stays lean.
-        /// Returns a log string to emit via onToken, or null if nothing was compressed.
+        /// Pre-append budget guard: truncates oversized [READ:] blocks in the userMessage string
+        /// BEFORE it is added to _conversationHistory. Preserves append-only invariant.
+        /// Returns the (possibly modified) userMessage and an optional log string.
         /// </summary>
-        public string CompressLastUserReadBlocks()
-        {
-            // Find the most recent user message
-            int targetIndex = -1;
-            for (int i = _conversationHistory.Count - 1; i >= 1; i--)
-            {
-                if (_conversationHistory[i].Role == "user")
-                {
-                    targetIndex = i;
-                    break;
-                }
-            }
-            if (targetIndex < 0) return null;
-
-            var msg = _conversationHistory[targetIndex];
-            if (!msg.Content.Contains("[READ:")) return null;
-
-            string original = msg.Content;
-
-            // Collect all uncompressed READ blocks
-            var blocks = new List<(string filename, int lineCount, string outline, int blockStart, int blockEnd)>();
-            int searchFrom = 0;
-
-            while (true)
-            {
-                int tagStart = original.IndexOf("[READ:", searchFrom, StringComparison.Ordinal);
-                if (tagStart < 0) break;
-
-                int tagEnd = original.IndexOf(']', tagStart);
-                if (tagEnd < 0) break;
-
-                string filename = original.Substring(tagStart + 6, tagEnd - tagStart - 6);
-
-                bool isSqueezed = tagStart >= 10 &&
-                    string.Equals(original.Substring(tagStart - 10, 10), "[SQUEEZED]", StringComparison.Ordinal);
-                bool isSpecial = string.Equals(filename, "SUPERSEDED", StringComparison.OrdinalIgnoreCase)
-                              || string.Equals(filename, "OUTLINE",    StringComparison.OrdinalIgnoreCase);
-
-                if (!isSqueezed && !isSpecial)
-                {
-                    int contentStart = tagEnd + 1;
-                    if (contentStart < original.Length && original[contentStart] == '\n')
-                        contentStart++;
-
-                    int nextTag  = original.IndexOf("\n[", contentStart, StringComparison.Ordinal);
-                    int blockEnd = nextTag >= 0 ? nextTag : original.Length;
-
-                    string blockContent = original.Substring(contentStart, blockEnd - contentStart);
-                    int    lineCount    = blockContent.Split('\n').Length;
-                    string outline      = GenerateOutline(filename, blockContent);
-
-                    blocks.Add((filename, lineCount, outline, tagStart, blockEnd));
-                }
-
-                searchFrom = tagEnd + 1;
-            }
-
-            if (blocks.Count == 0) return null;
-
-            // Rebuild the message replacing each block in reverse order to preserve offsets
-            var sb = new StringBuilder(original);
-            var logParts = new List<string>();
-            for (int i = blocks.Count - 1; i >= 0; i--)
-            {
-                var b = blocks[i];
-                // Bounds guard: positions were computed from the original string; after prior iterations
-                // modified sb at higher positions the lower-region should be unchanged, but guard
-                // defensively to prevent "Index was out of range" if any edge case shifts lengths.
-                if (b.blockStart < 0 || b.blockEnd > sb.Length || b.blockStart > b.blockEnd)
-                    continue;
-                int tokensBefore = EstimateTokens(original.Substring(b.blockStart, b.blockEnd - b.blockStart));
-                int tokensAfter  = EstimateTokens(b.outline);
-                string replacement = $"[SQUEEZED][READ:OUTLINE] {b.filename} ({b.lineCount} lines → outline)\n{b.outline}";
-                sb.Remove(b.blockStart, b.blockEnd - b.blockStart);
-                sb.Insert(b.blockStart, replacement);
-                _compressionLog.Add(b.filename);
-                logParts.Add($"{b.filename} ({tokensBefore} tokens → {tokensAfter} tokens)");
-            }
-
-            _conversationHistory[targetIndex] = new ChatMessage(msg.Role, sb.ToString(), msg.Turn);
-
-            logParts.Reverse(); // restore natural reading order
-            return $"\n[CONTEXT] Post-turn outline: {string.Join(", ", logParts)}\n";
-        }
-
-        /// Pre-squeezes any [READ:filename] block in the incoming userMessage whose token cost
-        /// alone exceeds WorkingHistoryLimit. Converts the content to an outline in-place,
-        /// before the message is added to _conversationHistory.
-        /// Returns the (possibly modified) userMessage and an optional status string for onToken.
-        /// </summary>
-        private string PreSqueezeOversizedRead(string userMessage, out string logMsg)
+        private string ApplyPreAppendBudgetGuard(string userMessage, out string logMsg)
         {
             logMsg = null;
             if (string.IsNullOrEmpty(userMessage)) return userMessage;
             if (!userMessage.Contains("[READ:")) return userMessage;
 
-            int workingLimit = _budget.WorkingHistoryLimit;
-            if (workingLimit <= 0) return userMessage;
+            // Estimate what total would be with this message added
+            int currentTotal = EstimateHistoryTokens();
+            int msgTokens = EstimateTokens(userMessage);
+            if (currentTotal + msgTokens <= _budget.HistoryHardLimit) return userMessage;
 
+            // Truncate oversized READ blocks to head+tail
+            var truncatedFiles = new List<string>();
             int tagStart = userMessage.IndexOf("[READ:", StringComparison.Ordinal);
             while (tagStart >= 0)
             {
-                // Skip squeezed/superseded/outline tags
                 bool isSqueezed = tagStart >= 10 &&
                     string.Equals(userMessage.Substring(tagStart - 10, 10), "[SQUEEZED]", StringComparison.Ordinal);
 
@@ -2401,8 +1297,8 @@ namespace DevMind
                 if (tagEnd < 0) break;
 
                 string filename = userMessage.Substring(tagStart + 6, tagEnd - tagStart - 6);
-                bool isSpecial  = string.Equals(filename, "SUPERSEDED", StringComparison.OrdinalIgnoreCase)
-                               || string.Equals(filename, "OUTLINE",    StringComparison.OrdinalIgnoreCase);
+                bool isSpecial = string.Equals(filename, "SUPERSEDED", StringComparison.OrdinalIgnoreCase)
+                              || string.Equals(filename, "OUTLINE", StringComparison.OrdinalIgnoreCase);
 
                 if (!isSqueezed && !isSpecial)
                 {
@@ -2410,44 +1306,34 @@ namespace DevMind
                     if (contentStart < userMessage.Length && userMessage[contentStart] == '\n')
                         contentStart++;
 
-                    int nextTag  = userMessage.IndexOf("\n[", contentStart, StringComparison.Ordinal);
+                    int nextTag = userMessage.IndexOf("\n[", contentStart, StringComparison.Ordinal);
                     int blockEnd = nextTag >= 0 ? nextTag : userMessage.Length;
 
                     string blockContent = userMessage.Substring(contentStart, blockEnd - contentStart);
-                    int    blockTokens  = EstimateTokens(blockContent);
+                    string[] lines = blockContent.Split('\n');
+                    int lineCount = lines.Length;
 
-                    if (blockTokens > workingLimit)
+                    if (lineCount > BudgetGuardKeepHead + BudgetGuardKeepTail)
                     {
-                        string[] lines     = blockContent.Split('\n');
-                        int      lineCount = lines.Length;
+                        int omitted = lineCount - BudgetGuardKeepHead - BudgetGuardKeepTail;
+                        var head = new string[BudgetGuardKeepHead];
+                        var tail = new string[BudgetGuardKeepTail];
+                        Array.Copy(lines, 0, head, 0, BudgetGuardKeepHead);
+                        Array.Copy(lines, lineCount - BudgetGuardKeepTail, tail, 0, BudgetGuardKeepTail);
+                        string truncated = string.Join("\n", head)
+                            + $"\n[... {omitted} lines omitted — use READ with line range to see specific sections ...]\n"
+                            + string.Join("\n", tail);
 
-                        string truncated;
-                        if (lineCount <= BudgetGuardKeepHead + BudgetGuardKeepTail)
-                        {
-                            truncated = blockContent;
-                        }
-                        else
-                        {
-                            int omitted = lineCount - BudgetGuardKeepHead - BudgetGuardKeepTail;
-                            var head    = new string[BudgetGuardKeepHead];
-                            var tail    = new string[BudgetGuardKeepTail];
-                            Array.Copy(lines, 0, head, 0, BudgetGuardKeepHead);
-                            Array.Copy(lines, lineCount - BudgetGuardKeepTail, tail, 0, BudgetGuardKeepTail);
-                            truncated = string.Join("\n", head)
-                                + $"\n[... {omitted} lines omitted — use READ with line range to see specific sections ...]\n"
-                                + string.Join("\n", tail);
-                        }
-
-                        string replacement = $"[SQUEEZED][READ:{filename}]\n{truncated}";
-
-                        userMessage = userMessage.Substring(0, tagStart) + replacement
+                        userMessage = userMessage.Substring(0, contentStart) + truncated
                             + (nextTag >= 0 ? userMessage.Substring(nextTag) : "");
 
-                        int truncatedTokens = EstimateTokens(truncated);
-                        logMsg = $"\n[CONTEXT] Pre-squeezed oversized READ: {filename} ({blockTokens} tokens → {truncatedTokens} tokens head+tail)\n";
-                        _compressionLog.Add(filename);
+                        truncatedFiles.Add($"{Regex.Replace(filename, @":\d+(?:-\d+)?$", "")} ({lineCount}→{BudgetGuardKeepHead + BudgetGuardKeepTail} lines)");
 
-                        // Restart scan from beginning — userMessage changed
+                        // Re-check: if now within budget, stop truncating
+                        if (currentTotal + EstimateTokens(userMessage) <= _budget.HistoryHardLimit)
+                            break;
+
+                        // Restart scan — string changed
                         tagStart = userMessage.IndexOf("[READ:", 0, StringComparison.Ordinal);
                         continue;
                     }
@@ -2456,118 +1342,10 @@ namespace DevMind
                 tagStart = userMessage.IndexOf("[READ:", tagEnd + 1, StringComparison.Ordinal);
             }
 
+            if (truncatedFiles.Count > 0)
+                logMsg = $"\n[CONTEXT] Budget guard: Truncated {string.Join(", ", truncatedFiles)} to fit budget.\n";
+
             return userMessage;
-        }
-
-        private const int BudgetGuardKeepHead = 200;
-        private const int BudgetGuardKeepTail = 50;
-
-        /// <summary>
-        /// Budget Guard Level 3: if total estimated tokens still exceed HistoryHardLimit after
-        /// squeezing and trimming, truncates every uncompressed [READ:] block in the current user
-        /// message (last entry in _conversationHistory) to head+tail lines, stopping early if the
-        /// budget comes within the hard limit. Blocks are processed in reverse order so that char
-        /// positions remain valid across successive replacements.
-        /// Returns a notification string to emit via onToken, or null if no action was taken.
-        /// </summary>
-        private string ApplyBudgetGuardLevel3()
-        {
-            if (EstimateHistoryTokens() <= _budget.HistoryHardLimit)
-                return null;
-
-            int lastIndex = _conversationHistory.Count - 1;
-            var currentMsg = _conversationHistory[lastIndex];
-            if (currentMsg.Role != "user") return null;
-
-            string content = currentMsg.Content;
-            if (!content.Contains("[READ:")) return null;
-
-            // Collect all uncompressed READ blocks: (filename, blockStart, blockEnd, originalLineCount).
-            // blockStart = start of [READ:...] tag; blockEnd = end of block content.
-            var blocks = new List<(string filename, int contentStart, int blockEnd, int lineCount)>();
-            int searchFrom = 0;
-
-            while (true)
-            {
-                int tagStart = content.IndexOf("[READ:", searchFrom, StringComparison.Ordinal);
-                if (tagStart < 0) break;
-
-                // Skip already-squeezed tags: [SQUEEZED][READ:...]
-                bool isSqueezed = tagStart >= 10 &&
-                    string.Equals(content.Substring(tagStart - 10, 10), "[SQUEEZED]", StringComparison.Ordinal);
-
-                int tagEnd = content.IndexOf(']', tagStart);
-                if (tagEnd < 0) break;
-
-                string filename = content.Substring(tagStart + 6, tagEnd - tagStart - 6);
-                // Strip line-range suffix (e.g. [READ:file.cs:100-200] → file.cs)
-                filename = Regex.Replace(filename, @":\d+(?:-\d+)?$", "");
-
-                bool isSpecial = string.Equals(filename, "SUPERSEDED", StringComparison.OrdinalIgnoreCase)
-                              || string.Equals(filename, "OUTLINE",    StringComparison.OrdinalIgnoreCase);
-
-                if (!isSqueezed && !isSpecial)
-                {
-                    int cs = tagEnd + 1;
-                    if (cs < content.Length && content[cs] == '\n') cs++;
-
-                    int nextTag  = content.IndexOf("\n[", cs, StringComparison.Ordinal);
-                    int blockEnd = nextTag >= 0 ? nextTag : content.Length;
-
-                    string fileContent = content.Substring(cs, blockEnd - cs);
-                    int    lineCount   = fileContent.Split('\n').Length;
-
-                    blocks.Add((filename, cs, blockEnd, lineCount));
-                }
-
-                searchFrom = tagEnd + 1;
-            }
-
-            if (blocks.Count == 0) return null;
-
-            // Process in reverse order so earlier block positions stay valid.
-            var truncatedFiles = new List<string>();
-
-            for (int i = blocks.Count - 1; i >= 0; i--)
-            {
-                // Re-check budget before each truncation — stop if already within limit.
-                if (EstimateHistoryTokens() <= _budget.HistoryHardLimit) break;
-
-                var (filename, cs, blockEnd, lineCount) = blocks[i];
-
-                if (lineCount <= BudgetGuardKeepHead + BudgetGuardKeepTail)
-                    continue; // block is already small enough; try the next one
-
-                // Re-read content from history (prior iterations may have modified the message).
-                string current = _conversationHistory[lastIndex].Content;
-
-                // The positions collected earlier still map to the correct location because we
-                // process in reverse — no earlier-in-string block has been modified yet.
-                string fileContent = current.Substring(cs, blockEnd - cs);
-                string[] lines     = fileContent.Split('\n');
-                int      origLines = lines.Length;
-
-                var headLines = new string[BudgetGuardKeepHead];
-                var tailLines = new string[BudgetGuardKeepTail];
-                Array.Copy(lines, 0, headLines, 0, BudgetGuardKeepHead);
-                Array.Copy(lines, origLines - BudgetGuardKeepTail, tailLines, 0, BudgetGuardKeepTail);
-
-                int    omitted  = origLines - BudgetGuardKeepHead - BudgetGuardKeepTail;
-                string truncated = string.Join("\n", headLines)
-                    + $"\n[... {omitted} lines omitted by budget guard ...]\n"
-                    + string.Join("\n", tailLines);
-
-                string newContent = current.Substring(0, cs) + truncated + current.Substring(blockEnd);
-                _conversationHistory[lastIndex] = new ChatMessage(currentMsg.Role, newContent, currentMsg.Turn);
-
-                _compressionLog.Add(filename);
-                truncatedFiles.Add($"{filename} ({origLines}→{BudgetGuardKeepHead + BudgetGuardKeepTail} lines)");
-            }
-
-            if (truncatedFiles.Count == 0) return null;
-
-            truncatedFiles.Reverse(); // restore natural reading order
-            return $"\n[CONTEXT] Level 3: Truncated {string.Join(", ", truncatedFiles)} to fit budget.\n";
         }
 
         /// <summary>
@@ -2578,8 +1356,7 @@ namespace DevMind
         private int TrimConversationHistory(int maxTurns)
         {
             // Layout: [0]=system, [1..Count-2]=prior turns (user/assistant pairs), [Count-1]=current user
-            // Prior turn count (complete pairs only — last entry is the not-yet-answered user message)
-            int priorMessages = _conversationHistory.Count - 2; // excludes system and current user
+            int priorMessages = _conversationHistory.Count - 2;
             if (priorMessages <= 0)
                 return 0;
 
@@ -2589,104 +1366,139 @@ namespace DevMind
 
             int pairsToRemove = priorPairs - maxTurns;
             int messagesToRemove = pairsToRemove * 2;
+
+            // Build a drop summary before removing — preserves awareness of what happened
+            var summaryParts = new List<string>();
+            for (int i = 1; i <= messagesToRemove && i < _conversationHistory.Count; i++)
+            {
+                var msg = _conversationHistory[i];
+                string snippet = BuildDropSnippet(msg);
+                if (snippet != null) summaryParts.Add(snippet);
+            }
+            string dropSummary = summaryParts.Count > 0
+                ? $"[DROPPED] Turns 1-{pairsToRemove}: {string.Join(", ", summaryParts)}"
+                : $"[DROPPED] {pairsToRemove} turn(s) removed for budget";
+
             _conversationHistory.RemoveRange(1, messagesToRemove);
-            _compressionLog.Add($"(history trim: {pairsToRemove} turn{(pairsToRemove == 1 ? "" : "s")} removed)");
+
+            // Insert summary as a system-role message so the model knows what happened
+            _conversationHistory.Insert(1, new ChatMessage("system", dropSummary));
+
             return messagesToRemove;
         }
 
         /// <summary>
-        /// Strips any [CONTEXT NOTE] prefix injected in a prior call from all user messages
-        /// in [1..N-2] (prior turns). The current user message (N-1) is not yet present when
-        /// this runs — it is added before this call in SendMessageAsync.
-        /// The prefix format is: "[CONTEXT NOTE] ...\n\n" — everything up to and including
-        /// the first blank line.
+        /// Drops a specific number of oldest turn-pairs from history.
+        /// Always preserves index 0 (system) and the last entry (pending user message).
+        /// When <paramref name="withSummaries"/> is true, inserts a drop summary; otherwise drops silently.
+        /// Also skips any pinned content (DevMind.md, SCRATCHPAD) at the start of history.
+        /// Returns the number of messages actually removed.
         /// </summary>
-        private void StripContextNotes()
+        private int TrimOldestTurns(int pairsToRemove, bool withSummaries)
         {
-            const string marker = "[CONTEXT NOTE]";
-            int last = _conversationHistory.Count - 1;
-            // Strip from all prior user messages (skip system [0], skip current user [last])
-            for (int i = 1; i < last; i++)
+            // Layout: [0]=system, [1..Count-2]=prior turns, [Count-1]=current user
+            // Find the first removable index (skip pinned system messages after index 0)
+            int startIdx = 1;
+            while (startIdx < _conversationHistory.Count - 1)
             {
-                var msg = _conversationHistory[i];
-                if (msg.Role != "user") continue;
-                string content = msg.Content;
-                if (!content.StartsWith(marker, StringComparison.Ordinal)) continue;
-
-                // Find the blank line that terminates the note header
-                int blankLine = content.IndexOf("\n\n", marker.Length, StringComparison.Ordinal);
-                if (blankLine >= 0)
-                    _conversationHistory[i] = new ChatMessage("user", content.Substring(blankLine + 2), msg.Turn);
+                string c = _conversationHistory[startIdx].Content;
+                if (c.Contains("[DevMind.md]") || c.Contains("[TASK STATE]") || c.Contains("[DROPPED]"))
+                    startIdx++;
+                else
+                    break;
             }
+
+            int removableMessages = _conversationHistory.Count - 1 - startIdx; // exclude last (current user)
+            if (removableMessages <= 0)
+                return 0;
+
+            int removablePairs = removableMessages / 2;
+            int actualPairs = Math.Min(pairsToRemove, removablePairs);
+            if (actualPairs <= 0)
+                return 0;
+
+            int messagesToRemove = actualPairs * 2;
+
+            if (withSummaries)
+            {
+                var summaryParts = new List<string>();
+                for (int i = startIdx; i < startIdx + messagesToRemove && i < _conversationHistory.Count; i++)
+                {
+                    string snippet = BuildDropSnippet(_conversationHistory[i]);
+                    if (snippet != null) summaryParts.Add(snippet);
+                }
+                string dropSummary = summaryParts.Count > 0
+                    ? $"[DROPPED] {actualPairs} turn(s): {string.Join(", ", summaryParts)}"
+                    : $"[DROPPED] {actualPairs} turn(s) removed for budget";
+
+                _conversationHistory.RemoveRange(startIdx, messagesToRemove);
+                _conversationHistory.Insert(startIdx, new ChatMessage("system", dropSummary));
+            }
+            else
+            {
+                _conversationHistory.RemoveRange(startIdx, messagesToRemove);
+            }
+
+            return messagesToRemove;
         }
 
         /// <summary>
-        /// Prepends a compact [CONTEXT NOTE] to the current user message (last in history)
-        /// listing every filename/command logged in _compressionLog. The note is under ~60 tokens
-        /// and tells the LLM which files were compressed so it can request READs if needed.
-        /// Does nothing if _compressionLog is empty.
+        /// Builds a short snippet describing a message for drop summaries.
         /// </summary>
-        private void InjectContextNote()
+        private static string BuildDropSnippet(ChatMessage msg)
         {
-            if (_compressionLog.Count == 0) return;
+            string c = msg.Content;
+            if (c.Length == 0) return null;
 
-            int last = _conversationHistory.Count - 1;
-            if (last < 0) return;
-
-            // Deduplicate while preserving order
-            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var unique = new List<string>();
-            foreach (var entry in _compressionLog)
+            if (c.Contains("[READ:"))
             {
-                if (seen.Add(entry))
-                    unique.Add(entry);
-            }
-
-            // Budget the file list: fixed template costs ~23 tokens (~92 chars).
-            // Reserve 37 tokens (~148 chars) for the file list to stay under 60 tokens total.
-            const int MaxListChars = 148;
-            string affected;
-            int shown = 0;
-            var sb = new StringBuilder();
-            foreach (var name in unique)
-            {
-                string part = shown == 0 ? name : ", " + name;
-                if (sb.Length + part.Length > MaxListChars)
+                var files = new List<string>();
+                int sf = 0;
+                while (true)
                 {
-                    int remaining = unique.Count - shown;
-                    sb.Append($", and {remaining} more");
-                    shown = unique.Count; // exit loop
-                    break;
+                    int ts = c.IndexOf("[READ:", sf, StringComparison.Ordinal);
+                    if (ts < 0) break;
+                    int te = c.IndexOf(']', ts);
+                    if (te < 0) break;
+                    string fn = c.Substring(ts + 6, te - ts - 6);
+                    if (!string.Equals(fn, "SUPERSEDED", StringComparison.OrdinalIgnoreCase) &&
+                        !string.Equals(fn, "OUTLINE", StringComparison.OrdinalIgnoreCase))
+                        files.Add(fn);
+                    sf = te + 1;
                 }
-                sb.Append(part);
-                shown++;
+                if (files.Count > 0) return $"READ {string.Join(", ", files)}";
             }
-            affected = sb.ToString();
 
-            string note = $"[CONTEXT NOTE] {unique.Count} block(s) compressed. Affected: {affected}. Use READ to reload any file you need.\n\n";
+            if (c.Contains("[PATCH-RESULT:")) return "PATCH applied";
+            if (c.Contains("[SHELL-RESULT:"))
+            {
+                bool ok = c.IndexOf("Build succeeded", StringComparison.OrdinalIgnoreCase) >= 0;
+                return ok ? "build succeeded" : "shell command";
+            }
 
-            var current = _conversationHistory[last];
-            _conversationHistory[last] = new ChatMessage(current.Role, note + current.Content, current.Turn);
+            if (msg.Role == "assistant")
+            {
+                string t = c.Trim();
+                if (t.Length > 40) t = t.Substring(0, 40) + "...";
+                return $"response: {t}";
+            }
+
+            return null;
         }
 
         private string BuildRequestJson(string modelName)
         {
+            // Append-only: serialize _conversationHistory exactly as-is.
+            // No phantom injections — the JSON payload is a 1:1 mirror of the list.
             var messages = new JArray();
             int lastIdx   = _conversationHistory.Count - 1;
             for (int mi = 0; mi <= lastIdx; mi++)
             {
-                var msg     = _conversationHistory[mi];
-                string content = msg.Content;
-
-                // Prepend task scratchpad to the last (current) user message only.
-                // This keeps _conversationHistory clean — scratchpad is never stored in history.
-                if (mi == lastIdx && msg.Role == "user" && !string.IsNullOrEmpty(_taskScratchpad))
-                    content = $"[TASK STATE]\n{_taskScratchpad}\n[/TASK STATE]\n\n{content}";
-
+                var msg = _conversationHistory[mi];
                 messages.Add(new JObject
                 {
                     ["role"]    = msg.Role,
-                    ["content"] = content
+                    ["content"] = msg.Content
                 });
             }
 
@@ -2725,6 +1537,8 @@ namespace DevMind
 
     /// <summary>
     /// Represents a single message in the chat conversation history.
+    /// Immutable by design — once added to _conversationHistory, content never changes.
+    /// Context management uses DROP (removing entire messages) rather than rewriting.
     /// </summary>
     internal sealed class ChatMessage
     {
@@ -2734,7 +1548,7 @@ namespace DevMind
         /// <summary>The text content of the message.</summary>
         public string Content { get; }
 
-        /// <summary>The turn number this message belongs to. Used by tiered context eviction.</summary>
+        /// <summary>The turn number this message belongs to. Used by context eviction.</summary>
         public int Turn { get; }
 
         /// <summary>

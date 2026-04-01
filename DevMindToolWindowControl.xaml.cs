@@ -28,6 +28,8 @@ namespace DevMind
     public partial class DevMindToolWindowControl : UserControl
     {
         private readonly LlmClient _llmClient;
+        private readonly ProfileManager _profileManager;
+        private bool _suppressProfileChange;
         private CancellationTokenSource _cts;
         private (string fullPath, Encoding fileEncoding, string fileName, string content, List<(int origStart, int origEnd, string replaceText)> resolvedBlocks)? _pendingFuzzyPatch;
         private bool _suppressSystemPromptSave;
@@ -91,7 +93,10 @@ namespace DevMind
             });
 
             LoadSystemPromptText();
+            _profileManager = new ProfileManager();
+            PopulateProfileComboBox();
             DevMindOptions.Saved += OnSettingsSaved;
+            DevMindOptions.ProfileChanged += OnProfileChangedFromOptions;
             // Defer banner until after first layout pass so ViewportHeight is known for spacer calc
 #pragma warning disable VSTHRD001
             _ = Dispatcher.BeginInvoke(new Action(AppendBanner), System.Windows.Threading.DispatcherPriority.Loaded);
@@ -198,6 +203,59 @@ namespace DevMind
                 await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
                 StatusText.Text = connected ? "Connected" : "Disconnected";
             });
+        }
+
+        // ── Profile switching ─────────────────────────────────────────────────
+
+        private void PopulateProfileComboBox()
+        {
+            _suppressProfileChange = true;
+            ProfileComboBox.Items.Clear();
+            var profiles = _profileManager.GetAllProfiles();
+            var active = _profileManager.GetActiveProfile();
+            int selectedIndex = 0;
+            for (int i = 0; i < profiles.Count; i++)
+            {
+                ProfileComboBox.Items.Add(profiles[i]);
+                if (active != null && string.Equals(profiles[i].Id, active.Id, StringComparison.OrdinalIgnoreCase))
+                    selectedIndex = i;
+            }
+            if (ProfileComboBox.Items.Count > 0)
+                ProfileComboBox.SelectedIndex = selectedIndex;
+            _suppressProfileChange = false;
+        }
+
+        private void ProfileComboBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+        {
+            if (_suppressProfileChange) return;
+            if (!(ProfileComboBox.SelectedItem is ProfileData profile)) return;
+
+            var current = _profileManager.GetActiveProfile();
+            if (current != null && string.Equals(current.Id, profile.Id, StringComparison.OrdinalIgnoreCase))
+                return;
+
+            try
+            {
+                _profileManager.ApplyProfile(profile);
+                // ApplyProfile calls DevMindOptions.Save() which triggers OnSettingsSaved,
+                // which in turn calls Configure + TestConnectionInBackground.
+                AppendOutput($"\n[PROFILE] Switched to: {profile.Name}\n", OutputColor.Dim);
+            }
+            catch (Exception ex)
+            {
+                AppendOutput($"\n[PROFILE] Failed to switch profile: {ex.Message}\n", OutputColor.Error);
+            }
+        }
+
+        private void OnProfileChangedFromOptions()
+        {
+#pragma warning disable VSTHRD001
+            _ = Dispatcher.BeginInvoke(new Action(() =>
+#pragma warning restore VSTHRD001
+            {
+                _profileManager.Reload();
+                PopulateProfileComboBox();
+            }));
         }
 
         // ── System prompt panel ───────────────────────────────────────────────
@@ -790,124 +848,134 @@ namespace DevMind
             // UpdateSystemPrompt() in LlmClient runs synchronously at the start of
             // SendMessageAsync, before the first await, so restoring immediately after
             // RunAsync() returns is safe — no race condition.
-            string originalSystemPrompt = DevMindOptions.Instance.SystemPrompt;
+            //
+            // During agentic resubmits (_shellLoopPending), skip reconstruction entirely.
+            // The combined system prompt was built on the first iteration and is still set
+            // in DevMindOptions.Instance.SystemPrompt (restored by the finally block of the
+            // previous iteration, then unchanged). Rebuilding from DTE on subsequent
+            // iterations risks wobble (null active doc, changed tabs) that would alter the
+            // system prompt string and invalidate the server's entire KV cache from position 0.
+            string originalSystemPrompt = _shellLoopPending ? null : DevMindOptions.Instance.SystemPrompt;
 
-            string projectNamespace = null;
-            try
+            if (!_shellLoopPending)
             {
-                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
-                var dte = await VS.GetServiceAsync<EnvDTE.DTE, EnvDTE.DTE>();
-                var activeDoc = dte?.ActiveDocument;
-                if (activeDoc != null)
+                string projectNamespace = null;
+                try
                 {
-                    var project = activeDoc.ProjectItem?.ContainingProject;
-                    projectNamespace = project?.Properties?.Item("DefaultNamespace")?.Value?.ToString();
+                    await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+                    var dte = await VS.GetServiceAsync<EnvDTE.DTE, EnvDTE.DTE>();
+                    var activeDoc = dte?.ActiveDocument;
+                    if (activeDoc != null)
+                    {
+                        var project = activeDoc.ProjectItem?.ContainingProject;
+                        projectNamespace = project?.Properties?.Item("DefaultNamespace")?.Value?.ToString();
+                    }
                 }
-            }
-            catch { }
+                catch { }
 
-            string buildCommand = activeProjectPath != null
-                ? $"dotnet build \"{activeProjectPath}\""
-                : "msbuild \"C:\\Users\\pkailas.KAILAS\\source\\repos\\DevMind\\DevMind.slnx\" /p:DeployExtension=false /verbosity:minimal";
+                string buildCommand = activeProjectPath != null
+                    ? $"dotnet build \"{activeProjectPath}\""
+                    : "msbuild \"C:\\Users\\pkailas.KAILAS\\source\\repos\\DevMind\\DevMind.slnx\" /p:DeployExtension=false /verbosity:minimal";
 
-            string llmDirective =
-                "## Directives\n" +
-                "FILE: <filename>\n<raw source>\nEND_FILE\n\n" +
-                "PATCH <filename>\nFIND:\n<exact text>\nREPLACE:\n<replacement>\nEND_PATCH\n" +
-                "Multiple FIND/REPLACE pairs are allowed before END_PATCH. END_PATCH is required and must appear on its own line after the last REPLACE block.\n\n" +
-                "SHELL: <command>\n\n" +
-                "READ <filename>  — full if <100 lines, outline otherwise\n" +
-                "READ <filename>:<start>-<end>  — targeted line range (1-based)\n" +
-                "READ! <filename>  — force full content (expensive)\n" +
-                "READ git log [N]  — show recent commit history (default 10, max 50)\n" +
-                "READ git diff [ref]  — show working changes, staged changes, or diff against a commit\n" +
-                "  Examples: READ git diff, READ git diff --staged, READ git diff HEAD~1, READ git diff filename.cs\n\n" +
-                "### GREP — Search File for Pattern\n" +
-                "GREP: \"pattern\" filename\n" +
-                "GREP: \"pattern\" filename:100-200\n\n" +
-                "Searches for lines containing the pattern (case-insensitive substring match) in a single file.\n" +
-                "Returns matching lines with line numbers. Use GREP to locate code before doing a targeted READ.\n\n" +
-                "Example workflow:\n" +
-                "1. GREP: \"SaveFileAsync\" AgenticExecutor.cs     → finds lines 42, 89, 155\n" +
-                "2. READ AgenticExecutor.cs:85-100               → reads context around line 89\n" +
-                "3. PATCH AgenticExecutor.cs                      → applies the change\n\n" +
-                "Rules:\n" +
-                "- Pattern must be in double quotes.\n" +
-                "- Results are capped at 50 matches. If truncated, narrow your pattern or add a line range.\n" +
-                "- GREP does not modify files. It is information-gathering only.\n" +
-                "- Prefer GREP + targeted READ over sequential full-file READs.\n\n" +
-                "### FIND — Cross-File Search\n" +
-                "FIND: \"pattern\" *.cs\n" +
-                "FIND: \"pattern\" Services/*.cs\n\n" +
-                "Searches all files matching the glob for lines containing the pattern (case-insensitive substring match).\n" +
-                "Returns filename:line: content for each match, capped at 100 results across all files.\n\n" +
-                "Use FIND when you need to know where something is used across the project.\n" +
-                "Use GREP when you already know which file to search.\n\n" +
-                "### DELETE — Remove File\n" +
-                "DELETE filename.cs\n\n" +
-                "Deletes a file from disk. Use only when explicitly asked to remove a file.\n" +
-                "Do not use DELETE speculatively — only when the task requires file removal.\n\n" +
-                "### RENAME — Rename/Move File\n" +
-                "RENAME OldFile.cs NewFile.cs\n\n" +
-                "Renames a file on disk. The old file is closed in the editor and the new file is opened.\n" +
-                "Does not update references in other files — use FIND + PATCH to update imports or usings if needed.\n\n" +
-                "### DIFF — Show File Changes\n" +
-                "DIFF filename.cs\n\n" +
-                "Shows all changes made to a file during this conversation as a unified-style diff.\n" +
-                "Use DIFF to review cumulative modifications before confirming task completion.\n" +
-                "Use DIFF after multiple PATCHes to verify the overall result is correct.\n" +
-                "DIFF is information-gathering only — it does not modify files.\n\n" +
-                "### TEST — Run Tests\n" +
-                "TEST ProjectName.csproj\n" +
-                "TEST ProjectName.csproj ClassName.MethodName\n" +
-                "TEST ProjectName.csproj --filter \"FullyQualifiedName~SomeTest\"\n\n" +
-                "Runs dotnet test and returns structured pass/fail results.\n" +
-                "Output is compact — only failed tests show details. Much cheaper than SHELL: dotnet test.\n" +
-                "Use TEST after making changes to verify correctness.\n" +
-                "If tests fail, fix the code with PATCH and TEST again.\n\n" +
-                "## Build Verification\n" +
-                $"After ANY code change emit: SHELL: {buildCommand}\n\n" +
-                "## After PATCH\n" +
-                "You receive [PATCH-RESULT:filename] with ±3 lines of context and >>> CHANGED:/>>> ADDED: markers.\n" +
-                "Full file is cached — use READ filename:start-end for more context.\n\n" +
-                "## Before PATCH\n" +
-                "Never output raw code blocks. Use FILE: for new files, PATCH for edits.\n" +
-                "READ the file first if you have not seen it. You may combine FILE, PATCH, SHELL in one response.\n" +
-                "FIND text must be copied verbatim from READ output — never reconstructed from memory.\n" +
-                "Do not read the same file multiple times. If you have an outline and a line range, that is sufficient context to write a PATCH. Act immediately.\n\n" +
-                "## Large File Strategy\n" +
-                "For files over 100 lines:\n" +
-                "1. First READ gets an outline (types, methods, signatures with line numbers).\n" +
-                "2. Use the outline to identify the exact line range you need.\n" +
-                "3. READ filename:start-end for just that section.\n" +
-                "4. PATCH using only the content from that range.\n" +
-                "Never READ! an entire large file unless explicitly asked. Work from outline → range → patch.\n\n" +
-                "## Core rules\n" +
-                "After a READ is loaded, act on it immediately in the same response. Never emit only READ directives and stop. Every response must include at least one PATCH, FILE, or SHELL directive unless you are responding to a question.\n\n" +
-                "## Task Completion\n" +
-                "When all steps of the task are complete and nothing remains to do, emit:\nDONE\n" +
-                "Only emit DONE when the task is truly finished. Do not emit DONE mid-task.\n\n" +
-                "## Scratchpad\n" +
-                "Emit a SCRATCHPAD: block (end with END_SCRATCHPAD on its own line) to track state across turns:\n" +
-                "SCRATCHPAD:\nGoal: <task>\nFiles: <file> (lines N-M)\nStatus: <PLANNING|PATCHING|BUILDING|DONE>\nLast: <action>\nNext: <step>\nEND_SCRATCHPAD";
-            if (DevMindOptions.Instance.BlockByBlockMode != BlockByBlockModeType.Off)
-
-                llmDirective +=
-                    "\n\n## Block-by-Block Mode (Active)\n" +
-                    "You are operating in block-by-block mode for memory-constrained environments.\n" +
+                string llmDirective =
+                    "## Directives\n" +
+                    "FILE: <filename>\n<raw source>\nEND_FILE\n\n" +
+                    "PATCH <filename>\nFIND:\n<exact text>\nREPLACE:\n<replacement>\nEND_PATCH\n" +
+                    "Multiple FIND/REPLACE pairs are allowed before END_PATCH. END_PATCH is required and must appear on its own line after the last REPLACE block.\n\n" +
+                    "SHELL: <command>\n\n" +
+                    "READ <filename>  — full if <100 lines, outline otherwise\n" +
+                    "READ <filename>:<start>-<end>  — targeted line range (1-based)\n" +
+                    "READ! <filename>  — force full content (expensive)\n" +
+                    "READ git log [N]  — show recent commit history (default 10, max 50)\n" +
+                    "READ git diff [ref]  — show working changes, staged changes, or diff against a commit\n" +
+                    "  Examples: READ git diff, READ git diff --staged, READ git diff HEAD~1, READ git diff filename.cs\n\n" +
+                    "### GREP — Search File for Pattern\n" +
+                    "GREP: \"pattern\" filename\n" +
+                    "GREP: \"pattern\" filename:100-200\n\n" +
+                    "Searches for lines containing the pattern (case-insensitive substring match) in a single file.\n" +
+                    "Returns matching lines with line numbers. Use GREP to locate code before doing a targeted READ.\n\n" +
+                    "Example workflow:\n" +
+                    "1. GREP: \"SaveFileAsync\" AgenticExecutor.cs     → finds lines 42, 89, 155\n" +
+                    "2. READ AgenticExecutor.cs:85-100               → reads context around line 89\n" +
+                    "3. PATCH AgenticExecutor.cs                      → applies the change\n\n" +
                     "Rules:\n" +
-                    "1. Start each task by READing the file outline only — do not request full content.\n" +
-                    "2. Each turn: READ one range, emit one PATCH, update SCRATCHPAD with remaining steps.\n" +
-                    "3. Do not attempt multiple file sections in a single response.\n" +
-                    "4. After each PATCH, mark that step done in SCRATCHPAD before continuing.\n" +
-                    "5. If more steps remain, state the next step clearly and wait for the next turn.\n" +
-                    "Work incrementally: outline → one range → one patch → repeat until done.";
-            if (!string.IsNullOrEmpty(projectNamespace))
-                llmDirective += $"\n- When creating new files, use the namespace '{projectNamespace}'.";
-            string combined = $"{originalSystemPrompt}\n\n{llmDirective}";
-            if (!string.IsNullOrEmpty(_devMindContext))
-                combined += $"\n\n--- Project Context (DevMind.md) ---\n{_devMindContext}\n---";
-            DevMindOptions.Instance.SystemPrompt = combined;
+                    "- Pattern must be in double quotes.\n" +
+                    "- Results are capped at 50 matches. If truncated, narrow your pattern or add a line range.\n" +
+                    "- GREP does not modify files. It is information-gathering only.\n" +
+                    "- Prefer GREP + targeted READ over sequential full-file READs.\n\n" +
+                    "### FIND — Cross-File Search\n" +
+                    "FIND: \"pattern\" *.cs\n" +
+                    "FIND: \"pattern\" Services/*.cs\n\n" +
+                    "Searches all files matching the glob for lines containing the pattern (case-insensitive substring match).\n" +
+                    "Returns filename:line: content for each match, capped at 100 results across all files.\n\n" +
+                    "Use FIND when you need to know where something is used across the project.\n" +
+                    "Use GREP when you already know which file to search.\n\n" +
+                    "### DELETE — Remove File\n" +
+                    "DELETE filename.cs\n\n" +
+                    "Deletes a file from disk. Use only when explicitly asked to remove a file.\n" +
+                    "Do not use DELETE speculatively — only when the task requires file removal.\n\n" +
+                    "### RENAME — Rename/Move File\n" +
+                    "RENAME OldFile.cs NewFile.cs\n\n" +
+                    "Renames a file on disk. The old file is closed in the editor and the new file is opened.\n" +
+                    "Does not update references in other files — use FIND + PATCH to update imports or usings if needed.\n\n" +
+                    "### DIFF — Show File Changes\n" +
+                    "DIFF filename.cs\n\n" +
+                    "Shows all changes made to a file during this conversation as a unified-style diff.\n" +
+                    "Use DIFF to review cumulative modifications before confirming task completion.\n" +
+                    "Use DIFF after multiple PATCHes to verify the overall result is correct.\n" +
+                    "DIFF is information-gathering only — it does not modify files.\n\n" +
+                    "### TEST — Run Tests\n" +
+                    "TEST ProjectName.csproj\n" +
+                    "TEST ProjectName.csproj ClassName.MethodName\n" +
+                    "TEST ProjectName.csproj --filter \"FullyQualifiedName~SomeTest\"\n\n" +
+                    "Runs dotnet test and returns structured pass/fail results.\n" +
+                    "Output is compact — only failed tests show details. Much cheaper than SHELL: dotnet test.\n" +
+                    "Use TEST after making changes to verify correctness.\n" +
+                    "If tests fail, fix the code with PATCH and TEST again.\n\n" +
+                    "## Build Verification\n" +
+                    $"After ANY code change emit: SHELL: {buildCommand}\n\n" +
+                    "## After PATCH\n" +
+                    "You receive [PATCH-RESULT:filename] with ±3 lines of context and >>> CHANGED:/>>> ADDED: markers.\n" +
+                    "Full file is cached — use READ filename:start-end for more context.\n\n" +
+                    "## Before PATCH\n" +
+                    "Never output raw code blocks. Use FILE: for new files, PATCH for edits.\n" +
+                    "READ the file first if you have not seen it. You may combine FILE, PATCH, SHELL in one response.\n" +
+                    "FIND text must be copied verbatim from READ output — never reconstructed from memory.\n" +
+                    "Do not read the same file multiple times. If you have an outline and a line range, that is sufficient context to write a PATCH. Act immediately.\n\n" +
+                    "## Large File Strategy\n" +
+                    "For files over 100 lines:\n" +
+                    "1. First READ gets an outline (types, methods, signatures with line numbers).\n" +
+                    "2. Use the outline to identify the exact line range you need.\n" +
+                    "3. READ filename:start-end for just that section.\n" +
+                    "4. PATCH using only the content from that range.\n" +
+                    "Never READ! an entire large file unless explicitly asked. Work from outline → range → patch.\n\n" +
+                    "## Core rules\n" +
+                    "After a READ is loaded, act on it immediately in the same response. Never emit only READ directives and stop. Every response must include at least one PATCH, FILE, or SHELL directive unless you are responding to a question.\n\n" +
+                    "## Task Completion\n" +
+                    "When all steps of the task are complete and nothing remains to do, emit:\nDONE\n" +
+                    "Only emit DONE when the task is truly finished. Do not emit DONE mid-task.\n\n" +
+                    "## Scratchpad\n" +
+                    "Emit a SCRATCHPAD: block (end with END_SCRATCHPAD on its own line) to track state across turns:\n" +
+                    "SCRATCHPAD:\nGoal: <task>\nFiles: <file> (lines N-M)\nStatus: <PLANNING|PATCHING|BUILDING|DONE>\nLast: <action>\nNext: <step>\nEND_SCRATCHPAD";
+                if (DevMindOptions.Instance.BlockByBlockMode != BlockByBlockModeType.Off)
+
+                    llmDirective +=
+                        "\n\n## Block-by-Block Mode (Active)\n" +
+                        "You are operating in block-by-block mode for memory-constrained environments.\n" +
+                        "Rules:\n" +
+                        "1. Start each task by READing the file outline only — do not request full content.\n" +
+                        "2. Each turn: READ one range, emit one PATCH, update SCRATCHPAD with remaining steps.\n" +
+                        "3. Do not attempt multiple file sections in a single response.\n" +
+                        "4. After each PATCH, mark that step done in SCRATCHPAD before continuing.\n" +
+                        "5. If more steps remain, state the next step clearly and wait for the next turn.\n" +
+                        "Work incrementally: outline → one range → one patch → repeat until done.";
+                if (!string.IsNullOrEmpty(projectNamespace))
+                    llmDirective += $"\n- When creating new files, use the namespace '{projectNamespace}'.";
+                string combined = $"{originalSystemPrompt}\n\n{llmDirective}";
+                if (!string.IsNullOrEmpty(_devMindContext))
+                    combined += $"\n\n--- Project Context (DevMind.md) ---\n{_devMindContext}\n---";
+                DevMindOptions.Instance.SystemPrompt = combined;
+            }
 
             System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] About to call SendMessageAsync — contextualMessage length={contextualMessage.Length}");
 
@@ -1068,8 +1136,6 @@ namespace DevMind
                                             "Re-attempt the task now using the correct format.";
                                         string retryPrompt = _pendingResubmitPrompt ?? InputTextBox.Text;
                                         _pendingResubmitPrompt = null;
-                                        string fmtPostTurn = _llmClient.CompressLastUserReadBlocks();
-                                        if (fmtPostTurn != null) AppendOutput(fmtPostTurn, OutputColor.Dim);
                                         InputTextBox.Text = retryPrompt;
                                         _shellLoopPending = true;
                                         _agenticDepth = 1;
@@ -1183,8 +1249,6 @@ namespace DevMind
                                                     // All numbered steps are DONE — task complete
                                                     AppendOutput("[AGENTIC] Block-by-block: all steps complete.\n", OutputColor.Success);
                                                     _blockByBlockStep = 0;
-                                                    string bbDeferredLog = _llmClient.RunDeferredCompression();
-                                                    if (bbDeferredLog != null) AppendOutput(bbDeferredLog, OutputColor.Dim);
                                                     blockByBlockAllDone = true;
                                                 }
                                             }
@@ -1242,10 +1306,6 @@ namespace DevMind
                                                 else
                                                     InputTextBox.Text = "Continue with remaining steps (modify other files, run builds). When done, emit DONE.";
 
-                                                // Post-turn: outline-compress READ blocks in the completed user message
-                                                string postTurnMsg = _llmClient.CompressLastUserReadBlocks();
-                                                if (postTurnMsg != null) AppendOutput(postTurnMsg, OutputColor.Dim);
-
                                                 // Check cancellation before re-triggering
                                                 if (_cts.IsCancellationRequested)
                                                 {
@@ -1294,16 +1354,6 @@ namespace DevMind
                                                         : cbPct < 80 ? OutputColor.Normal
                                                         : OutputColor.Error;
                                     AppendOutput($"[CONTEXT] Working: {cbUsed:N0} / {cbBudget:N0} ({cbPct}%) | Response headroom: {cbHeadroom:N0} reserved\n", cbColor);
-                                }
-
-                                // Deferred compression: run all five phases once the agentic loop
-                                // has completed to keep history lean for the next user turn,
-                                // without invalidating the KV cache during agentic iterations.
-                                if (_shellLoopPending)
-                                {
-                                    string deferredLog = _llmClient.RunDeferredCompression();
-                                    if (deferredLog != null)
-                                        AppendOutput(deferredLog, OutputColor.Dim);
                                 }
 
                                 _agenticDepth = 0;
@@ -1395,7 +1445,9 @@ namespace DevMind
                 // Restore original system prompt now that RunAsync has started and
                 // UpdateSystemPrompt() has captured the combined value synchronously
                 // before the first await in SendMessageAsync.
-                DevMindOptions.Instance.SystemPrompt = originalSystemPrompt;
+                // originalSystemPrompt is null during agentic resubmits — skip restore.
+                if (originalSystemPrompt != null)
+                    DevMindOptions.Instance.SystemPrompt = originalSystemPrompt;
             }
         }
 

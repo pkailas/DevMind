@@ -1,10 +1,15 @@
-// File: DevMindOptionsPage.cs  v5.9
+// File: DevMindOptionsPage.cs  v6.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
+using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Drawing.Design;
+using System.Globalization;
+using System.Linq;
 using System.Runtime.InteropServices;
+using System.Windows;
 
 namespace DevMind
 {
@@ -49,6 +54,32 @@ namespace DevMind
 
 
     /// <summary>
+    /// TypeConverter that populates the Active Profile dropdown from ProfileManager.
+    /// </summary>
+    public class ActiveProfileConverter : StringConverter
+    {
+        public override bool GetStandardValuesSupported(ITypeDescriptorContext context) => true;
+
+        public override bool GetStandardValuesExclusive(ITypeDescriptorContext context) => true;
+
+        public override StandardValuesCollection GetStandardValues(ITypeDescriptorContext context)
+        {
+            try
+            {
+                var pm = new ProfileManager();
+                var names = pm.GetAllProfiles().Select(p => p.Name).ToList();
+                if (names.Count == 0)
+                    names.Add("(none)");
+                return new StandardValuesCollection(names);
+            }
+            catch
+            {
+                return new StandardValuesCollection(new List<string> { "(none)" });
+            }
+        }
+    }
+
+    /// <summary>
     /// Provider class that hosts the options page in the Tools > Options dialog.
     /// </summary>
     internal partial class OptionsProvider
@@ -66,6 +97,203 @@ namespace DevMind
     /// </summary>
     public class DevMindOptions : BaseOptionModel<DevMindOptions>
     {
+        /// <summary>
+        /// Raised when a profile action (save/delete/rename) is performed from the Options page,
+        /// so the toolbar dropdown can refresh.
+        /// </summary>
+        public static event Action ProfileChanged;
+
+        // ── Profile Management ───────────────────────────────────────────────
+
+        /// <summary>
+        /// The currently active profile. Select from the dropdown to switch profiles.
+        /// </summary>
+        [Category("  Profile")]
+        [DisplayName("Active Profile")]
+        [Description("Select a profile from the dropdown to switch connection settings immediately.")]
+        [TypeConverter(typeof(ActiveProfileConverter))]
+        [DefaultValue("")]
+        public string ActiveProfileName
+        {
+            get
+            {
+                try
+                {
+                    var pm = new ProfileManager();
+                    var active = pm.GetActiveProfile();
+                    return active?.Name ?? "(none)";
+                }
+                catch { return "(unknown)"; }
+            }
+            set
+            {
+                if (string.IsNullOrWhiteSpace(value) || value == "(none)")
+                    return;
+                try
+                {
+                    var pm = new ProfileManager();
+                    var active = pm.GetActiveProfile();
+                    if (active != null && string.Equals(active.Name, value, StringComparison.OrdinalIgnoreCase))
+                        return;
+                    var target = pm.GetAllProfiles()
+                        .FirstOrDefault(p => string.Equals(p.Name, value, StringComparison.OrdinalIgnoreCase));
+                    if (target != null)
+                    {
+                        pm.SetActiveProfile(target.Id);
+                        pm.ApplyProfile(target);
+                        ProfileChanged?.Invoke();
+                    }
+                }
+                catch (InvalidOperationException ex)
+                {
+                    System.Windows.MessageBox.Show(ex.Message, "DevMind — Switch Profile",
+                        MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Enter a profile name and click Apply/OK to save the current settings as a new profile.
+        /// </summary>
+        [Category("  Profile")]
+        [DisplayName("Save Current as New Profile")]
+        [Description("Type a profile name here and click Apply or OK to save the current connection settings as a new named profile.")]
+        [DefaultValue("")]
+        public string SaveAsNewProfile { get; set; } = "";
+
+        /// <summary>
+        /// Set to True and click Apply/OK to delete the currently active profile.
+        /// Resets to False after the action completes.
+        /// </summary>
+        [Category("  Profile")]
+        [DisplayName("Delete Current Profile")]
+        [Description("Set to True and click Apply or OK to delete the currently active profile. You will be prompted for confirmation.")]
+        [DefaultValue(false)]
+        public bool DeleteCurrentProfile { get; set; } = false;
+
+        /// <summary>
+        /// Enter a new name and click Apply/OK to rename the currently active profile.
+        /// </summary>
+        [Category("  Profile")]
+        [DisplayName("Rename Current Profile")]
+        [Description("Type a new name here and click Apply or OK to rename the currently active profile.")]
+        [DefaultValue("")]
+        public string RenameCurrentProfile { get; set; } = "";
+
+        /// <summary>
+        /// Set to True and click Apply/OK to overwrite the active profile's stored
+        /// values with the current settings. This is how you explicitly save tweaks
+        /// back to a profile.
+        /// </summary>
+        [Category("  Profile")]
+        [DisplayName("Update Current Profile")]
+        [Description("Set to True and click Apply or OK to overwrite the active profile with the current connection settings. Resets to False after the action completes.")]
+        [DefaultValue(false)]
+        public bool UpdateCurrentProfile { get; set; } = false;
+
+        public override void Save()
+        {
+            bool changed = false;
+
+            // ── Save as new profile ──
+            if (!string.IsNullOrWhiteSpace(SaveAsNewProfile))
+            {
+                try
+                {
+                    var pm = new ProfileManager();
+                    pm.SaveCurrentAsProfile(SaveAsNewProfile);
+                    changed = true;
+                }
+                catch (InvalidOperationException ex)
+                {
+                    System.Windows.MessageBox.Show(ex.Message, "DevMind — Save Profile",
+                        MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
+                SaveAsNewProfile = "";
+            }
+
+            // ── Delete current profile ──
+            if (DeleteCurrentProfile)
+            {
+                try
+                {
+                    var pm = new ProfileManager();
+                    var active = pm.GetActiveProfile();
+                    if (active != null)
+                    {
+                        var result = System.Windows.MessageBox.Show(
+                            $"Delete profile \"{active.Name}\"?\nThis cannot be undone.",
+                            "DevMind — Delete Profile",
+                            MessageBoxButton.YesNo, MessageBoxImage.Question);
+                        if (result == MessageBoxResult.Yes)
+                        {
+                            pm.DeleteProfile(active.Id);
+                            // Switch to the first remaining profile
+                            var next = pm.GetActiveProfile();
+                            if (next != null)
+                                pm.ApplyProfile(next);
+                            changed = true;
+                        }
+                    }
+                }
+                catch (InvalidOperationException ex)
+                {
+                    System.Windows.MessageBox.Show(ex.Message, "DevMind — Delete Profile",
+                        MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
+                DeleteCurrentProfile = false;
+            }
+
+            // ── Rename current profile ──
+            if (!string.IsNullOrWhiteSpace(RenameCurrentProfile))
+            {
+                try
+                {
+                    var pm = new ProfileManager();
+                    var active = pm.GetActiveProfile();
+                    if (active != null)
+                    {
+                        pm.RenameProfile(active.Id, RenameCurrentProfile);
+                        changed = true;
+                    }
+                }
+                catch (InvalidOperationException ex)
+                {
+                    System.Windows.MessageBox.Show(ex.Message, "DevMind — Rename Profile",
+                        MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
+                RenameCurrentProfile = "";
+            }
+
+            // ── Update current profile ──
+            if (UpdateCurrentProfile)
+            {
+                try
+                {
+                    var pm = new ProfileManager();
+                    var active = pm.GetActiveProfile();
+                    if (active != null)
+                    {
+                        pm.UpdateActiveProfileFromSettings();
+                        changed = true;
+                    }
+                }
+                catch (InvalidOperationException ex)
+                {
+                    System.Windows.MessageBox.Show(ex.Message, "DevMind — Update Profile",
+                        MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
+                UpdateCurrentProfile = false;
+            }
+
+            base.Save();
+
+            if (changed)
+                ProfileChanged?.Invoke();
+        }
+
+        // ── Connection ───────────────────────────────────────────────────────
+
         /// <summary>
         /// The base URL for the OpenAI-compatible API endpoint (e.g., LM Studio, Ollama).
         /// </summary>

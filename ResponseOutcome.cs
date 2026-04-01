@@ -1,6 +1,7 @@
-// File: ResponseOutcome.cs  v1.7.0
+// File: ResponseOutcome.cs  v1.8.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
+using System;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -71,8 +72,51 @@ namespace DevMind
             bool hasInfoGather    = HasReadRequests || HasGrepRequests || HasFindRequests || HasDiffRequests;
 
             HasAnyDirective   = hasMutatingAction || hasInfoGather;
-            IsEmptyOrBareCode = !HasAnyDirective && !IsDone;
+            IsEmptyOrBareCode = !HasAnyDirective && !IsDone && ContainsBareCodeBlock(Blocks);
             IsReadOnly        = hasInfoGather && !hasMutatingAction;
+        }
+
+        /// <summary>
+        /// Returns true only when the text blocks contain a fenced code block
+        /// (``` delimiters) and no meaningful prose outside the fences.
+        /// A response with prose text (greetings, bullet lists, explanations)
+        /// that happens to include inline code or code fences is NOT bare code.
+        /// </summary>
+        private static bool ContainsBareCodeBlock(List<ResponseBlock> blocks)
+        {
+            // Gather all text content from Text blocks.
+            string allText = string.Join("\n",
+                blocks.Where(b => b.Type == BlockType.Text)
+                      .Select(b => b.Content ?? string.Empty));
+
+            if (string.IsNullOrWhiteSpace(allText))
+                return false;
+
+            // Must contain at least one opening ``` fence to be considered code.
+            string[] lines = allText.Split(new[] { '\r', '\n' }, StringSplitOptions.None);
+            bool hasFence = false;
+            int proseChars = 0;
+            bool insideFence = false;
+
+            foreach (string line in lines)
+            {
+                string trimmed = line.TrimStart();
+                if (trimmed.StartsWith("```"))
+                {
+                    hasFence = true;
+                    insideFence = !insideFence;
+                    continue;
+                }
+
+                // Count non-whitespace characters outside code fences as prose.
+                if (!insideFence)
+                    proseChars += trimmed.Length;
+            }
+
+            // Only flag as bare code when there IS a code fence AND the prose
+            // outside the fence is negligible (< 20 chars, allowing for minor
+            // artifacts like a trailing newline).
+            return hasFence && proseChars < 20;
         }
 
         /// <summary>

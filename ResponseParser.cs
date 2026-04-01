@@ -935,7 +935,8 @@ namespace DevMind
                         if (string.IsNullOrWhiteSpace(lines[j])) continue;
                         nextIsDirective = _patchStart.IsMatch(lines[j])
                                        || _fileStart.IsMatch(lines[j])
-                                       || _shellLine.IsMatch(lines[j]);
+                                       || _shellLine.IsMatch(lines[j])
+                                       || _fileEnd.IsMatch(lines[j]);
                         break;
                     }
                     bool prevIsDirective = false;
@@ -945,6 +946,7 @@ namespace DevMind
                         prevIsDirective = _patchStart.IsMatch(lines[j])
                                        || _fileStart.IsMatch(lines[j])
                                        || _shellLine.IsMatch(lines[j])
+                                       || _fileEnd.IsMatch(lines[j])
                                        || lines[j].StartsWith("FIND:", StringComparison.OrdinalIgnoreCase)
                                        || lines[j].StartsWith("REPLACE:", StringComparison.OrdinalIgnoreCase);
                         break;

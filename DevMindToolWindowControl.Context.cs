@@ -460,13 +460,22 @@ namespace DevMind
                     _taskReadFiles.Add(fileNameOnly);
                     int lineCount = content.Split('\n').Length;
 
-                    bool injectOutline = lineCount >= ReadOutlineThresholdLines && !isForceRead;
+                    // Pre-append compression (Rule 4): if we've already read this file
+                    // this session, inject an outline instead of full content. The model
+                    // already saw the full content on the first read. This replaces the
+                    // old post-append SqueezeReadContent/CompressLastUserReadBlocks approach.
+                    bool alreadyRead = _llmClient._filesReadThisSession.Contains(fileNameOnly);
+                    bool injectOutline = (alreadyRead || lineCount >= ReadOutlineThresholdLines) && !isForceRead;
+
+                    // Track that we've now read this file
+                    _llmClient._filesReadThisSession.Add(fileNameOnly);
+
                     if (injectOutline)
                     {
                         string outlineText = LlmClient.GenerateOutline(fileNameOnly, content);
                         _readContext = (_readContext ?? "") +
                             $"[READ:{fileNameOnly}] ({lineCount} lines — outline only, use READ {fileNameOnly}:start-end for detail)\n{outlineText}\n\n";
-                        AppendOutput($"[READ] {fullPath} ({lineCount} lines — outline)\n", OutputColor.Success);
+                        AppendOutput($"[READ] {fullPath} ({lineCount} lines — outline{(alreadyRead ? ", re-read" : "")})\n", OutputColor.Success);
                         if (showOutline)
                             AppendOutlineToPanel(fullPath, content);
                     }

@@ -1,4 +1,4 @@
-# CLAUDE.md — DevMind Developer Reference  v1.9
+# CLAUDE.md — DevMind Developer Reference  v2.0
 
 ## Project Overview
 
@@ -6,7 +6,7 @@
 
 - **Product**: DevMind
 - **Brand**: iOnline Consulting LLC
-- **Current Version**: v6.0.83
+- **Current Version**: v6.0.132
 - **Platform**: Visual Studio 2022+ (VSIX), .NET Framework (VSSDK requirement)
 - **Language**: C# with WPF UI
 
@@ -35,7 +35,8 @@
 | `IAgenticHost.cs` | Interface abstracting all VS/file-system/UI side effects from the pipeline |
 | `OutputColor.cs` | Public enum for output panel color categories |
 | `LlmClient.cs` | HTTP client — SSE streaming to OpenAI-compatible `/v1/chat/completions` |
-| `DevMindOptionsPage.cs` | VS Tools > Options settings — EndpointUrl, ApiKey, ModelName, ServerType, CustomContextEndpoint, SystemPrompt, AgenticLoopMaxDepth, ShowLlmThinking |
+| `DevMindOptionsPage.cs` | VS Tools > Options settings — EndpointUrl, ApiKey, ModelName, ServerType, CustomContextEndpoint, SystemPrompt, AgenticLoopMaxDepth, ShowLlmThinking, profile management actions |
+| `ProfileManager.cs` | Named connection profiles — CRUD, save/load, apply to settings. Stored in `%LOCALAPPDATA%\DevMind\profiles.json` |
 | `FileContentCache.cs` | In-memory line-indexed file cache — powers `READ filename:start-end` line-range access |
 | `DiffPreviewCard.xaml/.cs` | Inline diff preview card — rendered in OutputBox for PATCH confirmation; exposes `Task<bool> UserDecision` |
 | `DiffBatchBar.xaml/.cs` | Batch action bar — "Apply All / Skip All" shown when 2+ PATCH blocks need confirmation |
@@ -96,7 +97,7 @@ A single LLM response can contain any combination of FILE:, PATCH, SHELL:, READ,
 ```
 Row 0  Height="Auto"   — System prompt collapsible panel (ToggleButton + Border)
 Row 1  Height="Auto"   — Input area (Border + TextBox, AcceptsReturn, MinHeight=60)
-Row 2  Height="Auto"   — Toolbar (Ask | Run | Stop | Restart | Clear | ⌫ | ContextIndicator | StatusText)
+Row 2  Height="Auto"   — Toolbar (Ask | Run | Stop | Restart | Clear | ⌫ | ProfileComboBox | ContextIndicator | StatusText)
 Row 3  Height="*"      — DockPanel:
                            └─ Bottom: Terminal strip ("> " + TerminalInputBox, single-line, Consolas)
                            └─ Fill:   OutputBox (RichTextBox, dark theme, Consolas, read-only)
@@ -138,6 +139,8 @@ v5.0 eliminates this. All tokens stream into a single buffer. `ResponseParser.Pa
 
 ### Cancellation
 `_cts` (`CancellationTokenSource`) is created fresh in `SendToLlm()` and passed to `LlmClient.SendMessageAsync()`. `OperationCanceledException` is swallowed silently in `LlmClient` — cancellation is not treated as an error. Stop button is enabled (`IsEnabled`) during generation and during diff preview (`_diffPreviewPending`); Ask/Run are disabled. Cancellation is checked before agentic re-triggers to prevent frozen loops. When Stop is pressed during diff preview, all pending `DiffPreviewCard` decisions are cancelled via `TrySetCanceled()`.
+
+**SSE read loop**: After the first token is received, the SSE read loop uses 500ms cancellation polling — `Task.WhenAny(readTask, Task.Delay(500, cancellationToken))` — so the Stop button responds promptly even when the server holds the connection open between SSE lines.
 
 ### Thread Model
 All UI updates must be dispatched to the main thread. The `onToken`, `onComplete`, and `onError` callbacks from `LlmClient` use `Dispatcher.BeginInvoke` (FIFO queue) rather than `ThreadHelper.JoinableTaskFactory.Run` to avoid blocking the SSE streaming reader and to guarantee FIFO token ordering. VSSDK007/VSTHRD001/VSTHRD110 pragmas suppress fire-and-forget and dispatcher warnings for these intentional patterns.
@@ -359,7 +362,8 @@ Next: <next step>
 END_SCRATCHPAD
 ```
 - Terminated by `END_SCRATCHPAD` on its own line.
-- Stored in `LlmClient._taskScratchpad`; injected into context on subsequent turns (≤200 tokens).
+- Stored in `LlmClient._taskScratchpad` (≤200 tokens).
+- The model reads its own prior SCRATCHPAD output from conversation history — no phantom injection into user messages via `BuildRequestJson`.
 - Helps the model track multi-step task state across turns without repeating context.
 
 ---
@@ -376,8 +380,6 @@ After `onComplete` processes all directive blocks, DevMind decides whether to re
 6. **Auto-READ resubmit** — response was only a READ request → load files, resubmit original prompt (works at depth 0 and depth > 0).
 7. **Bare code block** — response had fenced code but no directives → retry once with correction prompt.
 8. **Depth cap** (`AgenticLoopMaxDepth`, default 5) → stop, suggest UNDO.
-
-**Post-turn READ compression**: After each agentic turn, `CompressLastUserReadBlocks()` replaces full READ file content in the completed user message with an outline, so the LLM had full content during its turn but history stays lean for the next iteration.
 
 State fields: `_agenticDepth`, `_shellLoopPending`, `_lastShellExitCode`, `_pendingShellContext`, `_pendingResubmitPrompt`.
 
@@ -485,7 +487,7 @@ Fields: `_suppressDisplay`.
 | `AlwaysConfirmPatch` | `false` | When `true`, all PATCHes pause for diff preview confirmation; when `false` only fuzzy matches require confirmation |
 | `FirstTokenTimeoutMinutes` | `5` | Max minutes to wait for the first token (covers prompt-ingestion phase) |
 | `RequestTimeoutMinutes` | `10` | Max minutes for a complete LLM response; sets `HttpClient.Timeout` |
-| `ContextEviction` | `Balanced` | `Off` / `Balanced` / `Aggressive` — tiered eviction of stale context turns |
+| `ContextEviction` | `Balanced` | `Off` / `Balanced` / `Aggressive` — proactive turn dropping by age threshold (8 turns for Balanced, 5 for Aggressive) |
 | `ShowDebugOutput` | `false` | Enable debug logging to OutputBox for context management and directive execution |
 
 Settings are accessed via `DevMindOptions.Instance` (synchronous) or `GetLiveInstanceAsync()` (async). The `DevMindOptions.Saved` event fires when the user saves options, triggering `LlmClient.Configure()` and a background connection test.
@@ -501,14 +503,15 @@ At the start of each `SendToLlm()` call, DevMind temporarily injects into the sy
 3. **Active project path** — DTE walks active document → containing `.csproj`; path injected so the model knows which project to target for builds and file creation.
 4. **DevMind.md** — project-specific context from solution root (lazy-loaded, cached until `/reload`).
 
-The original system prompt is restored immediately after `RunAsync()` returns (safe because `UpdateSystemPrompt()` in LlmClient runs synchronously before the first await).
+**Stability**: `UpdateSystemPrompt()` in `LlmClient` compares the new prompt text against the current system message via `string.Equals(..., Ordinal)` and skips replacement if identical — this preserves the KV cache prefix across agentic resubmits. The system prompt is not rebuilt during agentic iterations.
 
 ---
 
 ## LlmClient API
 
 ```csharp
-// Configure endpoint (called on startup and settings change)
+// Configure endpoint (called on startup, settings change, and profile switch)
+// Recreates the HttpClient to avoid InvalidOperationException on header changes.
 void Configure(string endpointUrl, string apiKey)
 
 // Stream a message. All callbacks are invoked on the caller's thread.
@@ -540,19 +543,56 @@ Multi-block input can be typed into the input box using `[WAIT]` as a separator 
 - All other blocks are sent to the LLM; execution pauses until `onComplete` fires before sending the next block.
 - Implemented via `ProcessBatchInputAsync()`, signaled by `_batchOnComplete` TaskCompletionSource callback.
 
-## Squeeze Algorithm (LlmClient — v5.25+)
+## Settings Profiles (v6.0.132+)
 
-Before trimming history by token count, `LlmClient` runs a **squeeze pass** to structurally compress history without losing semantic content:
+Named connection profiles allow switching between LLM endpoints without re-entering settings.
 
-| Pass | What it does |
-|------|-------------|
-| READ deduplication | Collapses repeated reads of the same file into the most recent copy |
-| Patch chain collapse | Merges sequential PATCH results to the same file into a single diff summary |
-| Eager shell compression | Compresses verbose shell output (build logs, stack traces) early, not just on overflow |
-| Outline collapse | Strips doc comments from outline blocks; retains signatures only |
-| Compression metadata | Injects steering signals (e.g. `[COMPRESSED]` markers) so the LLM knows history was trimmed |
+### ProfileManager
 
-Squeeze runs before the hard-trim (`TrimHistoryToFit`) and after each agentic turn via `RunDeferredCompression`. During active agentic iterations, full content is preserved for the current turn; compression is deferred to `onComplete` to keep tokens lean for the next iteration.
+- Profiles are stored in `%LOCALAPPDATA%\DevMind\profiles.json` as a `ProfileStore` (JSON, versioned schema).
+- Each `ProfileData` stores: `Id`, `Name`, `Endpoint`, `ApiKey`, `ModelName`, `ManualContextSize`, `ServerType`, `ContextEviction`.
+- On first run, a "Default" profile is seeded from the current `DevMindOptions.Instance` values.
+- Schema migration: if `ProfileStore.Version < CurrentVersion`, the store is reset and re-seeded.
+
+### CRUD Operations
+
+- **Create**: `CreateProfile(name, ...)` or `SaveCurrentAsProfile(name)` — slug-based IDs, duplicate name check.
+- **Update**: `UpdateProfile(profile)` or `UpdateActiveProfileFromSettings()` — explicit save model, not auto-sync.
+- **Delete**: `DeleteProfile(id)` — switches active profile to the next available.
+- **Rename**: `RenameProfile(id, newName)` — validates uniqueness.
+- **Duplicate**: `DuplicateProfile(id)` — creates a copy with "(copy)" suffix.
+
+### Switching Profiles
+
+- `ApplyProfile(profile)` writes profile values into `DevMindOptions.Instance`, calls `opts.Save()`, and raises `ProfileApplied` event.
+- The `ProfileApplied` event triggers `LlmClient.Configure()` in the tool window, which **recreates the `HttpClient`** (via `RecreateHttpClient()`) to avoid `InvalidOperationException` when changing headers on an in-use client.
+
+### UI Integration
+
+- **Toolbar dropdown**: `ComboBox` in the toolbar (Row 2) bound to `ProfileManager.GetAllProfiles()`. Switching triggers `ApplyProfile`.
+- **Options page**: `DevMindOptionsPage.cs` exposes profile actions as settings properties:
+  - `ActiveProfileName` — dropdown via `ActiveProfileConverter` (TypeConverter).
+  - `SaveAsNewProfile` — text field, creates profile on Apply/OK, resets to empty.
+  - `DeleteCurrentProfile` — bool, prompts confirmation, resets to false.
+  - `RenameCurrentProfile` — text field, renames on Apply/OK, resets to empty.
+  - `UpdateCurrentProfile` — bool, overwrites active profile from current settings, resets to false.
+- `DevMindOptions.ProfileChanged` event fires after any profile CRUD action so the toolbar dropdown can refresh.
+
+## Append-Only Context Architecture (v6.0.132+)
+
+Conversation history is **immutable after append**. Once a `ChatMessage` is added to `_conversationHistory`, its content is never modified. There is no squeeze algorithm, no retroactive compression, no `CompressLastUserReadBlocks`, no `RunDeferredCompression`, no `InjectContextNote`/`StripContextNotes`, no `IsFrozen`/`IsSent` flags.
+
+Context management is **pre-append only**:
+
+| Mechanism | When | What it does |
+|-----------|------|-------------|
+| Outline on re-read | Before append | Files already in `_filesReadThisSession` get an outline instead of full content |
+| Shell summary | Before append | `BuildShellSummary()` classifies shell output into a compact summary before adding to history |
+| Pre-append budget guard | Before append | `ApplyPreAppendBudgetGuard()` truncates oversized READ content before it enters history |
+| Budget guard (always-on) | After append | Drops oldest turns at 80% (soft, with summaries) and 95% (hard, no summaries) of `HistoryHardLimit` |
+| Proactive eviction | Before append | `EvictStaleContext()` drops messages older than the age threshold (when `ContextEviction` ≠ Off) |
+
+`BuildRequestJson` serializes `_conversationHistory` as a 1:1 mirror — no phantom SCRATCHPAD injection, no last-minute modifications. What you store is what you send. What you send is what the KV cache sees.
 
 ## Context Budget (ContextBudget class)
 
@@ -572,47 +612,39 @@ Squeeze runs before the hard-trim (`TrimHistoryToFit`) and after each agentic tu
 - Detection is awaited (up to 5 seconds) before the first `SendMessageAsync` call.
 - `HistoryHardLimit = TotalLimit - ResponseHeadroomLimit` — history must never exceed this.
 
-## Tiered Context Eviction (v6.0.84+)
+## Proactive Context Eviction (v6.0.132+)
 
-~~## Tiered Context Eviction (v6.0.84+)~~ — **Implemented v6.0.91**. Tiered context eviction (HOT/WARM/COLD/DROP) with Off/Balanced/Aggressive modes shipped.
-
-Before each `SendMessageAsync`, `EvictStaleContext()` compresses or drops stale messages based on their age relative to the current turn. Controlled by `ContextEviction` setting (`Off` / `Balanced` / `Aggressive`).
+`EvictStaleContext()` runs at the top of `SendMessageAsync` (before user message is added), only when `deferCompression` is false. It drops messages older than an age threshold — no warm/cold compression tiers, no rewriting.
 
 ### Turn Tracking
 
 Each `ChatMessage` carries a `Turn` property. `_currentTurn` in `LlmClient` is incremented once per user-initiated send (via `IncrementTurn()`). Agentic resubmits share the same turn number. Reset to 0 on `ClearHistory()`.
 
-### Three Tiers
+### Drop Age Threshold
 
-| Tier | Balanced | Aggressive | Treatment |
-|------|----------|------------|-----------|
-| HOT | current + 1 previous | current only | Full fidelity — unchanged |
-| WARM | next 3 turns | next 2 turns | One-line summary per message (e.g. `[WARM] READ file.cs — 200 lines`) |
-| COLD | next 3 turns | next 2 turns | Entire turn collapsed to `[COLD] Turn N: actions...` |
-| DROP | age 8+ | age 5+ | Removed entirely |
+| Mode | Drop Age | Behavior |
+|------|----------|----------|
+| Off | — | No proactive eviction |
+| Balanced | 8 turns | Messages older than 8 turns are dropped |
+| Aggressive | 5 turns | Messages older than 5 turns are dropped |
+
+Dropped messages are replaced with a `[DROPPED]` summary so the model knows context was removed.
 
 ### Pinned Content (never evicted)
 
 - System prompt (index 0)
 - DevMind.md content (`[DevMind.md]` marker)
-- SCRATCHPAD state (`[TASK STATE]` marker)
 
-### WARM Summaries
+### Budget Guard (always-on)
 
-Each message type gets a specific summary format:
-- `[WARM] READ filename.cs — N lines` / `[WARM] READ filename.cs:start-end — N lines loaded`
-- `[WARM] SHELL: <command> — exit code N (succeeded/failed, E errors)`
-- `[WARM] PATCH filename.cs — applied` / `[WARM] PATCH filename.cs — skipped by user`
-- `[WARM] FILE filename.cs — created (N lines)`
-- `[WARM] GREP/FIND "pattern" — N matches`
-- `[WARM] Assistant: <first 80 chars>...`
-- Agentic resubmit prompts → `[WARM] (agentic resubmit)`
+Runs on **every** `SendMessageAsync` call including agentic resubmits (even when `deferCompression=true`):
 
-### Integration
+| Threshold | Action |
+|-----------|--------|
+| 80% of `HistoryHardLimit` | Soft trim: drop 2 oldest turn pairs with `[DROPPED]` summaries |
+| 95% of `HistoryHardLimit` | Hard trim: drop 4 oldest turn pairs without summaries |
 
-- `EvictStaleContext()` runs at the top of `SendMessageAsync` (before user message is added, after `StripContextNotes`), only when `deferCompression` is false.
-- Complementary to the existing squeeze algorithm — eviction runs first, then squeeze handles remaining pressure.
-- Logging: single summary line `[CONTEXT] Eviction: N warm-compressed, M cold-collapsed, K dropped` — only emitted when at least one message was affected.
+If total history exceeds `HistoryHardLimit` after trimming, the send is aborted with a `CRITICAL` error.
 
 ## Agent Context File Compatibility
 
@@ -643,37 +675,27 @@ DevMind also supports `.agent.md` profile files in `.github/agents/`:
 - `/context` — shows currently loaded READ files
 - `/context clear` — wipes READ context without restarting
 
-The `ContextEviction` setting controls how aggressively stale context turns are compressed or dropped:
+The `ContextEviction` setting controls the proactive turn dropping age threshold:
 
-| Mode | HOT Turns | WARM Turns | COLD Turns | DROP Age |
-|------|-----------|------------|------------|----------|
-| Off | All | — | — | Never |
-| Balanced | current + 1 | next 3 | next 3 | 8+ |
-| Aggressive | current only | next 2 | next 2 | 5+ |
+| Mode | Drop Age | Behavior |
+|------|----------|----------|
+| Off | — | No proactive eviction; budget guard still active |
+| Balanced | 8 turns | Messages older than 8 turns are dropped |
+| Aggressive | 5 turns | Messages older than 5 turns are dropped |
 
-- **HOT**: Full fidelity — messages unchanged
-- **WARM**: Compressed to one-line summary per message
-- **COLD**: Entire turn collapsed to single line
-- **DROP**: Removed entirely from context
-
-- System prompt (index 0)
-- DevMind.md content (`[DevMind.md]` marker)
-- SCRATCHPAD state (`[TASK STATE]` marker)
-
+Pinned content (system prompt, DevMind.md) is never evicted.
 
 The `ShowDebugOutput` setting (default `false`) enables verbose debug logging to the OutputBox:
 
-- Context eviction summary: `[CONTEXT] Eviction: N warm-compressed, M cold-collapsed, K dropped`
+- Context eviction summary: `[CONTEXT] Eviction: N message(s) dropped`
+- Budget guard actions: `[CONTEXT] Soft trim: dropped N messages` / `[CONTEXT] Hard trim: dropped N messages`
 - Directive execution details: `[DEBUG] FILE: created X.cs (N lines)`, `[DEBUG] PATCH: applied to Y.cs`
 - LLM client events: connection status, token counts, context budget calculations
 - Agentic pipeline tracing: parser output, classifier decisions, executor actions
 
 Enable when troubleshooting context management or directive execution issues.
 
-
 During LLM generation, the status bar displays `Generating... (N tokens)` showing the real-time token count. This updates with each SSE token received, giving visibility into response length and helping identify unusually long generations.
-
-
 
 - `/reload` — clears cached DevMind.md, reloads on next Ask
 - `/context` — shows currently loaded READ files

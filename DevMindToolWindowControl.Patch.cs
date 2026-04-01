@@ -246,20 +246,25 @@ namespace DevMind
             var lines = text.Split('\n').ToList();
             if (lines.Count == 0) return text;
 
-            // Strip leading opening fence — matches ```  or ```csharp etc.
-            bool hadOpeningFence = Regex.IsMatch(lines[0], @"^\s*```\w*\s*$");
+            // Find and strip leading opening fence — matches ```  or ```csharp etc.
+            // Skips leading blank lines to find the fence.
+            int openIdx = -1;
+            for (int i = 0; i < lines.Count; i++)
+            {
+                if (string.IsNullOrWhiteSpace(lines[i]))
+                    continue;
+                if (Regex.IsMatch(lines[i], @"^\s*```[\w#+]*\s*$"))
+                    openIdx = i;
+                break; // only inspect the first non-blank line
+            }
+            bool hadOpeningFence = openIdx >= 0;
             if (hadOpeningFence)
-                lines.RemoveAt(0);
+                lines.RemoveAt(openIdx);
 
             if (lines.Count == 0) return string.Empty;
 
-            // Strip closing fence and everything after it.
-            // When the model wraps FILE content in fences, natural language text
-            // (e.g. "Now let me create the next file...") can appear after the
-            // closing ```.  We search from the end for the closing fence and
-            // discard it plus all trailing lines.
-            // Only strip if we found an opening fence — otherwise interior ```
-            // lines are left untouched.
+            // Strip closing fence (and everything after it when an opening fence was found).
+            // Search from the end for the closing ```.
             if (hadOpeningFence)
             {
                 for (int i = lines.Count - 1; i >= 0; i--)
@@ -274,7 +279,7 @@ namespace DevMind
             }
             else
             {
-                // No opening fence — legacy behavior: only strip a trailing bare ```.
+                // No opening fence — only strip a trailing bare ```.
                 for (int i = lines.Count - 1; i >= 0; i--)
                 {
                     if (string.IsNullOrWhiteSpace(lines[i]))

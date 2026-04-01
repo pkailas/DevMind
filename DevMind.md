@@ -1,4 +1,4 @@
-# DevMind Project Context  v1.1
+# DevMind Project Context  v1.2
 
 ## Project
 - **Product**: DevMind
@@ -15,7 +15,8 @@ This is a Visual Studio extension (VSIX) that provides a local LLM coding assist
 - **UI**: `DevMindToolWindowControl.xaml/.cs` — single-stream WPF output (RichTextBox), input bar, toolbar, terminal strip. No third-party markdown renderers — plain `Run`/`Paragraph` appends only.
 - **Partial classes**: `.AgenticHost.cs` (IAgenticHost bridge to VS/UI), `.Context.cs` (editor context, READ, file search), `.Patch.cs` (PATCH parsing, matching, UNDO, markdown fence stripping fix for FILE directive), `.Shell.cs` (shell execution).
 - **Agentic pipeline**: `ResponseParser` → `ResponseClassifier` → `AgenticActionResolver` → `AgenticExecutor` → `IAgenticHost`. Only `AgenticExecutor` has side effects.
-- **LLM client**: `LlmClient.cs` — SSE streaming to OpenAI-compatible `/v1/chat/completions`. Context budget auto-detected. Squeeze algorithm compresses history. Tiered context eviction (HOT/WARM/COLD/DROP) based on turn age.
+- **LLM client**: `LlmClient.cs` — SSE streaming to OpenAI-compatible `/v1/chat/completions`. Context budget auto-detected. Append-only context architecture — history is immutable after append, no squeeze or retroactive compression. Budget guard (always-on turn dropping at 80%/95%) and proactive eviction by age threshold (Off/Balanced/Aggressive).
+- **Settings profiles**: `ProfileManager.cs` — named connection profiles (endpoint, model, context settings). Stored in `%LOCALAPPDATA%\DevMind\profiles.json`. Toolbar dropdown for switching. Options page for CRUD. HttpClient recreated on profile switch.
 - **Diff preview**: `DiffPreviewCard.xaml/.cs` + `DiffBatchBar.xaml/.cs` — inline diff cards in OutputBox for PATCH confirmation. Three-phase pipeline: resolve → auto-apply exact → preview fuzzy.
 
 ## Coding Standards
@@ -86,7 +87,8 @@ SHELL: dotnet build --no-restore
 | `AgenticActionResolver.cs` | Pure static: maps ResponseOutcome + ExecutionResult to AgenticAction |
 | `AgenticExecutor.cs` | Executes actions via IAgenticHost; three-phase PATCH pipeline |
 | `ResponseParser.cs` | Parses LLM responses into typed blocks |
-| `LlmClient.cs` | HTTP SSE streaming, history management, squeeze algorithm |
+| `LlmClient.cs` | HTTP SSE streaming, append-only history management, budget guard |
+| `ProfileManager.cs` | Named connection profiles — CRUD, save/load, apply to settings |
+| `DevMindOptionsPage.cs` | VS Tools > Options settings, profile management actions |
 | `DiffPreviewCard.xaml.cs` | Inline diff preview card with Apply/Skip |
 | `PatchConfidence.cs` | PatchConfidence enum + PatchResolveResult for two-phase PATCH |
-| `DevMindOptionsPage.cs` | VS Tools > Options settings |
