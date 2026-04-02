@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v7.1
+// File: DevMindToolWindowControl.xaml.cs  v7.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -1034,6 +1034,12 @@ namespace DevMind
                                     // Tool use path — map tool calls to response blocks
                                     var toolBlocks = ToolCallMapper.Map(lastToolCalls, buildCommand);
 
+                                    if (DevMindOptions.Instance.ShowDebugOutput)
+                                    {
+                                        foreach (var tb in toolBlocks)
+                                            AppendOutput($"[DIAG] Block: Type={tb.Type}, FileName={tb.FileName}, Command={tb.Command}, MemoryTopic={tb.MemoryTopic}\n", OutputColor.Dim);
+                                    }
+
                                     // Also parse text content for any prose alongside tool_calls
                                     if (!string.IsNullOrWhiteSpace(fullResponse))
                                     {
@@ -1067,158 +1073,369 @@ namespace DevMind
                                     AppendOutput($"[DIAG] Outcome: HasPatches={outcome.HasPatches}, HasShell={outcome.HasShellCommands}, HasRead={outcome.HasReadRequests}, IsDone={outcome.IsDone}, IsReadOnly={outcome.IsReadOnly}\n", OutputColor.Dim);
                                 System.Diagnostics.Debug.WriteLine($"[DEVMIND-DIAG] Outcome: HasPatches={outcome.HasPatches} HasShell={outcome.HasShellCommands} HasFile={outcome.HasFileCreation} HasDelete={outcome.HasDeleteRequests} IsDone={outcome.IsDone} IsReadOnly={outcome.IsReadOnly} IsEmptyOrBareCode={outcome.IsEmptyOrBareCode}");
 
-                                // Initial resolve — no previousResult on the first call
-                                AgenticAction action = AgenticActionResolver.Resolve(outcome, null, _agenticDepth, maxDepth);
+                                // ── Branch: Tool Use simplified loop vs TextDirective resolver-driven loop ──
+                                bool useToolUseLoop = lastToolCalls != null && lastToolCalls.Count > 0
+                                    && DevMindOptions.Instance.DirectiveMode != DirectiveMode.TextDirective;
 
-                                if (action.Type != ActionType.Stop)
+                                if (useToolUseLoop)
                                 {
+                                    // ══════════════════════════════════════════════════════════════
+                                    // Tool Use loop: model decides, we execute
+                                    // The model called tools — execute them all, inject results,
+                                    // resubmit so the model can decide what's next.
+                                    // ══════════════════════════════════════════════════════════════
+
+                                    var action = new AgenticAction { Type = ActionType.ApplyAndBuild };
                                     ExecutionResult result = await executor.ExecuteAsync(action, outcome);
 
-                                    // ── Inject tool result messages for multi-turn tool use ──
-                                    if (lastToolCalls != null && lastToolCalls.Count > 0)
+                                    // Inject per-tool result messages so the model sees what happened
+                                    InjectToolResultMessages(lastToolCalls, result, outcome.Blocks);
+
+                                    // Check for explicit DONE signal (task_done tool call)
+                                    if (outcome.IsDone)
                                     {
-                                        InjectToolResultMessages(lastToolCalls, result, outcome.Blocks);
+                                        AppendOutput("[AGENTIC] Task complete.\n", OutputColor.Success);
+                                        _agenticDepth = 0;
+                                        _pendingResubmitPrompt = null;
+                                        // fall through to completion
                                     }
-
-                                    // ── Resubmit paths (return immediately; SendToLlm manages its own completion) ──
-
-                                    if (action.Type == ActionType.LoadAndResubmit)
+                                    // Check for run/exec command — treat as task complete
+                                    else if (result.ShellExitCode.HasValue && result.ShellExitCode == 0
+                                        && !string.IsNullOrEmpty(result.LastShellCommand)
+                                        && IsRunOrExecCommand(result.LastShellCommand))
                                     {
-                                        // DONE + info-gather: load files but then stop
-                                        if (outcome.IsDone)
+                                        AppendOutput("[AGENTIC] Run/exec command succeeded — treating as task complete.\n", OutputColor.Success);
+                                        _agenticDepth = 0;
+                                        _pendingResubmitPrompt = null;
+                                        // fall through to completion
+                                    }
+                                    // Check depth cap
+                                    else if (maxDepth > 0 && _agenticDepth >= maxDepth)
+                                    {
+                                        if (result.ShellExitCode.HasValue && result.ShellExitCode != 0)
                                         {
-                                            AppendOutput("[AGENTIC] File(s) loaded. Task complete.\n", OutputColor.Success);
-                                            _agenticDepth = 0;
-                                            _pendingResubmitPrompt = null;
-                                            // fall through to completion
-                                        }
-                                        else if (_agenticDepth > 0)
-                                        {
-                                            AppendOutput("[AUTO-READ] File(s) loaded during agentic iteration — continuing...\n", OutputColor.Dim);
-                                            InputTextBox.Text = "The requested file(s) have been loaded into context. Continue with the task using PATCH/SHELL/FILE directives.";
-                                            _shellLoopPending = true;
-                                            SendToLlm();
-                                            return;
-                                        }
-                                        else if (!string.IsNullOrEmpty(_pendingResubmitPrompt))
-                                        {
-                                            string saved = _pendingResubmitPrompt;
-                                            _pendingResubmitPrompt = null;
-                                            AppendOutput("[AUTO-READ] File(s) loaded — resubmitting original prompt...\n", OutputColor.Dim);
-                                            InputTextBox.Text = saved;
-                                            _shellLoopPending = true;
-                                            SendToLlm();
-                                            return;
+                                            int undoDepth = _patchBackupStack.Count;
+                                            AppendOutput($"[AGENTIC] Depth cap reached ({_agenticDepth}) — build still failing.\n", OutputColor.Error);
+                                            AppendOutput("Type UNDO to revert all changes, or continue editing manually.\n", OutputColor.Dim);
+                                            AppendOutput($"({undoDepth} change(s) can be undone)\n", OutputColor.Dim);
                                         }
                                         else
                                         {
-                                            AppendOutput("[AUTO-READ] File(s) loaded — resubmitting...\n", OutputColor.Dim);
-                                            InputTextBox.Text = "The requested file(s) have been loaded. Continue with the task.";
-                                            _shellLoopPending = true;
-                                            SendToLlm();
+                                            AppendOutput($"[AGENTIC] Depth cap reached ({_agenticDepth}). Stopping.\n", OutputColor.Dim);
+                                        }
+                                        _agenticDepth = 0;
+                                        // fall through to completion
+                                    }
+                                    else
+                                    {
+                                        // ── Re-trigger: feed results back, let model decide next ──
+
+                                        _agenticDepth++;
+                                        {
+                                            int agTokens  = _llmClient.EstimateHistoryTokens();
+                                            int agBudget  = _llmClient.MaxPromptTokens;
+                                            int agHeadroom = _llmClient.ResponseHeadroomTokens;
+                                            int agPct     = agBudget > 0 ? (int)((agTokens * 100.0) / agBudget) : 0;
+                                            AppendOutput($"[AGENTIC] Iteration {_agenticDepth}/{maxDepth} — Working: {agTokens:N0} / {agBudget:N0} ({agPct}%) | Response headroom: {agHeadroom:N0} reserved\n", OutputColor.Dim);
+                                            if (DevMindOptions.Instance.ShowContextBudget)
+                                            {
+                                                int cbPct = _llmClient.ContextBudgetPercent;
+                                                OutputColor cbColor = cbPct < 60 ? OutputColor.Dim
+                                                                    : cbPct < 80 ? OutputColor.Normal
+                                                                    : OutputColor.Error;
+                                                AppendOutput($"[CONTEXT] Working: {agTokens:N0} / {agBudget:N0} ({cbPct}%) | Response headroom: {agHeadroom:N0} reserved\n", cbColor);
+                                            }
+                                        }
+
+                                        // Tool results are already in conversation as tool role messages.
+                                        // Simple continuation prompt — the model has all the context it needs.
+                                        InputTextBox.Text = "Continue with the task.";
+                                        _pendingShellContext = null;
+
+                                        // Check cancellation before re-triggering
+                                        if (_cts.IsCancellationRequested)
+                                        {
+                                            _shellLoopPending = false;
+                                            _agenticDepth = 0;
+                                            AppendOutput("[AGENTIC] Cancelled.\n", OutputColor.Dim);
+                                            StatusText.Text = "Stopped";
+                                            SetInputEnabled(true);
                                             return;
                                         }
-                                    }
-
-                                    if (action.Type == ActionType.RetryWithCorrection)
-                                    {
-                                        AppendOutput("[FORMAT] Response was a code block instead of directives — retrying...\n", OutputColor.Dim);
-                                        _pendingShellContext =
-                                            "Your previous response contained a raw code block instead of PATCH/SHELL/FILE directives. " +
-                                            "You MUST use FILE: for new files, PATCH for edits, and SHELL: for commands. " +
-                                            "Re-attempt the task now using the correct format.";
-                                        string retryPrompt = _pendingResubmitPrompt ?? InputTextBox.Text;
-                                        _pendingResubmitPrompt = null;
-                                        InputTextBox.Text = retryPrompt;
                                         _shellLoopPending = true;
-                                        _agenticDepth = 1;
-                                        SendToLlm();
+                                        try { SendToLlm(); }
+                                        catch
+                                        {
+                                            _shellLoopPending = false;
+                                            _agenticDepth = 0;
+                                            StatusText.Text = "Error";
+                                            SetInputEnabled(true);
+                                            throw;
+                                        }
                                         return;
                                     }
+                                }
+                                else if (!useToolUseLoop
+                                    && (lastToolCalls == null || lastToolCalls.Count == 0)
+                                    && DevMindOptions.Instance.DirectiveMode != DirectiveMode.TextDirective)
+                                {
+                                    // ══════════════════════════════════════════════════════════════
+                                    // No tool calls in non-TextDirective mode — model is done.
+                                    // ══════════════════════════════════════════════════════════════
 
-                                    // ── Actions that may loop ────────────────────────────────────
+                                    // Check for text-based DONE signal as safety net
+                                    if (outcome.IsDone)
+                                        AppendOutput("Task complete.\n", OutputColor.Success);
 
-                                    if (action.Type == ActionType.ApplyAndBuild
-                                        || action.Type == ActionType.CreateFile
-                                        || action.Type == ActionType.RunShell
-                                        || action.Type == ActionType.ContinueAgentic)
+                                    // Stop — model chose not to call any tools
+                                    _agenticDepth = 0;
+                                    _pendingResubmitPrompt = null;
+                                    if (DevMindOptions.Instance.ShowDebugOutput)
+                                        AppendOutput("[DIAG] Tool use loop: no tool calls — stopping.\n", OutputColor.Dim);
+                                    // fall through to completion
+                                }
+                                else
+                                {
+                                    // ══════════════════════════════════════════════════════════════
+                                    // TextDirective mode — resolver-driven loop (unchanged)
+                                    // ══════════════════════════════════════════════════════════════
+
+                                    AgenticAction action = AgenticActionResolver.Resolve(outcome, null, _agenticDepth, maxDepth);
+
+                                    if (action.Type != ActionType.Stop)
                                     {
-                                        bool hasDone  = outcome.IsDone;
-                                        bool ranShell = result.ShellExitCode.HasValue;
-                                        bool isRunExec = ranShell && result.ShellExitCode == 0
-                                            && !string.IsNullOrEmpty(result.LastShellCommand)
-                                            && IsRunOrExecCommand(result.LastShellCommand);
+                                        ExecutionResult result = await executor.ExecuteAsync(action, outcome);
 
-                                        if (hasDone)
+                                        // ── Inject tool result messages for multi-turn tool use ──
+                                        if (lastToolCalls != null && lastToolCalls.Count > 0)
                                         {
-                                            AppendOutput("[AGENTIC] Task complete.\n", OutputColor.Success);
-                                            _agenticDepth = 0;
-                                            _pendingResubmitPrompt = null;
-                                            // fall through to completion
+                                            InjectToolResultMessages(lastToolCalls, result, outcome.Blocks);
                                         }
-                                        else if (isRunExec)
+
+                                        // ── Resubmit paths (return immediately; SendToLlm manages its own completion) ──
+
+                                        if (action.Type == ActionType.LoadAndResubmit)
                                         {
-                                            AppendOutput("[AGENTIC] Run/exec command succeeded — treating as task complete.\n", OutputColor.Success);
-                                            _agenticDepth = 0;
-                                            _pendingResubmitPrompt = null;
-                                            // fall through to completion
-                                        }
-                                        else if (maxDepth <= 0 || _agenticDepth >= maxDepth)
-                                        {
-                                            if (ranShell && result.ShellExitCode != 0)
+                                            // DONE + info-gather: load files but then stop
+                                            if (outcome.IsDone)
                                             {
-                                                int undoDepth = _patchBackupStack.Count;
-                                                AppendOutput($"[AGENTIC] Depth cap reached ({_agenticDepth}) — build still failing.\n", OutputColor.Error);
-                                                AppendOutput("Type UNDO to revert all changes, or continue editing manually.\n", OutputColor.Dim);
-                                                AppendOutput($"({undoDepth} change(s) can be undone)\n", OutputColor.Dim);
+                                                AppendOutput("[AGENTIC] File(s) loaded. Task complete.\n", OutputColor.Success);
+                                                _agenticDepth = 0;
+                                                _pendingResubmitPrompt = null;
+                                                // fall through to completion
+                                            }
+                                            else if (_agenticDepth > 0)
+                                            {
+                                                AppendOutput("[AUTO-READ] File(s) loaded during agentic iteration — continuing...\n", OutputColor.Dim);
+                                                InputTextBox.Text = "The requested file(s) have been loaded into context. Continue with the task using PATCH/SHELL/FILE directives.";
+                                                _shellLoopPending = true;
+                                                SendToLlm();
+                                                return;
+                                            }
+                                            else if (!string.IsNullOrEmpty(_pendingResubmitPrompt))
+                                            {
+                                                string saved = _pendingResubmitPrompt;
+                                                _pendingResubmitPrompt = null;
+                                                AppendOutput("[AUTO-READ] File(s) loaded — resubmitting original prompt...\n", OutputColor.Dim);
+                                                InputTextBox.Text = saved;
+                                                _shellLoopPending = true;
+                                                SendToLlm();
+                                                return;
                                             }
                                             else
                                             {
-                                                AppendOutput($"[AGENTIC] Depth cap reached ({_agenticDepth}). Stopping.\n", OutputColor.Dim);
+                                                AppendOutput("[AUTO-READ] File(s) loaded — resubmitting...\n", OutputColor.Dim);
+                                                InputTextBox.Text = "The requested file(s) have been loaded. Continue with the task.";
+                                                _shellLoopPending = true;
+                                                SendToLlm();
+                                                return;
                                             }
-                                            _agenticDepth = 0;
-                                            // fall through to completion
                                         }
-                                        else
+
+                                        if (action.Type == ActionType.RetryWithCorrection)
                                         {
-                                            // ── Re-trigger agentic loop ───────────────────────────
+                                            AppendOutput("[FORMAT] Response was a code block instead of directives — retrying...\n", OutputColor.Dim);
+                                            _pendingShellContext =
+                                                "Your previous response contained a raw code block instead of PATCH/SHELL/FILE directives. " +
+                                                "You MUST use FILE: for new files, PATCH for edits, and SHELL: for commands. " +
+                                                "Re-attempt the task now using the correct format.";
+                                            string retryPrompt = _pendingResubmitPrompt ?? InputTextBox.Text;
+                                            _pendingResubmitPrompt = null;
+                                            InputTextBox.Text = retryPrompt;
+                                            _shellLoopPending = true;
+                                            _agenticDepth = 1;
+                                            SendToLlm();
+                                            return;
+                                        }
 
-                                            _agenticDepth++;
+                                        // ── Actions that may loop ────────────────────────────────────
+
+                                        if (action.Type == ActionType.ApplyAndBuild
+                                            || action.Type == ActionType.CreateFile
+                                            || action.Type == ActionType.RunShell
+                                            || action.Type == ActionType.ContinueAgentic)
+                                        {
+                                            bool hasDone  = outcome.IsDone;
+                                            bool ranShell = result.ShellExitCode.HasValue;
+                                            bool isRunExec = ranShell && result.ShellExitCode == 0
+                                                && !string.IsNullOrEmpty(result.LastShellCommand)
+                                                && IsRunOrExecCommand(result.LastShellCommand);
+
+                                            if (hasDone)
                                             {
-                                                int agTokens  = _llmClient.EstimateHistoryTokens();
-                                                int agBudget  = _llmClient.MaxPromptTokens;
-                                                int agHeadroom = _llmClient.ResponseHeadroomTokens;
-                                                int agPct     = agBudget > 0 ? (int)((agTokens * 100.0) / agBudget) : 0;
-                                                AppendOutput($"[AGENTIC] Iteration {_agenticDepth}/{maxDepth} — Working: {agTokens:N0} / {agBudget:N0} ({agPct}%) | Response headroom: {agHeadroom:N0} reserved\n", OutputColor.Dim);
-                                                if (DevMindOptions.Instance.ShowContextBudget)
-                                                {
-                                                    int cbPct = _llmClient.ContextBudgetPercent;
-                                                    OutputColor cbColor = cbPct < 60 ? OutputColor.Dim
-                                                                        : cbPct < 80 ? OutputColor.Normal
-                                                                        : OutputColor.Error;
-                                                    AppendOutput($"[CONTEXT] Working: {agTokens:N0} / {agBudget:N0} ({cbPct}%) | Response headroom: {agHeadroom:N0} reserved\n", cbColor);
-                                                }
+                                                AppendOutput("[AGENTIC] Task complete.\n", OutputColor.Success);
+                                                _agenticDepth = 0;
+                                                _pendingResubmitPrompt = null;
+                                                // fall through to completion
                                             }
-
-                                            // Block-by-block mode (preserved)
-                                            bool blockByBlockAllDone = false;
-                                            if (result.BuildSucceeded && DevMindOptions.Instance.BlockByBlockMode != BlockByBlockModeType.Off)
+                                            else if (isRunExec)
                                             {
-                                                var steps = ParseScratchpadSteps(_llmClient.TaskScratchpad);
-                                                var nextStep = steps.Find(s => !s.IsDone);
-                                                if (nextStep.StepNumber > 0)
+                                                AppendOutput("[AGENTIC] Run/exec command succeeded — treating as task complete.\n", OutputColor.Success);
+                                                _agenticDepth = 0;
+                                                _pendingResubmitPrompt = null;
+                                                // fall through to completion
+                                            }
+                                            else if (maxDepth <= 0 || _agenticDepth >= maxDepth)
+                                            {
+                                                if (ranShell && result.ShellExitCode != 0)
                                                 {
-                                                    _blockByBlockStep  = nextStep.StepNumber;
-                                                    _blockByBlockTotal = steps.Count;
-                                                    AppendOutput($"[AGENTIC] Block-by-block: advancing to step {nextStep.StepNumber}/{steps.Count}\n", OutputColor.Dim);
-                                                    _llmClient.ClearHistory(preserveScratchpad: true);
-                                                    InputTextBox.Text = $"Continue with step {nextStep.StepNumber}: {nextStep.Description}. READ the relevant file range first, then PATCH. Build when done.";
-                                                    _pendingShellContext = null;
-                                                    _agenticDepth = 0;
+                                                    int undoDepth = _patchBackupStack.Count;
+                                                    AppendOutput($"[AGENTIC] Depth cap reached ({_agenticDepth}) — build still failing.\n", OutputColor.Error);
+                                                    AppendOutput("Type UNDO to revert all changes, or continue editing manually.\n", OutputColor.Dim);
+                                                    AppendOutput($"({undoDepth} change(s) can be undone)\n", OutputColor.Dim);
+                                                }
+                                                else
+                                                {
+                                                    AppendOutput($"[AGENTIC] Depth cap reached ({_agenticDepth}). Stopping.\n", OutputColor.Dim);
+                                                }
+                                                _agenticDepth = 0;
+                                                // fall through to completion
+                                            }
+                                            else
+                                            {
+                                                // ── Re-trigger agentic loop ───────────────────────────
+
+                                                _agenticDepth++;
+                                                {
+                                                    int agTokens  = _llmClient.EstimateHistoryTokens();
+                                                    int agBudget  = _llmClient.MaxPromptTokens;
+                                                    int agHeadroom = _llmClient.ResponseHeadroomTokens;
+                                                    int agPct     = agBudget > 0 ? (int)((agTokens * 100.0) / agBudget) : 0;
+                                                    AppendOutput($"[AGENTIC] Iteration {_agenticDepth}/{maxDepth} — Working: {agTokens:N0} / {agBudget:N0} ({agPct}%) | Response headroom: {agHeadroom:N0} reserved\n", OutputColor.Dim);
+                                                    if (DevMindOptions.Instance.ShowContextBudget)
+                                                    {
+                                                        int cbPct = _llmClient.ContextBudgetPercent;
+                                                        OutputColor cbColor = cbPct < 60 ? OutputColor.Dim
+                                                                            : cbPct < 80 ? OutputColor.Normal
+                                                                            : OutputColor.Error;
+                                                        AppendOutput($"[CONTEXT] Working: {agTokens:N0} / {agBudget:N0} ({cbPct}%) | Response headroom: {agHeadroom:N0} reserved\n", cbColor);
+                                                    }
+                                                }
+
+                                                // Block-by-block mode (preserved)
+                                                bool blockByBlockAllDone = false;
+                                                if (result.BuildSucceeded && DevMindOptions.Instance.BlockByBlockMode != BlockByBlockModeType.Off)
+                                                {
+                                                    var steps = ParseScratchpadSteps(_llmClient.TaskScratchpad);
+                                                    var nextStep = steps.Find(s => !s.IsDone);
+                                                    if (nextStep.StepNumber > 0)
+                                                    {
+                                                        _blockByBlockStep  = nextStep.StepNumber;
+                                                        _blockByBlockTotal = steps.Count;
+                                                        AppendOutput($"[AGENTIC] Block-by-block: advancing to step {nextStep.StepNumber}/{steps.Count}\n", OutputColor.Dim);
+                                                        _llmClient.ClearHistory(preserveScratchpad: true);
+                                                        InputTextBox.Text = $"Continue with step {nextStep.StepNumber}: {nextStep.Description}. READ the relevant file range first, then PATCH. Build when done.";
+                                                        _pendingShellContext = null;
+                                                        _agenticDepth = 0;
+                                                        if (_cts.IsCancellationRequested)
+                                                        {
+                                                            _shellLoopPending = false;
+                                                            _blockByBlockStep = 0;
+                                                            AppendOutput("[AGENTIC] Cancelled.\n", OutputColor.Dim);
+                                                            StatusText.Text = "Stopped";
+                                                            SetInputEnabled(true);
+                                                            return;
+                                                        }
+                                                        _shellLoopPending = true;
+                                                        try { SendToLlm(); }
+                                                        catch
+                                                        {
+                                                            _shellLoopPending = false;
+                                                            _blockByBlockStep = 0;
+                                                            _agenticDepth = 0;
+                                                            StatusText.Text = "Error";
+                                                            SetInputEnabled(true);
+                                                            throw;
+                                                        }
+                                                        return;
+                                                    }
+                                                    else if (steps.Count > 0)
+                                                    {
+                                                        // All numbered steps are DONE — task complete
+                                                        AppendOutput("[AGENTIC] Block-by-block: all steps complete.\n", OutputColor.Success);
+                                                        _blockByBlockStep = 0;
+                                                        blockByBlockAllDone = true;
+                                                    }
+                                                }
+
+                                                if (!blockByBlockAllDone)
+                                                {
+                                                    // Build continuation context from ExecutionResult
+                                                    var agenticContext = new StringBuilder();
+                                                    agenticContext.AppendLine($"[AGENTIC LOOP — iteration {_agenticDepth} of {maxDepth}]");
+
+                                                    if (result.FilesCreated.Count > 0)
+                                                        agenticContext.AppendLine("[FILE CREATED] File was generated and added to the project.");
+
+                                                    if (result.FilesDeleted.Count > 0)
+                                                        agenticContext.AppendLine($"[FILE DELETED] Deleted from disk: {string.Join(", ", result.FilesDeleted.ConvertAll(System.IO.Path.GetFileName))}.");
+
+                                                    if (result.FilesRenamed.Count > 0)
+                                                        agenticContext.AppendLine($"[FILE RENAMED] {string.Join("; ", result.FilesRenamed)}.");
+
+                                                    if (!string.IsNullOrEmpty(result.ShellOutput))
+                                                    {
+                                                        string shellTag = result.LastShellCommand?.Length > 60
+                                                            ? result.LastShellCommand.Substring(0, 60) : result.LastShellCommand;
+                                                        agenticContext.AppendLine($"[SHELL-RESULT:{shellTag}]\nShell command: {result.LastShellCommand}\nOutput:\n{result.ShellOutput}\n---");
+                                                    }
+
+                                                    // Inject diff-only PATCH-RESULT (changed region ± context lines)
+                                                    foreach (string pp in result.PatchedPaths)
+                                                    {
+                                                        try
+                                                        {
+                                                            string fn = Path.GetFileName(pp);
+                                                            int undoDepth = _patchBackupStack.Count;
+                                                            string diffView = _patchDiffCache.TryGetValue(pp, out string dv) ? dv : null;
+                                                            if (diffView != null)
+                                                                agenticContext.AppendLine($"\n[PATCH-RESULT:{fn}] Applied successfully (undo depth: {undoDepth})\n{diffView}");
+                                                            else
+                                                                agenticContext.AppendLine($"\n[PATCH-RESULT:{fn}] Applied successfully (undo depth: {undoDepth})");
+                                                        }
+                                                        catch { }
+                                                    }
+
+                                                    // Per-block failure messages (includes PATCH-FAILED lines)
+                                                    foreach (string err in result.Errors)
+                                                        agenticContext.AppendLine(err);
+
+                                                    agenticContext.AppendLine("Continue with any remaining steps. When there is nothing left to do, emit DONE on a line by itself.");
+                                                    _pendingShellContext = agenticContext.ToString().TrimEnd();
+
+                                                    // Set continuation prompt
+                                                    if (result.BuildSucceeded)
+                                                        InputTextBox.Text = "Build succeeded (exit code 0). Continue with any remaining steps from the original task, or emit DONE if the task is complete.";
+                                                    else if (ranShell && result.ShellExitCode != 0)
+                                                        InputTextBox.Text = "The shell output above shows build errors. Analyze the specific error messages and apply targeted PATCH fixes. Do NOT re-add code that already exists in the file. Do NOT replace code with unrelated code.";
+                                                    else
+                                                        InputTextBox.Text = "Continue with remaining steps (modify other files, run builds). When done, emit DONE.";
+
+                                                    // Check cancellation before re-triggering
                                                     if (_cts.IsCancellationRequested)
                                                     {
                                                         _shellLoopPending = false;
-                                                        _blockByBlockStep = 0;
+                                                        _agenticDepth = 0;
                                                         AppendOutput("[AGENTIC] Cancelled.\n", OutputColor.Dim);
                                                         StatusText.Text = "Stopped";
                                                         SetInputEnabled(true);
@@ -1229,7 +1446,6 @@ namespace DevMind
                                                     catch
                                                     {
                                                         _shellLoopPending = false;
-                                                        _blockByBlockStep = 0;
                                                         _agenticDepth = 0;
                                                         StatusText.Text = "Error";
                                                         SetInputEnabled(true);
@@ -1237,101 +1453,18 @@ namespace DevMind
                                                     }
                                                     return;
                                                 }
-                                                else if (steps.Count > 0)
-                                                {
-                                                    // All numbered steps are DONE — task complete
-                                                    AppendOutput("[AGENTIC] Block-by-block: all steps complete.\n", OutputColor.Success);
-                                                    _blockByBlockStep = 0;
-                                                    blockByBlockAllDone = true;
-                                                }
+                                                // blockByBlockAllDone == true → fall through to completion
                                             }
-
-                                            if (!blockByBlockAllDone)
-                                            {
-                                                // Build continuation context from ExecutionResult
-                                                var agenticContext = new StringBuilder();
-                                                agenticContext.AppendLine($"[AGENTIC LOOP — iteration {_agenticDepth} of {maxDepth}]");
-
-                                                if (result.FilesCreated.Count > 0)
-                                                    agenticContext.AppendLine("[FILE CREATED] File was generated and added to the project.");
-
-                                                if (result.FilesDeleted.Count > 0)
-                                                    agenticContext.AppendLine($"[FILE DELETED] Deleted from disk: {string.Join(", ", result.FilesDeleted.ConvertAll(System.IO.Path.GetFileName))}.");
-
-                                                if (result.FilesRenamed.Count > 0)
-                                                    agenticContext.AppendLine($"[FILE RENAMED] {string.Join("; ", result.FilesRenamed)}.");
-
-                                                if (!string.IsNullOrEmpty(result.ShellOutput))
-                                                {
-                                                    string shellTag = result.LastShellCommand?.Length > 60
-                                                        ? result.LastShellCommand.Substring(0, 60) : result.LastShellCommand;
-                                                    agenticContext.AppendLine($"[SHELL-RESULT:{shellTag}]\nShell command: {result.LastShellCommand}\nOutput:\n{result.ShellOutput}\n---");
-                                                }
-
-                                                // Inject diff-only PATCH-RESULT (changed region ± context lines)
-                                                foreach (string pp in result.PatchedPaths)
-                                                {
-                                                    try
-                                                    {
-                                                        string fn = Path.GetFileName(pp);
-                                                        int undoDepth = _patchBackupStack.Count;
-                                                        string diffView = _patchDiffCache.TryGetValue(pp, out string dv) ? dv : null;
-                                                        if (diffView != null)
-                                                            agenticContext.AppendLine($"\n[PATCH-RESULT:{fn}] Applied successfully (undo depth: {undoDepth})\n{diffView}");
-                                                        else
-                                                            agenticContext.AppendLine($"\n[PATCH-RESULT:{fn}] Applied successfully (undo depth: {undoDepth})");
-                                                    }
-                                                    catch { }
-                                                }
-
-                                                // Per-block failure messages (includes PATCH-FAILED lines)
-                                                foreach (string err in result.Errors)
-                                                    agenticContext.AppendLine(err);
-
-                                                agenticContext.AppendLine("Continue with any remaining steps. When there is nothing left to do, emit DONE on a line by itself.");
-                                                _pendingShellContext = agenticContext.ToString().TrimEnd();
-
-                                                // Set continuation prompt
-                                                if (result.BuildSucceeded)
-                                                    InputTextBox.Text = "Build succeeded (exit code 0). Continue with any remaining steps from the original task, or emit DONE if the task is complete.";
-                                                else if (ranShell && result.ShellExitCode != 0)
-                                                    InputTextBox.Text = "The shell output above shows build errors. Analyze the specific error messages and apply targeted PATCH fixes. Do NOT re-add code that already exists in the file. Do NOT replace code with unrelated code.";
-                                                else
-                                                    InputTextBox.Text = "Continue with remaining steps (modify other files, run builds). When done, emit DONE.";
-
-                                                // Check cancellation before re-triggering
-                                                if (_cts.IsCancellationRequested)
-                                                {
-                                                    _shellLoopPending = false;
-                                                    _agenticDepth = 0;
-                                                    AppendOutput("[AGENTIC] Cancelled.\n", OutputColor.Dim);
-                                                    StatusText.Text = "Stopped";
-                                                    SetInputEnabled(true);
-                                                    return;
-                                                }
-                                                _shellLoopPending = true;
-                                                try { SendToLlm(); }
-                                                catch
-                                                {
-                                                    _shellLoopPending = false;
-                                                    _agenticDepth = 0;
-                                                    StatusText.Text = "Error";
-                                                    SetInputEnabled(true);
-                                                    throw;
-                                                }
-                                                return;
-                                            }
-                                            // blockByBlockAllDone == true → fall through to completion
                                         }
                                     }
-                                }
-                                else
-                                {
-                                    // Stop action — display reason if meaningful
-                                    if (!string.IsNullOrEmpty(action.StopReason) && action.StopReason != "Response complete.")
+                                    else
                                     {
-                                        bool isSuccess = action.StopReason.Contains("complete") || action.StopReason.Contains("succeeded");
-                                        AppendOutput(action.StopReason + "\n", isSuccess ? OutputColor.Success : OutputColor.Dim);
+                                        // Stop action — display reason if meaningful
+                                        if (!string.IsNullOrEmpty(action.StopReason) && action.StopReason != "Response complete.")
+                                        {
+                                            bool isSuccess = action.StopReason.Contains("complete") || action.StopReason.Contains("succeeded");
+                                            AppendOutput(action.StopReason + "\n", isSuccess ? OutputColor.Success : OutputColor.Dim);
+                                        }
                                     }
                                 }
 
