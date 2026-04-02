@@ -490,12 +490,13 @@ namespace DevMind
             }
 
             // Reset agentic depth for user-initiated calls; preserve it for agentic re-triggers.
-            // Increment turn counter so tiered eviction ages previous turns correctly.
+            // Increment turn counter on every call so tiered eviction and MicroCompact age tracking
+            // see increasing turn numbers during the agentic loop.
             if (!_shellLoopPending)
             {
                 _agenticDepth = 0;
-                _llmClient.IncrementTurn();
             }
+            _llmClient.IncrementTurn();
 
             // Known /command handlers — must be checked before the generic shell router below
             if (text.Equals("/stats", StringComparison.OrdinalIgnoreCase))
