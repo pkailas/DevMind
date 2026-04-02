@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v7.2
+// File: LlmClient.cs  v7.3
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -445,6 +445,14 @@ namespace DevMind
             // No post-append modifications. Budget managed by DROP (removing turns)
             // and pre-append truncation only.
 
+            // Tier 1: Trim stale tool result content in-place before eviction
+            if (!deferCompression)
+            {
+                string compactMsg = MicroCompactToolResults();
+                if (compactMsg != null)
+                    onToken(compactMsg);
+            }
+
             // Drop stale turns before adding the new message
             if (!deferCompression)
             {
@@ -469,17 +477,32 @@ namespace DevMind
             // Runs on EVERY call including agentic resubmits (deferCompression=true).
             // Context grows fast during agentic iterations; without this guard the
             // window fills up and crashes before TrimConversationHistory can fire.
+            // Tool_use sessions use softer thresholds (70%/85%) because tool_call/result
+            // groups are heavier per logical turn — earlier trimming prevents cliff-edge drops.
             {
                 _budget.Assess(_conversationHistory, EstimateTokens);
                 int totalHistoryTokens = _budget.SystemPromptUsed + _budget.WorkingHistoryUsed + _budget.ProtectedTurnsUsed
                     + EstimateTokens(_conversationHistory[_conversationHistory.Count - 1].Content);
 
-                bool overHard = totalHistoryTokens > (int)(_budget.HistoryHardLimit * 0.95);
-                bool overSoft = totalHistoryTokens > (int)(_budget.HistoryHardLimit * 0.80);
+                // Detect tool_use session: any "tool" role message in history
+                bool isToolUseSession = false;
+                for (int ti = 1; ti < _conversationHistory.Count; ti++)
+                {
+                    if (_conversationHistory[ti].Role == "tool")
+                    {
+                        isToolUseSession = true;
+                        break;
+                    }
+                }
+
+                double hardPct = isToolUseSession ? 0.85 : 0.95;
+                double softPct = isToolUseSession ? 0.70 : 0.80;
+                bool overHard = totalHistoryTokens > (int)(_budget.HistoryHardLimit * hardPct);
+                bool overSoft = totalHistoryTokens > (int)(_budget.HistoryHardLimit * softPct);
 
                 if (overHard)
                 {
-                    // Hard budget (95%): drop 4 oldest turns aggressively without summaries
+                    // Hard budget: drop 4 oldest turn-groups aggressively without summaries
                     int trimmed = TrimOldestTurns(4, withSummaries: false);
                     if (trimmed > 0)
                     {
@@ -489,7 +512,7 @@ namespace DevMind
                 }
                 else if (overSoft)
                 {
-                    // Soft budget (80%): drop 2 oldest turns with summaries
+                    // Soft budget: drop 2 oldest turn-groups with summaries
                     int trimmed = TrimOldestTurns(2, withSummaries: true);
                     if (trimmed > 0)
                     {
@@ -956,6 +979,141 @@ namespace DevMind
             if (c.IndexOf("[DevMind.md]", StringComparison.Ordinal) >= 0) return true;
 
             return false;
+        }
+
+        // ── Tier 1: MicroCompact ─────────────────────────────────────────────
+        // Trims the CONTENT of old tool results, assistant tool_call planning text,
+        // and user READ blocks in-place — without removing messages. Preserves
+        // conversation structure (tool_call/tool_result pairing) while reclaiming
+        // context tokens from bulky payloads that are no longer needed.
+        // Returns a log string to emit via onToken, or null if nothing changed.
+
+        /// <summary>Minimum age in turns before a tool result is eligible for trimming.</summary>
+        private const int MicroCompactToolAge = 3;
+
+        /// <summary>Minimum content length before a tool result is eligible for trimming.</summary>
+        private const int MicroCompactMinLength = 200;
+
+        /// <summary>
+        /// Trims stale tool result content, assistant tool_call planning text, and user
+        /// READ blocks in-place. Messages are replaced (not removed) with compact versions
+        /// that preserve role/turn/toolCallId structure for API pairing rules.
+        /// Called before <see cref="EvictStaleContext"/> on every non-deferred send.
+        /// </summary>
+        public string MicroCompactToolResults()
+        {
+            bool showDebug = DevMindOptions.Instance.ShowDebugOutput;
+            int trimmed = 0;
+            int savedChars = 0;
+
+            for (int i = 1; i < _conversationHistory.Count; i++)
+            {
+                var msg = _conversationHistory[i];
+                int age = _currentTurn - msg.Turn;
+
+                // ── Tool result messages ──────────────────────────────────────
+                if (msg.Role == "tool" && age > MicroCompactToolAge
+                    && msg.Content != null && msg.Content.Length > MicroCompactMinLength)
+                {
+                    // Preserve tool results that carry important state
+                    string c = msg.Content;
+                    if (c.IndexOf("[PATCH", StringComparison.OrdinalIgnoreCase) >= 0
+                        || c.IndexOf("error", StringComparison.OrdinalIgnoreCase) >= 0
+                        || c.IndexOf("failed", StringComparison.OrdinalIgnoreCase) >= 0)
+                        continue;
+
+                    int origLen = c.Length;
+                    _conversationHistory[i] = new ChatMessage(msg.Role,
+                        $"[tool result trimmed — originally {origLen} chars]",
+                        msg.Turn, msg.ToolCalls, msg.ToolCallId);
+                    savedChars += origLen;
+                    trimmed++;
+                    continue;
+                }
+
+                // ── Assistant messages with ToolCalls — trim verbose planning text ──
+                if (msg.Role == "assistant" && msg.ToolCalls != null && msg.ToolCalls.Count > 0
+                    && age > MicroCompactToolAge
+                    && msg.Content != null && msg.Content.Length > MicroCompactMinLength)
+                {
+                    int origLen = msg.Content.Length;
+                    _conversationHistory[i] = new ChatMessage(msg.Role,
+                        $"[planning text trimmed — originally {origLen} chars]",
+                        msg.Turn, msg.ToolCalls, msg.ToolCallId);
+                    savedChars += origLen;
+                    trimmed++;
+                    continue;
+                }
+
+                // ── User messages with [READ: blocks — trim file content ─────
+                if (msg.Role == "user" && age > MicroCompactToolAge
+                    && msg.Content != null && msg.Content.Length > MicroCompactMinLength
+                    && msg.Content.IndexOf("[READ:", StringComparison.Ordinal) >= 0)
+                {
+                    string compacted = CompactReadBlocks(msg.Content);
+                    if (compacted.Length < msg.Content.Length)
+                    {
+                        int origLen = msg.Content.Length;
+                        _conversationHistory[i] = new ChatMessage(msg.Role,
+                            compacted, msg.Turn, msg.ToolCalls, msg.ToolCallId);
+                        savedChars += origLen - compacted.Length;
+                        trimmed++;
+                    }
+                }
+            }
+
+            if (trimmed == 0)
+                return null;
+
+            string logMsg = $"\n[CONTEXT] MicroCompact: trimmed {trimmed} message(s), reclaimed ~{savedChars / 4} tokens.\n";
+            if (showDebug)
+                System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] MicroCompact: {trimmed} trimmed, {savedChars} chars saved");
+
+            return logMsg;
+        }
+
+        /// <summary>
+        /// Replaces file content inside [READ:filename] blocks with a placeholder while
+        /// preserving the [READ:filename] header so the model knows the file was read.
+        /// </summary>
+        private static string CompactReadBlocks(string content)
+        {
+            var sb = new StringBuilder(content.Length);
+            int pos = 0;
+
+            while (pos < content.Length)
+            {
+                int tagStart = content.IndexOf("[READ:", pos, StringComparison.Ordinal);
+                if (tagStart < 0)
+                {
+                    sb.Append(content, pos, content.Length - pos);
+                    break;
+                }
+
+                // Copy everything before the tag
+                sb.Append(content, pos, tagStart - pos);
+
+                int tagEnd = content.IndexOf(']', tagStart);
+                if (tagEnd < 0)
+                {
+                    sb.Append(content, tagStart, content.Length - tagStart);
+                    break;
+                }
+
+                // Copy the [READ:filename] header
+                string header = content.Substring(tagStart, tagEnd - tagStart + 1);
+                sb.Append(header);
+
+                // Find the end of this READ block — next [READ: or end of string
+                int nextTag = content.IndexOf("[READ:", tagEnd + 1, StringComparison.Ordinal);
+                int blockEnd = nextTag >= 0 ? nextTag : content.Length;
+
+                // Replace file content with placeholder
+                sb.Append("\n[file content trimmed]\n");
+                pos = blockEnd;
+            }
+
+            return sb.ToString();
         }
 
         /// <summary>
@@ -1512,13 +1670,17 @@ namespace DevMind
         }
 
         /// <summary>
-        /// Drops a specific number of oldest turn-pairs from history.
+        /// Drops the oldest complete turn-groups from history.
+        /// A turn-group is either:
+        ///   - tool_use group: assistant (with tool_calls) + all following tool results + next user message
+        ///   - regular group: assistant + user (existing pair behavior)
+        /// Dropping complete groups prevents orphaned tool_call/tool_result messages.
         /// Always preserves index 0 (system) and the last entry (pending user message).
         /// When <paramref name="withSummaries"/> is true, inserts a drop summary; otherwise drops silently.
         /// Also skips any pinned content (DevMind.md, SCRATCHPAD) at the start of history.
         /// Returns the number of messages actually removed.
         /// </summary>
-        private int TrimOldestTurns(int pairsToRemove, bool withSummaries)
+        private int TrimOldestTurns(int groupsToRemove, bool withSummaries)
         {
             // Layout: [0]=system, [1..Count-2]=prior turns, [Count-1]=current user
             // Find the first removable index (skip pinned system messages after index 0)
@@ -1532,28 +1694,57 @@ namespace DevMind
                     break;
             }
 
-            int removableMessages = _conversationHistory.Count - 1 - startIdx; // exclude last (current user)
-            if (removableMessages <= 0)
+            int lastRemovable = _conversationHistory.Count - 1; // exclude last (current user)
+
+            // Build a list of complete turn-groups starting from startIdx
+            var groups = new List<int[]>(); // each entry is [groupStart, groupEnd) indices
+            int cursor = startIdx;
+            while (cursor < lastRemovable && groups.Count < groupsToRemove)
+            {
+                int groupStart = cursor;
+                var msg = _conversationHistory[cursor];
+
+                if (msg.Role == "assistant" && msg.ToolCalls != null && msg.ToolCalls.Count > 0)
+                {
+                    // tool_use group: assistant (with tool_calls) + all following tool results + optional user
+                    cursor++; // past assistant
+                    while (cursor < lastRemovable && _conversationHistory[cursor].Role == "tool")
+                        cursor++; // consume all tool results
+                    if (cursor < lastRemovable && _conversationHistory[cursor].Role == "user")
+                        cursor++; // consume the following user message
+                }
+                else
+                {
+                    // Regular group: current message + next message (classic pair)
+                    cursor++;
+                    if (cursor < lastRemovable)
+                        cursor++;
+                }
+
+                groups.Add(new[] { groupStart, cursor });
+            }
+
+            if (groups.Count == 0)
                 return 0;
 
-            int removablePairs = removableMessages / 2;
-            int actualPairs = Math.Min(pairsToRemove, removablePairs);
-            if (actualPairs <= 0)
-                return 0;
+            // Calculate total messages to remove
+            int totalEnd = groups[groups.Count - 1][1];
+            int messagesToRemove = totalEnd - startIdx;
 
-            int messagesToRemove = actualPairs * 2;
+            if (messagesToRemove <= 0)
+                return 0;
 
             if (withSummaries)
             {
                 var summaryParts = new List<string>();
-                for (int i = startIdx; i < startIdx + messagesToRemove && i < _conversationHistory.Count; i++)
+                for (int i = startIdx; i < totalEnd && i < _conversationHistory.Count; i++)
                 {
                     string snippet = BuildDropSnippet(_conversationHistory[i]);
                     if (snippet != null) summaryParts.Add(snippet);
                 }
                 string dropSummary = summaryParts.Count > 0
-                    ? $"[DROPPED] {actualPairs} turn(s): {string.Join(", ", summaryParts)}"
-                    : $"[DROPPED] {actualPairs} turn(s) removed for budget";
+                    ? $"[DROPPED] {groups.Count} group(s): {string.Join(", ", summaryParts)}"
+                    : $"[DROPPED] {groups.Count} group(s) removed for budget";
 
                 _conversationHistory.RemoveRange(startIdx, messagesToRemove);
                 _conversationHistory.Insert(startIdx, new ChatMessage("system", dropSummary));
