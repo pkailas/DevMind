@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v7.1
+// File: LlmClient.cs  v7.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -556,6 +556,18 @@ namespace DevMind
                     DevMindOptions.Instance.FirstTokenTimeoutMinutes);
                 string lastDataLine = null; // Track last SSE data line for tool_calls extraction
 
+                // Accumulate tool calls across SSE delta chunks.
+                // llama-server streams tool_calls incrementally:
+                //   chunk 1: id, name, arguments="" (start)
+                //   chunk N: arguments partial string (append)
+                //   final:   empty delta with finish_reason="tool_calls"
+                // We accumulate per-index: id, name, arguments (concatenated).
+                JArray accumulatedToolCalls = null;
+                // Per-index argument builders — tool call index → accumulated arguments string
+                var toolCallArgBuilders = new Dictionary<int, StringBuilder>();
+                // Per-index metadata (id, name) — captured from the first chunk for each index
+                var toolCallMeta = new Dictionary<int, JObject>();
+
                 while (true)
                 {
                     Task<string> readTask = reader.ReadLineAsync();
@@ -620,18 +632,34 @@ namespace DevMind
                         fullResponse.Append(token);
                         onToken(token);
                     }
+
+                    // Accumulate streamed tool_calls deltas
+                    AccumulateToolCallDelta(data, toolCallArgBuilders, toolCallMeta);
                 }
 
+                // Build accumulated tool calls from streamed deltas
+                accumulatedToolCalls = BuildAccumulatedToolCalls(toolCallArgBuilders, toolCallMeta);
+
                 // Check for tool_calls in the SSE stream
+                onToken($"\n[DIAG-SSE] lastDataLine: {(lastDataLine?.Length > 500 ? lastDataLine.Substring(0, 500) + "..." : lastDataLine)}\n");
+                onToken($"\n[DIAG-TOOLS] Accumulated {accumulatedToolCalls?.Count ?? 0} tool call(s)\n");
                 LastToolCalls = null;
                 JArray rawToolCalls = null;
-                if (lastDataLine != null)
+
+                // Priority 1: Use accumulated tool calls from streamed deltas
+                if (accumulatedToolCalls != null && accumulatedToolCalls.Count > 0)
+                {
+                    LastToolCalls = ParseToolCallsFromArray(accumulatedToolCalls);
+                    rawToolCalls = accumulatedToolCalls;
+                }
+
+                // Priority 2: Fallback — check lastDataLine for non-streamed message.tool_calls
+                if (LastToolCalls == null && lastDataLine != null)
                 {
                     var parseResult = ParseToolCalls(lastDataLine);
                     if (parseResult != null && parseResult.Count > 0)
                     {
                         LastToolCalls = parseResult;
-                        // Extract raw tool_calls JArray for history serialization
                         rawToolCalls = ExtractRawToolCalls(lastDataLine);
                     }
                 }
@@ -1685,6 +1713,132 @@ namespace DevMind
             {
                 return null;
             }
+        }
+
+        /// <summary>
+        /// Accumulates a single SSE delta chunk's tool_calls into the per-index builders.
+        /// First chunk for an index captures id/name; all chunks append arguments.
+        /// </summary>
+        private static void AccumulateToolCallDelta(string json,
+            Dictionary<int, StringBuilder> argBuilders,
+            Dictionary<int, JObject> meta)
+        {
+            try
+            {
+                var obj = JObject.Parse(json);
+                var delta = obj?["choices"]?[0]?["delta"];
+                var toolCalls = delta?["tool_calls"] as JArray;
+                if (toolCalls == null) return;
+
+                foreach (var tc in toolCalls)
+                {
+                    int index = tc["index"]?.Value<int>() ?? 0;
+
+                    // First time seeing this index — capture id, type, name
+                    if (!meta.ContainsKey(index))
+                    {
+                        var entry = new JObject();
+                        if (tc["id"] != null) entry["id"] = tc["id"].ToString();
+                        if (tc["type"] != null) entry["type"] = tc["type"].ToString();
+                        var fn = tc["function"];
+                        if (fn?["name"] != null) entry["name"] = fn["name"].ToString();
+                        meta[index] = entry;
+                        argBuilders[index] = new StringBuilder();
+                    }
+
+                    // Append arguments fragment (may be empty string on first chunk)
+                    var fnArgs = tc["function"]?["arguments"]?.ToString();
+                    if (fnArgs != null)
+                        argBuilders[index].Append(fnArgs);
+
+                    // Update name if present (in case first chunk didn't have it)
+                    if (tc["function"]?["name"] != null && meta[index]["name"] == null)
+                        meta[index]["name"] = tc["function"]["name"].ToString();
+                }
+            }
+            catch
+            {
+                // Malformed chunk — skip silently
+            }
+        }
+
+        /// <summary>
+        /// Builds a complete JArray of tool calls from accumulated delta fragments.
+        /// Returns null if no tool calls were accumulated.
+        /// </summary>
+        private static JArray BuildAccumulatedToolCalls(
+            Dictionary<int, StringBuilder> argBuilders,
+            Dictionary<int, JObject> meta)
+        {
+            if (meta.Count == 0) return null;
+
+            var result = new JArray();
+            foreach (var kvp in meta)
+            {
+                int index = kvp.Key;
+                var m = kvp.Value;
+
+                var tc = new JObject
+                {
+                    ["id"] = m["id"]?.ToString() ?? $"call_{index}",
+                    ["type"] = m["type"]?.ToString() ?? "function",
+                    ["function"] = new JObject
+                    {
+                        ["name"] = m["name"]?.ToString() ?? "",
+                        ["arguments"] = argBuilders.ContainsKey(index)
+                            ? argBuilders[index].ToString()
+                            : ""
+                    }
+                };
+                result.Add(tc);
+            }
+            return result.Count > 0 ? result : null;
+        }
+
+        /// <summary>
+        /// Parses a pre-built tool_calls JArray into <see cref="ToolCallResult"/> list.
+        /// Used for accumulated streamed tool calls (already assembled).
+        /// </summary>
+        private static List<ToolCallResult> ParseToolCallsFromArray(JArray toolCallsArray)
+        {
+            if (toolCallsArray == null || toolCallsArray.Count == 0)
+                return null;
+
+            var results = new List<ToolCallResult>();
+            foreach (var tc in toolCallsArray)
+            {
+                var fn = tc["function"];
+                if (fn == null) continue;
+
+                string name = fn["name"]?.ToString();
+                if (string.IsNullOrEmpty(name)) continue;
+
+                var args = new Dictionary<string, string>();
+                var argsToken = fn["arguments"];
+                if (argsToken != null)
+                {
+                    string argsStr = argsToken.ToString();
+                    if (!string.IsNullOrEmpty(argsStr))
+                    {
+                        try
+                        {
+                            var argsObj = JObject.Parse(argsStr);
+                            foreach (var prop in argsObj.Properties())
+                                args[prop.Name] = prop.Value?.ToString() ?? "";
+                        }
+                        catch { /* malformed args — skip */ }
+                    }
+                }
+
+                results.Add(new ToolCallResult
+                {
+                    Id = tc["id"]?.ToString() ?? $"call_{results.Count}",
+                    Name = name,
+                    Arguments = args
+                });
+            }
+
+            return results.Count > 0 ? results : null;
         }
 
         /// <summary>
