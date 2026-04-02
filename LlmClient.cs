@@ -452,8 +452,7 @@ namespace DevMind
             // No post-append modifications. Budget managed by DROP (removing turns)
             // and pre-append truncation only.
 
-            // Tier 1: Trim stale tool result content in-place before eviction
-            if (!deferCompression)
+            // Tier 1: Trim stale tool result content in-place — runs ALWAYS, including agentic resubmits
             {
                 string compactMsg = MicroCompactToolResults();
                 if (compactMsg != null)
