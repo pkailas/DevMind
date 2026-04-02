@@ -1,4 +1,4 @@
-// File: DevMindOptionsPage.cs  v7.0
+// File: DevMindOptionsPage.cs  v7.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -486,6 +486,16 @@ namespace DevMind
         [Description("When enabled, shows detailed diagnostic logging in the output panel including eviction details, turn tracking, and pinned message status.")]
         [DefaultValue(false)]
         public bool ShowDebugOutput { get; set; } = false;
+
+        /// <summary>
+        /// Working budget percentage at which MicroCompact fires. Set to 0 to disable.
+        /// Higher values maximize prompt cache hits but risk running out of context.
+        /// </summary>
+        [Category("Context Management")]
+        [DisplayName("MicroCompact Threshold (%)")]
+        [Description("Working budget percentage at which MicroCompact fires. Set to 0 to disable. Higher values maximize prompt cache hits but risk running out of context.")]
+        [DefaultValue(85)]
+        public int MicroCompactThreshold { get; set; } = 85;
 
     }
 }

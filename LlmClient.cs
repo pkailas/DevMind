@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v7.5
+// File: LlmClient.cs  v7.8
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -121,6 +121,13 @@ namespace DevMind
         private string _taskScratchpad = "";
         private const int ScratchpadMaxTokens = 200;
         private int _currentTurn;
+
+        /// <summary>
+        /// Set to true after MicroCompact fires. Cleared when budget stabilises below 40%
+        /// or when a new user-initiated message arrives. Prevents re-trimming every turn
+        /// and gives llama-server time to rebuild its KV-cache prefix.
+        /// </summary>
+        private bool _microCompactFiredThisCycle;
 
         /// <summary>
         /// Tracks filenames (case-insensitive) that have been fully read this session.
@@ -454,6 +461,11 @@ namespace DevMind
 
             // Tier 1: Trim stale tool result content in-place — runs ALWAYS, including agentic resubmits
             {
+                // Reset the cycle flag on new user-initiated sends so the next compaction
+                // fires at the normal threshold rather than the hysteresis threshold.
+                if (!deferCompression)
+                    _microCompactFiredThisCycle = false;
+
                 string compactMsg = MicroCompactToolResults();
                 if (compactMsg != null)
                     onToken(compactMsg);
@@ -992,14 +1004,17 @@ namespace DevMind
         // Trims the CONTENT of old tool result messages in-place — without removing
         // messages. Preserves conversation structure (tool_call/tool_result pairing)
         // while reclaiming context tokens from bulky payloads that are no longer needed.
-        // Only tool result messages (Role == "tool") are eligible. User and assistant
-        // messages are never modified — the model needs its own prior responses for
-        // coherence, and user messages contain the original task prompt.
+        // Tool result messages (Role == "tool") and user messages containing [READ: blocks
+        // are eligible. Assistant messages are never modified. The first user message
+        // (original task prompt) and the 5 most recent user messages with READ blocks are protected.
         // Returns a log string to emit via onToken, or null if nothing changed.
 
         /// <summary>Number of most-recent tool result messages to protect from trimming.
         /// The 5 most recent tool results (counted from end of history) are kept intact.</summary>
         private const int MicroCompactKeepRecentTools = 5;
+
+        /// <summary>Number of most-recent user messages with [READ: blocks to protect from trimming.</summary>
+        private const int MicroCompactKeepRecentUserReads = 5;
 
         /// <summary>Minimum content length before a tool result is eligible for trimming.</summary>
         private const int MicroCompactMinLength = 200;
@@ -1007,23 +1022,63 @@ namespace DevMind
         /// <summary>
         /// Trims stale tool result content in-place. The 5 most recent tool result messages
         /// are protected; all older tool results exceeding MicroCompactMinLength are compacted.
-        /// Only Role == "tool" messages are eligible — user and assistant messages are untouched.
+        /// Pass 3 additionally trims [READ: blocks from older user messages, protecting the 5
+        /// most recent user messages with READ blocks and always protecting the first user message.
         /// Called before <see cref="EvictStaleContext"/> on every non-deferred send.
         /// </summary>
         public string MicroCompactToolResults()
         {
             bool showDebug = DevMindOptions.Instance.ShowDebugOutput;
+
+            // ── Threshold gate: only compact when context pressure is high ────
+            int threshold = DevMindOptions.Instance.MicroCompactThreshold;
+            if (threshold == 0)
+                return null; // disabled
+
+            // Compute current working-history percentage without a full Assess() call.
+            // (Assess() is heavyweight; we only need the working bucket here.)
+            int workingLimit = _budget?.WorkingHistoryLimit ?? 1;
+            if (workingLimit <= 0) workingLimit = 1;
+
+            // Quick estimate: sum tokens for all non-system, non-protected messages.
+            // "Working" = everything except system[0] and the last 5 messages (protected turns + current).
+            int histCount = _conversationHistory.Count;
+            int workingUsedEstimate = 0;
+            int protectedStart = histCount - 5; // last 4 protected + 1 pending current
+            for (int i = 1; i < histCount && i < protectedStart; i++)
+                workingUsedEstimate += EstimateTokens(_conversationHistory[i].Content);
+
+            int workingPct = (int)(workingUsedEstimate * 100.0 / workingLimit);
+
+            // Budget reset: when we've recovered substantial headroom (threshold - 25),
+            // clear the cycle flag so the next compaction fires at the normal threshold.
+            if (workingPct < threshold - 25)
+                _microCompactFiredThisCycle = false;
+
+            // Hysteresis: after firing, require threshold+10 before firing again,
+            // giving the server time to rebuild its KV-cache prefix.
+            int effectiveThreshold = _microCompactFiredThisCycle
+                ? threshold + 10
+                : threshold;
+
+            if (workingPct < effectiveThreshold)
+            {
+                if (showDebug)
+                    System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] MicroCompact: skipped — working {workingPct}% < threshold {effectiveThreshold}%");
+                return null;
+            }
+
             int trimmed = 0;
             int savedChars = 0;
 
             // ── Pass 1: identify the 5 most recent tool result indices ───────
-            var protectedIndices = new System.Collections.Generic.HashSet<int>();
+            var protectedToolIndices = new System.Collections.Generic.HashSet<int>();
             int toolCount = 0;
             for (int i = _conversationHistory.Count - 1; i >= 1 && toolCount < MicroCompactKeepRecentTools; i--)
             {
                 if (_conversationHistory[i].Role == "tool")
                 {
-                    protectedIndices.Add(i);
+                    protectedToolIndices.Add(i);
                     toolCount++;
                 }
             }
@@ -1034,7 +1089,7 @@ namespace DevMind
                 var msg = _conversationHistory[i];
 
                 if (msg.Role != "tool") continue;
-                if (protectedIndices.Contains(i)) continue;
+                if (protectedToolIndices.Contains(i)) continue;
                 if (msg.Content == null || msg.Content.Length <= MicroCompactMinLength) continue;
 
                 // Preserve tool results that carry important state
@@ -1054,13 +1109,64 @@ namespace DevMind
                 trimmed++;
             }
 
+            // ── Pass 3: trim [READ: blocks from older user messages ───────────
+            // Find the index of the first user message — this is the original task prompt
+            // and must never be trimmed regardless of the keep-recent count.
+            int firstUserIndex = -1;
+            for (int i = 1; i < _conversationHistory.Count; i++)
+            {
+                if (_conversationHistory[i].Role == "user")
+                {
+                    firstUserIndex = i;
+                    break;
+                }
+            }
+
+            // Walk backwards to identify the 5 most recent user messages that contain [READ: blocks
+            var protectedUserReadIndices = new System.Collections.Generic.HashSet<int>();
+            int userReadCount = 0;
+            for (int i = _conversationHistory.Count - 1; i >= 1 && userReadCount < MicroCompactKeepRecentUserReads; i--)
+            {
+                var msg = _conversationHistory[i];
+                if (msg.Role == "user" && msg.Content != null
+                    && msg.Content.IndexOf("[READ:", StringComparison.Ordinal) >= 0)
+                {
+                    protectedUserReadIndices.Add(i);
+                    userReadCount++;
+                }
+            }
+
+            // Trim [READ: blocks from unprotected user messages (excluding the first user message)
+            for (int i = 1; i < _conversationHistory.Count; i++)
+            {
+                var msg = _conversationHistory[i];
+
+                if (msg.Role != "user") continue;
+                if (i == firstUserIndex) continue;                        // always protect first user message
+                if (protectedUserReadIndices.Contains(i)) continue;       // protect 5 most recent with READ blocks
+                if (msg.Content == null) continue;
+                if (msg.Content.IndexOf("[READ:", StringComparison.Ordinal) < 0) continue;
+
+                int origLen = msg.Content.Length;
+                CacheReadBlocks(msg.Content);
+                string compacted = CompactReadBlocks(msg.Content);
+                if (compacted.Length >= origLen) continue;                 // nothing trimmed
+
+                _conversationHistory[i] = new ChatMessage(msg.Role,
+                    compacted, msg.Turn, msg.ToolCalls, msg.ToolCallId);
+                savedChars += origLen - compacted.Length;
+                trimmed++;
+            }
+
             if (trimmed == 0)
                 return null;
 
-            string logMsg = $"\n[CONTEXT] MicroCompact: trimmed {trimmed} message(s), reclaimed ~{savedChars / 4} tokens.\n";
+            _microCompactFiredThisCycle = true;
+
+            string logMsg = $"\n[CONTEXT] Compacting — one-time cache rebuild expected.\n[CONTEXT] MicroCompact: trimmed {trimmed} message(s), reclaimed ~{savedChars / 4} tokens.\n";
             if (showDebug)
             {
-                System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] MicroCompact: {trimmed} trimmed, {savedChars} chars saved");
+                System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] MicroCompact: {trimmed} trimmed, {savedChars} chars saved, workingPct={workingPct}%, threshold={threshold}%");
                 logMsg += $"[DIAG] MicroCompact: trimmed {trimmed} messages, cache holds {NearlineCache.Count} entries ({NearlineCache.EstimatedTokens} est. tokens)\n";
             }
 
