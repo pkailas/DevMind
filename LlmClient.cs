@@ -809,13 +809,10 @@ namespace DevMind
 
             var diagLog = new System.Text.StringBuilder();
 
-            if (showDebug)
-            {
-                diagLog.AppendLine($"\n[CONTEXT] Eviction check: turn={_currentTurn}, mode={mode}, message count={_conversationHistory.Count}");
-            }
-
             if (mode == ContextEvictionMode.Off)
             {
+                if (showDebug)
+                    diagLog.AppendLine($"\n[CONTEXT] Eviction check: turn={_currentTurn}, mode={mode}, skipped");
                 System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] Eviction: mode=Off, skipped");
                 return showDebug ? diagLog.ToString() : null;
             }
@@ -823,6 +820,15 @@ namespace DevMind
             // Drop age: messages older than this are removed entirely.
             // No warm/cold tiers — append-only means we only DROP, never rewrite.
             int dropAge = mode == ContextEvictionMode.Aggressive ? 5 : 8;
+
+            // Tool call + tool result pairs are 2-3x heavier per logical turn and carry
+            // low residual value once acted upon. Use a shorter drop age for them.
+            int toolDropAge = Math.Max(2, dropAge - 3);
+
+            if (showDebug)
+            {
+                diagLog.AppendLine($"\n[CONTEXT] Eviction check: turn={_currentTurn}, mode={mode}, message count={_conversationHistory.Count}, dropAge={dropAge}, toolDropAge={toolDropAge}");
+            }
 
             int dropped = 0;
             var indicesToRemove = new List<int>();
@@ -833,7 +839,12 @@ namespace DevMind
                 var msg = _conversationHistory[i];
                 int age = _currentTurn - msg.Turn;
 
-                if (age <= dropAge) continue;
+                // Tool role messages and assistant messages with tool_calls use a shorter drop age
+                bool isToolRelated = msg.Role == "tool"
+                    || (msg.Role == "assistant" && msg.ToolCalls != null && msg.ToolCalls.Count > 0);
+                int effectiveDropAge = isToolRelated ? toolDropAge : dropAge;
+
+                if (age <= effectiveDropAge) continue;
                 if (IsPinnedMessage(msg)) continue;
 
                 // Build snippet before dropping
@@ -843,6 +854,60 @@ namespace DevMind
                 indicesToRemove.Add(i);
                 dropped++;
             }
+
+            // Ensure tool call/result pairs are dropped as a unit: if an assistant message
+            // with tool_calls is dropped, also drop all immediately following tool role
+            // messages (and vice versa). This prevents orphaned tool_calls or tool results.
+            var extraIndices = new HashSet<int>();
+            foreach (int idx in indicesToRemove)
+            {
+                var msg = _conversationHistory[idx];
+
+                // Assistant with tool_calls → also drop following tool results
+                if (msg.Role == "assistant" && msg.ToolCalls != null && msg.ToolCalls.Count > 0)
+                {
+                    for (int j = idx + 1; j < _conversationHistory.Count; j++)
+                    {
+                        if (_conversationHistory[j].Role == "tool")
+                            extraIndices.Add(j);
+                        else
+                            break;
+                    }
+                }
+
+                // Tool result → also drop the preceding assistant with tool_calls
+                if (msg.Role == "tool" && idx > 1)
+                {
+                    // Walk back to find the assistant message that initiated these tool calls
+                    for (int j = idx - 1; j >= 1; j--)
+                    {
+                        if (_conversationHistory[j].Role == "tool")
+                            continue; // skip other tool results in the same batch
+                        if (_conversationHistory[j].Role == "assistant"
+                            && _conversationHistory[j].ToolCalls != null
+                            && _conversationHistory[j].ToolCalls.Count > 0)
+                        {
+                            extraIndices.Add(j);
+                        }
+                        break;
+                    }
+                }
+            }
+
+            // Merge extra indices
+            foreach (int idx in extraIndices)
+            {
+                if (!indicesToRemove.Contains(idx) && !IsPinnedMessage(_conversationHistory[idx]))
+                {
+                    string snippet = BuildDropSnippet(_conversationHistory[idx]);
+                    if (snippet != null) dropSummaryParts.Add(snippet);
+                    indicesToRemove.Add(idx);
+                    dropped++;
+                }
+            }
+
+            // Sort for reverse removal
+            indicesToRemove.Sort();
 
             // Remove in reverse index order to preserve indices
             if (indicesToRemove.Count > 0)
@@ -1535,8 +1600,17 @@ namespace DevMind
                 return ok ? "build succeeded" : "shell command";
             }
 
+            if (msg.Role == "tool")
+            {
+                string t = c.Trim();
+                if (t.Length > 60) t = t.Substring(0, 60) + "...";
+                return $"tool result: {t}";
+            }
+
             if (msg.Role == "assistant")
             {
+                if (msg.ToolCalls != null && msg.ToolCalls.Count > 0)
+                    return $"tool call ({msg.ToolCalls.Count} call(s))";
                 string t = c.Trim();
                 if (t.Length > 40) t = t.Substring(0, 40) + "...";
                 return $"response: {t}";

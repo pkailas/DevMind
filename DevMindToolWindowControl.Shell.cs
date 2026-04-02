@@ -145,6 +145,11 @@ namespace DevMind
 
             bool usePowerShell = IsPowerShellAvailable();
             string shell     = usePowerShell ? "powershell.exe" : "cmd.exe";
+
+            // Bash && (run-next-if-succeeded) doesn't work in PowerShell; replace with ; (sequential).
+            if (usePowerShell)
+                command = command.Replace(" && ", "; ");
+
             string sanitized = SanitizeShellCommand(command);
             string args = usePowerShell
                 ? $"-NoProfile -NonInteractive -Command \"{sanitized.Replace("\"", "\\\"")}\""
@@ -281,6 +286,11 @@ namespace DevMind
         {
             bool usePowerShell = IsPowerShellAvailable();
             string shell     = usePowerShell ? "powershell.exe" : "cmd.exe";
+
+            // Bash && (run-next-if-succeeded) doesn't work in PowerShell; replace with ; (sequential).
+            if (usePowerShell)
+                command = command.Replace(" && ", "; ");
+
             string sanitized = SanitizeShellCommand(command);
             string args = usePowerShell
                 ? $"-NoProfile -NonInteractive -Command \"{sanitized.Replace("\"", "\\\"")}\""

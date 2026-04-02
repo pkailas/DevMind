@@ -1551,15 +1551,14 @@ namespace DevMind
                         _blockByBlockStep = 0;
                         _pendingResubmitPrompt = null;
                     }
-                    // Skip re-enabling input when the agentic loop is still active.
-                    // The re-triggered SendToLlm() manages its own SetInputEnabled(false) call;
-                    // calling SetInputEnabled(true) here would disable Stop and re-enable input
-                    // between agentic iterations.
-                    if (!_shellLoopPending)
-                    {
-                        _agenticDepth = 0;
-                        SetInputEnabled(true);
-                    }
+                    // Do NOT reset _agenticDepth or SetInputEnabled here.
+                    // The onComplete handler is dispatched via Dispatcher.BeginInvoke and
+                    // may not have executed yet — resetting depth here causes a race where
+                    // the counter resets to 0 on every iteration, preventing depth cap from
+                    // ever being reached. All terminal paths in onComplete already reset
+                    // _agenticDepth = 0 and call SetInputEnabled(true).
+                    // _shellLoopPending is safe to clear unconditionally — it's a no-op
+                    // when onComplete hasn't run yet (still false), and a cleanup when it has.
                     _shellLoopPending = false;
                 }
             });

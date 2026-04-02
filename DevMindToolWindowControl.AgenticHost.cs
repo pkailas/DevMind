@@ -644,9 +644,32 @@ namespace DevMind
         {
             const int MaxFailedTests = 10;
 
-            // Guard: null/empty project name
+            // Auto-detect project when none specified: look for *.csproj in working directory.
             if (string.IsNullOrWhiteSpace(project))
-                return "[TEST] No project specified.";
+            {
+                try
+                {
+                    string[] csprojFiles = Directory.GetFiles(_terminalWorkingDir, "*.csproj", SearchOption.TopDirectoryOnly);
+                    if (csprojFiles.Length == 1)
+                    {
+                        project = csprojFiles[0];
+                        AppendOutput($"[TEST] Auto-detected project: {Path.GetFileName(project)}\n", OutputColor.Dim);
+                    }
+                    else if (csprojFiles.Length > 1)
+                    {
+                        project = csprojFiles[0];
+                        AppendOutput($"[TEST] Multiple .csproj files found — using {Path.GetFileName(project)}\n", OutputColor.Dim);
+                    }
+                    else
+                    {
+                        return "[TEST] No project specified and no .csproj found in working directory.";
+                    }
+                }
+                catch
+                {
+                    return "[TEST] No project specified.";
+                }
+            }
 
             // Resolve project path — if it looks like a bare name (no path separators, no .csproj ext),
             // search for a matching .csproj in the solution/working directory.
