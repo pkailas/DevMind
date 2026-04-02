@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v5.0.69
+// File: DevMindToolWindowControl.xaml.cs  v7.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -877,100 +877,22 @@ namespace DevMind
                     ? $"dotnet build \"{activeProjectPath}\""
                     : "msbuild \"C:\\Users\\pkailas.KAILAS\\source\\repos\\DevMind\\DevMind.slnx\" /p:DeployExtension=false /verbosity:minimal";
 
-                string llmDirective =
-                    "## Directives\n" +
-                    "FILE: <filename>\n<raw source>\nEND_FILE\n\n" +
-                    "PATCH <filename>\nFIND:\n<exact text>\nREPLACE:\n<replacement>\nEND_PATCH\n" +
-                    "Multiple FIND/REPLACE pairs are allowed before END_PATCH. END_PATCH is required and must appear on its own line after the last REPLACE block.\n\n" +
-                    "SHELL: <command>\n\n" +
-                    "READ <filename>  — full if <100 lines, outline otherwise\n" +
-                    "READ <filename>:<start>-<end>  — targeted line range (1-based)\n" +
-                    "READ! <filename>  — force full content (expensive)\n" +
-                    "READ git log [N]  — show recent commit history (default 10, max 50)\n" +
-                    "READ git diff [ref]  — show working changes, staged changes, or diff against a commit\n" +
-                    "  Examples: READ git diff, READ git diff --staged, READ git diff HEAD~1, READ git diff filename.cs\n\n" +
-                    "### GREP — Search File for Pattern\n" +
-                    "GREP: \"pattern\" filename\n" +
-                    "GREP: \"pattern\" filename:100-200\n\n" +
-                    "Searches for lines containing the pattern (case-insensitive substring match) in a single file.\n" +
-                    "Returns matching lines with line numbers. Use GREP to locate code before doing a targeted READ.\n\n" +
-                    "Example workflow:\n" +
-                    "1. GREP: \"SaveFileAsync\" AgenticExecutor.cs     → finds lines 42, 89, 155\n" +
-                    "2. READ AgenticExecutor.cs:85-100               → reads context around line 89\n" +
-                    "3. PATCH AgenticExecutor.cs                      → applies the change\n\n" +
-                    "Rules:\n" +
-                    "- Pattern must be in double quotes.\n" +
-                    "- Results are capped at 50 matches. If truncated, narrow your pattern or add a line range.\n" +
-                    "- GREP does not modify files. It is information-gathering only.\n" +
-                    "- Prefer GREP + targeted READ over sequential full-file READs.\n\n" +
-                    "### FIND — Cross-File Search\n" +
-                    "FIND: \"pattern\" *.cs\n" +
-                    "FIND: \"pattern\" Services/*.cs\n\n" +
-                    "Searches all files matching the glob for lines containing the pattern (case-insensitive substring match).\n" +
-                    "Returns filename:line: content for each match, capped at 100 results across all files.\n\n" +
-                    "Use FIND when you need to know where something is used across the project.\n" +
-                    "Use GREP when you already know which file to search.\n\n" +
-                    "### DELETE — Remove File\n" +
-                    "DELETE filename.cs\n\n" +
-                    "Deletes a file from disk. Use only when explicitly asked to remove a file.\n" +
-                    "Do not use DELETE speculatively — only when the task requires file removal.\n\n" +
-                    "### RENAME — Rename/Move File\n" +
-                    "RENAME OldFile.cs NewFile.cs\n\n" +
-                    "Renames a file on disk. The old file is closed in the editor and the new file is opened.\n" +
-                    "Does not update references in other files — use FIND + PATCH to update imports or usings if needed.\n\n" +
-                    "### DIFF — Show File Changes\n" +
-                    "DIFF filename.cs\n\n" +
-                    "Shows all changes made to a file during this conversation as a unified-style diff.\n" +
-                    "Use DIFF to review cumulative modifications before confirming task completion.\n" +
-                    "Use DIFF after multiple PATCHes to verify the overall result is correct.\n" +
-                    "DIFF is information-gathering only — it does not modify files.\n\n" +
-                    "### TEST — Run Tests\n" +
-                    "TEST ProjectName.csproj\n" +
-                    "TEST ProjectName.csproj ClassName.MethodName\n" +
-                    "TEST ProjectName.csproj --filter \"FullyQualifiedName~SomeTest\"\n\n" +
-                    "Runs dotnet test and returns structured pass/fail results.\n" +
-                    "Output is compact — only failed tests show details. Much cheaper than SHELL: dotnet test.\n" +
-                    "Use TEST after making changes to verify correctness.\n" +
-                    "If tests fail, fix the code with PATCH and TEST again.\n\n" +
-                    "## Build Verification\n" +
-                    $"After ANY code change emit: SHELL: {buildCommand}\n\n" +
-                    "## After PATCH\n" +
-                    "You receive [PATCH-RESULT:filename] with ±3 lines of context and >>> CHANGED:/>>> ADDED: markers.\n" +
-                    "Full file is cached — use READ filename:start-end for more context.\n\n" +
-                    "## Before PATCH\n" +
-                    "Never output raw code blocks. Use FILE: for new files, PATCH for edits.\n" +
-                    "READ the file first if you have not seen it. You may combine FILE, PATCH, SHELL in one response.\n" +
-                    "FIND text must be copied verbatim from READ output — never reconstructed from memory.\n" +
-                    "Do not read the same file multiple times. If you have an outline and a line range, that is sufficient context to write a PATCH. Act immediately.\n\n" +
-                    "## Large File Strategy\n" +
-                    "For files over 100 lines:\n" +
-                    "1. First READ gets an outline (types, methods, signatures with line numbers).\n" +
-                    "2. Use the outline to identify the exact line range you need.\n" +
-                    "3. READ filename:start-end for just that section.\n" +
-                    "4. PATCH using only the content from that range.\n" +
-                    "Never READ! an entire large file unless explicitly asked. Work from outline → range → patch.\n\n" +
-                    "## Core rules\n" +
-                    "After a READ is loaded, act on it immediately in the same response. Never emit only READ directives and stop. Every response must include at least one PATCH, FILE, or SHELL directive unless you are responding to a question.\n\n" +
-                    "## Task Completion\n" +
-                    "When all steps of the task are complete and nothing remains to do, emit:\nDONE\n" +
-                    "Only emit DONE when the task is truly finished. Do not emit DONE mid-task.\n\n" +
-                    "## Scratchpad\n" +
-                    "Emit a SCRATCHPAD: block (end with END_SCRATCHPAD on its own line) to track state across turns:\n" +
-                    "SCRATCHPAD:\nGoal: <task>\nFiles: <file> (lines N-M)\nStatus: <PLANNING|PATCHING|BUILDING|DONE>\nLast: <action>\nNext: <step>\nEND_SCRATCHPAD";
-                if (DevMindOptions.Instance.BlockByBlockMode != BlockByBlockModeType.Off)
+                // ── Behavioral rules (included regardless of directive mode) ──
+                string behavioralRules = BuildBehavioralPrompt(buildCommand, projectNamespace);
 
-                    llmDirective +=
-                        "\n\n## Block-by-Block Mode (Active)\n" +
-                        "You are operating in block-by-block mode for memory-constrained environments.\n" +
-                        "Rules:\n" +
-                        "1. Start each task by READing the file outline only — do not request full content.\n" +
-                        "2. Each turn: READ one range, emit one PATCH, update SCRATCHPAD with remaining steps.\n" +
-                        "3. Do not attempt multiple file sections in a single response.\n" +
-                        "4. After each PATCH, mark that step done in SCRATCHPAD before continuing.\n" +
-                        "5. If more steps remain, state the next step clearly and wait for the next turn.\n" +
-                        "Work incrementally: outline → one range → one patch → repeat until done.";
-                if (!string.IsNullOrEmpty(projectNamespace))
-                    llmDirective += $"\n- When creating new files, use the namespace '{projectNamespace}'.";
+                string llmDirective;
+                var directiveMode = DevMindOptions.Instance.DirectiveMode;
+                if (directiveMode == DirectiveMode.TextDirective)
+                {
+                    // Full text directives — syntax descriptions + behavioral rules
+                    llmDirective = BuildTextDirectivePrompt(buildCommand) + "\n\n" + behavioralRules;
+                }
+                else
+                {
+                    // ToolUse or Auto — tools are in the request body, system prompt has behavioral rules only
+                    llmDirective = behavioralRules;
+                }
+
                 string combined = $"{originalSystemPrompt}\n\n{llmDirective}";
                 if (!string.IsNullOrEmpty(_devMindContext))
                     combined += $"\n\n--- Project Context (DevMind.md) ---\n{_devMindContext}\n---";
@@ -1897,6 +1819,128 @@ namespace DevMind
                 catch { }
                 AppendOutput($"✗ Failed to create {fileName}: {ex.Message}\n", OutputColor.Error);
             }
+        }
+
+        // ── System Prompt Builders ──────────────────────────────────────────
+
+        /// <summary>
+        /// Builds the text directive syntax descriptions for TextDirective mode.
+        /// Contains the FILE:, PATCH, SHELL:, READ, GREP:, FIND:, DELETE, RENAME, DIFF, TEST syntax.
+        /// </summary>
+        private static string BuildTextDirectivePrompt(string buildCommand)
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.Append("## Directives\n");
+            sb.Append("FILE: <filename>\n<raw source>\nEND_FILE\n\n");
+            sb.Append("PATCH <filename>\nFIND:\n<exact text>\nREPLACE:\n<replacement>\nEND_PATCH\n");
+            sb.Append("Multiple FIND/REPLACE pairs are allowed before END_PATCH. END_PATCH is required and must appear on its own line after the last REPLACE block.\n\n");
+            sb.Append("SHELL: <command>\n\n");
+            sb.Append("READ <filename>  — full if <100 lines, outline otherwise\n");
+            sb.Append("READ <filename>:<start>-<end>  — targeted line range (1-based)\n");
+            sb.Append("READ! <filename>  — force full content (expensive)\n");
+            sb.Append("READ git log [N]  — show recent commit history (default 10, max 50)\n");
+            sb.Append("READ git diff [ref]  — show working changes, staged changes, or diff against a commit\n");
+            sb.Append("  Examples: READ git diff, READ git diff --staged, READ git diff HEAD~1, READ git diff filename.cs\n\n");
+            sb.Append("### GREP — Search File for Pattern\n");
+            sb.Append("GREP: \"pattern\" filename\n");
+            sb.Append("GREP: \"pattern\" filename:100-200\n\n");
+            sb.Append("Searches for lines containing the pattern (case-insensitive substring match) in a single file.\n");
+            sb.Append("Returns matching lines with line numbers. Use GREP to locate code before doing a targeted READ.\n\n");
+            sb.Append("Example workflow:\n");
+            sb.Append("1. GREP: \"SaveFileAsync\" AgenticExecutor.cs     → finds lines 42, 89, 155\n");
+            sb.Append("2. READ AgenticExecutor.cs:85-100               → reads context around line 89\n");
+            sb.Append("3. PATCH AgenticExecutor.cs                      → applies the change\n\n");
+            sb.Append("Rules:\n");
+            sb.Append("- Pattern must be in double quotes.\n");
+            sb.Append("- Results are capped at 50 matches. If truncated, narrow your pattern or add a line range.\n");
+            sb.Append("- GREP does not modify files. It is information-gathering only.\n");
+            sb.Append("- Prefer GREP + targeted READ over sequential full-file READs.\n\n");
+            sb.Append("### FIND — Cross-File Search\n");
+            sb.Append("FIND: \"pattern\" *.cs\n");
+            sb.Append("FIND: \"pattern\" Services/*.cs\n\n");
+            sb.Append("Searches all files matching the glob for lines containing the pattern (case-insensitive substring match).\n");
+            sb.Append("Returns filename:line: content for each match, capped at 100 results across all files.\n\n");
+            sb.Append("Use FIND when you need to know where something is used across the project.\n");
+            sb.Append("Use GREP when you already know which file to search.\n\n");
+            sb.Append("### DELETE — Remove File\n");
+            sb.Append("DELETE filename.cs\n\n");
+            sb.Append("Deletes a file from disk. Use only when explicitly asked to remove a file.\n");
+            sb.Append("Do not use DELETE speculatively — only when the task requires file removal.\n\n");
+            sb.Append("### RENAME — Rename/Move File\n");
+            sb.Append("RENAME OldFile.cs NewFile.cs\n\n");
+            sb.Append("Renames a file on disk. The old file is closed in the editor and the new file is opened.\n");
+            sb.Append("Does not update references in other files — use FIND + PATCH to update imports or usings if needed.\n\n");
+            sb.Append("### DIFF — Show File Changes\n");
+            sb.Append("DIFF filename.cs\n\n");
+            sb.Append("Shows all changes made to a file during this conversation as a unified-style diff.\n");
+            sb.Append("Use DIFF to review cumulative modifications before confirming task completion.\n");
+            sb.Append("Use DIFF after multiple PATCHes to verify the overall result is correct.\n");
+            sb.Append("DIFF is information-gathering only — it does not modify files.\n\n");
+            sb.Append("### TEST — Run Tests\n");
+            sb.Append("TEST ProjectName.csproj\n");
+            sb.Append("TEST ProjectName.csproj ClassName.MethodName\n");
+            sb.Append("TEST ProjectName.csproj --filter \"FullyQualifiedName~SomeTest\"\n\n");
+            sb.Append("Runs dotnet test and returns structured pass/fail results.\n");
+            sb.Append("Output is compact — only failed tests show details. Much cheaper than SHELL: dotnet test.\n");
+            sb.Append("Use TEST after making changes to verify correctness.\n");
+            sb.Append("If tests fail, fix the code with PATCH and TEST again.\n\n");
+            sb.Append("## Build Verification\n");
+            sb.Append($"After ANY code change emit: SHELL: {buildCommand}");
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// Builds the behavioral rules that apply regardless of directive mode.
+        /// Includes: After PATCH, Before PATCH, Large File Strategy, Core rules,
+        /// Task Completion, Scratchpad, Block-by-Block, and namespace guidance.
+        /// </summary>
+        private static string BuildBehavioralPrompt(string buildCommand, string projectNamespace)
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.Append("## Build Verification\n");
+            sb.Append($"Build command: {buildCommand}\n");
+            sb.Append("After ANY code change, run the build to verify it still passes.\n\n");
+            sb.Append("## After PATCH\n");
+            sb.Append("You receive [PATCH-RESULT:filename] with ±3 lines of context and >>> CHANGED:/>>> ADDED: markers.\n");
+            sb.Append("Full file is cached — use READ filename:start-end for more context.\n\n");
+            sb.Append("## Before PATCH\n");
+            sb.Append("Never output raw code blocks. Use FILE: for new files, PATCH for edits.\n");
+            sb.Append("READ the file first if you have not seen it. You may combine FILE, PATCH, SHELL in one response.\n");
+            sb.Append("FIND text must be copied verbatim from READ output — never reconstructed from memory.\n");
+            sb.Append("Do not read the same file multiple times. If you have an outline and a line range, that is sufficient context to write a PATCH. Act immediately.\n\n");
+            sb.Append("## Large File Strategy\n");
+            sb.Append("For files over 100 lines:\n");
+            sb.Append("1. First READ gets an outline (types, methods, signatures with line numbers).\n");
+            sb.Append("2. Use the outline to identify the exact line range you need.\n");
+            sb.Append("3. READ filename:start-end for just that section.\n");
+            sb.Append("4. PATCH using only the content from that range.\n");
+            sb.Append("Never READ! an entire large file unless explicitly asked. Work from outline → range → patch.\n\n");
+            sb.Append("## Core rules\n");
+            sb.Append("After a READ is loaded, act on it immediately in the same response. Never emit only READ directives and stop. Every response must include at least one PATCH, FILE, or SHELL directive unless you are responding to a question.\n\n");
+            sb.Append("## Task Completion\n");
+            sb.Append("When all steps of the task are complete and nothing remains to do, emit:\nDONE\n");
+            sb.Append("Only emit DONE when the task is truly finished. Do not emit DONE mid-task.\n\n");
+            sb.Append("## Scratchpad\n");
+            sb.Append("Emit a SCRATCHPAD: block (end with END_SCRATCHPAD on its own line) to track state across turns:\n");
+            sb.Append("SCRATCHPAD:\nGoal: <task>\nFiles: <file> (lines N-M)\nStatus: <PLANNING|PATCHING|BUILDING|DONE>\nLast: <action>\nNext: <step>\nEND_SCRATCHPAD");
+
+            if (DevMindOptions.Instance.BlockByBlockMode != BlockByBlockModeType.Off)
+            {
+                sb.Append("\n\n## Block-by-Block Mode (Active)\n");
+                sb.Append("You are operating in block-by-block mode for memory-constrained environments.\n");
+                sb.Append("Rules:\n");
+                sb.Append("1. Start each task by READing the file outline only — do not request full content.\n");
+                sb.Append("2. Each turn: READ one range, emit one PATCH, update SCRATCHPAD with remaining steps.\n");
+                sb.Append("3. Do not attempt multiple file sections in a single response.\n");
+                sb.Append("4. After each PATCH, mark that step done in SCRATCHPAD before continuing.\n");
+                sb.Append("5. If more steps remain, state the next step clearly and wait for the next turn.\n");
+                sb.Append("Work incrementally: outline → one range → one patch → repeat until done.");
+            }
+
+            if (!string.IsNullOrEmpty(projectNamespace))
+                sb.Append($"\n- When creating new files, use the namespace '{projectNamespace}'.");
+
+            return sb.ToString();
         }
 
     }

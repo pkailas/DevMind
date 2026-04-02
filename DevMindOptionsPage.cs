@@ -1,4 +1,4 @@
-// File: DevMindOptionsPage.cs  v6.2
+// File: DevMindOptionsPage.cs  v7.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -37,6 +37,19 @@ namespace DevMind
         Balanced,
         [Description("Aggressive")]
         Aggressive
+    }
+
+    /// <summary>
+    /// Controls how DevMind communicates directives to the LLM.
+    /// </summary>
+    public enum DirectiveMode
+    {
+        [Description("Tool Use")]
+        ToolUse,
+        [Description("Text Directives")]
+        TextDirective,
+        [Description("Auto")]
+        Auto
     }
 
     /// <summary>
@@ -406,6 +419,18 @@ namespace DevMind
         [Description("Display a color-coded context budget line after every LLM response.")]
         [DefaultValue(true)]
         public bool ShowContextBudget { get; set; } = true;
+
+        /// <summary>
+        /// How DevMind communicates directives to the LLM.
+        /// ToolUse sends JSON Schema tools (requires --jinja on llama-server).
+        /// TextDirective uses the legacy text format.
+        /// Auto tries ToolUse first, falls back to TextDirective on error.
+        /// </summary>
+        [Category("Directives")]
+        [DisplayName("Directive Mode")]
+        [Description("How DevMind communicates directives to the LLM. ToolUse sends JSON Schema tools (requires --jinja on llama-server). TextDirective uses the legacy text format. Auto tries ToolUse first, falls back to TextDirective on error.")]
+        [DefaultValue(DirectiveMode.Auto)]
+        public DirectiveMode DirectiveMode { get; set; } = DirectiveMode.Auto;
 
         /// <summary>
         /// Whether to display LLM thinking tokens (&lt;think&gt;...&lt;/think&gt;) in the output.

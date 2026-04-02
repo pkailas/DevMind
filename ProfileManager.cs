@@ -1,4 +1,4 @@
-// File: ProfileManager.cs  v2.0
+// File: ProfileManager.cs  v3.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -39,6 +39,9 @@ namespace DevMind
         [JsonProperty("contextEviction")]
         public string ContextEviction { get; set; }
 
+        [JsonProperty("directiveMode")]
+        public string DirectiveMode { get; set; }
+
         public override string ToString() => Name ?? Id ?? "(unnamed)";
     }
 
@@ -59,7 +62,7 @@ namespace DevMind
         [JsonProperty("profiles")]
         public List<ProfileData> Profiles { get; set; } = new List<ProfileData>();
 
-        internal const int CurrentVersion = 2;
+        internal const int CurrentVersion = 3;
     }
 
     /// <summary>
@@ -111,7 +114,7 @@ namespace DevMind
 
         public ProfileData CreateProfile(string name, string endpoint, string apiKey,
             string modelName, int manualContextSize, LlmServerType serverType,
-            ContextEvictionMode contextEviction)
+            ContextEvictionMode contextEviction, DirectiveMode directiveMode = DirectiveMode.Auto)
         {
             if (string.IsNullOrWhiteSpace(name))
                 throw new ArgumentException("Profile name cannot be empty.", nameof(name));
@@ -127,7 +130,8 @@ namespace DevMind
                 ModelName = modelName ?? "",
                 ManualContextSize = manualContextSize,
                 ServerType = serverType.ToString(),
-                ContextEviction = contextEviction.ToString()
+                ContextEviction = contextEviction.ToString(),
+                DirectiveMode = directiveMode.ToString()
             };
 
             // Ensure unique ID
@@ -149,7 +153,8 @@ namespace DevMind
                 opts.ModelName,
                 opts.ManualContextSize,
                 opts.ServerType,
-                opts.ContextEviction);
+                opts.ContextEviction,
+                opts.DirectiveMode);
 
             // Activate the newly created profile
             _store.ActiveProfile = profile.Id;
@@ -208,9 +213,10 @@ namespace DevMind
 
             Enum.TryParse(source.ServerType, true, out LlmServerType serverType);
             Enum.TryParse(source.ContextEviction, true, out ContextEvictionMode eviction);
+            Enum.TryParse(source.DirectiveMode, true, out DirectiveMode dirMode);
 
             return CreateProfile(newName, source.Endpoint, source.ApiKey,
-                source.ModelName, source.ManualContextSize, serverType, eviction);
+                source.ModelName, source.ManualContextSize, serverType, eviction, dirMode);
         }
 
         // ── Apply / Activate ─────────────────────────────────────────────────
@@ -244,6 +250,8 @@ namespace DevMind
                 opts.ServerType = st;
             if (Enum.TryParse(profile.ContextEviction, true, out ContextEvictionMode ev))
                 opts.ContextEviction = ev;
+            if (Enum.TryParse(profile.DirectiveMode, true, out DirectiveMode dm))
+                opts.DirectiveMode = dm;
 
             opts.Save();
 
@@ -270,6 +278,7 @@ namespace DevMind
             active.ManualContextSize = opts.ManualContextSize;
             active.ServerType = opts.ServerType.ToString();
             active.ContextEviction = opts.ContextEviction.ToString();
+            active.DirectiveMode = opts.DirectiveMode.ToString();
             Save();
         }
 
@@ -290,7 +299,8 @@ namespace DevMind
                 ModelName = opts.ModelName,
                 ManualContextSize = opts.ManualContextSize,
                 ServerType = opts.ServerType.ToString(),
-                ContextEviction = opts.ContextEviction.ToString()
+                ContextEviction = opts.ContextEviction.ToString(),
+                DirectiveMode = opts.DirectiveMode.ToString()
             };
             _store.Profiles.Add(defaultProfile);
             _store.ActiveProfile = "default";
@@ -337,7 +347,8 @@ namespace DevMind
                     ModelName = opts.ModelName,
                     ManualContextSize = opts.ManualContextSize,
                     ServerType = opts.ServerType.ToString(),
-                    ContextEviction = opts.ContextEviction.ToString()
+                    ContextEviction = opts.ContextEviction.ToString(),
+                    DirectiveMode = opts.DirectiveMode.ToString()
                 };
                 _store.Profiles.Add(defaultProfile);
                 _store.ActiveProfile = "default";

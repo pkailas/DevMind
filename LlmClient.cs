@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v6.0
+// File: LlmClient.cs  v7.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -1516,6 +1516,13 @@ namespace DevMind
             if (!string.IsNullOrWhiteSpace(modelName))
             {
                 request["model"] = modelName;
+            }
+
+            // Include tool definitions when DirectiveMode is ToolUse or Auto
+            var directiveMode = DevMindOptions.Instance.DirectiveMode;
+            if (directiveMode != DirectiveMode.TextDirective)
+            {
+                request["tools"] = ToolRegistry.BuildToolsArray();
             }
 
             return request.ToString(Formatting.None);
