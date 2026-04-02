@@ -857,6 +857,11 @@ namespace DevMind
             // system prompt string and invalidate the server's entire KV cache from position 0.
             string originalSystemPrompt = _shellLoopPending ? null : DevMindOptions.Instance.SystemPrompt;
 
+            // Hoist buildCommand so it's accessible in the onComplete lambda for ToolCallMapper
+            string buildCommand = activeProjectPath != null
+                ? $"dotnet build \"{activeProjectPath}\""
+                : "msbuild \"C:\\Users\\pkailas.KAILAS\\source\\repos\\DevMind\\DevMind.slnx\" /p:DeployExtension=false /verbosity:minimal";
+
             if (!_shellLoopPending)
             {
                 string projectNamespace = null;
@@ -872,10 +877,6 @@ namespace DevMind
                     }
                 }
                 catch { }
-
-                string buildCommand = activeProjectPath != null
-                    ? $"dotnet build \"{activeProjectPath}\""
-                    : "msbuild \"C:\\Users\\pkailas.KAILAS\\source\\repos\\DevMind\\DevMind.slnx\" /p:DeployExtension=false /verbosity:minimal";
 
                 // ── Behavioral rules (included regardless of directive mode) ──
                 string behavioralRules = BuildBehavioralPrompt(buildCommand, projectNamespace);
@@ -995,7 +996,34 @@ namespace DevMind
                                 System.Diagnostics.Debug.WriteLine($"[DEVMIND-DIAG] responseBuffer length={fullResponse.Length}");
                                 System.Diagnostics.Debug.WriteLine($"[DEVMIND-DIAG] responseBuffer first 500 chars: {(fullResponse.Length > 500 ? fullResponse.Substring(0, 500) : fullResponse)}");
 
-                                var outcome  = ResponseClassifier.Classify(fullResponse);
+                                ResponseOutcome outcome;
+                                var lastToolCalls = _llmClient.LastToolCalls;
+                                if (lastToolCalls != null && lastToolCalls.Count > 0)
+                                {
+                                    // Tool use path — map tool calls to response blocks
+                                    var toolBlocks = ToolCallMapper.Map(lastToolCalls, buildCommand);
+
+                                    // Also parse text content for any prose alongside tool_calls
+                                    if (!string.IsNullOrWhiteSpace(fullResponse))
+                                    {
+                                        var textBlocks = ResponseParser.Parse(fullResponse);
+                                        // Prepend text blocks (prose) before tool blocks
+                                        foreach (var tb in textBlocks)
+                                        {
+                                            if (tb.Type == BlockType.Text)
+                                                toolBlocks.Insert(0, tb);
+                                        }
+                                    }
+
+                                    outcome = ResponseClassifier.Classify(toolBlocks);
+                                    System.Diagnostics.Debug.WriteLine($"[DEVMIND-DIAG] Tool use path: {lastToolCalls.Count} tool call(s) → {toolBlocks.Count} block(s)");
+                                }
+                                else
+                                {
+                                    // Text directive fallback
+                                    outcome = ResponseClassifier.Classify(fullResponse);
+                                }
+
                                 var executor = new AgenticExecutor(this);
                                 executor.SetCancellationToken(_cts?.Token ?? CancellationToken.None);
                                 int maxDepth = DevMindOptions.Instance.AgenticLoopMaxDepth;
@@ -1008,6 +1036,12 @@ namespace DevMind
                                 if (action.Type != ActionType.Stop)
                                 {
                                     ExecutionResult result = await executor.ExecuteAsync(action, outcome);
+
+                                    // ── Inject tool result messages for multi-turn tool use ──
+                                    if (lastToolCalls != null && lastToolCalls.Count > 0)
+                                    {
+                                        InjectToolResultMessages(lastToolCalls, result);
+                                    }
 
                                     // ── Resubmit paths (return immediately; SendToLlm manages its own completion) ──
 
@@ -1818,6 +1852,82 @@ namespace DevMind
                 }
                 catch { }
                 AppendOutput($"✗ Failed to create {fileName}: {ex.Message}\n", OutputColor.Error);
+            }
+        }
+
+        // ── Tool Result Injection ────────────────────────────────────────────
+
+        /// <summary>
+        /// After the executor processes tool calls, injects tool result messages into
+        /// conversation history so the model sees the outcome on the next turn.
+        /// </summary>
+        private void InjectToolResultMessages(List<ToolCallResult> toolCalls, ExecutionResult result)
+        {
+            foreach (var tc in toolCalls)
+            {
+                string resultContent = BuildToolResultContent(tc, result);
+                _llmClient.AddToolResultMessage(tc.Id, resultContent);
+            }
+        }
+
+        /// <summary>
+        /// Builds the result content string for a single tool call based on the execution result.
+        /// </summary>
+        private static string BuildToolResultContent(ToolCallResult tc, ExecutionResult result)
+        {
+            switch (tc.Name)
+            {
+                case "read_file":
+                case "grep_file":
+                case "find_in_files":
+                case "diff_file":
+                    // Read-like operations — content was injected into context by the executor.
+                    // The model sees it via the next user message's context injection.
+                    return "[File content loaded into context]";
+
+                case "patch_file":
+                    if (result.PatchedPaths != null && result.PatchedPaths.Count > 0)
+                        return $"[PATCH applied to {string.Join(", ", result.PatchedPaths)}]";
+                    if (result.Errors != null && result.Errors.Count > 0)
+                        return $"[PATCH-FAILED: {string.Join("; ", result.Errors)}]";
+                    return "[PATCH processed]";
+
+                case "create_file":
+                    if (result.FilesCreated != null && result.FilesCreated.Count > 0)
+                        return $"[File created: {string.Join(", ", result.FilesCreated)}]";
+                    return "[File created]";
+
+                case "run_shell":
+                case "run_build":
+                    if (!string.IsNullOrEmpty(result.ShellOutput))
+                        return result.ShellOutput;
+                    return result.ShellExitCode.HasValue
+                        ? $"[Shell exited with code {result.ShellExitCode}]"
+                        : "[Shell command executed]";
+
+                case "run_tests":
+                    return !string.IsNullOrEmpty(result.ShellOutput)
+                        ? result.ShellOutput
+                        : "[Tests executed]";
+
+                case "delete_file":
+                    if (result.FilesDeleted != null && result.FilesDeleted.Count > 0)
+                        return $"[Deleted: {string.Join(", ", result.FilesDeleted)}]";
+                    return "[File deleted]";
+
+                case "rename_file":
+                    if (result.FilesRenamed != null && result.FilesRenamed.Count > 0)
+                        return $"[Renamed: {string.Join(", ", result.FilesRenamed)}]";
+                    return "[File renamed]";
+
+                case "scratchpad":
+                    return "[Scratchpad updated]";
+
+                case "task_done":
+                    return "[Task complete]";
+
+                default:
+                    return "[Executed]";
             }
         }
 

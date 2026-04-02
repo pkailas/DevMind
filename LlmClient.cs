@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v7.0
+// File: LlmClient.cs  v7.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -134,6 +134,12 @@ namespace DevMind
 
         // Tokens reserved for LLM response generation — never consumed by history.
         public int ResponseHeadroomTokens => _budget?.ResponseHeadroomLimit ?? (int)(_contextSize * 0.15);
+
+        /// <summary>
+        /// Parsed tool calls from the last LLM response, or null if the response
+        /// contained no tool_calls. Set during <see cref="SendMessageAsync"/>.
+        /// </summary>
+        public List<ToolCallResult> LastToolCalls { get; private set; }
 
         private static int EstimateTokens(string text) => (text?.Length ?? 0) / 4 + 4;
 
@@ -548,6 +554,7 @@ namespace DevMind
                 bool firstTokenReceived = false;
                 var firstTokenDeadline = DateTime.UtcNow.AddMinutes(
                     DevMindOptions.Instance.FirstTokenTimeoutMinutes);
+                string lastDataLine = null; // Track last SSE data line for tool_calls extraction
 
                 while (true)
                 {
@@ -604,6 +611,8 @@ namespace DevMind
                     if (data == "[DONE]")
                         break;
 
+                    lastDataLine = data;
+
                     string token = ParseContentDelta(data);
                     if (token != null)
                     {
@@ -613,7 +622,22 @@ namespace DevMind
                     }
                 }
 
-                _conversationHistory.Add(new ChatMessage("assistant", fullResponse.ToString(), _currentTurn));
+                // Check for tool_calls in the SSE stream
+                LastToolCalls = null;
+                JArray rawToolCalls = null;
+                if (lastDataLine != null)
+                {
+                    var parseResult = ParseToolCalls(lastDataLine);
+                    if (parseResult != null && parseResult.Count > 0)
+                    {
+                        LastToolCalls = parseResult;
+                        // Extract raw tool_calls JArray for history serialization
+                        rawToolCalls = ExtractRawToolCalls(lastDataLine);
+                    }
+                }
+
+                _conversationHistory.Add(new ChatMessage("assistant", fullResponse.ToString(),
+                    _currentTurn, toolCalls: rawToolCalls));
                 onComplete();
             }
             catch (OperationCanceledException)
@@ -1495,11 +1519,25 @@ namespace DevMind
             for (int mi = 0; mi <= lastIdx; mi++)
             {
                 var msg = _conversationHistory[mi];
-                messages.Add(new JObject
+                var msgObj = new JObject
                 {
                     ["role"]    = msg.Role,
                     ["content"] = msg.Content
-                });
+                };
+
+                // Assistant messages with tool_calls must include the tool_calls array
+                if (msg.Role == "assistant" && msg.ToolCalls != null)
+                {
+                    msgObj["tool_calls"] = msg.ToolCalls;
+                }
+
+                // Tool result messages must include tool_call_id
+                if (msg.Role == "tool" && msg.ToolCallId != null)
+                {
+                    msgObj["tool_call_id"] = msg.ToolCallId;
+                }
+
+                messages.Add(msgObj);
             }
 
             var request = new JObject
@@ -1540,6 +1578,124 @@ namespace DevMind
                 return null;
             }
         }
+
+        /// <summary>
+        /// Parses tool_calls from the last SSE data line. Checks both
+        /// <c>choices[0].message.tool_calls</c> (non-streamed) and
+        /// <c>choices[0].delta.tool_calls</c> (streamed delta).
+        /// Returns null if no tool_calls found.
+        /// </summary>
+        private static List<ToolCallResult> ParseToolCalls(string json)
+        {
+            try
+            {
+                var obj = JObject.Parse(json);
+                var choice = obj?["choices"]?[0];
+                if (choice == null) return null;
+
+                // Check finish_reason — tool_calls indicates tool use
+                var finishReason = choice["finish_reason"]?.ToString();
+
+                // Look for tool_calls in message (non-streamed) or delta (streamed)
+                var toolCallsToken = choice["message"]?["tool_calls"]
+                    ?? choice["delta"]?["tool_calls"];
+
+                if (toolCallsToken == null || toolCallsToken.Type != JTokenType.Array)
+                    return null;
+
+                var toolCallsArray = (JArray)toolCallsToken;
+                if (toolCallsArray.Count == 0)
+                    return null;
+
+                // Extract reasoning_content / thinking text
+                string thinking = choice["message"]?["reasoning_content"]?.ToString()
+                    ?? choice["delta"]?["reasoning_content"]?.ToString();
+
+                var results = new List<ToolCallResult>();
+                foreach (var tc in toolCallsArray)
+                {
+                    var fn = tc["function"];
+                    if (fn == null) continue;
+
+                    string name = fn["name"]?.ToString();
+                    if (string.IsNullOrEmpty(name)) continue;
+
+                    // Parse arguments — may be a JSON string or a JSON object
+                    var args = new Dictionary<string, string>();
+                    var argsToken = fn["arguments"];
+                    if (argsToken != null)
+                    {
+                        JObject argsObj = null;
+                        if (argsToken.Type == JTokenType.String)
+                        {
+                            // OpenAI format: arguments is a JSON string
+                            string argsStr = argsToken.ToString();
+                            if (!string.IsNullOrEmpty(argsStr))
+                            {
+                                try { argsObj = JObject.Parse(argsStr); }
+                                catch { /* malformed args — skip */ }
+                            }
+                        }
+                        else if (argsToken.Type == JTokenType.Object)
+                        {
+                            // Ollama native format: arguments is already an object
+                            argsObj = (JObject)argsToken;
+                        }
+
+                        if (argsObj != null)
+                        {
+                            foreach (var prop in argsObj.Properties())
+                            {
+                                args[prop.Name] = prop.Value?.ToString() ?? "";
+                            }
+                        }
+                    }
+
+                    results.Add(new ToolCallResult
+                    {
+                        Id = tc["id"]?.ToString() ?? $"call_{results.Count}",
+                        Name = name,
+                        Arguments = args,
+                        ThinkingText = thinking
+                    });
+                }
+
+                return results.Count > 0 ? results : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Extracts the raw tool_calls JArray from the SSE data line for history serialization.
+        /// </summary>
+        private static JArray ExtractRawToolCalls(string json)
+        {
+            try
+            {
+                var obj = JObject.Parse(json);
+                var choice = obj?["choices"]?[0];
+                var toolCallsToken = choice?["message"]?["tool_calls"]
+                    ?? choice?["delta"]?["tool_calls"];
+                return toolCallsToken as JArray;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Appends a tool result message to conversation history.
+        /// Called by the onComplete handler after executing each tool call.
+        /// </summary>
+        public void AddToolResultMessage(string toolCallId, string content)
+        {
+            _conversationHistory.Add(new ChatMessage("tool", content ?? "",
+                _currentTurn, toolCallId: toolCallId));
+        }
     }
 
     /// <summary>
@@ -1559,16 +1715,32 @@ namespace DevMind
         public int Turn { get; }
 
         /// <summary>
+        /// For assistant messages: the raw tool_calls JArray from the response, preserved
+        /// for serialization back to the API on subsequent turns.
+        /// </summary>
+        public JArray ToolCalls { get; }
+
+        /// <summary>
+        /// For tool role messages: the tool_call_id this result corresponds to.
+        /// </summary>
+        public string ToolCallId { get; }
+
+        /// <summary>
         /// Initializes a new instance of the <see cref="ChatMessage"/> class.
         /// </summary>
-        /// <param name="role">The role (system, user, or assistant).</param>
+        /// <param name="role">The role (system, user, assistant, or tool).</param>
         /// <param name="content">The message text.</param>
         /// <param name="turn">The turn number (0 for system prompt, incremented per user-initiated send).</param>
-        public ChatMessage(string role, string content, int turn = 0)
+        /// <param name="toolCalls">For assistant messages with tool calls.</param>
+        /// <param name="toolCallId">For tool result messages.</param>
+        public ChatMessage(string role, string content, int turn = 0,
+            JArray toolCalls = null, string toolCallId = null)
         {
             Role = role;
             Content = content;
             Turn = turn;
+            ToolCalls = toolCalls;
+            ToolCallId = toolCallId;
         }
     }
 }
