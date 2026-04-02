@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v7.4
+// File: LlmClient.cs  v7.5
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -989,23 +989,25 @@ namespace DevMind
         }
 
         // ── Tier 1: MicroCompact ─────────────────────────────────────────────
-        // Trims the CONTENT of old tool results, assistant tool_call planning text,
-        // and user READ blocks in-place — without removing messages. Preserves
-        // conversation structure (tool_call/tool_result pairing) while reclaiming
-        // context tokens from bulky payloads that are no longer needed.
+        // Trims the CONTENT of old tool result messages in-place — without removing
+        // messages. Preserves conversation structure (tool_call/tool_result pairing)
+        // while reclaiming context tokens from bulky payloads that are no longer needed.
+        // Only tool result messages (Role == "tool") are eligible. User and assistant
+        // messages are never modified — the model needs its own prior responses for
+        // coherence, and user messages contain the original task prompt.
         // Returns a log string to emit via onToken, or null if nothing changed.
 
-        /// <summary>Minimum age in turns before a tool result is eligible for trimming.
-        /// Lowered from 3 to 1 — safe because all trimmed content is preserved in NearlineCache.</summary>
-        private const int MicroCompactToolAge = 1;
+        /// <summary>Number of most-recent tool result messages to protect from trimming.
+        /// The 5 most recent tool results (counted from end of history) are kept intact.</summary>
+        private const int MicroCompactKeepRecentTools = 5;
 
         /// <summary>Minimum content length before a tool result is eligible for trimming.</summary>
         private const int MicroCompactMinLength = 200;
 
         /// <summary>
-        /// Trims stale tool result content, assistant tool_call planning text, and user
-        /// READ blocks in-place. Messages are replaced (not removed) with compact versions
-        /// that preserve role/turn/toolCallId structure for API pairing rules.
+        /// Trims stale tool result content in-place. The 5 most recent tool result messages
+        /// are protected; all older tool results exceeding MicroCompactMinLength are compacted.
+        /// Only Role == "tool" messages are eligible — user and assistant messages are untouched.
         /// Called before <see cref="EvictStaleContext"/> on every non-deferred send.
         /// </summary>
         public string MicroCompactToolResults()
@@ -1014,64 +1016,42 @@ namespace DevMind
             int trimmed = 0;
             int savedChars = 0;
 
+            // ── Pass 1: identify the 5 most recent tool result indices ───────
+            var protectedIndices = new System.Collections.Generic.HashSet<int>();
+            int toolCount = 0;
+            for (int i = _conversationHistory.Count - 1; i >= 1 && toolCount < MicroCompactKeepRecentTools; i--)
+            {
+                if (_conversationHistory[i].Role == "tool")
+                {
+                    protectedIndices.Add(i);
+                    toolCount++;
+                }
+            }
+
+            // ── Pass 2: trim unprotected tool results ─────────────────────────
             for (int i = 1; i < _conversationHistory.Count; i++)
             {
                 var msg = _conversationHistory[i];
-                int age = _currentTurn - msg.Turn;
 
-                // ── Tool result messages ──────────────────────────────────────
-                if (msg.Role == "tool" && age > MicroCompactToolAge
-                    && msg.Content != null && msg.Content.Length > MicroCompactMinLength)
-                {
-                    // Preserve tool results that carry important state
-                    string c = msg.Content;
-                    if (c.IndexOf("[PATCH", StringComparison.OrdinalIgnoreCase) >= 0
-                        || c.IndexOf("error", StringComparison.OrdinalIgnoreCase) >= 0
-                        || c.IndexOf("failed", StringComparison.OrdinalIgnoreCase) >= 0)
-                        continue;
+                if (msg.Role != "tool") continue;
+                if (protectedIndices.Contains(i)) continue;
+                if (msg.Content == null || msg.Content.Length <= MicroCompactMinLength) continue;
 
-                    int origLen = c.Length;
-                    string cacheKey = $"tool:{msg.ToolCallId ?? i.ToString()}";
-                    string breadcrumb = BuildToolResultBreadcrumb(c, origLen);
-                    NearlineCache.Store(cacheKey, c, breadcrumb);
-                    _conversationHistory[i] = new ChatMessage(msg.Role,
-                        breadcrumb, msg.Turn, msg.ToolCalls, msg.ToolCallId);
-                    savedChars += origLen;
-                    trimmed++;
+                // Preserve tool results that carry important state
+                string c = msg.Content;
+                if (c.IndexOf("[PATCH", StringComparison.OrdinalIgnoreCase) >= 0
+                    || c.IndexOf("error", StringComparison.OrdinalIgnoreCase) >= 0
+                    || c.IndexOf("failed", StringComparison.OrdinalIgnoreCase) >= 0)
                     continue;
-                }
 
-                // ── Assistant messages with ToolCalls — trim verbose planning text ──
-                if (msg.Role == "assistant" && msg.ToolCalls != null && msg.ToolCalls.Count > 0
-                    && age > MicroCompactToolAge
-                    && msg.Content != null && msg.Content.Length > MicroCompactMinLength)
-                {
-                    int origLen = msg.Content.Length;
-                    _conversationHistory[i] = new ChatMessage(msg.Role,
-                        $"[planning text trimmed — originally {origLen} chars]",
-                        msg.Turn, msg.ToolCalls, msg.ToolCallId);
-                    savedChars += origLen;
-                    trimmed++;
-                    continue;
-                }
-
-                // ── User messages with [READ: blocks — trim file content ─────
-                if (msg.Role == "user" && age > MicroCompactToolAge
-                    && msg.Content != null && msg.Content.Length > MicroCompactMinLength
-                    && msg.Content.IndexOf("[READ:", StringComparison.Ordinal) >= 0)
-                {
-                    // Cache each READ block before compacting
-                    CacheReadBlocks(msg.Content);
-                    string compacted = CompactReadBlocks(msg.Content);
-                    if (compacted.Length < msg.Content.Length)
-                    {
-                        int origLen = msg.Content.Length;
-                        _conversationHistory[i] = new ChatMessage(msg.Role,
-                            compacted, msg.Turn, msg.ToolCalls, msg.ToolCallId);
-                        savedChars += origLen - compacted.Length;
-                        trimmed++;
-                    }
-                }
+                int origLen = c.Length;
+                string cacheKey = $"tool:{msg.ToolCallId ?? i.ToString()}";
+                string breadcrumb = BuildToolResultBreadcrumb(c, origLen);
+                NearlineCache.Store(cacheKey, c, breadcrumb);
+                _conversationHistory[i] = new ChatMessage(msg.Role,
+                    breadcrumb, msg.Turn, msg.ToolCalls, msg.ToolCallId);
+                savedChars += origLen;
+                trimmed++;
             }
 
             if (trimmed == 0)
