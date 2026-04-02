@@ -68,6 +68,7 @@ namespace DevMind
         private int _patchCount = 0;
         private int _undoCount = 0;
         private int _readFileCount = 0;
+        private static string _cachedMSBuildPath;
 
         public DevMindToolWindowControl(LlmClient llmClient)
         {
@@ -867,12 +868,12 @@ namespace DevMind
                     (System.IO.File.Exists(System.IO.Path.Combine(projectDir, "source.extension.vsixmanifest")) ||
                      System.IO.File.Exists(System.IO.Path.Combine(projectDir, "extension.vsixmanifest")));
                 buildCommand = isVsix
-                    ? $"msbuild \"{activeProjectPath}\" /p:DeployExtension=false /p:Configuration=Release /verbosity:minimal"
+                    ? $"\"{FindMSBuildPath()}\" \"{activeProjectPath}\" /p:DeployExtension=false /p:Configuration=Release /verbosity:minimal"
                     : $"dotnet build \"{activeProjectPath}\" /p:Configuration=Release";
             }
             else
             {
-                buildCommand = "msbuild \"C:\\Users\\pkailas.KAILAS\\source\\repos\\DevMind\\DevMind.slnx\" /p:DeployExtension=false /p:Configuration=Release /verbosity:minimal";
+                buildCommand = $"\"{FindMSBuildPath()}\" \"C:\\Users\\pkailas.KAILAS\\source\\repos\\DevMind\\DevMind.slnx\" /p:DeployExtension=false /p:Configuration=Release /verbosity:minimal";
             }
 
             if (!_shellLoopPending)
@@ -2099,6 +2100,81 @@ namespace DevMind
                 sb.Append($"\n- When creating new files, use the namespace '{projectNamespace}'.");
 
             return sb.ToString();
+        }
+
+        /// <summary>
+        /// Discovers MSBuild.exe at runtime. Checks VSINSTALLDIR env var, then vswhere.exe,
+        /// then known VS installation directories. Caches the result for the session.
+        /// </summary>
+        private static string FindMSBuildPath()
+        {
+            if (_cachedMSBuildPath != null)
+                return _cachedMSBuildPath;
+
+            // 1. Check VSINSTALLDIR environment variable
+            var vsInstallDir = Environment.GetEnvironmentVariable("VSINSTALLDIR");
+            if (!string.IsNullOrEmpty(vsInstallDir))
+            {
+                var candidate = System.IO.Path.Combine(vsInstallDir, "MSBuild", "Current", "Bin", "MSBuild.exe");
+                if (System.IO.File.Exists(candidate))
+                {
+                    _cachedMSBuildPath = candidate;
+                    return _cachedMSBuildPath;
+                }
+            }
+
+            // 2. Try vswhere.exe
+            var vswherePath = @"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe";
+            if (System.IO.File.Exists(vswherePath))
+            {
+                try
+                {
+                    var psi = new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = vswherePath,
+                        Arguments = "-latest -requires Microsoft.Component.MSBuild -find MSBuild\\**\\Bin\\MSBuild.exe",
+                        RedirectStandardOutput = true,
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    };
+                    using (var proc = System.Diagnostics.Process.Start(psi))
+                    {
+                        var output = proc.StandardOutput.ReadToEnd();
+                        proc.WaitForExit(5000);
+                        var firstLine = output?.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+                        if (!string.IsNullOrEmpty(firstLine) && System.IO.File.Exists(firstLine))
+                        {
+                            _cachedMSBuildPath = firstLine;
+                            return _cachedMSBuildPath;
+                        }
+                    }
+                }
+                catch
+                {
+                    // vswhere failed — fall through to directory scan
+                }
+            }
+
+            // 3. Scan known VS installation directories
+            var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            var versions = new[] { "18", "2022", "2019" };
+            var editions = new[] { "Enterprise", "Professional", "Community", "BuildTools" };
+            foreach (var ver in versions)
+            {
+                foreach (var edition in editions)
+                {
+                    var candidate = System.IO.Path.Combine(programFiles, "Microsoft Visual Studio", ver, edition, "MSBuild", "Current", "Bin", "MSBuild.exe");
+                    if (System.IO.File.Exists(candidate))
+                    {
+                        _cachedMSBuildPath = candidate;
+                        return _cachedMSBuildPath;
+                    }
+                }
+            }
+
+            // 4. Last resort — bare msbuild, hope it's on PATH
+            _cachedMSBuildPath = "msbuild";
+            return _cachedMSBuildPath;
         }
 
     }
