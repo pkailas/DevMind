@@ -1027,7 +1027,8 @@ namespace DevMind
 
                                 ResponseOutcome outcome;
                                 var lastToolCalls = _llmClient.LastToolCalls;
-                                AppendOutput($"[DIAG] LastToolCalls: {lastToolCalls?.Count ?? 0}\n", OutputColor.Dim);
+                                if (DevMindOptions.Instance.ShowDebugOutput)
+                                    AppendOutput($"[DIAG] LastToolCalls: {lastToolCalls?.Count ?? 0}\n", OutputColor.Dim);
                                 if (lastToolCalls != null && lastToolCalls.Count > 0)
                                 {
                                     // Tool use path — map tool calls to response blocks
@@ -1046,13 +1047,15 @@ namespace DevMind
                                     }
 
                                     outcome = ResponseClassifier.Classify(toolBlocks);
-                                    AppendOutput($"[DIAG] Tool use path: {lastToolCalls.Count} call(s) mapped to {toolBlocks.Count} block(s)\n", OutputColor.Dim);
+                                    if (DevMindOptions.Instance.ShowDebugOutput)
+                                        AppendOutput($"[DIAG] Tool use path: {lastToolCalls.Count} call(s) mapped to {toolBlocks.Count} block(s)\n", OutputColor.Dim);
                                     System.Diagnostics.Debug.WriteLine($"[DEVMIND-DIAG] Tool use path: {lastToolCalls.Count} tool call(s) → {toolBlocks.Count} block(s)");
                                 }
                                 else
                                 {
                                     // Text directive fallback
-                                    AppendOutput("[DIAG] Text directive fallback path\n", OutputColor.Dim);
+                                    if (DevMindOptions.Instance.ShowDebugOutput)
+                                        AppendOutput("[DIAG] Text directive fallback path\n", OutputColor.Dim);
                                     outcome = ResponseClassifier.Classify(fullResponse);
                                 }
 
@@ -1060,7 +1063,8 @@ namespace DevMind
                                 executor.SetCancellationToken(_cts?.Token ?? CancellationToken.None);
                                 int maxDepth = DevMindOptions.Instance.AgenticLoopMaxDepth;
 
-                                AppendOutput($"[DIAG] Outcome: HasPatches={outcome.HasPatches}, HasShell={outcome.HasShellCommands}, HasRead={outcome.HasReadRequests}, IsDone={outcome.IsDone}, IsReadOnly={outcome.IsReadOnly}\n", OutputColor.Dim);
+                                if (DevMindOptions.Instance.ShowDebugOutput)
+                                    AppendOutput($"[DIAG] Outcome: HasPatches={outcome.HasPatches}, HasShell={outcome.HasShellCommands}, HasRead={outcome.HasReadRequests}, IsDone={outcome.IsDone}, IsReadOnly={outcome.IsReadOnly}\n", OutputColor.Dim);
                                 System.Diagnostics.Debug.WriteLine($"[DEVMIND-DIAG] Outcome: HasPatches={outcome.HasPatches} HasShell={outcome.HasShellCommands} HasFile={outcome.HasFileCreation} HasDelete={outcome.HasDeleteRequests} IsDone={outcome.IsDone} IsReadOnly={outcome.IsReadOnly} IsEmptyOrBareCode={outcome.IsEmptyOrBareCode}");
 
                                 // Initial resolve — no previousResult on the first call

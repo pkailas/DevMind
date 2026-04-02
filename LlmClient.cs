@@ -641,8 +641,15 @@ namespace DevMind
                 accumulatedToolCalls = BuildAccumulatedToolCalls(toolCallArgBuilders, toolCallMeta);
 
                 // Check for tool_calls in the SSE stream
-                onToken($"\n[DIAG-SSE] lastDataLine: {(lastDataLine?.Length > 500 ? lastDataLine.Substring(0, 500) + "..." : lastDataLine)}\n");
-                onToken($"\n[DIAG-TOOLS] Accumulated {accumulatedToolCalls?.Count ?? 0} tool call(s)\n");
+                if (DevMindOptions.Instance.ShowDebugOutput)
+                    onToken($"\n[DIAG-SSE] lastDataLine: {(lastDataLine?.Length > 500 ? lastDataLine.Substring(0, 500) + "..." : lastDataLine)}\n");
+                if (DevMindOptions.Instance.ShowDebugOutput)
+                    onToken($"\n[DIAG-TOOLS] Accumulated {accumulatedToolCalls?.Count ?? 0} tool call(s)\n");
+
+                // Emit visible status if model responded with tool calls but no content
+                if (accumulatedToolCalls != null && accumulatedToolCalls.Count > 0 && string.IsNullOrWhiteSpace(fullResponse.ToString()))
+                    onToken("\n[TOOL_USE] Processing tool call(s)...\n");
+
                 LastToolCalls = null;
                 JArray rawToolCalls = null;
 
