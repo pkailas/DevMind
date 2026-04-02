@@ -1,4 +1,4 @@
-// File: ToolCallMapper.cs  v7.0
+// File: ToolCallMapper.cs  v7.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System.Collections.Generic;
@@ -152,6 +152,28 @@ namespace DevMind
                     {
                         Type = BlockType.Shell,
                         Command = buildCommand
+                    };
+
+                case "recall_memory":
+                    return new ResponseBlock
+                    {
+                        Type = BlockType.RecallMemory,
+                        MemoryTopic = GetArg(tc, "topic")
+                    };
+
+                case "save_memory":
+                    return new ResponseBlock
+                    {
+                        Type = BlockType.SaveMemory,
+                        MemoryTopic = GetArg(tc, "topic"),
+                        MemoryContent = GetArg(tc, "content"),
+                        MemoryDescription = GetArg(tc, "description")
+                    };
+
+                case "list_memory_topics":
+                    return new ResponseBlock
+                    {
+                        Type = BlockType.ListMemory
                     };
 
                 default:

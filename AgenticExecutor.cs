@@ -1,4 +1,4 @@
-// File: AgenticExecutor.cs  v2.0.0
+// File: AgenticExecutor.cs  v7.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -376,6 +376,45 @@ namespace DevMind
                         {
                             result.Errors.Add(ex.Message);
                             _host.AppendOutput($"[READ ERROR] {block.FileName}: {ex.Message}\n", OutputColor.Error);
+                        }
+                        break;
+
+                    case BlockType.RecallMemory:
+                        try
+                        {
+                            string recallResult = await _host.RecallMemoryAsync(block.MemoryTopic);
+                            block.MemoryContent = recallResult; // Store for tool result injection
+                        }
+                        catch (Exception ex)
+                        {
+                            block.MemoryContent = $"Error recalling memory: {ex.Message}";
+                            _host.AppendOutput($"[MEMORY ERROR] {ex.Message}\n", OutputColor.Error);
+                        }
+                        break;
+
+                    case BlockType.SaveMemory:
+                        try
+                        {
+                            string saveResult = await _host.SaveMemoryAsync(
+                                block.MemoryTopic, block.MemoryContent, block.MemoryDescription);
+                            block.MemoryDescription = saveResult; // Reuse field for result message
+                        }
+                        catch (Exception ex)
+                        {
+                            _host.AppendOutput($"[MEMORY ERROR] {ex.Message}\n", OutputColor.Error);
+                        }
+                        break;
+
+                    case BlockType.ListMemory:
+                        try
+                        {
+                            string listResult = await _host.ListMemoryTopicsAsync();
+                            block.MemoryContent = listResult; // Store for tool result injection
+                        }
+                        catch (Exception ex)
+                        {
+                            block.MemoryContent = $"Error listing memory: {ex.Message}";
+                            _host.AppendOutput($"[MEMORY ERROR] {ex.Message}\n", OutputColor.Error);
                         }
                         break;
 

@@ -1,4 +1,4 @@
-// File: IAgenticHost.cs  v1.7.0
+// File: IAgenticHost.cs  v7.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System.Collections.Generic;
@@ -144,5 +144,23 @@ namespace DevMind
         Task<List<int>> ShowDiffPreviewAsync(
             List<PatchResolveResult> resolvedPatches,
             CancellationToken cancellationToken);
+
+        /// <summary>
+        /// Load a memory topic file and return its content.
+        /// Returns the topic content, or an error message if not found.
+        /// </summary>
+        Task<string> RecallMemoryAsync(string topic);
+
+        /// <summary>
+        /// Save content to a memory topic file for cross-session persistence.
+        /// Returns a confirmation message.
+        /// </summary>
+        Task<string> SaveMemoryAsync(string topic, string content, string description);
+
+        /// <summary>
+        /// List all available memory topics with their descriptions.
+        /// Returns a formatted list of topics.
+        /// </summary>
+        Task<string> ListMemoryTopicsAsync();
     }
 }

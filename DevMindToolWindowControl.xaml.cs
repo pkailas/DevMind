@@ -897,6 +897,17 @@ namespace DevMind
                 string combined = $"{originalSystemPrompt}\n\n{llmDirective}";
                 if (!string.IsNullOrEmpty(_devMindContext))
                     combined += $"\n\n--- Project Context (DevMind.md) ---\n{_devMindContext}\n---";
+
+                // Load MEMORY.md cross-session memory index
+                try
+                {
+                    var memMgr = new MemoryManager(_terminalWorkingDir);
+                    string memoryIndex = memMgr.LoadIndex();
+                    if (!string.IsNullOrWhiteSpace(memoryIndex))
+                        combined += $"\n\n--- Session Memory (MEMORY.md) ---\n{memoryIndex}\n---";
+                }
+                catch { /* Memory loading is best-effort */ }
+
                 DevMindOptions.Instance.SystemPrompt = combined;
             }
 
@@ -1040,7 +1051,7 @@ namespace DevMind
                                     // ── Inject tool result messages for multi-turn tool use ──
                                     if (lastToolCalls != null && lastToolCalls.Count > 0)
                                     {
-                                        InjectToolResultMessages(lastToolCalls, result);
+                                        InjectToolResultMessages(lastToolCalls, result, outcome.Blocks);
                                     }
 
                                     // ── Resubmit paths (return immediately; SendToLlm manages its own completion) ──
@@ -1861,11 +1872,12 @@ namespace DevMind
         /// After the executor processes tool calls, injects tool result messages into
         /// conversation history so the model sees the outcome on the next turn.
         /// </summary>
-        private void InjectToolResultMessages(List<ToolCallResult> toolCalls, ExecutionResult result)
+        private void InjectToolResultMessages(List<ToolCallResult> toolCalls, ExecutionResult result,
+            List<ResponseBlock> executedBlocks)
         {
             foreach (var tc in toolCalls)
             {
-                string resultContent = BuildToolResultContent(tc, result);
+                string resultContent = BuildToolResultContent(tc, result, executedBlocks);
                 _llmClient.AddToolResultMessage(tc.Id, resultContent);
             }
         }
@@ -1873,7 +1885,8 @@ namespace DevMind
         /// <summary>
         /// Builds the result content string for a single tool call based on the execution result.
         /// </summary>
-        private static string BuildToolResultContent(ToolCallResult tc, ExecutionResult result)
+        private static string BuildToolResultContent(ToolCallResult tc, ExecutionResult result,
+            List<ResponseBlock> executedBlocks)
         {
             switch (tc.Name)
             {
@@ -1925,6 +1938,24 @@ namespace DevMind
 
                 case "task_done":
                     return "[Task complete]";
+
+                case "recall_memory":
+                    {
+                        var memBlock = executedBlocks?.FirstOrDefault(b => b.Type == BlockType.RecallMemory);
+                        return memBlock?.MemoryContent ?? "[Topic not found]";
+                    }
+
+                case "save_memory":
+                    {
+                        var memBlock = executedBlocks?.FirstOrDefault(b => b.Type == BlockType.SaveMemory);
+                        return memBlock?.MemoryDescription ?? "[Memory saved]";
+                    }
+
+                case "list_memory_topics":
+                    {
+                        var memBlock = executedBlocks?.FirstOrDefault(b => b.Type == BlockType.ListMemory);
+                        return memBlock?.MemoryContent ?? "[No memory topics found]";
+                    }
 
                 default:
                     return "[Executed]";

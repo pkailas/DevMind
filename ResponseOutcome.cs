@@ -1,4 +1,4 @@
-// File: ResponseOutcome.cs  v1.8.0
+// File: ResponseOutcome.cs  v7.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -27,6 +27,9 @@ namespace DevMind
         public bool HasDiffRequests    { get; }
         public bool HasTestRequests    { get; }
         public bool HasScratchpad      { get; }
+        public bool HasRecallMemory   { get; }
+        public bool HasSaveMemory     { get; }
+        public bool HasListMemory     { get; }
         public bool IsDone             { get; }
 
         /// <summary>
@@ -68,8 +71,12 @@ namespace DevMind
             HasScratchpad     = Blocks.Any(b => b.Type == BlockType.Scratchpad);
             IsDone            = Blocks.Any(b => b.Type == BlockType.Done);
 
-            bool hasMutatingAction = HasPatches || HasShellCommands || HasFileCreation || HasDeleteRequests || HasRenameRequests || HasTestRequests;
-            bool hasInfoGather    = HasReadRequests || HasGrepRequests || HasFindRequests || HasDiffRequests;
+            HasRecallMemory   = Blocks.Any(b => b.Type == BlockType.RecallMemory);
+            HasSaveMemory     = Blocks.Any(b => b.Type == BlockType.SaveMemory);
+            HasListMemory     = Blocks.Any(b => b.Type == BlockType.ListMemory);
+
+            bool hasMutatingAction = HasPatches || HasShellCommands || HasFileCreation || HasDeleteRequests || HasRenameRequests || HasTestRequests || HasSaveMemory;
+            bool hasInfoGather    = HasReadRequests || HasGrepRequests || HasFindRequests || HasDiffRequests || HasRecallMemory || HasListMemory;
 
             HasAnyDirective   = hasMutatingAction || hasInfoGather;
             IsEmptyOrBareCode = !HasAnyDirective && !IsDone && ContainsBareCodeBlock(Blocks);

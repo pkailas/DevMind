@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.AgenticHost.cs  v1.9.2
+// File: DevMindToolWindowControl.AgenticHost.cs  v7.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -23,6 +23,20 @@ namespace DevMind
     /// </summary>
     public partial class DevMindToolWindowControl : UserControl, IAgenticHost
     {
+        // ── Memory Manager ───────────────────────────────────────────────────────
+
+        private MemoryManager _memoryManager;
+
+        /// <summary>
+        /// Initializes the MemoryManager for the current working directory.
+        /// Called when the solution directory is available.
+        /// </summary>
+        private void EnsureMemoryManager()
+        {
+            if (_memoryManager == null && !string.IsNullOrEmpty(_terminalWorkingDir))
+                _memoryManager = new MemoryManager(_terminalWorkingDir);
+        }
+
         // ── File snapshot tracking (for DIFF directive) ───────────────────────────
 
         // Stores original file content keyed by full path, captured before first patch/read.
@@ -1005,9 +1019,69 @@ namespace DevMind
             return sb.ToString().TrimEnd('\r', '\n');
         }
 
-    }
+        // ── IAgenticHost.RecallMemoryAsync ──────────────────────────────────────
 
-    // ── Diff algorithm helper ─────────────────────────────────────────────────────
+        async Task<string> IAgenticHost.RecallMemoryAsync(string topic)
+        {
+            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+            EnsureMemoryManager();
+            if (_memoryManager == null)
+                return "Memory not available: no solution open";
+
+            string content = _memoryManager.LoadTopic(topic);
+            if (content == null)
+            {
+                AppendOutput($"[MEMORY] Topic not found: {topic}\n", OutputColor.Dim);
+                return $"Topic not found: {topic}";
+            }
+
+            AppendOutput($"[MEMORY] Recalled: {topic}\n", OutputColor.Dim);
+            return content;
+        }
+
+        // ── IAgenticHost.SaveMemoryAsync ────────────────────────────────────────
+
+        async Task<string> IAgenticHost.SaveMemoryAsync(string topic, string content, string description)
+        {
+            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+            EnsureMemoryManager();
+            if (_memoryManager == null)
+                return "Memory not available: no solution open";
+
+            _memoryManager.SaveTopic(topic, content, description);
+            string desc = string.IsNullOrEmpty(description) ? topic : description;
+            AppendOutput($"[MEMORY] Saved: [{topic}] {desc}\n", OutputColor.Success);
+            return $"Memory saved: [{topic}] {desc}";
+        }
+
+        // ── IAgenticHost.ListMemoryTopicsAsync ──────────────────────────────────
+
+        async Task<string> IAgenticHost.ListMemoryTopicsAsync()
+        {
+            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+            EnsureMemoryManager();
+            if (_memoryManager == null)
+                return "Memory not available: no solution open";
+
+            string index = _memoryManager.LoadIndex();
+            if (string.IsNullOrWhiteSpace(index))
+            {
+                var topics = _memoryManager.ListTopics();
+                if (topics.Count == 0)
+                {
+                    AppendOutput("[MEMORY] No memory topics found.\n", OutputColor.Dim);
+                    return "No memory topics found. Use save_memory to create one.";
+                }
+                // Fallback: list topic slugs without descriptions
+                string list = string.Join("\n", topics.Select(t => $"- [{t}]"));
+                AppendOutput($"[MEMORY] {topics.Count} topic(s) available.\n", OutputColor.Dim);
+                return list;
+            }
+
+            AppendOutput("[MEMORY] Topics listed.\n", OutputColor.Dim);
+            return index;
+        }
+    }
 
     /// <summary>
     /// Produces a simple unified-style diff between two sets of lines.

@@ -1,4 +1,4 @@
-// File: ToolRegistry.cs  v7.0
+// File: ToolRegistry.cs  v7.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json.Linq;
@@ -122,6 +122,30 @@ namespace DevMind
                 "Signal that the current task is complete. Emit only when all steps are finished — " +
                 "code changes applied, build verified, tests passing. Do not emit mid-task.",
                 Optional("summary", "string", "Brief summary of what was accomplished")));
+
+            // ── recall_memory ─────────────────────────────────────────────────
+            tools.Add(MakeTool("recall_memory",
+                "Recall previously saved knowledge about a topic. Returns the content of a memory " +
+                "topic file. Use this when you need context about a project convention, debugging " +
+                "insight, or file purpose that was saved in a previous session. " +
+                "Call list_memory_topics first if you're not sure what topics are available.",
+                Required("topic", "string", "The topic slug to recall (e.g., 'auth-system', 'build-quirks')")));
+
+            // ── save_memory ──────────────────────────────────────────────────
+            tools.Add(MakeTool("save_memory",
+                "Save project knowledge that should persist across sessions. Use this when you " +
+                "discover a project convention, resolve a tricky bug, learn a file's purpose, or " +
+                "identify a pattern that would be useful to remember. Topics are overwritten if " +
+                "they already exist — include all relevant content, not just additions.",
+                Required("topic", "string", "Slug for the topic (e.g., 'auth-system', 'build-quirks')"),
+                Required("content", "string", "The knowledge to save — conventions, insights, patterns"),
+                Optional("description", "string", "Short one-line description for the memory index")));
+
+            // ── list_memory_topics ────────────────────────────────────────────
+            tools.Add(MakeTool("list_memory_topics",
+                "List all available memory topics with their descriptions from the memory index. " +
+                "Use this to see what knowledge has been saved in previous sessions before " +
+                "recalling a specific topic."));
 
             // ── run_build ────────────────────────────────────────────────────
             tools.Add(MakeTool("run_build",
