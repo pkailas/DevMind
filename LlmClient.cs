@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v7.3
+// File: LlmClient.cs  v7.4
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -111,6 +111,13 @@ namespace DevMind
         private readonly List<string> _pendingDebugLog = new List<string>();
         private const string DefaultSystemPrompt = "You are a helpful coding assistant. Be concise and precise.";
         internal readonly FileContentCache _fileCache = new FileContentCache();
+
+        /// <summary>
+        /// Nearline RAM cache for content trimmed by MicroCompactToolResults.
+        /// Allows instant recall of trimmed tool results and READ blocks.
+        /// </summary>
+        public NearlineCache NearlineCache { get; } = new NearlineCache();
+
         private string _taskScratchpad = "";
         private const int ScratchpadMaxTokens = 200;
         private int _currentTurn;
@@ -748,6 +755,7 @@ namespace DevMind
             _conversationHistory.Clear();
             _conversationHistory.Add(new ChatMessage("system", GetSystemPrompt()));
             _filesReadThisSession.Clear();
+            NearlineCache.Clear();
             if (!preserveScratchpad)
             {
                 _taskScratchpad = "";
@@ -988,8 +996,9 @@ namespace DevMind
         // context tokens from bulky payloads that are no longer needed.
         // Returns a log string to emit via onToken, or null if nothing changed.
 
-        /// <summary>Minimum age in turns before a tool result is eligible for trimming.</summary>
-        private const int MicroCompactToolAge = 3;
+        /// <summary>Minimum age in turns before a tool result is eligible for trimming.
+        /// Lowered from 3 to 1 — safe because all trimmed content is preserved in NearlineCache.</summary>
+        private const int MicroCompactToolAge = 1;
 
         /// <summary>Minimum content length before a tool result is eligible for trimming.</summary>
         private const int MicroCompactMinLength = 200;
@@ -1023,9 +1032,11 @@ namespace DevMind
                         continue;
 
                     int origLen = c.Length;
+                    string cacheKey = $"tool:{msg.ToolCallId ?? i.ToString()}";
+                    string breadcrumb = BuildToolResultBreadcrumb(c, origLen);
+                    NearlineCache.Store(cacheKey, c, breadcrumb);
                     _conversationHistory[i] = new ChatMessage(msg.Role,
-                        $"[tool result trimmed — originally {origLen} chars]",
-                        msg.Turn, msg.ToolCalls, msg.ToolCallId);
+                        breadcrumb, msg.Turn, msg.ToolCalls, msg.ToolCallId);
                     savedChars += origLen;
                     trimmed++;
                     continue;
@@ -1050,6 +1061,8 @@ namespace DevMind
                     && msg.Content != null && msg.Content.Length > MicroCompactMinLength
                     && msg.Content.IndexOf("[READ:", StringComparison.Ordinal) >= 0)
                 {
+                    // Cache each READ block before compacting
+                    CacheReadBlocks(msg.Content);
                     string compacted = CompactReadBlocks(msg.Content);
                     if (compacted.Length < msg.Content.Length)
                     {
@@ -1067,9 +1080,103 @@ namespace DevMind
 
             string logMsg = $"\n[CONTEXT] MicroCompact: trimmed {trimmed} message(s), reclaimed ~{savedChars / 4} tokens.\n";
             if (showDebug)
+            {
                 System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] MicroCompact: {trimmed} trimmed, {savedChars} chars saved");
+                logMsg += $"[DIAG] MicroCompact: trimmed {trimmed} messages, cache holds {NearlineCache.Count} entries ({NearlineCache.EstimatedTokens} est. tokens)\n";
+            }
 
             return logMsg;
+        }
+
+        /// <summary>
+        /// Builds a semantic breadcrumb for a trimmed tool result based on content type.
+        /// </summary>
+        private static string BuildToolResultBreadcrumb(string content, int origLen)
+        {
+            // read_file results — look for filename and line count
+            if (content.IndexOf("[READ:", StringComparison.Ordinal) >= 0)
+            {
+                int tagStart = content.IndexOf("[READ:", StringComparison.Ordinal);
+                int tagEnd = content.IndexOf(']', tagStart);
+                string filename = tagEnd > tagStart
+                    ? content.Substring(tagStart + 6, tagEnd - tagStart - 6).Trim()
+                    : "unknown";
+                int lineCount = 0;
+                for (int j = 0; j < content.Length; j++)
+                    if (content[j] == '\n') lineCount++;
+                return $"[cached — {filename}, {lineCount} lines]";
+            }
+
+            // Build results
+            if (content.IndexOf("Build succeeded", StringComparison.OrdinalIgnoreCase) >= 0
+                || content.IndexOf("0 Error(s)", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                int warnings = 0;
+                int wIdx = content.IndexOf("Warning(s)", StringComparison.OrdinalIgnoreCase);
+                if (wIdx > 0)
+                {
+                    int numStart = wIdx - 1;
+                    while (numStart > 0 && char.IsDigit(content[numStart - 1])) numStart--;
+                    if (numStart < wIdx && int.TryParse(content.Substring(numStart, wIdx - numStart).Trim(), out int w))
+                        warnings = w;
+                }
+                return $"[cached — build succeeded, {warnings} warnings]";
+            }
+
+            // Shell results — look for exit code
+            if (content.IndexOf("exit code", StringComparison.OrdinalIgnoreCase) >= 0
+                || content.IndexOf("[SHELL", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return $"[cached — shell output, {origLen} chars]";
+            }
+
+            // Grep/find results — look for match pattern
+            if (content.IndexOf("matches", StringComparison.OrdinalIgnoreCase) >= 0
+                || content.IndexOf("GREP:", StringComparison.OrdinalIgnoreCase) >= 0
+                || content.IndexOf("FIND:", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return $"[cached — search results, {origLen} chars]";
+            }
+
+            // Test results
+            if (content.IndexOf("TEST RESULTS", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                bool passed = content.IndexOf("failed", StringComparison.OrdinalIgnoreCase) < 0;
+                return $"[cached — tests {(passed ? "passed" : "failed")}]";
+            }
+
+            // Fallback
+            return $"[cached — {origLen} chars]";
+        }
+
+        /// <summary>
+        /// Extracts [READ:filename] blocks from user message content and stores each
+        /// file's content in the NearlineCache before the content is compacted away.
+        /// </summary>
+        private void CacheReadBlocks(string content)
+        {
+            int pos = 0;
+            while (pos < content.Length)
+            {
+                int tagStart = content.IndexOf("[READ:", pos, StringComparison.Ordinal);
+                if (tagStart < 0) break;
+
+                int tagEnd = content.IndexOf(']', tagStart);
+                if (tagEnd < 0) break;
+
+                string filename = content.Substring(tagStart + 6, tagEnd - tagStart - 6).Trim();
+                int nextTag = content.IndexOf("[READ:", tagEnd + 1, StringComparison.Ordinal);
+                int blockEnd = nextTag >= 0 ? nextTag : content.Length;
+                string blockContent = content.Substring(tagEnd + 1, blockEnd - tagEnd - 1);
+
+                if (!string.IsNullOrWhiteSpace(filename) && blockContent.Length > 0)
+                {
+                    string cacheKey = $"read:{filename}";
+                    NearlineCache.Store(cacheKey, blockContent, $"[cached — {filename}]");
+                }
+
+                pos = blockEnd;
+            }
         }
 
         /// <summary>

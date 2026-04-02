@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.AgenticHost.cs  v7.0
+// File: DevMindToolWindowControl.AgenticHost.cs  v7.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -215,6 +215,20 @@ namespace DevMind
             {
                 await ApplyReadCommandAsync($"READ {fileName}", showOutline: false);
                 return string.Empty;
+            }
+
+            // ── NearlineCache check — instant recall of recently trimmed file content ──
+            if (rangeStart <= 0 && !forceFullRead && _llmClient?.NearlineCache != null)
+            {
+                string cacheKey = $"read:{fileName}";
+                string cached = _llmClient.NearlineCache.Retrieve(cacheKey);
+                if (cached != null)
+                {
+                    AppendOutput($"[CACHE HIT] {fileName}\n", OutputColor.Dim);
+                    // Inject cached content into _readContext — same path as a normal READ
+                    _readContext = (_readContext ?? "") + cached;
+                    return string.Empty;
+                }
             }
 
             // Resolve file path and capture original snapshot (for DIFF support) before reading
