@@ -644,6 +644,10 @@ namespace DevMind
         {
             const int MaxFailedTests = 10;
 
+            // Guard: null/empty project name
+            if (string.IsNullOrWhiteSpace(project))
+                return "[TEST] No project specified.";
+
             // Resolve project path — if it looks like a bare name (no path separators, no .csproj ext),
             // search for a matching .csproj in the solution/working directory.
             string resolvedProject = project;
@@ -666,7 +670,7 @@ namespace DevMind
 
             string searchDir = projectDir ?? _terminalWorkingDir;
 
-            if (looksLikeBare)
+            if (looksLikeBare && !string.IsNullOrEmpty(searchDir))
             {
                 // Search for <project>.csproj or just project if it already ends with .csproj
                 string searchName = project.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase)
@@ -679,7 +683,7 @@ namespace DevMind
                 }
                 catch { }
             }
-            else if (!Path.IsPathRooted(resolvedProject))
+            else if (!looksLikeBare && !Path.IsPathRooted(resolvedProject) && !string.IsNullOrEmpty(searchDir))
             {
                 resolvedProject = Path.Combine(searchDir, resolvedProject.Replace('/', Path.DirectorySeparatorChar));
             }
@@ -691,16 +695,31 @@ namespace DevMind
             // Remove stale TRX from a previous run
             try { if (File.Exists(trxFile)) File.Delete(trxFile); } catch { }
 
-            // Build command
-            string quotedProject = resolvedProject.Contains(' ')
-                ? $"\"{resolvedProject}\"" : resolvedProject;
+            // Build command — quote project path if it contains spaces
+            string quotedProject = (resolvedProject ?? project).Contains(' ')
+                ? $"\"{resolvedProject ?? project}\"" : (resolvedProject ?? project);
+            string filterArg = !string.IsNullOrWhiteSpace(filter)
+                ? $" --filter \"{filter.Trim('\"')}\"" : "";
+
+            // Phase 1: try with TRX logger for structured output
             string cmd = $"dotnet test {quotedProject} --no-build --verbosity quiet" +
-                         $" --logger \"trx;LogFileName={trxFile}\"";
-            if (!string.IsNullOrWhiteSpace(filter))
-                cmd += $" --filter \"{filter.Trim('\"')}\"";
+                         $" --logger \"trx;LogFileName={trxFile}\"{filterArg}";
 
             AppendOutput($"[TEST] > {cmd}\n", OutputColor.Dim);
-            var (rawOutput, exitCode) = await RunShellCommandCaptureAsync(cmd);
+
+            string rawOutput = null;
+            int exitCode = -1;
+
+            try
+            {
+                var result = await RunShellCommandCaptureAsync(cmd);
+                rawOutput = result.output;
+                exitCode  = result.exitCode;
+            }
+            catch (Exception ex)
+            {
+                AppendOutput($"[TEST] Shell execution failed: {ex.Message}\n", OutputColor.Dim);
+            }
 
             // Try TRX parsing first
             try
@@ -708,14 +727,41 @@ namespace DevMind
                 if (File.Exists(trxFile))
                 {
                     string trxContent = File.ReadAllText(trxFile);
-                    string summary = ParseTrxSummary(trxContent, MaxFailedTests, resolvedProject, filter);
-                    try { File.Delete(trxFile); } catch { }
-                    return summary;
+                    if (!string.IsNullOrWhiteSpace(trxContent))
+                    {
+                        string summary = ParseTrxSummary(trxContent, MaxFailedTests, resolvedProject ?? project, filter);
+                        try { File.Delete(trxFile); } catch { }
+                        if (!string.IsNullOrWhiteSpace(summary))
+                            return summary;
+                    }
                 }
             }
-            catch { }
+            catch (Exception trxEx)
+            {
+                AppendOutput($"[TEST] TRX parse failed: {trxEx.Message}\n", OutputColor.Dim);
+            }
 
-            // Fallback: return raw console output
+            // If we got usable raw output from the TRX run, return it
+            if (!string.IsNullOrWhiteSpace(rawOutput) && rawOutput != "(no output)")
+                return rawOutput;
+
+            // Phase 2: fallback — re-run without --no-build and without TRX logger
+            // so we get plain console output even for projects that don't produce TRX
+            string fallbackCmd = $"dotnet test {quotedProject} --verbosity normal{filterArg}";
+            AppendOutput($"[TEST] TRX unavailable, falling back to console output.\n", OutputColor.Dim);
+            AppendOutput($"[TEST] > {fallbackCmd}\n", OutputColor.Dim);
+
+            try
+            {
+                var fallback = await RunShellCommandCaptureAsync(fallbackCmd);
+                rawOutput = fallback.output;
+                exitCode  = fallback.exitCode;
+            }
+            catch (Exception ex)
+            {
+                return $"[TEST] Failed to run tests: {ex.Message}";
+            }
+
             return string.IsNullOrWhiteSpace(rawOutput)
                 ? $"TEST: no output (exit code {exitCode})"
                 : rawOutput;
@@ -727,12 +773,18 @@ namespace DevMind
         /// </summary>
         private static string ParseTrxSummary(string trxXml, int maxFailedTests, string project, string filter)
         {
+            if (string.IsNullOrWhiteSpace(trxXml))
+                return null;
+
             // TRX files use the VS test results namespace
             XDocument doc = XDocument.Parse(trxXml);
+            if (doc?.Root == null)
+                return null;
+
             XNamespace ns = "http://microsoft.com/schemas/VisualStudio/TeamTest/2010";
 
             // Counters element: total, passed, failed, etc.
-            var counters = doc.Descendants(ns + "Counters").FirstOrDefault();
+            var counters = doc.Descendants(ns + "Counters")?.FirstOrDefault();
             int total   = counters != null ? (int?)counters.Attribute("total")   ?? 0 : 0;
             int passed  = counters != null ? (int?)counters.Attribute("passed")  ?? 0 : 0;
             int failed  = counters != null ? (int?)counters.Attribute("failed")  ?? 0 : 0;
@@ -742,7 +794,7 @@ namespace DevMind
             // Handle zero tests found
             if (total == 0)
             {
-                string projectShort = Path.GetFileName(project);
+                string projectShort = Path.GetFileName(project ?? "unknown");
                 if (!string.IsNullOrWhiteSpace(filter))
                 {
                     return $"[TEST] No tests found matching filter \"{filter.Trim('\"')}\" in {projectShort}";
@@ -752,7 +804,7 @@ namespace DevMind
 
             // Duration from TestRun summary
             double totalSecs = 0;
-            var runInfos = doc.Descendants(ns + "Times").FirstOrDefault();
+            var runInfos = doc.Descendants(ns + "Times")?.FirstOrDefault();
             if (runInfos != null)
             {
                 string start  = (string)runInfos.Attribute("start");
@@ -773,10 +825,13 @@ namespace DevMind
                 sb.AppendLine();
                 sb.AppendLine("FAILED:");
 
-                var unitTestResults = doc.Descendants(ns + "UnitTestResult")
-                    .Where(r => string.Equals((string)r.Attribute("outcome"), "Failed", StringComparison.OrdinalIgnoreCase))
-                    .Take(maxFailedTests)
-                    .ToList();
+                var failedResults = doc.Descendants(ns + "UnitTestResult");
+                var unitTestResults = failedResults != null
+                    ? failedResults
+                        .Where(r => string.Equals((string)r.Attribute("outcome"), "Failed", StringComparison.OrdinalIgnoreCase))
+                        .Take(maxFailedTests)
+                        .ToList()
+                    : new List<XElement>();
 
                 foreach (var tr in unitTestResults)
                 {
@@ -790,7 +845,8 @@ namespace DevMind
                     sb.AppendLine($"  {name}{durStr}");
 
                     // Error message from Output/ErrorInfo/Message
-                    var errorMsg = tr.Descendants(ns + "Message").FirstOrDefault()?.Value;
+                    var messages = tr.Descendants(ns + "Message");
+                    var errorMsg = messages?.FirstOrDefault()?.Value;
                     if (!string.IsNullOrWhiteSpace(errorMsg))
                     {
                         // Trim to first 3 lines to keep output compact
