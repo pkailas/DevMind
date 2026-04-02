@@ -1,4 +1,4 @@
-// File: ResponseParser.cs  v7.0
+// File: ResponseParser.cs  v7.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -62,6 +62,8 @@ namespace DevMind
         private static readonly Regex _scratchpadEnd  = new Regex(@"^\s*END_SCRATCHPAD\s*$",       RegexOptions.Compiled | RegexOptions.IgnoreCase);
         // Matches a line that is exactly "DONE"
         private static readonly Regex _doneLine       = new Regex(@"^\s*DONE\s*$",                 RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        // Matches a line that is exactly "task_done" (fallback when model writes it as prose instead of a tool call)
+        private static readonly Regex _taskDoneLine   = new Regex(@"^\s*task_done\s*$",            RegexOptions.Compiled | RegexOptions.IgnoreCase);
         // Matches GREP: "pattern" filename or GREP: "pattern" filename:start-end
         private static readonly Regex _grepLine       = new Regex(@"^GREP:\s+""([^""]+)""\s+(\S+\.\S+?)(?::(\d+)(?:-(\d+))?)?\s*$", RegexOptions.Compiled);
         // Matches FIND: "pattern" glob or FIND: "pattern" glob:start-end  (glob may contain * and /)
@@ -421,8 +423,8 @@ namespace DevMind
                 return;
             }
 
-            // DONE
-            if (_doneLine.IsMatch(line))
+            // DONE / task_done (fallback when model writes task_done as prose)
+            if (_doneLine.IsMatch(line) || _taskDoneLine.IsMatch(line))
             {
                 FlushText(blocks, textBuf);
                 blocks.Add(new ResponseBlock { Type = BlockType.Done });
@@ -556,8 +558,8 @@ namespace DevMind
                 return;
             }
 
-            // DONE — implicit termination
-            if (_doneLine.IsMatch(line))
+            // DONE / task_done — implicit termination
+            if (_doneLine.IsMatch(line) || _taskDoneLine.IsMatch(line))
             {
                 EmitFileBlock(blocks, currentFileName,
                               fileBuf.ToString().TrimEnd('\r', '\n', ' '));
@@ -804,8 +806,8 @@ namespace DevMind
                 return;
             }
 
-            // DONE — implicit termination
-            if (_doneLine.IsMatch(line))
+            // DONE / task_done — implicit termination
+            if (_doneLine.IsMatch(line) || _taskDoneLine.IsMatch(line))
             {
                 EmitScratchpadBlock(blocks, scratchBuf);
                 blocks.Add(new ResponseBlock { Type = BlockType.Done });

@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v7.0
+// File: DevMindToolWindowControl.xaml.cs  v7.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -858,9 +858,22 @@ namespace DevMind
             string originalSystemPrompt = _shellLoopPending ? null : DevMindOptions.Instance.SystemPrompt;
 
             // Hoist buildCommand so it's accessible in the onComplete lambda for ToolCallMapper
-            string buildCommand = activeProjectPath != null
-                ? $"dotnet build \"{activeProjectPath}\""
-                : "msbuild \"C:\\Users\\pkailas.KAILAS\\source\\repos\\DevMind\\DevMind.slnx\" /p:DeployExtension=false /verbosity:minimal";
+            // VSIX projects fail with dotnet build — detect via .vsixmanifest sibling and use MSBuild instead
+            string buildCommand;
+            if (activeProjectPath != null)
+            {
+                var projectDir = System.IO.Path.GetDirectoryName(activeProjectPath);
+                bool isVsix = projectDir != null &&
+                    (System.IO.File.Exists(System.IO.Path.Combine(projectDir, "source.extension.vsixmanifest")) ||
+                     System.IO.File.Exists(System.IO.Path.Combine(projectDir, "extension.vsixmanifest")));
+                buildCommand = isVsix
+                    ? $"msbuild \"{activeProjectPath}\" /p:DeployExtension=false /p:Configuration=Release /verbosity:minimal"
+                    : $"dotnet build \"{activeProjectPath}\" /p:Configuration=Release";
+            }
+            else
+            {
+                buildCommand = "msbuild \"C:\\Users\\pkailas.KAILAS\\source\\repos\\DevMind\\DevMind.slnx\" /p:DeployExtension=false /p:Configuration=Release /verbosity:minimal";
+            }
 
             if (!_shellLoopPending)
             {

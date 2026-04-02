@@ -1,4 +1,4 @@
-// File: ToolRegistry.cs  v7.1
+// File: ToolRegistry.cs  v7.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json.Linq;
@@ -150,7 +150,8 @@ namespace DevMind
             // ── run_build ────────────────────────────────────────────────────
             tools.Add(MakeTool("run_build",
                 "Run the project build command. Call this after ANY code change (patch_file or create_file). " +
-                "The actual build command is substituted by the executor based on the active project. " +
+                "The build command is auto-detected: VSIX projects (detected via .vsixmanifest) use " +
+                "MSBuild with /p:DeployExtension=false; other projects use dotnet build. " +
                 "No parameters needed — the system knows the correct build command."));
 
             return tools;
