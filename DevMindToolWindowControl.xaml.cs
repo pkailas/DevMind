@@ -867,13 +867,17 @@ namespace DevMind
                 bool isVsix = projectDir != null &&
                     (System.IO.File.Exists(System.IO.Path.Combine(projectDir, "source.extension.vsixmanifest")) ||
                      System.IO.File.Exists(System.IO.Path.Combine(projectDir, "extension.vsixmanifest")));
+                var msbuildPath = FindMSBuildPath();
+                var msbuildInvoke = msbuildPath.Contains(" ") ? $"& \"{msbuildPath}\"" : msbuildPath;
                 buildCommand = isVsix
-                    ? $"\"{FindMSBuildPath()}\" \"{activeProjectPath}\" /p:DeployExtension=false /p:Configuration=Release /verbosity:minimal"
+                    ? $"{msbuildInvoke} \"{activeProjectPath}\" /p:DeployExtension=false /p:Configuration=Release /verbosity:minimal"
                     : $"dotnet build \"{activeProjectPath}\" /p:Configuration=Release";
             }
             else
             {
-                buildCommand = $"\"{FindMSBuildPath()}\" \"C:\\Users\\pkailas.KAILAS\\source\\repos\\DevMind\\DevMind.slnx\" /p:DeployExtension=false /p:Configuration=Release /verbosity:minimal";
+                var msbuildPath = FindMSBuildPath();
+                var msbuildInvoke = msbuildPath.Contains(" ") ? $"& \"{msbuildPath}\"" : msbuildPath;
+                buildCommand = $"{msbuildInvoke} \"C:\\Users\\pkailas.KAILAS\\source\\repos\\DevMind\\DevMind.slnx\" /p:DeployExtension=false /p:Configuration=Release /verbosity:minimal";
             }
 
             if (!_shellLoopPending)
