@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v7.8
+// File: LlmClient.cs  v7.9
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -123,11 +123,12 @@ namespace DevMind
         private int _currentTurn;
 
         /// <summary>
-        /// Set to true after MicroCompact fires. Cleared when budget stabilises below 40%
-        /// or when a new user-initiated message arrives. Prevents re-trimming every turn
-        /// and gives llama-server time to rebuild its KV-cache prefix.
+        /// After the first compaction, stores the working-budget percentage target.
+        /// Subsequent compactions trim until at or below this watermark.
+        /// 0 means no watermark set yet (first compaction targets 40%).
+        /// Reset to 0 on ClearHistory().
         /// </summary>
-        private bool _microCompactFiredThisCycle;
+        private int _microCompactWatermark;
 
         /// <summary>
         /// Tracks filenames (case-insensitive) that have been fully read this session.
@@ -461,11 +462,6 @@ namespace DevMind
 
             // Tier 1: Trim stale tool result content in-place — runs ALWAYS, including agentic resubmits
             {
-                // Reset the cycle flag on new user-initiated sends so the next compaction
-                // fires at the normal threshold rather than the hysteresis threshold.
-                if (!deferCompression)
-                    _microCompactFiredThisCycle = false;
-
                 string compactMsg = MicroCompactToolResults();
                 if (compactMsg != null)
                     onToken(compactMsg);
@@ -767,6 +763,7 @@ namespace DevMind
             _conversationHistory.Add(new ChatMessage("system", GetSystemPrompt()));
             _filesReadThisSession.Clear();
             NearlineCache.Clear();
+            _microCompactWatermark = 0;
             if (!preserveScratchpad)
             {
                 _taskScratchpad = "";
@@ -1009,22 +1006,159 @@ namespace DevMind
         // (original task prompt) and the 5 most recent user messages with READ blocks are protected.
         // Returns a log string to emit via onToken, or null if nothing changed.
 
-        /// <summary>Number of most-recent tool result messages to protect from trimming.
-        /// The 5 most recent tool results (counted from end of history) are kept intact.</summary>
-        private const int MicroCompactKeepRecentTools = 5;
-
-        /// <summary>Number of most-recent user messages with [READ: blocks to protect from trimming.</summary>
-        private const int MicroCompactKeepRecentUserReads = 5;
-
         /// <summary>Minimum content length before a tool result is eligible for trimming.</summary>
         private const int MicroCompactMinLength = 200;
 
+        /// <summary>Age (in turns) beyond which tool results are pre-tagged as stale.</summary>
+        private const int StaleToolAgeTurns = 10;
+
         /// <summary>
-        /// Trims stale tool result content in-place. The 5 most recent tool result messages
-        /// are protected; all older tool results exceeding MicroCompactMinLength are compacted.
-        /// Pass 3 additionally trims [READ: blocks from older user messages, protecting the 5
-        /// most recent user messages with READ blocks and always protecting the first user message.
-        /// Called before <see cref="EvictStaleContext"/> on every non-deferred send.
+        /// Returns the dynamic keep-recent count based on the current turn.
+        /// Turns 1-6: keep 5, Turns 7-12: keep 3, Turns 13+: keep 2.
+        /// </summary>
+        private int GetSlidingKeepRecent()
+        {
+            if (_currentTurn <= 6) return 5;
+            if (_currentTurn <= 12) return 3;
+            return 2;
+        }
+
+        /// <summary>
+        /// Identifies stale message indices that should be trimmed first during compaction.
+        /// Criteria: superseded builds, superseded scratchpads, re-read files, and old tool results.
+        /// Rebuilt on every call — not persisted.
+        /// </summary>
+        private System.Collections.Generic.HashSet<int> PreTagStaleMessages(int firstUserIndex)
+        {
+            var staleIndices = new System.Collections.Generic.HashSet<int>();
+            int histCount = _conversationHistory.Count;
+
+            // Track latest build result, latest scratchpad, and latest read per filename
+            int latestBuildIndex = -1;
+            int latestScratchpadIndex = -1;
+            var latestReadByFile = new System.Collections.Generic.Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+            // Forward scan to find the latest of each category
+            for (int i = 1; i < histCount; i++)
+            {
+                var msg = _conversationHistory[i];
+                if (msg.Content == null) continue;
+
+                // Track latest build result (tool or assistant with build output)
+                if (msg.Role == "tool" || msg.Role == "assistant")
+                {
+                    if (msg.Content.IndexOf("Build succeeded", StringComparison.OrdinalIgnoreCase) >= 0
+                        || msg.Content.IndexOf("Build FAILED", StringComparison.OrdinalIgnoreCase) >= 0)
+                        latestBuildIndex = i;
+                }
+
+                // Track latest scratchpad
+                if (msg.Content.IndexOf("SCRATCHPAD:", StringComparison.Ordinal) >= 0)
+                    latestScratchpadIndex = i;
+
+                // Track latest READ per filename (in user messages)
+                if (msg.Role == "user" && msg.Content.IndexOf("[READ:", StringComparison.Ordinal) >= 0)
+                {
+                    // Extract filenames from [READ: filename] tags
+                    int searchFrom = 0;
+                    while (searchFrom < msg.Content.Length)
+                    {
+                        int tagStart = msg.Content.IndexOf("[READ:", searchFrom, StringComparison.Ordinal);
+                        if (tagStart < 0) break;
+                        int tagEnd = msg.Content.IndexOf(']', tagStart);
+                        if (tagEnd < 0) break;
+                        string fname = msg.Content.Substring(tagStart + 6, tagEnd - tagStart - 6).Trim();
+                        if (fname.Length > 0)
+                            latestReadByFile[fname] = i;
+                        searchFrom = tagEnd + 1;
+                    }
+                }
+            }
+
+            // Second pass: mark superseded messages as stale
+            for (int i = 1; i < histCount; i++)
+            {
+                if (i == firstUserIndex) continue; // never tag the pinned task prompt
+
+                var msg = _conversationHistory[i];
+                if (msg.Content == null) continue;
+
+                // Superseded build outputs
+                if (latestBuildIndex > 0 && i < latestBuildIndex
+                    && (msg.Role == "tool" || msg.Role == "assistant")
+                    && (msg.Content.IndexOf("Build succeeded", StringComparison.OrdinalIgnoreCase) >= 0
+                        || msg.Content.IndexOf("Build FAILED", StringComparison.OrdinalIgnoreCase) >= 0))
+                {
+                    staleIndices.Add(i);
+                }
+
+                // Superseded scratchpads
+                if (latestScratchpadIndex > 0 && i < latestScratchpadIndex
+                    && msg.Content.IndexOf("SCRATCHPAD:", StringComparison.Ordinal) >= 0)
+                {
+                    staleIndices.Add(i);
+                }
+
+                // Re-read files (user messages with READ blocks where a newer READ of the same file exists)
+                if (msg.Role == "user" && msg.Content.IndexOf("[READ:", StringComparison.Ordinal) >= 0)
+                {
+                    int searchFrom = 0;
+                    bool allReadsSuperseded = true;
+                    bool hasAnyRead = false;
+                    while (searchFrom < msg.Content.Length)
+                    {
+                        int tagStart = msg.Content.IndexOf("[READ:", searchFrom, StringComparison.Ordinal);
+                        if (tagStart < 0) break;
+                        int tagEnd = msg.Content.IndexOf(']', tagStart);
+                        if (tagEnd < 0) break;
+                        string fname = msg.Content.Substring(tagStart + 6, tagEnd - tagStart - 6).Trim();
+                        hasAnyRead = true;
+                        if (fname.Length > 0 && latestReadByFile.TryGetValue(fname, out int latestIdx) && latestIdx > i)
+                        {
+                            // This read is superseded
+                        }
+                        else
+                        {
+                            allReadsSuperseded = false;
+                        }
+                        searchFrom = tagEnd + 1;
+                    }
+                    // Only mark stale if ALL reads in this message are superseded
+                    if (hasAnyRead && allReadsSuperseded)
+                        staleIndices.Add(i);
+                }
+
+                // Tool results older than StaleToolAgeTurns
+                if (msg.Role == "tool" && _currentTurn - msg.Turn >= StaleToolAgeTurns)
+                {
+                    staleIndices.Add(i);
+                }
+            }
+
+            return staleIndices;
+        }
+
+        /// <summary>
+        /// Computes the current working-budget percentage (quick estimate without full Assess).
+        /// </summary>
+        private int ComputeWorkingPct()
+        {
+            int workingLimit = _budget?.WorkingHistoryLimit ?? 1;
+            if (workingLimit <= 0) workingLimit = 1;
+            int histCount = _conversationHistory.Count;
+            int workingUsedEstimate = 0;
+            int protectedStart = histCount - 5;
+            for (int i = 1; i < histCount && i < protectedStart; i++)
+                workingUsedEstimate += EstimateTokens(_conversationHistory[i].Content);
+            return (int)(workingUsedEstimate * 100.0 / workingLimit);
+        }
+
+        /// <summary>
+        /// Trims stale tool result content in-place using a watermark-based strategy.
+        /// Stale messages (superseded builds, re-read files, old tool results) are trimmed first.
+        /// Keep-recent count slides down as turn count increases.
+        /// After passes 2-3, a Pass 4 trims oldest non-pinned messages until the watermark target is met.
+        /// Called before <see cref="EvictStaleContext"/> on every send.
         /// </summary>
         public string MicroCompactToolResults()
         {
@@ -1035,46 +1169,40 @@ namespace DevMind
             if (threshold == 0)
                 return null; // disabled
 
-            // Compute current working-history percentage without a full Assess() call.
-            // (Assess() is heavyweight; we only need the working bucket here.)
-            int workingLimit = _budget?.WorkingHistoryLimit ?? 1;
-            if (workingLimit <= 0) workingLimit = 1;
+            int workingPct = ComputeWorkingPct();
 
-            // Quick estimate: sum tokens for all non-system, non-protected messages.
-            // "Working" = everything except system[0] and the last 5 messages (protected turns + current).
-            int histCount = _conversationHistory.Count;
-            int workingUsedEstimate = 0;
-            int protectedStart = histCount - 5; // last 4 protected + 1 pending current
-            for (int i = 1; i < histCount && i < protectedStart; i++)
-                workingUsedEstimate += EstimateTokens(_conversationHistory[i].Content);
-
-            int workingPct = (int)(workingUsedEstimate * 100.0 / workingLimit);
-
-            // Budget reset: when we've recovered substantial headroom (threshold - 25),
-            // clear the cycle flag so the next compaction fires at the normal threshold.
-            if (workingPct < threshold - 25)
-                _microCompactFiredThisCycle = false;
-
-            // Hysteresis: after firing, require threshold+10 before firing again,
-            // giving the server time to rebuild its KV-cache prefix.
-            int effectiveThreshold = _microCompactFiredThisCycle
-                ? threshold + 10
-                : threshold;
-
-            if (workingPct < effectiveThreshold)
+            if (workingPct < threshold)
             {
                 if (showDebug)
-                    System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] MicroCompact: skipped — working {workingPct}% < threshold {effectiveThreshold}%");
+                    System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] MicroCompact: skipped — working {workingPct}% < threshold {threshold}%");
                 return null;
+            }
+
+            // ── Determine watermark target ────────────────────────────────────
+            int watermarkTarget = _microCompactWatermark > 0 ? _microCompactWatermark : 40;
+
+            // ── Pin the original task prompt ──────────────────────────────────
+            int firstUserIndex = -1;
+            for (int i = 1; i < _conversationHistory.Count; i++)
+            {
+                if (_conversationHistory[i].Role == "user")
+                {
+                    firstUserIndex = i;
+                    break;
+                }
             }
 
             int trimmed = 0;
             int savedChars = 0;
+            int keepRecent = GetSlidingKeepRecent();
 
-            // ── Pass 1: identify the 5 most recent tool result indices ───────
+            // ── Pre-tag stale messages ────────────────────────────────────────
+            var staleIndices = PreTagStaleMessages(firstUserIndex);
+
+            // ── Pass 1: identify the N most recent tool result indices ────────
             var protectedToolIndices = new System.Collections.Generic.HashSet<int>();
             int toolCount = 0;
-            for (int i = _conversationHistory.Count - 1; i >= 1 && toolCount < MicroCompactKeepRecentTools; i--)
+            for (int i = _conversationHistory.Count - 1; i >= 1 && toolCount < keepRecent; i--)
             {
                 if (_conversationHistory[i].Role == "tool")
                 {
@@ -1083,22 +1211,30 @@ namespace DevMind
                 }
             }
 
-            // ── Pass 2: trim unprotected tool results ─────────────────────────
+            // ── Pass 2: trim stale tool results first, then unprotected ──────
             for (int i = 1; i < _conversationHistory.Count; i++)
             {
                 var msg = _conversationHistory[i];
 
                 if (msg.Role != "tool") continue;
-                if (protectedToolIndices.Contains(i)) continue;
                 if (msg.Content == null || msg.Content.Length <= MicroCompactMinLength) continue;
 
-                // Preserve tool results that carry important state
-                string c = msg.Content;
-                if (c.IndexOf("[PATCH", StringComparison.OrdinalIgnoreCase) >= 0
-                    || c.IndexOf("error", StringComparison.OrdinalIgnoreCase) >= 0
-                    || c.IndexOf("failed", StringComparison.OrdinalIgnoreCase) >= 0)
-                    continue;
+                // Stale-tagged messages skip protection checks — trim them first
+                bool isStale = staleIndices.Contains(i);
 
+                if (!isStale)
+                {
+                    if (protectedToolIndices.Contains(i)) continue;
+
+                    // Preserve tool results that carry important state (unless stale)
+                    string c2 = msg.Content;
+                    if (c2.IndexOf("[PATCH", StringComparison.OrdinalIgnoreCase) >= 0
+                        || c2.IndexOf("error", StringComparison.OrdinalIgnoreCase) >= 0
+                        || c2.IndexOf("failed", StringComparison.OrdinalIgnoreCase) >= 0)
+                        continue;
+                }
+
+                string c = msg.Content;
                 int origLen = c.Length;
                 string cacheKey = $"tool:{msg.ToolCallId ?? i.ToString()}";
                 string breadcrumb = BuildToolResultBreadcrumb(c, origLen);
@@ -1110,22 +1246,9 @@ namespace DevMind
             }
 
             // ── Pass 3: trim [READ: blocks from older user messages ───────────
-            // Find the index of the first user message — this is the original task prompt
-            // and must never be trimmed regardless of the keep-recent count.
-            int firstUserIndex = -1;
-            for (int i = 1; i < _conversationHistory.Count; i++)
-            {
-                if (_conversationHistory[i].Role == "user")
-                {
-                    firstUserIndex = i;
-                    break;
-                }
-            }
-
-            // Walk backwards to identify the 5 most recent user messages that contain [READ: blocks
             var protectedUserReadIndices = new System.Collections.Generic.HashSet<int>();
             int userReadCount = 0;
-            for (int i = _conversationHistory.Count - 1; i >= 1 && userReadCount < MicroCompactKeepRecentUserReads; i--)
+            for (int i = _conversationHistory.Count - 1; i >= 1 && userReadCount < keepRecent; i--)
             {
                 var msg = _conversationHistory[i];
                 if (msg.Role == "user" && msg.Content != null
@@ -1136,16 +1259,18 @@ namespace DevMind
                 }
             }
 
-            // Trim [READ: blocks from unprotected user messages (excluding the first user message)
             for (int i = 1; i < _conversationHistory.Count; i++)
             {
                 var msg = _conversationHistory[i];
 
                 if (msg.Role != "user") continue;
-                if (i == firstUserIndex) continue;                        // always protect first user message
-                if (protectedUserReadIndices.Contains(i)) continue;       // protect 5 most recent with READ blocks
+                if (i == firstUserIndex) continue;                        // always protect pinned task prompt
                 if (msg.Content == null) continue;
                 if (msg.Content.IndexOf("[READ:", StringComparison.Ordinal) < 0) continue;
+
+                // Stale-tagged user messages skip keep-recent protection
+                bool isStale = staleIndices.Contains(i);
+                if (!isStale && protectedUserReadIndices.Contains(i)) continue;
 
                 int origLen = msg.Content.Length;
                 CacheReadBlocks(msg.Content);
@@ -1158,16 +1283,75 @@ namespace DevMind
                 trimmed++;
             }
 
+            // ── Pass 4: trim-to-watermark — further trim if still above target ─
+            int currentPct = ComputeWorkingPct();
+            if (currentPct > watermarkTarget)
+            {
+                // Protect the last 2 messages unconditionally (beyond keep-recent tool protection)
+                int absoluteProtectStart = _conversationHistory.Count - 2;
+
+                for (int i = 1; i < _conversationHistory.Count && currentPct > watermarkTarget; i++)
+                {
+                    if (i == firstUserIndex) continue;                     // pinned task prompt
+                    if (i >= absoluteProtectStart) continue;               // last 2 messages
+
+                    var msg = _conversationHistory[i];
+                    if (msg.Content == null || msg.Content.Length <= MicroCompactMinLength) continue;
+
+                    // Already a breadcrumb — skip
+                    if (msg.Content.StartsWith("[cached", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (msg.Content.StartsWith("[DROPPED", StringComparison.OrdinalIgnoreCase)) continue;
+
+                    int origLen = msg.Content.Length;
+                    string replacement;
+
+                    if (msg.Role == "tool")
+                    {
+                        string cacheKey = $"tool:{msg.ToolCallId ?? i.ToString()}";
+                        string breadcrumb = BuildToolResultBreadcrumb(msg.Content, origLen);
+                        NearlineCache.Store(cacheKey, msg.Content, breadcrumb);
+                        replacement = breadcrumb;
+                    }
+                    else if (msg.Role == "user" && msg.Content.IndexOf("[READ:", StringComparison.Ordinal) >= 0)
+                    {
+                        CacheReadBlocks(msg.Content);
+                        replacement = CompactReadBlocks(msg.Content);
+                        if (replacement.Length >= origLen) continue;
+                    }
+                    else if (msg.Role == "assistant" && msg.Content.Length > MicroCompactMinLength)
+                    {
+                        // Trim long assistant messages to first 200 chars + breadcrumb
+                        int keepLen = 200;
+                        if (msg.Content.Length <= keepLen) continue;
+                        replacement = msg.Content.Substring(0, keepLen)
+                            + $"\n[... trimmed {origLen - keepLen} chars to reclaim context ...]";
+                    }
+                    else
+                    {
+                        continue;
+                    }
+
+                    _conversationHistory[i] = new ChatMessage(msg.Role,
+                        replacement, msg.Turn, msg.ToolCalls, msg.ToolCallId);
+                    savedChars += origLen - replacement.Length;
+                    trimmed++;
+                    currentPct = ComputeWorkingPct();
+                }
+            }
+
             if (trimmed == 0)
                 return null;
 
-            _microCompactFiredThisCycle = true;
+            // Set watermark after first successful compaction
+            int finalPct = ComputeWorkingPct();
+            if (_microCompactWatermark == 0)
+                _microCompactWatermark = finalPct;
 
-            string logMsg = $"\n[CONTEXT] Compacting — one-time cache rebuild expected.\n[CONTEXT] MicroCompact: trimmed {trimmed} message(s), reclaimed ~{savedChars / 4} tokens.\n";
+            string logMsg = $"\n[CONTEXT] Compacting — one-time cache rebuild expected.\n[CONTEXT] MicroCompact: trimmed {trimmed} message(s), reclaimed ~{savedChars / 4} tokens. Working budget: {finalPct}% (watermark: {_microCompactWatermark}%).\n";
             if (showDebug)
             {
-                System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] MicroCompact: {trimmed} trimmed, {savedChars} chars saved, workingPct={workingPct}%, threshold={threshold}%");
-                logMsg += $"[DIAG] MicroCompact: trimmed {trimmed} messages, cache holds {NearlineCache.Count} entries ({NearlineCache.EstimatedTokens} est. tokens)\n";
+                System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] MicroCompact: {trimmed} trimmed, {savedChars} chars saved, workingPct={workingPct}%→{finalPct}%, threshold={threshold}%, watermark={_microCompactWatermark}%");
+                logMsg += $"[DIAG] MicroCompact: trimmed {trimmed} messages, cache holds {NearlineCache.Count} entries ({NearlineCache.EstimatedTokens} est. tokens), stale-tagged {staleIndices.Count}\n";
             }
 
             return logMsg;
