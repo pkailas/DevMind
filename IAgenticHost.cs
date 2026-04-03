@@ -37,7 +37,7 @@ namespace DevMind
         /// in the VS editor after saving if OpenFileAfterGeneration is enabled.
         /// Returns the full path of the saved file.
         /// </summary>
-        Task<string> SaveFileAsync(string fileName, string content);
+        Task<string> SaveFileAsync(string fileName, string content, bool fromToolCall = false);
 
         /// <summary>
         /// Load the content of a file into context for the LLM.
@@ -129,7 +129,7 @@ namespace DevMind
         /// <see cref="PatchResolveResult"/> with confidence and match data,
         /// or null if resolution failed.
         /// </summary>
-        Task<PatchResolveResult> ResolvePatchAsync(string patchContent);
+        Task<PatchResolveResult> ResolvePatchAsync(string patchContent, bool fromToolCall = false);
 
         /// <summary>
         /// Applies a previously resolved PATCH. Returns the full path on success, null on failure.

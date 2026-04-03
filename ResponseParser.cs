@@ -28,6 +28,7 @@ namespace DevMind
         public string MemoryTopic { get; set; }       // for RecallMemory, SaveMemory — topic slug
         public string MemoryContent { get; set; }     // for SaveMemory — content to save
         public string MemoryDescription { get; set; } // for SaveMemory — index description
+        public bool FromToolCall { get; set; }        // true when block originated from a tool_call (skip fence stripping)
     }
 
     public static class ResponseParser

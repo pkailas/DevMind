@@ -318,7 +318,7 @@ namespace DevMind
             return string.Join("\n", kept);
         }
 
-        private static List<(string findText, string replaceText)> ParsePatchBlocks(string input)
+        private static List<(string findText, string replaceText)> ParsePatchBlocks(string input, bool fromToolCall = false)
         {
             var results = new List<(string, string)>();
             // Skip first line (PATCH <filename>)
@@ -338,6 +338,8 @@ namespace DevMind
                 // Skip an opening markdown fence line (e.g. ```csharp) immediately after FIND:
                 // so that the fence does not become part of findText and does not affect
                 // the REPLACE: boundary offset calculation.
+                // In tool_use mode, backticks are legitimate content — skip this stripping.
+                if (!fromToolCall)
                 {
                     int peekEnd = input.IndexOf('\n', findContentStart);
                     if (peekEnd > findContentStart)
@@ -376,7 +378,7 @@ namespace DevMind
                 for (int ri = 0; ri < splitReplaceLines.Length; ri++)
                 {
                     var rl = splitReplaceLines[ri];
-                    if (Regex.IsMatch(rl, @"^\s*```\s*$")) break;
+                    if (!fromToolCall && Regex.IsMatch(rl, @"^\s*```\s*$")) break;
                     if (rl.TrimStart().StartsWith("SHELL:", StringComparison.OrdinalIgnoreCase)) break;
                     if (rl.Trim() == "---")
                     {
@@ -413,8 +415,13 @@ namespace DevMind
                 findText    = StripHallucinatedTerminators(findText);
                 replaceText = StripHallucinatedTerminators(replaceText);
 
-                findText    = StripOuterCodeFence(StripMarkdownFenceLines(findText));
-                replaceText = StripOuterCodeFence(StripMarkdownFenceLines(replaceText));
+                // In tool_use mode, content comes from structured JSON — backticks
+                // are legitimate content, not markdown formatting. Skip fence stripping.
+                if (!fromToolCall)
+                {
+                    findText    = StripOuterCodeFence(StripMarkdownFenceLines(findText));
+                    replaceText = StripOuterCodeFence(StripMarkdownFenceLines(replaceText));
+                }
 
                 results.Add((findText, replaceText));
                 cursor = nextFindIdx >= 0 ? nextFindIdx : input.Length;
@@ -801,7 +808,7 @@ namespace DevMind
         /// resolved blocks, or null if parsing/matching failed.
         /// Used by the diff preview gate to show a card before committing.
         /// </summary>
-        internal async Task<PatchResolveResult> ResolvePatchAsync(string input)
+        internal async Task<PatchResolveResult> ResolvePatchAsync(string input, bool fromToolCall = false)
         {
             try
             {
@@ -813,15 +820,21 @@ namespace DevMind
                     return null;
                 }
 
-                int firstNl = input.IndexOf('\n');
-                if (firstNl >= 0)
+                // In tool_use mode, content comes from structured JSON arguments —
+                // backticks are legitimate content, not markdown formatting.
+                // Skip fence stripping to preserve code fences in FIND/REPLACE text.
+                if (!fromToolCall)
                 {
-                    string header = input.Substring(0, firstNl + 1);
-                    string body   = StripMarkdownFenceLines(input.Substring(firstNl + 1));
-                    input = header + body;
+                    int firstNl = input.IndexOf('\n');
+                    if (firstNl >= 0)
+                    {
+                        string header = input.Substring(0, firstNl + 1);
+                        string body   = StripMarkdownFenceLines(input.Substring(firstNl + 1));
+                        input = header + body;
+                    }
                 }
 
-                var rawBlocks = ParsePatchBlocks(input);
+                var rawBlocks = ParsePatchBlocks(input, fromToolCall);
                 if (rawBlocks.Count == 0)
                 {
                     AppendOutput("[PATCH] Invalid syntax — must contain at least one FIND: and REPLACE: pair.\n", OutputColor.Error);

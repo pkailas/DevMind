@@ -41,7 +41,8 @@ namespace DevMind
                         FileName = GetArg(tc, "filename"),
                         RangeStart = GetIntArg(tc, "start_line"),
                         RangeEnd = GetIntArg(tc, "end_line"),
-                        ForceFullRead = GetBoolArg(tc, "force_full")
+                        ForceFullRead = GetBoolArg(tc, "force_full"),
+                        FromToolCall = true
                     };
 
                 case "create_file":
@@ -49,7 +50,8 @@ namespace DevMind
                     {
                         Type = BlockType.File,
                         FileName = GetArg(tc, "filename"),
-                        Content = GetArg(tc, "content")
+                        Content = GetArg(tc, "content"),
+                        FromToolCall = true
                     };
 
                 case "patch_file":
@@ -72,7 +74,8 @@ namespace DevMind
                         {
                             Type = BlockType.Patch,
                             FileName = filename,
-                            Content = sb.ToString()
+                            Content = sb.ToString(),
+                            FromToolCall = true
                         };
                     }
 

@@ -159,7 +159,7 @@ namespace DevMind
                         if (!processFiles) break;
                         try
                         {
-                            string savedPath = await _host.SaveFileAsync(block.FileName, block.Content);
+                            string savedPath = await _host.SaveFileAsync(block.FileName, block.Content, block.FromToolCall);
                             if (!string.IsNullOrEmpty(savedPath))
                             {
                                 result.FilesCreated.Add(savedPath);
@@ -459,7 +459,7 @@ namespace DevMind
                 var block = patchBlocks[i];
                 try
                 {
-                    var resolveResult = await _host.ResolvePatchAsync(block.Content);
+                    var resolveResult = await _host.ResolvePatchAsync(block.Content, block.FromToolCall);
                     if (resolveResult != null)
                     {
                         resolved.Add(resolveResult);

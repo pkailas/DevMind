@@ -173,7 +173,7 @@ namespace DevMind
 
         // ── IAgenticHost.SaveFileAsync ────────────────────────────────────────────
 
-        async Task<string> IAgenticHost.SaveFileAsync(string fileName, string content)
+        async Task<string> IAgenticHost.SaveFileAsync(string fileName, string content, bool fromToolCall)
         {
             // Unrelated-file write guard: confirm before creating/overwriting an unread file.
             string saveFileOnly;
@@ -191,7 +191,10 @@ namespace DevMind
                 _taskReadFiles.Add(saveFileOnly);
             }
 
-            await SaveGeneratedFileAsync(fileName, StripOuterCodeFence(content));
+            // In tool_use mode, content comes from structured JSON — backticks are
+            // legitimate content, not markdown formatting. Skip fence stripping.
+            string fileContent = fromToolCall ? content : StripOuterCodeFence(content);
+            await SaveGeneratedFileAsync(fileName, fileContent);
             // Approximate the resolved path for agentic context / diff view purposes.
             try
             {
@@ -916,7 +919,7 @@ namespace DevMind
 
         // ── IAgenticHost.ResolvePatchAsync ───────────────────────────────────────
 
-        async Task<PatchResolveResult> IAgenticHost.ResolvePatchAsync(string patchContent)
+        async Task<PatchResolveResult> IAgenticHost.ResolvePatchAsync(string patchContent, bool fromToolCall)
         {
             // Extract filename for auto-READ and write guard
             string firstLine = (patchContent ?? string.Empty).Split('\n')[0];
@@ -966,7 +969,7 @@ namespace DevMind
                 }
             }
 
-            return await ResolvePatchAsync(patchContent);
+            return await ResolvePatchAsync(patchContent, fromToolCall);
         }
 
         // ── IAgenticHost.ApplyResolvedPatchAsync ────────────────────────────────
