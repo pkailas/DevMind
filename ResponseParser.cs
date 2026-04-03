@@ -1,4 +1,4 @@
-// File: ResponseParser.cs  v7.1
+// File: ResponseParser.cs  v7.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -8,7 +8,7 @@ using System.Text.RegularExpressions;
 
 namespace DevMind
 {
-    public enum BlockType { Text, File, Patch, Shell, ReadRequest, Scratchpad, Done, Grep, Find, Delete, Rename, Diff, Test, RecallMemory, SaveMemory, ListMemory }
+    public enum BlockType { Text, File, Patch, Shell, ReadRequest, Scratchpad, Done, Grep, Find, Delete, Rename, Diff, Test, RecallMemory, SaveMemory, ListMemory, AppendFile }
 
     public class ResponseBlock
     {

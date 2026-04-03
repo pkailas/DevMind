@@ -1,4 +1,4 @@
-// File: ToolCallMapper.cs  v7.1
+// File: ToolCallMapper.cs  v7.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System.Collections.Generic;
@@ -49,6 +49,15 @@ namespace DevMind
                     return new ResponseBlock
                     {
                         Type = BlockType.File,
+                        FileName = GetArg(tc, "filename"),
+                        Content = GetArg(tc, "content"),
+                        FromToolCall = true
+                    };
+
+                case "append_file":
+                    return new ResponseBlock
+                    {
+                        Type = BlockType.AppendFile,
                         FileName = GetArg(tc, "filename"),
                         Content = GetArg(tc, "content"),
                         FromToolCall = true

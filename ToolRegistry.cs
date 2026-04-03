@@ -1,4 +1,4 @@
-// File: ToolRegistry.cs  v7.2
+// File: ToolRegistry.cs  v7.3
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json.Linq;
@@ -39,6 +39,13 @@ namespace DevMind
                 "use patch_file to edit existing files. Do not wrap content in code fences.",
                 Required("filename", "string", "File path relative to project root"),
                 Required("content", "string", "The complete source code for the new file")));
+
+            // ── append_file ──────────────────────────────────────────────────
+            tools.Add(MakeTool("append_file",
+                "Append content to the end of an existing file. Use this when you need to add content " +
+                "incrementally to a file without replacing existing content. If the file does not exist, it will be created.",
+                Required("filename", "string", "File to append to"),
+                Required("content", "string", "Content to append to the end of the file")));
 
             // ── patch_file ───────────────────────────────────────────────────
             tools.Add(MakeTool("patch_file",

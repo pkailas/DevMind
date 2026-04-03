@@ -1,4 +1,4 @@
-// File: AgenticExecutor.cs  v7.0
+// File: AgenticExecutor.cs  v7.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -171,6 +171,25 @@ namespace DevMind
                         {
                             result.Errors.Add(ex.Message);
                             _host.AppendOutput($"[FILE ERROR] {block.FileName}: {ex.Message}\n", OutputColor.Error);
+                        }
+                        break;
+
+                    case BlockType.AppendFile:
+                        if (!processFiles) break;
+                        try
+                        {
+                            string appendedPath = await _host.AppendFileAsync(block.FileName, block.Content);
+                            if (!string.IsNullOrEmpty(appendedPath))
+                            {
+                                result.FilesAppended.Add(appendedPath);
+                                _lastReadKey = null;
+                                _lastReadRepeatCount = 0;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            result.Errors.Add(ex.Message);
+                            _host.AppendOutput($"[APPEND ERROR] {block.FileName}: {ex.Message}\n", OutputColor.Error);
                         }
                         break;
 

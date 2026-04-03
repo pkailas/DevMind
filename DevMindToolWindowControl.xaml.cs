@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v7.2
+// File: DevMindToolWindowControl.xaml.cs  v7.3
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -2068,6 +2068,11 @@ namespace DevMind
                     if (result.FilesCreated != null && result.FilesCreated.Count > 0)
                         return $"[File created: {string.Join(", ", result.FilesCreated)}]";
                     return "[File created]";
+
+                case "append_file":
+                    if (result.FilesAppended != null && result.FilesAppended.Count > 0)
+                        return $"[Content appended to {string.Join(", ", result.FilesAppended)}]";
+                    return "[Content appended]";
 
                 case "run_shell":
                 case "run_build":

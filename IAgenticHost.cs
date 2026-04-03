@@ -1,4 +1,4 @@
-// File: IAgenticHost.cs  v7.0
+// File: IAgenticHost.cs  v7.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System.Collections.Generic;
@@ -38,6 +38,12 @@ namespace DevMind
         /// Returns the full path of the saved file.
         /// </summary>
         Task<string> SaveFileAsync(string fileName, string content, bool fromToolCall = false);
+
+        /// <summary>
+        /// Append content to the end of an existing file. If the file does not
+        /// exist, it will be created. Returns the full path on success, null on failure.
+        /// </summary>
+        Task<string> AppendFileAsync(string fileName, string content);
 
         /// <summary>
         /// Load the content of a file into context for the LLM.

@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.AgenticHost.cs  v7.1
+// File: DevMindToolWindowControl.AgenticHost.cs  v7.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -205,6 +205,61 @@ namespace DevMind
             catch
             {
                 return fileName;
+            }
+        }
+
+        // ── IAgenticHost.AppendFileAsync ──────────────────────────────────────────
+
+        async Task<string> IAgenticHost.AppendFileAsync(string fileName, string content)
+        {
+            // Unrelated-file write guard: confirm before appending to an unread file.
+            string appendFileOnly;
+            try { appendFileOnly = Path.GetFileName(fileName.Replace('\\', '/')); }
+            catch { appendFileOnly = fileName; }
+
+            if (!IsFileKnownToTask(appendFileOnly))
+            {
+                bool approved = await ConfirmUnreadFileWriteAsync(appendFileOnly);
+                if (!approved)
+                {
+                    AppendOutput($"[WRITE GUARD] File append to \"{appendFileOnly}\" blocked by user.\n", OutputColor.Dim);
+                    return null;
+                }
+                _taskReadFiles.Add(appendFileOnly);
+            }
+
+            try
+            {
+                string resolvedPath = await FindFileInSolutionAsync(appendFileOnly, fileName.Replace('\\', '/'))
+                    ?? Path.Combine(_terminalWorkingDir, appendFileOnly);
+
+                if (File.Exists(resolvedPath))
+                {
+                    // Append with a newline separator to avoid content merging
+                    string existing = File.ReadAllText(resolvedPath);
+                    string separator = existing.Length > 0 && !existing.EndsWith("\n") ? "\n" : "";
+                    File.WriteAllText(resolvedPath, existing + separator + content);
+                    AppendOutput($"[APPEND] Appended to {appendFileOnly}\n", OutputColor.Success);
+                }
+                else
+                {
+                    // File does not exist — create it with the content
+                    string dir = Path.GetDirectoryName(resolvedPath);
+                    if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                        Directory.CreateDirectory(dir);
+                    File.WriteAllText(resolvedPath, content);
+                    AppendOutput($"[APPEND] Created {appendFileOnly}\n", OutputColor.Success);
+                }
+
+                // Invalidate cache so subsequent READs see the updated content
+                try { _llmClient._fileCache.Invalidate(appendFileOnly); } catch { }
+
+                return resolvedPath;
+            }
+            catch (Exception ex)
+            {
+                AppendOutput($"[APPEND ERROR] {fileName}: {ex.Message}\n", OutputColor.Error);
+                return null;
             }
         }
 
