@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v7.10
+// File: LlmClient.cs  v7.11
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -508,44 +508,57 @@ namespace DevMind
             // Tool_use sessions use softer thresholds (70%/85%) because tool_call/result
             // groups are heavier per logical turn — earlier trimming prevents cliff-edge drops.
             {
-                _budget.Assess(_conversationHistory, EstimateTokens);
-                int totalHistoryTokens = _budget.SystemPromptUsed + _budget.WorkingHistoryUsed + _budget.ProtectedTurnsUsed
-                    + EstimateTokens(_conversationHistory[_conversationHistory.Count - 1].Content);
-
-                // Detect tool_use session: any "tool" role message in history
-                bool isToolUseSession = false;
-                for (int ti = 1; ti < _conversationHistory.Count; ti++)
+                // Skip soft/hard trim when MicroCompact is the active strategy.
+                // MicroCompact handles context pressure at its own threshold.
+                // The soft trim interferes by changing the conversation prefix (breaks KV cache
+                // on hybrid models like Mamba) and reclaims too little to prevent server 500s.
+                int microCompactThreshold = DevMindOptions.Instance.MicroCompactThreshold;
+                if (microCompactThreshold > 0)
                 {
-                    if (_conversationHistory[ti].Role == "tool")
-                    {
-                        isToolUseSession = true;
-                        break;
-                    }
+                    // Let MicroCompact handle it — skip soft/hard trim entirely
                 }
-
-                double hardPct = isToolUseSession ? 0.85 : 0.95;
-                double softPct = isToolUseSession ? 0.70 : 0.80;
-                bool overHard = totalHistoryTokens > (int)(_budget.HistoryHardLimit * hardPct);
-                bool overSoft = totalHistoryTokens > (int)(_budget.HistoryHardLimit * softPct);
-
-                if (overHard)
+                else
                 {
-                    // Hard budget: drop 4 oldest turn-groups aggressively without summaries
-                    int trimmed = TrimOldestTurns(4, withSummaries: false);
-                    if (trimmed > 0)
+                    // Original soft/hard trim logic for when MicroCompact is disabled
+                    _budget.Assess(_conversationHistory, EstimateTokens);
+                    int totalHistoryTokens = _budget.SystemPromptUsed + _budget.WorkingHistoryUsed + _budget.ProtectedTurnsUsed
+                        + EstimateTokens(_conversationHistory[_conversationHistory.Count - 1].Content);
+
+                    // Detect tool_use session: any "tool" role message in history
+                    bool isToolUseSession = false;
+                    for (int ti = 1; ti < _conversationHistory.Count; ti++)
                     {
-                        int kept = Math.Max(0, (_conversationHistory.Count - 2) / 2);
-                        onToken($"\n[CONTEXT] Hard trim: dropped {trimmed} messages — {kept} turns remaining.\n");
+                        if (_conversationHistory[ti].Role == "tool")
+                        {
+                            isToolUseSession = true;
+                            break;
+                        }
                     }
-                }
-                else if (overSoft)
-                {
-                    // Soft budget: drop 2 oldest turn-groups with summaries
-                    int trimmed = TrimOldestTurns(2, withSummaries: true);
-                    if (trimmed > 0)
+
+                    double hardPct = isToolUseSession ? 0.85 : 0.95;
+                    double softPct = isToolUseSession ? 0.70 : 0.80;
+                    bool overHard = totalHistoryTokens > (int)(_budget.HistoryHardLimit * hardPct);
+                    bool overSoft = totalHistoryTokens > (int)(_budget.HistoryHardLimit * softPct);
+
+                    if (overHard)
                     {
-                        int kept = Math.Max(0, (_conversationHistory.Count - 2) / 2);
-                        onToken($"\n[CONTEXT] Soft trim: dropped {trimmed} messages — {kept} turns remaining.\n");
+                        // Hard budget: drop 4 oldest turn-groups aggressively without summaries
+                        int trimmed = TrimOldestTurns(4, withSummaries: false);
+                        if (trimmed > 0)
+                        {
+                            int kept = Math.Max(0, (_conversationHistory.Count - 2) / 2);
+                            onToken($"\n[CONTEXT] Hard trim: dropped {trimmed} messages — {kept} turns remaining.\n");
+                        }
+                    }
+                    else if (overSoft)
+                    {
+                        // Soft budget: drop 2 oldest turn-groups with summaries
+                        int trimmed = TrimOldestTurns(2, withSummaries: true);
+                        if (trimmed > 0)
+                        {
+                            int kept = Math.Max(0, (_conversationHistory.Count - 2) / 2);
+                            onToken($"\n[CONTEXT] Soft trim: dropped {trimmed} messages — {kept} turns remaining.\n");
+                        }
                     }
                 }
             }
@@ -1189,27 +1202,20 @@ namespace DevMind
         /// </summary>
         private int ComputeWorkingPct()
         {
-            int workingLimit = _budget?.WorkingHistoryLimit ?? 1;
-            if (workingLimit <= 0) workingLimit = 1;
-
-            // If we have a real server count, derive working usage from it
-            if (LastContextUsed > 0)
+            // Use real server token counts when available — n_past / n_ctx gives
+            // the actual context fill percentage, not a bucket-relative estimate.
+            if (LastContextUsed > 0 && ServerContextSize > 0)
             {
-                // Subtract system prompt and protected turns estimates from server total
-                int systemEst = _conversationHistory.Count > 0 ? EstimateTokens(_conversationHistory[0].Content) : 0;
-                int histCount = _conversationHistory.Count;
-                int protectedStart = histCount - 5;
-                int protectedEst = 0;
-                for (int i = Math.Max(1, protectedStart); i < histCount; i++)
-                    protectedEst += EstimateTokens(_conversationHistory[i].Content);
                 // Add estimates for messages added since last server response
                 int newMsgEst = 0;
-                for (int i = _lastServerCountIndex; i < histCount; i++)
+                for (int i = _lastServerCountIndex; i < _conversationHistory.Count; i++)
                     newMsgEst += EstimateTokens(_conversationHistory[i].Content);
-                int workingUsed = Math.Max(0, LastContextUsed + newMsgEst - systemEst - protectedEst);
-                return (int)(workingUsed * 100.0 / workingLimit);
+                return (int)((LastContextUsed + newMsgEst) * 100.0 / ServerContextSize);
             }
 
+            // Fallback: estimate from working bucket
+            int workingLimit = _budget?.WorkingHistoryLimit ?? 1;
+            if (workingLimit <= 0) workingLimit = 1;
             int count = _conversationHistory.Count;
             int workingUsedEstimate = 0;
             int protStart = count - 5;
