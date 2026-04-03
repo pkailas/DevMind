@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v7.13
+// File: LlmClient.cs  v7.14
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -163,6 +163,7 @@ namespace DevMind
         public double LastGeneratedMs { get; private set; }
         public int LastContextUsed { get; private set; }   // n_past
         public int ServerContextSize { get; private set; } // n_ctx
+        public int LastContextDelta { get; private set; }  // n_past growth since previous response
 
         // ── Predictive context growth tracking ──────────────────────────────
         private readonly List<int> _contextDeltas = new List<int>();
@@ -602,7 +603,7 @@ namespace DevMind
                 int avgDelta = 0;
                 foreach (var d in _contextDeltas) avgDelta += d;
                 avgDelta /= _contextDeltas.Count;
-                int maxSafe = ServerContextSize - (avgDelta * 2);
+                int maxSafe = ServerContextSize - (avgDelta * 3);
                 int pct = (int)(LastContextUsed * 100.0 / ServerContextSize);
                 onToken($"\n[CONTEXT] {LastContextUsed:N0} / {ServerContextSize:N0} ({pct}%) | Avg delta: {avgDelta:N0} | Safe ceiling: {maxSafe:N0}\n");
             }
@@ -785,8 +786,7 @@ namespace DevMind
                     double tokPerSec = genSec > 0 ? LastGeneratedTokens / genSec : 0;
                     int ctxTotal = ServerContextSize > 0 ? ServerContextSize : _contextSize;
                     int ctxPct = ctxTotal > 0 ? (int)(LastContextUsed * 100.0 / ctxTotal) : 0;
-                    int delta = _previousContextUsed > 0 ? LastContextUsed - _previousContextUsed : 0;
-                    string deltaStr = delta > 0 ? $" | delta +{delta:N0}" : "";
+                    string deltaStr = LastContextDelta > 0 ? $" | delta +{LastContextDelta:N0}" : "";
                     onToken($"\n[LLM] {LastGeneratedTokens:N0} tok in {genSec:F1}s ({tokPerSec:F1} tok/s) | Prompt: {LastContextUsed:N0} / {ctxTotal:N0} ({ctxPct}%){deltaStr}\n");
                 }
 
@@ -1272,7 +1272,7 @@ namespace DevMind
                 int avgDelta = 0;
                 foreach (var d in _contextDeltas) avgDelta += d;
                 avgDelta /= _contextDeltas.Count;
-                int headroom = avgDelta * 2;
+                int headroom = avgDelta * 3;
                 int maxSafe = ServerContextSize - headroom;
                 if (LastContextUsed < maxSafe)
                 {
@@ -2405,9 +2405,10 @@ namespace DevMind
                     _lastServerCountIndex = _conversationHistory.Count;
 
                     // Track context growth deltas for predictive threshold
-                    if (_previousContextUsed > 0 && nPast > _previousContextUsed)
+                    LastContextDelta = (_previousContextUsed > 0 && nPast > _previousContextUsed) ? nPast - _previousContextUsed : 0;
+                    if (LastContextDelta > 0)
                     {
-                        _contextDeltas.Add(nPast - _previousContextUsed);
+                        _contextDeltas.Add(LastContextDelta);
                         if (_contextDeltas.Count > 5) _contextDeltas.RemoveAt(0);
                     }
                     _previousContextUsed = nPast;
