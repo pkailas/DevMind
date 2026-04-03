@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v7.9
+// File: LlmClient.cs  v7.10
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -155,6 +155,20 @@ namespace DevMind
         /// contained no tool_calls. Set during <see cref="SendMessageAsync"/>.
         /// </summary>
         public List<ToolCallResult> LastToolCalls { get; private set; }
+
+        // ── Server-reported timings from last SSE response ──────────────────
+        public int LastPromptTokens { get; private set; }
+        public int LastGeneratedTokens { get; private set; }
+        public double LastPromptMs { get; private set; }
+        public double LastGeneratedMs { get; private set; }
+        public int LastContextUsed { get; private set; }   // n_past
+        public int ServerContextSize { get; private set; } // n_ctx
+
+        /// <summary>
+        /// Conversation history count at the time LastContextUsed was last updated.
+        /// Messages at indices &gt;= this value have not yet been counted by the server.
+        /// </summary>
+        private int _lastServerCountIndex;
 
         private static int EstimateTokens(string text) => (text?.Length ?? 0) / 4 + 4;
 
@@ -543,9 +557,23 @@ namespace DevMind
             int headroomLimit = _budget.ResponseHeadroomLimit;
             int workingPct    = workingLimit > 0 ? (int)(workingUsed * 100.0 / workingLimit) : 0;
 
-            int grandTotal = 0;
-            foreach (var msg in _conversationHistory)
-                grandTotal += EstimateTokens(msg.Content);
+            // Use actual server token count from last response if available
+            int grandTotal = LastContextUsed > 0 ? LastContextUsed : 0;
+            if (grandTotal > 0)
+            {
+                // Add estimate for the new message being sent (server hasn't counted it yet)
+                grandTotal += EstimateTokens(userMessage);
+                // Add estimates for any messages added since last server response
+                // (tool results, continuation prompts)
+                for (int i = _lastServerCountIndex; i < _conversationHistory.Count; i++)
+                    grandTotal += EstimateTokens(_conversationHistory[i].Content);
+            }
+            else
+            {
+                // Fallback: estimate entire history
+                foreach (var msg in _conversationHistory)
+                    grandTotal += EstimateTokens(msg.Content);
+            }
 
             if (grandTotal > _budget.HistoryHardLimit)
             {
@@ -683,6 +711,9 @@ namespace DevMind
                 if (DevMindOptions.Instance.ShowDebugOutput)
                     onToken($"\n[DIAG-TOOLS] Accumulated {accumulatedToolCalls?.Count ?? 0} tool call(s)\n");
 
+                // ── Parse server timings from lastDataLine ────────────────────
+                ParseTimings(lastDataLine);
+
                 // Emit visible status if model responded with tool calls but no content
                 if (accumulatedToolCalls != null && accumulatedToolCalls.Count > 0 && string.IsNullOrWhiteSpace(fullResponse.ToString()))
                     onToken("\n[TOOL_USE] Processing tool call(s)...\n");
@@ -710,6 +741,18 @@ namespace DevMind
 
                 _conversationHistory.Add(new ChatMessage("assistant", fullResponse.ToString(),
                     _currentTurn, toolCalls: rawToolCalls));
+
+                // ── Emit server timings status line ─────────────────────────
+                if (LastGeneratedTokens > 0
+                    && (DevMindOptions.Instance.ShowContextBudget || DevMindOptions.Instance.ShowDebugOutput))
+                {
+                    double genSec = LastGeneratedMs / 1000.0;
+                    double tokPerSec = genSec > 0 ? LastGeneratedTokens / genSec : 0;
+                    int ctxTotal = ServerContextSize > 0 ? ServerContextSize : _contextSize;
+                    int ctxPct = ctxTotal > 0 ? (int)(LastContextUsed * 100.0 / ctxTotal) : 0;
+                    onToken($"\n[LLM] {LastGeneratedTokens:N0} tok in {genSec:F1}s ({tokPerSec:F1} tok/s) | Prompt: {LastPromptTokens:N0} tok ({ctxPct}% ctx)\n");
+                }
+
                 onComplete();
             }
             catch (OperationCanceledException)
@@ -764,6 +807,8 @@ namespace DevMind
             _filesReadThisSession.Clear();
             NearlineCache.Clear();
             _microCompactWatermark = 0;
+            LastContextUsed = 0;
+            _lastServerCountIndex = 0;
             if (!preserveScratchpad)
             {
                 _taskScratchpad = "";
@@ -1140,15 +1185,35 @@ namespace DevMind
 
         /// <summary>
         /// Computes the current working-budget percentage (quick estimate without full Assess).
+        /// Uses server-reported n_past when available for more accurate measurement.
         /// </summary>
         private int ComputeWorkingPct()
         {
             int workingLimit = _budget?.WorkingHistoryLimit ?? 1;
             if (workingLimit <= 0) workingLimit = 1;
-            int histCount = _conversationHistory.Count;
+
+            // If we have a real server count, derive working usage from it
+            if (LastContextUsed > 0)
+            {
+                // Subtract system prompt and protected turns estimates from server total
+                int systemEst = _conversationHistory.Count > 0 ? EstimateTokens(_conversationHistory[0].Content) : 0;
+                int histCount = _conversationHistory.Count;
+                int protectedStart = histCount - 5;
+                int protectedEst = 0;
+                for (int i = Math.Max(1, protectedStart); i < histCount; i++)
+                    protectedEst += EstimateTokens(_conversationHistory[i].Content);
+                // Add estimates for messages added since last server response
+                int newMsgEst = 0;
+                for (int i = _lastServerCountIndex; i < histCount; i++)
+                    newMsgEst += EstimateTokens(_conversationHistory[i].Content);
+                int workingUsed = Math.Max(0, LastContextUsed + newMsgEst - systemEst - protectedEst);
+                return (int)(workingUsed * 100.0 / workingLimit);
+            }
+
+            int count = _conversationHistory.Count;
             int workingUsedEstimate = 0;
-            int protectedStart = histCount - 5;
-            for (int i = 1; i < histCount && i < protectedStart; i++)
+            int protStart = count - 5;
+            for (int i = 1; i < count && i < protStart; i++)
                 workingUsedEstimate += EstimateTokens(_conversationHistory[i].Content);
             return (int)(workingUsedEstimate * 100.0 / workingLimit);
         }
@@ -2240,6 +2305,43 @@ namespace DevMind
             }
 
             return request.ToString(Formatting.None);
+        }
+
+        /// <summary>
+        /// Extracts server-reported timings from the last SSE data line.
+        /// Updates LastPromptTokens, LastGeneratedTokens, etc. if the timings object is present.
+        /// </summary>
+        private void ParseTimings(string lastData)
+        {
+            if (string.IsNullOrEmpty(lastData)) return;
+            try
+            {
+                var obj = JObject.Parse(lastData);
+                var timings = obj?["timings"];
+                if (timings == null) return;
+
+                int promptN = timings["prompt_n"]?.Value<int>() ?? 0;
+                double promptMs = timings["prompt_ms"]?.Value<double>() ?? 0;
+                int predictedN = timings["predicted_n"]?.Value<int>() ?? 0;
+                double predictedMs = timings["predicted_ms"]?.Value<double>() ?? 0;
+                int nCtx = timings["n_ctx"]?.Value<int>() ?? 0;
+                int nPast = timings["n_past"]?.Value<int>() ?? 0;
+
+                if (promptN > 0) LastPromptTokens = promptN;
+                if (promptMs > 0) LastPromptMs = promptMs;
+                if (predictedN > 0) LastGeneratedTokens = predictedN;
+                if (predictedMs > 0) LastGeneratedMs = predictedMs;
+                if (nCtx > 0) ServerContextSize = nCtx;
+                if (nPast > 0)
+                {
+                    LastContextUsed = nPast;
+                    _lastServerCountIndex = _conversationHistory.Count;
+                }
+            }
+            catch
+            {
+                // Timings missing or malformed — leave previous values unchanged
+            }
         }
 
         private static string ParseContentDelta(string json)
