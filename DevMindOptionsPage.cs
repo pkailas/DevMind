@@ -1,4 +1,4 @@
-// File: DevMindOptionsPage.cs  v7.1
+// File: DevMindOptionsPage.cs  v7.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -492,9 +492,9 @@ namespace DevMind
         /// Higher values maximize prompt cache hits but risk running out of context.
         /// </summary>
         [Category("Context Management")]
-        [DisplayName("MicroCompact Threshold (%)")]
-        [Description("Working budget percentage at which MicroCompact fires. Set to 0 to disable. Higher values maximize prompt cache hits but risk running out of context.")]
-        [DefaultValue(85)]
+        [DisplayName("MicroCompact Enabled")]
+        [Description("Enable predictive context compaction. When enabled, MicroCompact uses observed context growth rate to determine when to trim. Disable to turn off context compaction entirely.")]
+        [DefaultValue(true)]
         public int MicroCompactThreshold { get; set; } = 85;
 
     }

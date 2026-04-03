@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v7.12
+// File: LlmClient.cs  v7.13
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -163,6 +163,10 @@ namespace DevMind
         public double LastGeneratedMs { get; private set; }
         public int LastContextUsed { get; private set; }   // n_past
         public int ServerContextSize { get; private set; } // n_ctx
+
+        // ── Predictive context growth tracking ──────────────────────────────
+        private readonly List<int> _contextDeltas = new List<int>();
+        private int _previousContextUsed;
 
         /// <summary>
         /// Conversation history count at the time LastContextUsed was last updated.
@@ -563,13 +567,6 @@ namespace DevMind
                 }
             }
 
-            // Budget display — bucket breakdown
-            _budget.Assess(_conversationHistory, EstimateTokens);
-            int workingUsed   = _budget.WorkingHistoryUsed;
-            int workingLimit  = _budget.WorkingHistoryLimit;
-            int headroomLimit = _budget.ResponseHeadroomLimit;
-            int workingPct    = workingLimit > 0 ? (int)(workingUsed * 100.0 / workingLimit) : 0;
-
             // Use real server context usage when available
             int grandTotal;
             if (LastContextUsed > 0 && ServerContextSize > 0)
@@ -599,7 +596,30 @@ namespace DevMind
                 return;
             }
 
-            onToken($"\n[CONTEXT] Working: {workingUsed:N0} / {workingLimit:N0} ({workingPct}%) | Response headroom: {headroomLimit:N0} reserved\n");
+            // Budget display — real server numbers or estimated fallback
+            if (LastContextUsed > 0 && ServerContextSize > 0 && _contextDeltas.Count > 0)
+            {
+                int avgDelta = 0;
+                foreach (var d in _contextDeltas) avgDelta += d;
+                avgDelta /= _contextDeltas.Count;
+                int maxSafe = ServerContextSize - (avgDelta * 2);
+                int pct = (int)(LastContextUsed * 100.0 / ServerContextSize);
+                onToken($"\n[CONTEXT] {LastContextUsed:N0} / {ServerContextSize:N0} ({pct}%) | Avg delta: {avgDelta:N0} | Safe ceiling: {maxSafe:N0}\n");
+            }
+            else if (LastContextUsed > 0 && ServerContextSize > 0)
+            {
+                int pct = (int)(LastContextUsed * 100.0 / ServerContextSize);
+                onToken($"\n[CONTEXT] {LastContextUsed:N0} / {ServerContextSize:N0} ({pct}%)\n");
+            }
+            else
+            {
+                _budget.Assess(_conversationHistory, EstimateTokens);
+                int workingUsed   = _budget.WorkingHistoryUsed;
+                int workingLimit  = _budget.WorkingHistoryLimit;
+                int headroomLimit = _budget.ResponseHeadroomLimit;
+                int workingPct    = workingLimit > 0 ? (int)(workingUsed * 100.0 / workingLimit) : 0;
+                onToken($"\n[CONTEXT] Working: {workingUsed:N0} / {workingLimit:N0} ({workingPct}%) | Response headroom: {headroomLimit:N0} reserved\n");
+            }
 
             // Health check — probe the server with a cheap GET before committing the
             // full chat payload. If the probe times out or fails, RecreateHttpClient()
@@ -765,7 +785,9 @@ namespace DevMind
                     double tokPerSec = genSec > 0 ? LastGeneratedTokens / genSec : 0;
                     int ctxTotal = ServerContextSize > 0 ? ServerContextSize : _contextSize;
                     int ctxPct = ctxTotal > 0 ? (int)(LastContextUsed * 100.0 / ctxTotal) : 0;
-                    onToken($"\n[LLM] {LastGeneratedTokens:N0} tok in {genSec:F1}s ({tokPerSec:F1} tok/s) | Prompt: {LastPromptTokens:N0} tok ({ctxPct}% ctx)\n");
+                    int delta = _previousContextUsed > 0 ? LastContextUsed - _previousContextUsed : 0;
+                    string deltaStr = delta > 0 ? $" | delta +{delta:N0}" : "";
+                    onToken($"\n[LLM] {LastGeneratedTokens:N0} tok in {genSec:F1}s ({tokPerSec:F1} tok/s) | Prompt: {LastContextUsed:N0} / {ctxTotal:N0} ({ctxPct}%){deltaStr}\n");
                 }
 
                 onComplete();
@@ -824,6 +846,8 @@ namespace DevMind
             _microCompactWatermark = 0;
             LastContextUsed = 0;
             _lastServerCountIndex = 0;
+            _previousContextUsed = 0;
+            _contextDeltas.Clear();
             if (!preserveScratchpad)
             {
                 _taskScratchpad = "";
@@ -1242,13 +1266,42 @@ namespace DevMind
             if (threshold == 0)
                 return null; // disabled
 
-            int workingPct = ComputeWorkingPct();
-
-            if (workingPct < threshold)
+            // Predictive threshold: use observed growth rate to determine safe ceiling
+            if (LastContextUsed > 0 && ServerContextSize > 0 && _contextDeltas.Count > 0)
             {
-                if (showDebug)
-                    System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] MicroCompact: skipped — working {workingPct}% < threshold {threshold}%");
-                return null;
+                int avgDelta = 0;
+                foreach (var d in _contextDeltas) avgDelta += d;
+                avgDelta /= _contextDeltas.Count;
+                int headroom = avgDelta * 2;
+                int maxSafe = ServerContextSize - headroom;
+                if (LastContextUsed < maxSafe)
+                {
+                    if (showDebug)
+                        System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] MicroCompact: skipped — n_past={LastContextUsed}, maxSafe={maxSafe} (avgDelta={avgDelta})");
+                    return null;
+                }
+            }
+            else if (LastContextUsed > 0 && ServerContextSize > 0)
+            {
+                // Server data available but no deltas yet — use fixed 75% threshold
+                int pct = (int)(LastContextUsed * 100.0 / ServerContextSize);
+                if (pct < 75)
+                {
+                    if (showDebug)
+                        System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] MicroCompact: skipped — n_past/n_ctx={pct}% < 75%");
+                    return null;
+                }
+            }
+            else
+            {
+                // No server data — fall back to estimated working percentage
+                int workingPct = ComputeWorkingPct();
+                if (workingPct < 75)
+                {
+                    if (showDebug)
+                        System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] MicroCompact: skipped — working {workingPct}% < 75%");
+                    return null;
+                }
             }
 
             // ── Determine watermark target ────────────────────────────────────
@@ -1423,9 +1476,15 @@ namespace DevMind
             string logMsg = $"\n[CONTEXT] Compacting — one-time cache rebuild expected.\n[CONTEXT] MicroCompact: trimmed {trimmed} message(s), reclaimed ~{savedChars / 4} tokens. Working budget: {finalPct}% (watermark: {_microCompactWatermark}%).\n";
             if (showDebug)
             {
-                System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] MicroCompact: {trimmed} trimmed, {savedChars} chars saved, workingPct={workingPct}%→{finalPct}%, threshold={threshold}%, watermark={_microCompactWatermark}%");
+                System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] MicroCompact: {trimmed} trimmed, {savedChars} chars saved, finalPct={finalPct}%, threshold={threshold}%, watermark={_microCompactWatermark}%");
                 logMsg += $"[DIAG] MicroCompact: trimmed {trimmed} messages, cache holds {NearlineCache.Count} entries ({NearlineCache.EstimatedTokens} est. tokens), stale-tagged {staleIndices.Count}\n";
             }
+
+            // Reset stale server data — history changed, n_past is no longer valid
+            LastContextUsed = 0;
+            _lastServerCountIndex = 0;
+            _previousContextUsed = 0;
+            // Do NOT clear _contextDeltas — the growth pattern is still valid for future predictions
 
             return logMsg;
         }
@@ -2344,6 +2403,14 @@ namespace DevMind
                 {
                     LastContextUsed = nPast;
                     _lastServerCountIndex = _conversationHistory.Count;
+
+                    // Track context growth deltas for predictive threshold
+                    if (_previousContextUsed > 0 && nPast > _previousContextUsed)
+                    {
+                        _contextDeltas.Add(nPast - _previousContextUsed);
+                        if (_contextDeltas.Count > 5) _contextDeltas.RemoveAt(0);
+                    }
+                    _previousContextUsed = nPast;
                 }
             }
             catch
