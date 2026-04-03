@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v7.11
+// File: LlmClient.cs  v7.12
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -570,25 +570,27 @@ namespace DevMind
             int headroomLimit = _budget.ResponseHeadroomLimit;
             int workingPct    = workingLimit > 0 ? (int)(workingUsed * 100.0 / workingLimit) : 0;
 
-            // Use actual server token count from last response if available
-            int grandTotal = LastContextUsed > 0 ? LastContextUsed : 0;
-            if (grandTotal > 0)
+            // Use real server context usage when available
+            int grandTotal;
+            if (LastContextUsed > 0 && ServerContextSize > 0)
             {
-                // Add estimate for the new message being sent (server hasn't counted it yet)
-                grandTotal += EstimateTokens(userMessage);
-                // Add estimates for any messages added since last server response
-                // (tool results, continuation prompts)
-                for (int i = _lastServerCountIndex; i < _conversationHistory.Count; i++)
-                    grandTotal += EstimateTokens(_conversationHistory[i].Content);
+                // Server told us exactly how many tokens are cached (n_past).
+                // Only estimate the NEW user message being added this turn —
+                // everything else (system prompt, prior turns, tool results) is already in n_past.
+                grandTotal = LastContextUsed + EstimateTokens(_conversationHistory[_conversationHistory.Count - 1].Content);
             }
             else
             {
-                // Fallback: estimate entire history
+                // No server data yet (first turn) — fall back to full estimation
+                grandTotal = 0;
                 foreach (var msg in _conversationHistory)
                     grandTotal += EstimateTokens(msg.Content);
             }
 
-            if (grandTotal > _budget.HistoryHardLimit)
+            // Compare against server's actual context size when known, otherwise use DevMind's budget.
+            // The server knows its own limit — ResponseHeadroom is a DevMind concept, not a server constraint.
+            int contextCeiling = ServerContextSize > 0 ? ServerContextSize : _budget.HistoryHardLimit;
+            if (grandTotal > contextCeiling)
             {
                 onToken($"\n[CONTEXT] CRITICAL: Cannot fit in context window — aborting send\n");
                 onError(new InvalidOperationException(
