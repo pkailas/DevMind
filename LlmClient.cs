@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v7.18
+// File: LlmClient.cs  v7.19
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -134,6 +134,12 @@ namespace DevMind
         /// Last error from GenerateSummaryAsync, surfaced in MicroCompact log output.
         /// </summary>
         internal string _lastSummaryError;
+
+        /// <summary>
+        /// Persistent store of all compaction summaries generated this session.
+        /// Used by GenerateSummaryAsync to build cumulative context across compactions.
+        /// </summary>
+        private readonly List<string> _compactionSummaries = new List<string>();
 
         /// <summary>
         /// Tracks filenames (case-insensitive) that have been fully read this session.
@@ -619,8 +625,18 @@ namespace DevMind
                 int pct = (int)(LastContextUsed * 100.0 / ServerContextSize);
                 onToken($"\n[CONTEXT] {LastContextUsed:N0} / {ServerContextSize:N0} ({pct}%)\n");
             }
+            else if (ServerContextSize > 0)
+            {
+                // Post-compaction or pre-first-response — estimate against real server size
+                int estimated = 0;
+                foreach (var msg in _conversationHistory)
+                    estimated += EstimateTokens(msg.Content);
+                int pct = (int)(estimated * 100.0 / ServerContextSize);
+                onToken($"\n[CONTEXT] ~{estimated:N0} / {ServerContextSize:N0} (~{pct}%) [estimated]\n");
+            }
             else
             {
+                // True first turn — no server info yet, use old budget as temporary fallback
                 _budget.Assess(_conversationHistory, EstimateTokens);
                 int workingUsed   = _budget.WorkingHistoryUsed;
                 int workingLimit  = _budget.WorkingHistoryLimit;
@@ -1505,6 +1521,7 @@ namespace DevMind
                         : $"{minTrimTurn}-{maxTrimTurn}";
                     string summaryContent = $"[CONTEXT SUMMARY — Turns {turnRange}]\n{summary}\n[END SUMMARY]";
                     _conversationHistory.Insert(insertIdx, new ChatMessage("user", summaryContent, 0));
+                    _compactionSummaries.Add(summary);
                     summaryLogExtra = $"[CONTEXT] Summary generated ({summary.Length / 4} tokens, {sw.Elapsed.TotalSeconds:F1}s)\n";
                     if (showDebug)
                     {
@@ -1582,19 +1599,34 @@ namespace DevMind
                 if (extractedContent.Length > 8000)
                     extractedContent = extractedContent.Substring(0, 8000) + "\n[... truncated ...]";
 
-                // Collect previous summaries so the new summary builds on them
-                var previousSummaries = new StringBuilder();
-                foreach (var msg in _conversationHistory)
+                // Include previous compaction summaries so the new summary builds cumulatively
+                string previousContext = "";
+                if (_compactionSummaries.Count > 0)
                 {
-                    if (msg.Content != null && msg.Content.StartsWith("[CONTEXT SUMMARY"))
-                    {
-                        previousSummaries.AppendLine(msg.Content);
-                    }
+                    var prevSb = new StringBuilder();
+                    prevSb.AppendLine("Previous context summaries (incorporate these facts, do not repeat verbatim):");
+                    foreach (var prev in _compactionSummaries)
+                        prevSb.AppendLine(prev);
+                    prevSb.AppendLine();
+                    previousContext = prevSb.ToString();
                 }
 
-                string previousContext = previousSummaries.Length > 0
-                    ? "Previous context summaries (build on these, do not repeat them):\n" + previousSummaries.ToString() + "\n"
-                    : "";
+                // Include file names from NearlineCache so the summary knows what was worked on
+                string cacheContext = "";
+                if (NearlineCache != null && NearlineCache.Count > 0)
+                {
+                    var keys = new StringBuilder();
+                    keys.Append("Files in cache (previously read): ");
+                    bool first = true;
+                    foreach (var key in NearlineCache.Keys)
+                    {
+                        if (!first) keys.Append(", ");
+                        keys.Append(key);
+                        first = false;
+                    }
+                    keys.AppendLine();
+                    cacheContext = keys.ToString();
+                }
 
                 // Build the summarization request — fresh messages array, not the main history
                 var messages = new JArray
@@ -1608,12 +1640,13 @@ namespace DevMind
                     {
                         ["role"] = "user",
                         ["content"] = previousContext
+                            + cacheContext
                             + "Summarize these NEW conversation turns into this exact format:\n\n"
-                            + "FILES READ: [list filenames — include files from previous summaries plus new ones]\n"
-                            + "ACTIONS TAKEN: [list patches, shell commands, file creates]\n"
-                            + "FINDINGS: [key findings]\n"
-                            + "CURRENT STATE: [what is done]\n"
-                            + "NEXT STEP: [what was being worked on]\n\n"
+                            + "FILES READ: [all files worked on, including from previous summaries and cache]\n"
+                            + "ACTIONS TAKEN: [what was done — files created, appended, patched]\n"
+                            + "FINDINGS: [key findings or decisions]\n"
+                            + "CURRENT STATE: [what is completed]\n"
+                            + "NEXT STEP: [what should happen next]\n\n"
                             + "Conversation:\n" + extractedContent
                     }
                 };

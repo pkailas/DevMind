@@ -151,6 +151,7 @@ namespace DevMind
                     OutputColor.Error    => new SolidColorBrush(Color.FromRgb(0xF4, 0x48, 0x47)),
                     OutputColor.Success  => new SolidColorBrush(Color.FromRgb(0x4E, 0xC9, 0x4E)),
                     OutputColor.Thinking => new SolidColorBrush(Color.FromRgb(0x6A, 0x6A, 0x8A)),
+                    OutputColor.Warning  => new SolidColorBrush(Color.FromRgb(0xFF, 0xB9, 0x00)),
                     _                    => new SolidColorBrush(Color.FromRgb(0xCC, 0xCC, 0xCC)),
                 }
             };

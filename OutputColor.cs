@@ -1,4 +1,4 @@
-// File: OutputColor.cs  v1.0.0
+// File: OutputColor.cs  v1.1.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 namespace DevMind
@@ -13,6 +13,7 @@ namespace DevMind
         Input,    // #569CD6 — echoed user input lines prefixed with "> "
         Error,    // #F44747 — shell stderr, LLM errors, build failures
         Success,  // #4EC94E — PATCH applied, file created, build succeeded
-        Thinking  // #6A6A8A — LLM thinking tokens when ShowLlmThinking is enabled
+        Thinking, // #6A6A8A — LLM thinking tokens when ShowLlmThinking is enabled
+        Warning   // #FFB900 — file not found, write guard, non-fatal warnings
     }
 }

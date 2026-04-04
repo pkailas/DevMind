@@ -1,4 +1,4 @@
-// File: NearlineCache.cs  v7.0
+// File: NearlineCache.cs  v7.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -71,6 +71,11 @@ namespace DevMind
         /// Number of entries currently in the cache.
         /// </summary>
         public int Count => _entries.Count;
+
+        /// <summary>
+        /// All cache keys (for diagnostic and summarization context).
+        /// </summary>
+        public IEnumerable<string> Keys => _entries.Keys;
     }
 
     /// <summary>

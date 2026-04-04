@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.AgenticHost.cs  v7.2
+// File: DevMindToolWindowControl.AgenticHost.cs  v7.3
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -89,7 +89,7 @@ namespace DevMind
             await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
             AppendOutput(
                 $"[WRITE GUARD] \"{fileNameOnly}\" was not read during this task — asking for approval.\n",
-                OutputColor.Dim);
+                OutputColor.Warning);
             var answer = System.Windows.MessageBox.Show(
                 $"DevMind wants to write to \"{fileNameOnly}\", but that file was not read during this task " +
                 $"and was not mentioned in your request.\n\nAllow this write?",

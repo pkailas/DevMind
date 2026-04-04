@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.Patch.cs  v5.17
+// File: DevMindToolWindowControl.Patch.cs  v5.18
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -482,7 +482,7 @@ namespace DevMind
 
                 if (!File.Exists(fullPath))
                 {
-                    AppendOutput($"[PATCH] File not found: {fullPath}\n", OutputColor.Error);
+                    AppendOutput($"[PATCH] File not found: {fullPath}\n", OutputColor.Warning);
                     return null;
                 }
 
@@ -856,7 +856,7 @@ namespace DevMind
 
                 if (!File.Exists(fullPath))
                 {
-                    AppendOutput($"[PATCH] File not found: {fullPath}\n", OutputColor.Error);
+                    AppendOutput($"[PATCH] File not found: {fullPath}\n", OutputColor.Warning);
                     return null;
                 }
 
