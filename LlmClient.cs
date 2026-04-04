@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v7.15
+// File: LlmClient.cs  v7.16
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -129,6 +129,11 @@ namespace DevMind
         /// Reset to 0 on ClearHistory().
         /// </summary>
         private int _microCompactWatermark;
+
+        /// <summary>
+        /// Last error from GenerateSummaryAsync, surfaced in MicroCompact log output.
+        /// </summary>
+        internal string _lastSummaryError;
 
         /// <summary>
         /// Tracks filenames (case-insensitive) that have been fully read this session.
@@ -1502,7 +1507,7 @@ namespace DevMind
                 }
                 else
                 {
-                    summaryLogExtra = "[CONTEXT] Summary failed — using breadcrumbs\n";
+                    summaryLogExtra = $"[CONTEXT] Summary failed — {_lastSummaryError ?? "unknown error"}\n";
                 }
             }
 
@@ -1614,7 +1619,10 @@ namespace DevMind
                         _baseUrl + "/v1/chat/completions", httpContent, cts.Token).ConfigureAwait(false);
 
                     if (!response.IsSuccessStatusCode)
+                    {
+                        _lastSummaryError = $"HTTP {response.StatusCode}";
                         return null;
+                    }
 
                     string responseBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
                     var json = JObject.Parse(responseBody);
@@ -1625,6 +1633,7 @@ namespace DevMind
             catch (Exception ex)
             {
                 Debug.WriteLine($"[DevMind TRACE] GenerateSummaryAsync failed: {ex.Message}");
+                _lastSummaryError = ex.Message;
                 return null;
             }
         }
