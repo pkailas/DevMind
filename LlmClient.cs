@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v7.16
+// File: LlmClient.cs  v7.17
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -1616,7 +1616,7 @@ namespace DevMind
                 using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
                 {
                     var response = await _httpClient.PostAsync(
-                        _baseUrl + "/v1/chat/completions", httpContent, cts.Token).ConfigureAwait(false);
+                        _baseUrl + "/chat/completions", httpContent, cts.Token).ConfigureAwait(false);
 
                     if (!response.IsSuccessStatusCode)
                     {
