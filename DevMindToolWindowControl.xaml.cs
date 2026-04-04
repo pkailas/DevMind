@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v7.3
+// File: DevMindToolWindowControl.xaml.cs  v7.4
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -1133,19 +1133,13 @@ namespace DevMind
 
                                         _agenticDepth++;
                                         {
-                                            int agTokens  = _llmClient.EstimateHistoryTokens();
-                                            int agBudget  = _llmClient.MaxPromptTokens;
-                                            int agHeadroom = _llmClient.ResponseHeadroomTokens;
-                                            int agPct     = agBudget > 0 ? (int)((agTokens * 100.0) / agBudget) : 0;
-                                            AppendOutput($"[AGENTIC] Iteration {_agenticDepth}/{maxDepth} — Working: {agTokens:N0} / {agBudget:N0} ({agPct}%) | Response headroom: {agHeadroom:N0} reserved\n", OutputColor.Dim);
-                                            if (DevMindOptions.Instance.ShowContextBudget)
-                                            {
-                                                int cbPct = _llmClient.ContextBudgetPercent;
-                                                OutputColor cbColor = cbPct < 60 ? OutputColor.Dim
-                                                                    : cbPct < 80 ? OutputColor.Normal
-                                                                    : OutputColor.Error;
-                                                AppendOutput($"[CONTEXT] Working: {agTokens:N0} / {agBudget:N0} ({cbPct}%) | Response headroom: {agHeadroom:N0} reserved\n", cbColor);
-                                            }
+                                            int agCtx = _llmClient.ServerContextSize > 0 ? _llmClient.ServerContextSize : _llmClient.MaxPromptTokens;
+                                            int agUsed = _llmClient.LastContextUsed > 0 ? _llmClient.LastContextUsed : _llmClient.EstimateHistoryTokens();
+                                            int agPct = agCtx > 0 ? (int)(agUsed * 100.0 / agCtx) : 0;
+                                            string iterLabel = maxDepth > 0
+                                                ? $"Iteration {_agenticDepth}/{maxDepth}"
+                                                : $"Iteration {_agenticDepth}";
+                                            AppendOutput($"[AGENTIC] {iterLabel} — {agUsed:N0} / {agCtx:N0} ({agPct}%)\n", OutputColor.Dim);
                                         }
 
                                         // Tool results are already in conversation as tool role messages.
@@ -1318,19 +1312,13 @@ namespace DevMind
 
                                                 _agenticDepth++;
                                                 {
-                                                    int agTokens  = _llmClient.EstimateHistoryTokens();
-                                                    int agBudget  = _llmClient.MaxPromptTokens;
-                                                    int agHeadroom = _llmClient.ResponseHeadroomTokens;
-                                                    int agPct     = agBudget > 0 ? (int)((agTokens * 100.0) / agBudget) : 0;
-                                                    AppendOutput($"[AGENTIC] Iteration {_agenticDepth}/{maxDepth} — Working: {agTokens:N0} / {agBudget:N0} ({agPct}%) | Response headroom: {agHeadroom:N0} reserved\n", OutputColor.Dim);
-                                                    if (DevMindOptions.Instance.ShowContextBudget)
-                                                    {
-                                                        int cbPct = _llmClient.ContextBudgetPercent;
-                                                        OutputColor cbColor = cbPct < 60 ? OutputColor.Dim
-                                                                            : cbPct < 80 ? OutputColor.Normal
-                                                                            : OutputColor.Error;
-                                                        AppendOutput($"[CONTEXT] Working: {agTokens:N0} / {agBudget:N0} ({cbPct}%) | Response headroom: {agHeadroom:N0} reserved\n", cbColor);
-                                                    }
+                                                    int agCtx = _llmClient.ServerContextSize > 0 ? _llmClient.ServerContextSize : _llmClient.MaxPromptTokens;
+                                                    int agUsed = _llmClient.LastContextUsed > 0 ? _llmClient.LastContextUsed : _llmClient.EstimateHistoryTokens();
+                                                    int agPct = agCtx > 0 ? (int)(agUsed * 100.0 / agCtx) : 0;
+                                                    string iterLabel = maxDepth > 0
+                                                        ? $"Iteration {_agenticDepth}/{maxDepth}"
+                                                        : $"Iteration {_agenticDepth}";
+                                                    AppendOutput($"[AGENTIC] {iterLabel} — {agUsed:N0} / {agCtx:N0} ({agPct}%)\n", OutputColor.Dim);
                                                 }
 
                                                 // Block-by-block mode (preserved)
@@ -1473,14 +1461,13 @@ namespace DevMind
 
                                 if (DevMindOptions.Instance.ShowContextBudget)
                                 {
-                                    int cbUsed     = _llmClient.EstimateHistoryTokens();
-                                    int cbBudget   = _llmClient.MaxPromptTokens;
-                                    int cbHeadroom = _llmClient.ResponseHeadroomTokens;
-                                    int cbPct      = _llmClient.ContextBudgetPercent;
+                                    int cbCtx  = _llmClient.ServerContextSize > 0 ? _llmClient.ServerContextSize : _llmClient.MaxPromptTokens;
+                                    int cbUsed = _llmClient.LastContextUsed > 0 ? _llmClient.LastContextUsed : _llmClient.EstimateHistoryTokens();
+                                    int cbPct  = cbCtx > 0 ? (int)(cbUsed * 100.0 / cbCtx) : 0;
                                     OutputColor cbColor = cbPct < 60 ? OutputColor.Dim
                                                         : cbPct < 80 ? OutputColor.Normal
                                                         : OutputColor.Error;
-                                    AppendOutput($"[CONTEXT] Working: {cbUsed:N0} / {cbBudget:N0} ({cbPct}%) | Response headroom: {cbHeadroom:N0} reserved\n", cbColor);
+                                    AppendOutput($"[CONTEXT] {cbUsed:N0} / {cbCtx:N0} ({cbPct}%)\n", cbColor);
                                 }
 
                                 _agenticDepth = 0;

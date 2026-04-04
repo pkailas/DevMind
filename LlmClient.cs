@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v7.17
+// File: LlmClient.cs  v7.18
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -150,7 +150,9 @@ namespace DevMind
         private const int MaxConversationTurns = 4;
 
         // MaxPromptTokens = hard limit for all history (leaves ResponseHeadroom for LLM output).
-        public int MaxPromptTokens => _budget?.HistoryHardLimit ?? (int)(_contextSize * 0.85);
+        public int MaxPromptTokens => ServerContextSize > 0
+            ? ServerContextSize
+            : (_budget?.HistoryHardLimit ?? (int)(_contextSize * 0.85));
 
         // Tokens reserved for LLM response generation — never consumed by history.
         public int ResponseHeadroomTokens => _budget?.ResponseHeadroomLimit ?? (int)(_contextSize * 0.15);
@@ -1504,6 +1506,10 @@ namespace DevMind
                     string summaryContent = $"[CONTEXT SUMMARY — Turns {turnRange}]\n{summary}\n[END SUMMARY]";
                     _conversationHistory.Insert(insertIdx, new ChatMessage("user", summaryContent, 0));
                     summaryLogExtra = $"[CONTEXT] Summary generated ({summary.Length / 4} tokens, {sw.Elapsed.TotalSeconds:F1}s)\n";
+                    if (showDebug)
+                    {
+                        summaryLogExtra += $"[CONTEXT] Summary content:\n{summary}\n";
+                    }
                 }
                 else
                 {
@@ -1576,6 +1582,20 @@ namespace DevMind
                 if (extractedContent.Length > 8000)
                     extractedContent = extractedContent.Substring(0, 8000) + "\n[... truncated ...]";
 
+                // Collect previous summaries so the new summary builds on them
+                var previousSummaries = new StringBuilder();
+                foreach (var msg in _conversationHistory)
+                {
+                    if (msg.Content != null && msg.Content.StartsWith("[CONTEXT SUMMARY"))
+                    {
+                        previousSummaries.AppendLine(msg.Content);
+                    }
+                }
+
+                string previousContext = previousSummaries.Length > 0
+                    ? "Previous context summaries (build on these, do not repeat them):\n" + previousSummaries.ToString() + "\n"
+                    : "";
+
                 // Build the summarization request — fresh messages array, not the main history
                 var messages = new JArray
                 {
@@ -1587,8 +1607,9 @@ namespace DevMind
                     new JObject
                     {
                         ["role"] = "user",
-                        ["content"] = "Summarize these conversation turns into this exact format:\n\n"
-                            + "FILES READ: [list filenames]\n"
+                        ["content"] = previousContext
+                            + "Summarize these NEW conversation turns into this exact format:\n\n"
+                            + "FILES READ: [list filenames — include files from previous summaries plus new ones]\n"
                             + "ACTIONS TAKEN: [list patches, shell commands, file creates]\n"
                             + "FINDINGS: [key findings]\n"
                             + "CURRENT STATE: [what is done]\n"
@@ -1615,13 +1636,30 @@ namespace DevMind
 
                 using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
                 {
+                    bool retried = false;
                     var response = await _httpClient.PostAsync(
                         _baseUrl + "/chat/completions", httpContent, cts.Token).ConfigureAwait(false);
 
                     if (!response.IsSuccessStatusCode)
                     {
-                        _lastSummaryError = $"HTTP {response.StatusCode}";
-                        return null;
+                        // Single retry with delay — server may need a moment after releasing the slot
+                        if (!retried)
+                        {
+                            retried = true;
+                            await Task.Delay(250, cts.Token).ConfigureAwait(false);
+                            response = await _httpClient.PostAsync(
+                                _baseUrl + "/chat/completions", httpContent, cts.Token).ConfigureAwait(false);
+                            if (!response.IsSuccessStatusCode)
+                            {
+                                _lastSummaryError = $"HTTP {(int)response.StatusCode} {response.ReasonPhrase} (after retry)";
+                                return null;
+                            }
+                        }
+                        else
+                        {
+                            _lastSummaryError = $"HTTP {(int)response.StatusCode} {response.ReasonPhrase}";
+                            return null;
+                        }
                     }
 
                     string responseBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
