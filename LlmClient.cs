@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v7.19
+// File: LlmClient.cs  v7.20
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -585,10 +585,12 @@ namespace DevMind
             int grandTotal;
             if (LastContextUsed > 0 && ServerContextSize > 0)
             {
-                // Server told us exactly how many tokens are cached (n_past).
-                // Only estimate the NEW user message being added this turn —
-                // everything else (system prompt, prior turns, tool results) is already in n_past.
-                grandTotal = LastContextUsed + EstimateTokens(_conversationHistory[_conversationHistory.Count - 1].Content);
+                // Estimate tokens for ALL messages added since the last server response.
+                // _lastServerCountIndex marks how many messages were in history when n_past was captured.
+                // Everything from that index onward is new and not yet counted by the server.
+                grandTotal = LastContextUsed;
+                for (int i = _lastServerCountIndex; i < _conversationHistory.Count; i++)
+                    grandTotal += EstimateTokens(_conversationHistory[i].Content);
             }
             else
             {
@@ -601,6 +603,29 @@ namespace DevMind
             // Compare against server's actual context size when known, otherwise use DevMind's budget.
             // The server knows its own limit — ResponseHeadroom is a DevMind concept, not a server constraint.
             int contextCeiling = ServerContextSize > 0 ? ServerContextSize : _budget.HistoryHardLimit;
+
+            // If the estimated total exceeds the safe ceiling, try MicroCompact before aborting
+            if (grandTotal > contextCeiling * 0.85 && DevMindOptions.Instance.MicroCompactThreshold > 0)
+            {
+                string compactLog = await MicroCompactToolResultsAsync().ConfigureAwait(false);
+                if (!string.IsNullOrEmpty(compactLog))
+                    onToken(compactLog);
+
+                // Re-estimate after compaction
+                if (LastContextUsed > 0 && ServerContextSize > 0)
+                {
+                    grandTotal = LastContextUsed;
+                    for (int i = _lastServerCountIndex; i < _conversationHistory.Count; i++)
+                        grandTotal += EstimateTokens(_conversationHistory[i].Content);
+                }
+                else
+                {
+                    grandTotal = 0;
+                    foreach (var msg in _conversationHistory)
+                        grandTotal += EstimateTokens(msg.Content);
+                }
+            }
+
             if (grandTotal > contextCeiling)
             {
                 onToken($"\n[CONTEXT] CRITICAL: Cannot fit in context window — aborting send\n");
