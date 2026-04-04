@@ -1,4 +1,4 @@
-// File: DevMindOptionsPage.cs  v7.3
+// File: DevMindOptionsPage.cs  v7.4
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -507,6 +507,16 @@ namespace DevMind
         [Description("Generate a semantic summary of trimmed messages during context compaction. Uses the same LLM server (non-streaming). Disable to use breadcrumbs only.")]
         [DefaultValue(true)]
         public bool MicroCompactSummarize { get; set; } = true;
+
+        /// <summary>
+        /// When enabled, escalates to brainwash (full context replacement) when compaction
+        /// thrashing is detected (2+ compactions in recent turns with n_past still above 60%).
+        /// </summary>
+        [Category("Context Management")]
+        [DisplayName("MicroCompact Brainwash")]
+        [Description("Enable context brainwash escalation. When compaction thrashing is detected, replaces the entire conversation history with a synthetic minimal conversation preserving task context. Drops n_past from 80-100K to ~5K.")]
+        [DefaultValue(false)]
+        public bool MicroCompactBrainwash { get; set; } = false;
 
     }
 }

@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v7.20
+// File: LlmClient.cs  v7.21
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -140,6 +140,18 @@ namespace DevMind
         /// Used by GenerateSummaryAsync to build cumulative context across compactions.
         /// </summary>
         private readonly List<string> _compactionSummaries = new List<string>();
+
+        /// <summary>
+        /// The user's original task prompt, captured on the first non-continuation user message.
+        /// Preserved across brainwash resets for synthetic conversation reconstruction.
+        /// </summary>
+        private string _originalTaskPrompt;
+
+        /// <summary>Number of compactions in recent turns. Reset on brainwash or after 3 clean turns.</summary>
+        private int _recentCompactionCount;
+
+        /// <summary>Turn number of the last compaction. Used for thrashing detection.</summary>
+        private int _lastCompactionTurn;
 
         /// <summary>
         /// Tracks filenames (case-insensitive) that have been fully read this session.
@@ -493,11 +505,24 @@ namespace DevMind
             // and pre-append truncation only.
 
             // Tier 1: Trim stale tool result content in-place — runs ALWAYS, including agentic resubmits
+            // If thrashing is detected, escalate to brainwash (full context replacement).
+            if (DevMindOptions.Instance.MicroCompactBrainwash && IsThrashing())
+            {
+                bool showDebug = DevMindOptions.Instance.ShowDebugOutput;
+                string brainwashMsg = await BrainwashContextAsync(showDebug).ConfigureAwait(false);
+                if (brainwashMsg != null)
+                    onToken(brainwashMsg);
+            }
+            else
             {
                 string compactMsg = await MicroCompactToolResultsAsync().ConfigureAwait(false);
                 if (compactMsg != null)
                     onToken(compactMsg);
             }
+
+            // Reset thrashing counter if 3+ turns have passed without compaction
+            if (_currentTurn - _lastCompactionTurn >= 3)
+                _recentCompactionCount = 0;
 
             // Drop stale turns before adding the new message
             if (!deferCompression)
@@ -514,6 +539,12 @@ namespace DevMind
                 userMessage = ApplyPreAppendBudgetGuard(userMessage, out budgetMsg);
                 if (budgetMsg != null)
                     onToken(budgetMsg);
+            }
+
+            // Capture the original task prompt on the first real user message
+            if (_originalTaskPrompt == null && !userMessage.TrimStart().StartsWith("Continue", StringComparison.OrdinalIgnoreCase))
+            {
+                _originalTaskPrompt = userMessage;
             }
 
             // Append user message — immutable from this point forward
@@ -896,6 +927,10 @@ namespace DevMind
             _lastServerCountIndex = 0;
             _previousContextUsed = 0;
             _contextDeltas.Clear();
+            _originalTaskPrompt = null;
+            _recentCompactionCount = 0;
+            _lastCompactionTurn = 0;
+            _compactionSummaries.Clear();
             if (!preserveScratchpad)
             {
                 _taskScratchpad = "";
@@ -1299,6 +1334,95 @@ namespace DevMind
         }
 
         /// <summary>
+        /// Detect thrashing: multiple compactions in a short span with minimal reclamation.
+        /// Returns true when 2+ compactions occurred in the last 3 turns and n_past is still above 60%.
+        /// </summary>
+        private bool IsThrashing()
+        {
+            if (_recentCompactionCount < 2 || ServerContextSize <= 0)
+                return false;
+
+            return LastContextUsed > ServerContextSize * 0.60;
+        }
+
+        /// <summary>
+        /// Replaces the entire conversation history with a synthetic minimal conversation
+        /// containing the system prompt, original task, and cumulative summary.
+        /// Drops n_past from 80-100K to ~5K, giving maximum clean runway.
+        /// </summary>
+        private async Task<string> BrainwashContextAsync(bool showDebug)
+        {
+            int preCount = _conversationHistory.Count;
+
+            // Step 1: Generate summary of current state (reuse existing summarizer)
+            // Build a list of non-system messages to summarize
+            var toSummarize = new List<ChatMessage>();
+            for (int i = 1; i < _conversationHistory.Count; i++)
+                toSummarize.Add(_conversationHistory[i]);
+
+            string summary = await GenerateSummaryAsync(toSummarize).ConfigureAwait(false);
+            if (!string.IsNullOrEmpty(summary))
+                _compactionSummaries.Add(summary);
+
+            // Step 2: Build the cumulative context block
+            var contextBlock = new StringBuilder();
+
+            if (_compactionSummaries.Count > 0)
+            {
+                contextBlock.AppendLine("## Context from previous work");
+                foreach (var prevSummary in _compactionSummaries)
+                    contextBlock.AppendLine(prevSummary);
+                contextBlock.AppendLine();
+            }
+
+            if (NearlineCache != null && NearlineCache.Count > 0)
+            {
+                contextBlock.Append("## Files in cache (available for re-read without disk I/O): ");
+                contextBlock.AppendLine(string.Join(", ", NearlineCache.Keys));
+                contextBlock.AppendLine();
+            }
+
+            // Step 3: Preserve the system message (index 0)
+            var systemMessage = _conversationHistory[0];
+
+            // Step 4: Build synthetic user message
+            string taskPrompt = _originalTaskPrompt ?? "Continue with the current task.";
+            string syntheticPrompt = taskPrompt
+                + "\n\n" + contextBlock.ToString()
+                + "Continue from where you left off. Do not repeat work already described in the context above.";
+
+            // Step 5: Replace conversation history
+            _conversationHistory.Clear();
+            _conversationHistory.Add(systemMessage);
+            _conversationHistory.Add(new ChatMessage("user", syntheticPrompt));
+
+            // Step 6: Reset server tracking state
+            LastContextUsed = 0;
+            _lastServerCountIndex = 0;
+            _previousContextUsed = 0;
+            _contextDeltas.Clear();
+            _recentCompactionCount = 0;
+            _lastCompactionTurn = 0;
+            _microCompactWatermark = 0;
+            // Do NOT clear _compactionSummaries — they persist across brainwashes
+            // Do NOT clear NearlineCache — cached file content is still valid
+            // Do NOT clear _originalTaskPrompt — it anchors the synthetic conversation
+
+            // Step 7: Log
+            int estimatedTokens = EstimateTokens(systemMessage.Content) + EstimateTokens(syntheticPrompt);
+            var log = new StringBuilder();
+            log.AppendLine($"\n[CONTEXT] Brainwash: replaced {preCount} messages with synthetic 2-message conversation");
+            log.AppendLine($"[CONTEXT] Estimated post-brainwash size: ~{estimatedTokens:N0} tokens");
+            if (showDebug && summary != null)
+            {
+                log.AppendLine($"[CONTEXT] Brainwash summary content:");
+                log.AppendLine(summary);
+            }
+
+            return log.ToString();
+        }
+
+        /// <summary>
         /// Trims stale tool result content in-place using a watermark-based strategy.
         /// Stale messages (superseded builds, re-read files, old tool results) are trimmed first.
         /// Keep-recent count slides down as turn count increases.
@@ -1576,6 +1700,10 @@ namespace DevMind
             _lastServerCountIndex = 0;
             _previousContextUsed = 0;
             // Do NOT clear _contextDeltas — the growth pattern is still valid for future predictions
+
+            // Track compaction frequency for thrashing detection
+            _recentCompactionCount++;
+            _lastCompactionTurn = _currentTurn;
 
             return logMsg;
         }
