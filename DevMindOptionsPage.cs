@@ -1,4 +1,4 @@
-// File: DevMindOptionsPage.cs  v7.2
+// File: DevMindOptionsPage.cs  v7.3
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -496,6 +496,17 @@ namespace DevMind
         [Description("Enable predictive context compaction. When enabled, MicroCompact uses observed context growth rate to determine when to trim. Disable to turn off context compaction entirely.")]
         [DefaultValue(true)]
         public int MicroCompactThreshold { get; set; } = 85;
+
+        /// <summary>
+        /// When enabled, MicroCompact generates a semantic summary of trimmed messages
+        /// using the same LLM endpoint (non-streaming, ~6s). The summary replaces dumb
+        /// breadcrumbs with rich context. When disabled, uses breadcrumbs only.
+        /// </summary>
+        [Category("Context Management")]
+        [DisplayName("MicroCompact Summarize")]
+        [Description("Generate a semantic summary of trimmed messages during context compaction. Uses the same LLM server (non-streaming). Disable to use breadcrumbs only.")]
+        [DefaultValue(true)]
+        public bool MicroCompactSummarize { get; set; } = true;
 
     }
 }

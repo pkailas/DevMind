@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v7.14
+// File: LlmClient.cs  v7.15
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -481,7 +481,7 @@ namespace DevMind
 
             // Tier 1: Trim stale tool result content in-place — runs ALWAYS, including agentic resubmits
             {
-                string compactMsg = MicroCompactToolResults();
+                string compactMsg = await MicroCompactToolResultsAsync().ConfigureAwait(false);
                 if (compactMsg != null)
                     onToken(compactMsg);
             }
@@ -1257,7 +1257,7 @@ namespace DevMind
         /// After passes 2-3, a Pass 4 trims oldest non-pinned messages until the watermark target is met.
         /// Called before <see cref="EvictStaleContext"/> on every send.
         /// </summary>
-        public string MicroCompactToolResults()
+        public async Task<string> MicroCompactToolResultsAsync()
         {
             bool showDebug = DevMindOptions.Instance.ShowDebugOutput;
 
@@ -1322,6 +1322,11 @@ namespace DevMind
             int savedChars = 0;
             int keepRecent = GetSlidingKeepRecent();
 
+            // ── Collect originals for context summarization ───────────────────
+            var trimmedOriginals = new List<ChatMessage>();
+            int minTrimTurn = int.MaxValue;
+            int maxTrimTurn = 0;
+
             // ── Pre-tag stale messages ────────────────────────────────────────
             var staleIndices = PreTagStaleMessages(firstUserIndex);
 
@@ -1365,6 +1370,9 @@ namespace DevMind
                 string cacheKey = $"tool:{msg.ToolCallId ?? i.ToString()}";
                 string breadcrumb = BuildToolResultBreadcrumb(c, origLen);
                 NearlineCache.Store(cacheKey, c, breadcrumb);
+                trimmedOriginals.Add(msg);
+                if (msg.Turn < minTrimTurn) minTrimTurn = msg.Turn;
+                if (msg.Turn > maxTrimTurn) maxTrimTurn = msg.Turn;
                 _conversationHistory[i] = new ChatMessage(msg.Role,
                     breadcrumb, msg.Turn, msg.ToolCalls, msg.ToolCallId);
                 savedChars += origLen;
@@ -1403,6 +1411,9 @@ namespace DevMind
                 string compacted = CompactReadBlocks(msg.Content);
                 if (compacted.Length >= origLen) continue;                 // nothing trimmed
 
+                trimmedOriginals.Add(msg);
+                if (msg.Turn < minTrimTurn) minTrimTurn = msg.Turn;
+                if (msg.Turn > maxTrimTurn) maxTrimTurn = msg.Turn;
                 _conversationHistory[i] = new ChatMessage(msg.Role,
                     compacted, msg.Turn, msg.ToolCalls, msg.ToolCallId);
                 savedChars += origLen - compacted.Length;
@@ -1457,6 +1468,9 @@ namespace DevMind
                         continue;
                     }
 
+                    trimmedOriginals.Add(msg);
+                    if (msg.Turn < minTrimTurn) minTrimTurn = msg.Turn;
+                    if (msg.Turn > maxTrimTurn) maxTrimTurn = msg.Turn;
                     _conversationHistory[i] = new ChatMessage(msg.Role,
                         replacement, msg.Turn, msg.ToolCalls, msg.ToolCallId);
                     savedChars += origLen - replacement.Length;
@@ -1468,12 +1482,36 @@ namespace DevMind
             if (trimmed == 0)
                 return null;
 
+            // ── Context summarization — replace dumb breadcrumbs with semantic summary ──
+            string summaryLogExtra = "";
+            if (DevMindOptions.Instance.MicroCompactSummarize && trimmedOriginals.Count > 0)
+            {
+                var sw = Stopwatch.StartNew();
+                string summary = await GenerateSummaryAsync(trimmedOriginals).ConfigureAwait(false);
+                sw.Stop();
+
+                if (summary != null)
+                {
+                    int insertIdx = (firstUserIndex >= 0) ? firstUserIndex + 1 : 1;
+                    string turnRange = (minTrimTurn == maxTrimTurn)
+                        ? minTrimTurn.ToString()
+                        : $"{minTrimTurn}-{maxTrimTurn}";
+                    string summaryContent = $"[CONTEXT SUMMARY — Turns {turnRange}]\n{summary}\n[END SUMMARY]";
+                    _conversationHistory.Insert(insertIdx, new ChatMessage("user", summaryContent, 0));
+                    summaryLogExtra = $"[CONTEXT] Summary generated ({summary.Length / 4} tokens, {sw.Elapsed.TotalSeconds:F1}s)\n";
+                }
+                else
+                {
+                    summaryLogExtra = "[CONTEXT] Summary failed — using breadcrumbs\n";
+                }
+            }
+
             // Set watermark after first successful compaction
             int finalPct = ComputeWorkingPct();
             if (_microCompactWatermark == 0)
                 _microCompactWatermark = finalPct;
 
-            string logMsg = $"\n[CONTEXT] Compacting — one-time cache rebuild expected.\n[CONTEXT] MicroCompact: trimmed {trimmed} message(s), reclaimed ~{savedChars / 4} tokens. Working budget: {finalPct}% (watermark: {_microCompactWatermark}%).\n";
+            string logMsg = $"\n[CONTEXT] Compacting — one-time cache rebuild expected.\n[CONTEXT] MicroCompact: trimmed {trimmed} message(s), reclaimed ~{savedChars / 4} tokens. Working budget: {finalPct}% (watermark: {_microCompactWatermark}%).\n" + summaryLogExtra;
             if (showDebug)
             {
                 System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] MicroCompact: {trimmed} trimmed, {savedChars} chars saved, finalPct={finalPct}%, threshold={threshold}%, watermark={_microCompactWatermark}%");
@@ -1487,6 +1525,108 @@ namespace DevMind
             // Do NOT clear _contextDeltas — the growth pattern is still valid for future predictions
 
             return logMsg;
+        }
+
+        /// <summary>
+        /// Sends a non-streaming summarization request to the same LLM endpoint to generate
+        /// a semantic summary of trimmed conversation messages. Uses the same model/server
+        /// since MicroCompact runs between turns when the server slot is idle.
+        /// Returns the summary text, or null if the call fails or times out.
+        /// </summary>
+        private async Task<string> GenerateSummaryAsync(List<ChatMessage> trimmedMessages)
+        {
+            if (trimmedMessages == null || trimmedMessages.Count == 0)
+                return null;
+
+            try
+            {
+                // Extract content from trimmed messages
+                var sb = new StringBuilder();
+                foreach (var msg in trimmedMessages)
+                {
+                    if (msg.Content == null) continue;
+
+                    // Skip short continuation prompts
+                    string trimContent = msg.Content.Trim();
+                    if (trimContent.Length < 30
+                        && (trimContent.StartsWith("Continue", StringComparison.OrdinalIgnoreCase)
+                            || trimContent.Equals("ok", StringComparison.OrdinalIgnoreCase)
+                            || trimContent.Equals("yes", StringComparison.OrdinalIgnoreCase)
+                            || trimContent.StartsWith("Continue with the task", StringComparison.OrdinalIgnoreCase)))
+                        continue;
+
+                    if (msg.Role == "assistant")
+                        sb.AppendLine($"[Assistant]: {msg.Content}");
+                    else if (msg.Role == "tool")
+                        sb.AppendLine($"[Tool Result]: {msg.Content}");
+                    else if (msg.Role == "user")
+                        sb.AppendLine($"[User]: {msg.Content}");
+                }
+
+                string extractedContent = sb.ToString();
+                if (string.IsNullOrWhiteSpace(extractedContent))
+                    return null;
+
+                // Cap input to avoid sending an enormous payload to the summarizer
+                if (extractedContent.Length > 8000)
+                    extractedContent = extractedContent.Substring(0, 8000) + "\n[... truncated ...]";
+
+                // Build the summarization request — fresh messages array, not the main history
+                var messages = new JArray
+                {
+                    new JObject
+                    {
+                        ["role"] = "system",
+                        ["content"] = "You are a context summarizer. Output ONLY the summary in the exact format requested. Be extremely concise."
+                    },
+                    new JObject
+                    {
+                        ["role"] = "user",
+                        ["content"] = "Summarize these conversation turns into this exact format:\n\n"
+                            + "FILES READ: [list filenames]\n"
+                            + "ACTIONS TAKEN: [list patches, shell commands, file creates]\n"
+                            + "FINDINGS: [key findings]\n"
+                            + "CURRENT STATE: [what is done]\n"
+                            + "NEXT STEP: [what was being worked on]\n\n"
+                            + "Conversation:\n" + extractedContent
+                    }
+                };
+
+                var request = new JObject
+                {
+                    ["messages"] = messages,
+                    ["stream"] = false,
+                    ["max_tokens"] = 500,
+                    ["temperature"] = 0.3,
+                    ["chat_template_kwargs"] = new JObject { ["enable_thinking"] = false }
+                };
+
+                string modelName = DevMindOptions.Instance.ModelName;
+                if (!string.IsNullOrWhiteSpace(modelName))
+                    request["model"] = modelName;
+
+                var httpContent = new StringContent(
+                    request.ToString(Formatting.None), Encoding.UTF8, "application/json");
+
+                using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
+                {
+                    var response = await _httpClient.PostAsync(
+                        _baseUrl + "/v1/chat/completions", httpContent, cts.Token).ConfigureAwait(false);
+
+                    if (!response.IsSuccessStatusCode)
+                        return null;
+
+                    string responseBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    var json = JObject.Parse(responseBody);
+                    string summary = json["choices"]?[0]?["message"]?["content"]?.ToString();
+                    return string.IsNullOrWhiteSpace(summary) ? null : summary;
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[DevMind TRACE] GenerateSummaryAsync failed: {ex.Message}");
+                return null;
+            }
         }
 
         /// <summary>
