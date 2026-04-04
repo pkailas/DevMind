@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.AgenticHost.cs  v7.3
+// File: DevMindToolWindowControl.AgenticHost.cs  v7.4
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -253,6 +253,9 @@ namespace DevMind
 
                 // Invalidate cache so subsequent READs see the updated content
                 try { _llmClient._fileCache.Invalidate(appendFileOnly); } catch { }
+
+                // Track completed files for brainwash context
+                _llmClient.TrackCompletedFiles(content);
 
                 return resolvedPath;
             }

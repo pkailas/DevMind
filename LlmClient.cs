@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v7.21
+// File: LlmClient.cs  v7.22
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -152,6 +152,18 @@ namespace DevMind
 
         /// <summary>Turn number of the last compaction. Used for thrashing detection.</summary>
         private int _lastCompactionTurn;
+
+        /// <summary>
+        /// Files whose findings have been written to the output file (e.g., CodeReview.md).
+        /// Updated whenever append_file targets a markdown file. Used by the summarizer
+        /// and brainwash to distinguish completed work from in-progress work.
+        /// Persists across brainwashes.
+        /// </summary>
+        private readonly List<string> _completedFiles = new List<string>();
+
+        private static readonly Regex _completedFileHeaderPattern =
+            new Regex(@"^##\s+(?:File:\s*)?(.+\.(?:vb|cs|vbproj|csproj|xaml|json|xml|md|txt))",
+                RegexOptions.Multiline | RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
         /// <summary>
         /// Tracks filenames (case-insensitive) that have been fully read this session.
@@ -912,6 +924,22 @@ namespace DevMind
         public void IncrementTurn() => _currentTurn++;
 
         /// <summary>
+        /// Scans appended content for file section headers and tracks them as completed.
+        /// Call after a successful append to a markdown output file.
+        /// </summary>
+        public void TrackCompletedFiles(string appendedContent)
+        {
+            if (string.IsNullOrEmpty(appendedContent)) return;
+
+            foreach (Match match in _completedFileHeaderPattern.Matches(appendedContent))
+            {
+                string fileName = match.Groups[1].Value.Trim();
+                if (!_completedFiles.Contains(fileName))
+                    _completedFiles.Add(fileName);
+            }
+        }
+
+        /// <summary>
         /// Clears the conversation history and resets to the system prompt only.
         /// </summary>
         /// <param name="preserveScratchpad">When true, the task scratchpad is preserved across the
@@ -931,6 +959,7 @@ namespace DevMind
             _recentCompactionCount = 0;
             _lastCompactionTurn = 0;
             _compactionSummaries.Clear();
+            _completedFiles.Clear();
             if (!preserveScratchpad)
             {
                 _taskScratchpad = "";
@@ -1387,9 +1416,29 @@ namespace DevMind
 
             // Step 4: Build synthetic user message
             string taskPrompt = _originalTaskPrompt ?? "Continue with the current task.";
-            string syntheticPrompt = taskPrompt
-                + "\n\n" + contextBlock.ToString()
-                + "Continue from where you left off. Do not repeat work already described in the context above.";
+            var syntheticBuilder = new StringBuilder();
+            syntheticBuilder.AppendLine(taskPrompt);
+            syntheticBuilder.AppendLine();
+
+            // Explicit completed files list
+            if (_completedFiles.Count > 0)
+            {
+                syntheticBuilder.AppendLine("## Work already completed — DO NOT REPEAT");
+                syntheticBuilder.AppendLine("The following files have been reviewed and findings written to CodeReview.md:");
+                foreach (var file in _completedFiles)
+                    syntheticBuilder.AppendLine($"- {file}");
+                syntheticBuilder.AppendLine();
+            }
+
+            // Cumulative summaries
+            syntheticBuilder.Append(contextBlock);
+
+            // Explicit instruction
+            syntheticBuilder.AppendLine("Continue from where you left off.");
+            syntheticBuilder.AppendLine("Do NOT re-read or re-analyze files listed above as completed.");
+            syntheticBuilder.AppendLine("Continue finding numbering from where the last summary left off.");
+
+            string syntheticPrompt = syntheticBuilder.ToString();
 
             // Step 5: Replace conversation history
             _conversationHistory.Clear();
@@ -1781,6 +1830,14 @@ namespace DevMind
                     cacheContext = keys.ToString();
                 }
 
+                // Include completed files so the summarizer has ground truth
+                string completedContext = "";
+                if (_completedFiles.Count > 0)
+                {
+                    completedContext = "Files with findings already written to output: "
+                        + string.Join(", ", _completedFiles) + "\n";
+                }
+
                 // Build the summarization request — fresh messages array, not the main history
                 var messages = new JArray
                 {
@@ -1794,12 +1851,14 @@ namespace DevMind
                         ["role"] = "user",
                         ["content"] = previousContext
                             + cacheContext
+                            + completedContext
                             + "Summarize these NEW conversation turns into this exact format:\n\n"
-                            + "FILES READ: [all files worked on, including from previous summaries and cache]\n"
-                            + "ACTIONS TAKEN: [what was done — files created, appended, patched]\n"
-                            + "FINDINGS: [key findings or decisions]\n"
-                            + "CURRENT STATE: [what is completed]\n"
-                            + "NEXT STEP: [what should happen next]\n\n"
+                            + "FILES COMPLETED (findings written to output): [files with analysis appended to CodeReview.md or similar]\n"
+                            + "FILES READ BUT NOT YET ANALYZED: [files loaded into context but findings not yet written]\n"
+                            + "FILES REMAINING: [files not yet read, based on project file list]\n"
+                            + "FINDING COUNT: [last finding IDs used, e.g., SEC-12, BUG-8 — so numbering can continue]\n"
+                            + "CURRENT FILE: [file currently being worked on, with progress if chunked]\n"
+                            + "NEXT ACTION: [the specific next thing to do — not a vague description]\n\n"
                             + "Conversation:\n" + extractedContent
                     }
                 };
