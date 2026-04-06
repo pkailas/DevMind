@@ -407,6 +407,7 @@ namespace DevMind
         private void ResetTrainingLogger()
         {
             string folder = DevMindOptions.Instance.TrainingLogFolder;
+            System.Diagnostics.Debug.WriteLine($"[ResetTrainingLogger] TrainingLogFolder='{folder}'");
             _trainingLogger = new TrainingLogger(Guid.NewGuid().ToString("N").Substring(0, 12),
                 string.IsNullOrWhiteSpace(folder) ? null : folder);
         }

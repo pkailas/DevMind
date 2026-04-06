@@ -31,7 +31,7 @@ namespace DevMind
     public sealed class TrainingLogger
     {
         private readonly string _sessionId;
-        private readonly string _filePath;
+        private readonly string _defaultFolder;
         private readonly object _writeLock = new object();
         private bool _systemPromptLogged;
 
@@ -52,10 +52,7 @@ namespace DevMind
                 logFolder = Path.Combine(exeDir, "training_logs");
             }
 
-            Directory.CreateDirectory(logFolder);
-
-            string date = DateTime.UtcNow.ToString("yyyyMMdd");
-            _filePath = Path.Combine(logFolder, $"training_{_sessionId}_{date}.jsonl");
+            _defaultFolder = logFolder;
         }
 
         /// <summary>
@@ -68,6 +65,15 @@ namespace DevMind
 
             try
             {
+                // Resolve folder at write time so settings changes take effect without restart
+                string folder = DevMindOptions.Instance.TrainingLogFolder;
+                string logFolder = string.IsNullOrWhiteSpace(folder) ? _defaultFolder : folder;
+                System.Diagnostics.Debug.WriteLine($"[TrainingLogger] LogTurn folder='{logFolder}' (setting='{folder}', default='{_defaultFolder}')");
+                Directory.CreateDirectory(logFolder);
+
+                string date = DateTime.UtcNow.ToString("yyyyMMdd");
+                string filePath = Path.Combine(logFolder, $"training_{_sessionId}_{date}.jsonl");
+
                 var entry = new TrainingEntry
                 {
                     SessionId = _sessionId,
@@ -95,7 +101,7 @@ namespace DevMind
 
                 lock (_writeLock)
                 {
-                    File.AppendAllText(_filePath, json + "\n");
+                    File.AppendAllText(filePath, json + "\n");
                 }
             }
             catch (Exception ex)
