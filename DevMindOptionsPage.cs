@@ -518,5 +518,26 @@ namespace DevMind
         [DefaultValue(false)]
         public bool MicroCompactBrainwash { get; set; } = false;
 
+        // ── Training Data ───────────────────────────────────────────────────
+
+        /// <summary>
+        /// When enabled, captures fine-tuning training data as JSONL after each agentic turn.
+        /// One file per session, stored in the Training Log Folder.
+        /// </summary>
+        [Category("Training Data")]
+        [DisplayName("Training Log Enabled")]
+        [Description("Capture fine-tuning training data as JSONL after each agentic turn. One file per session. No overhead when disabled.")]
+        [DefaultValue(false)]
+        public bool TrainingLogEnabled { get; set; } = false;
+
+        /// <summary>
+        /// Folder for training JSONL files. Leave empty to use the default (training_logs/ next to the extension).
+        /// </summary>
+        [Category("Training Data")]
+        [DisplayName("Training Log Folder")]
+        [Description("Folder for training JSONL files. Leave empty to use the default (training_logs/ next to the extension).")]
+        [DefaultValue("")]
+        public string TrainingLogFolder { get; set; } = "";
+
     }
 }

@@ -69,6 +69,7 @@ namespace DevMind
         private int _undoCount = 0;
         private int _readFileCount = 0;
         private static string _cachedMSBuildPath;
+        private TrainingLogger _trainingLogger;
 
         public DevMindToolWindowControl(LlmClient llmClient)
         {
@@ -93,6 +94,7 @@ namespace DevMind
                 catch { }
             });
 
+            ResetTrainingLogger();
             LoadSystemPromptText();
             _profileManager = new ProfileManager();
             PopulateProfileComboBox();
@@ -378,6 +380,8 @@ namespace DevMind
             _patchCount = 0;
             _undoCount = 0;
 
+            ResetTrainingLogger();
+
             AppendOutput("DevMind restarted.\n", OutputColor.Dim);
 
             // Re-detect context size after restart/reconnect
@@ -398,6 +402,74 @@ namespace DevMind
             InitOutputDocument();
             _llmClient.ClearHistory();
             StatusText.Text = "Cleared";
+        }
+
+        private void ResetTrainingLogger()
+        {
+            string folder = DevMindOptions.Instance.TrainingLogFolder;
+            _trainingLogger = new TrainingLogger(Guid.NewGuid().ToString("N").Substring(0, 12),
+                string.IsNullOrWhiteSpace(folder) ? null : folder);
+        }
+
+        private void LogTrainingTurn(
+            string userMessage,
+            string assistantResponse,
+            ResponseOutcome outcome,
+            ExecutionResult result,
+            List<ToolCallResult> toolCalls)
+        {
+            if (!DevMindOptions.Instance.TrainingLogEnabled || _trainingLogger == null)
+                return;
+
+            try
+            {
+                bool hasErrors = result?.Errors?.Count > 0
+                    || (result?.ShellExitCode.HasValue == true && result.ShellExitCode != 0);
+                bool hasToolCalls = toolCalls?.Count > 0
+                    || (outcome?.Blocks?.Any(b => b.Type != BlockType.Text && b.Type != BlockType.Scratchpad) == true);
+
+                int nCtx = _llmClient.ServerContextSize > 0 ? _llmClient.ServerContextSize : _llmClient.MaxPromptTokens;
+                int nPast = _llmClient.LastContextUsed;
+                int pct = nCtx > 0 ? (int)(nPast * 100.0 / nCtx) : 0;
+                double tokPerSec = _llmClient.LastGeneratedMs > 0
+                    ? _llmClient.LastGeneratedTokens * 1000.0 / _llmClient.LastGeneratedMs
+                    : 0;
+
+                var data = new TrainingTurnData
+                {
+                    TurnNumber = _llmClient.CurrentTurn,
+                    SystemPrompt = _llmClient.SystemPromptContent,
+                    UserMessage = userMessage,
+                    AssistantResponse = assistantResponse,
+                    ToolCalls = TrainingLogger.ExtractToolCalls(outcome?.Blocks),
+                    ToolResults = TrainingLogger.ExtractToolResults(result),
+                    SummaryContext = _llmClient.LastCompactionSummary,
+                    Metrics = new MetricsEntry
+                    {
+                        NPast = nPast,
+                        NCtx = nCtx,
+                        PredictedTokens = _llmClient.LastGeneratedTokens,
+                        PromptTokens = _llmClient.LastPromptTokens,
+                        TokPerSec = Math.Round(tokPerSec, 1),
+                        Iteration = _agenticDepth,
+                        ContextPercent = pct
+                    },
+                    Outcome = TrainingLogger.ClassifyOutcome(
+                        outcome?.IsDone == true,
+                        hasErrors,
+                        outcome?.HasReadRequests == true,
+                        outcome?.HasPatches == true,
+                        outcome?.HasFileCreation == true,
+                        outcome?.HasShellCommands == true,
+                        hasToolCalls)
+                };
+
+                _trainingLogger.LogTurn(data);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[TrainingLogger] LogTrainingTurn failed: {ex.Message}");
+            }
         }
 
         private void SetInputEnabled(bool enabled)
@@ -1093,6 +1165,9 @@ namespace DevMind
                                     // Inject per-tool result messages so the model sees what happened
                                     InjectToolResultMessages(lastToolCalls, result, outcome.Blocks);
 
+                                    // ── Training data capture ──
+                                    LogTrainingTurn(text, fullResponse, outcome, result, lastToolCalls);
+
                                     // Check for explicit DONE signal (task_done tool call)
                                     if (outcome.IsDone)
                                     {
@@ -1186,6 +1261,7 @@ namespace DevMind
                                     // Stop — model chose not to call any tools
                                     _agenticDepth = 0;
                                     _pendingResubmitPrompt = null;
+                                    LogTrainingTurn(text, fullResponse, outcome, null, null);
                                     if (DevMindOptions.Instance.ShowDebugOutput)
                                         AppendOutput("[DIAG] Tool use loop: no tool calls — stopping.\n", OutputColor.Dim);
                                     // fall through to completion
@@ -1207,6 +1283,9 @@ namespace DevMind
                                         {
                                             InjectToolResultMessages(lastToolCalls, result, outcome.Blocks);
                                         }
+
+                                        // ── Training data capture ──
+                                        LogTrainingTurn(text, fullResponse, outcome, result, lastToolCalls);
 
                                         // ── Resubmit paths (return immediately; SendToLlm manages its own completion) ──
 

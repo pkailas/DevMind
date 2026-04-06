@@ -917,6 +917,12 @@ namespace DevMind
         /// <summary>Gets the current turn number.</summary>
         public int CurrentTurn => _currentTurn;
 
+        /// <summary>Gets the last compaction summary (null if no compaction has fired this session).</summary>
+        public string LastCompactionSummary => _compactionSummaries.Count > 0 ? _compactionSummaries[_compactionSummaries.Count - 1] : null;
+
+        /// <summary>Gets the system prompt content (index 0 of conversation history).</summary>
+        public string SystemPromptContent => _conversationHistory.Count > 0 ? _conversationHistory[0].Content : null;
+
         /// <summary>
         /// Advances the turn counter. Call this once per user-initiated send from the input box.
         /// Do NOT call for agentic resubmits — those share the current turn.

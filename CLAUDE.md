@@ -42,6 +42,7 @@
 | `DiffBatchBar.xaml/.cs` | Batch action bar — "Apply All / Skip All" shown when 2+ PATCH blocks need confirmation |
 | `PatchConfidence.cs` | `PatchConfidence` enum (`Exact`, `Fuzzy`) + `PatchResolveResult` class for two-phase PATCH resolution |
 | `StringValidator.cs` | Trivial utility: `StringValidator.IsValid(string)` — checks `!IsNullOrWhiteSpace` |
+| `TrainingLogger.cs` | Captures fine-tuning training data as append-only JSONL — one file per session, gated behind `TrainingLogEnabled` setting |
 
 ### Data Flow
 
@@ -489,6 +490,8 @@ Fields: `_suppressDisplay`.
 | `RequestTimeoutMinutes` | `10` | Max minutes for a complete LLM response; sets `HttpClient.Timeout` |
 | `ContextEviction` | `Balanced` | `Off` / `Balanced` / `Aggressive` — proactive turn dropping by age threshold (8 turns for Balanced, 5 for Aggressive) |
 | `ShowDebugOutput` | `false` | Enable debug logging to OutputBox for context management and directive execution |
+| `TrainingLogEnabled` | `false` | Capture fine-tuning training data as JSONL after each agentic turn; no overhead when disabled |
+| `TrainingLogFolder` | `` (empty) | Folder for training JSONL files; empty = `training_logs/` next to the extension |
 
 Settings are accessed via `DevMindOptions.Instance` (synchronous) or `GetLiveInstanceAsync()` (async). The `DevMindOptions.Saved` event fires when the user saves options, triggering `LlmClient.Configure()` and a background connection test.
 
@@ -700,6 +703,47 @@ During LLM generation, the status bar displays `Generating... (N tokens)` showin
 - `/reload` — clears cached DevMind.md, reloads on next Ask
 - `/context` — shows currently loaded READ files
 - `/context clear` — wipes READ context without restarting
+
+---
+
+## Training Data Logger
+
+`TrainingLogger` captures fine-tuning training data as append-only JSONL, gated behind the `TrainingLogEnabled` setting (default `false`). When disabled, zero overhead — the guard check is the first line of `LogTurn()`.
+
+### JSONL Schema
+
+Each line is a JSON object with these fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `session_id` | string | Unique per `/restart` (12-char hex) |
+| `turn_number` | int | From `LlmClient.CurrentTurn` |
+| `timestamp` | string | ISO 8601 UTC |
+| `system_prompt` | string | Full system prompt (first turn only, null after) |
+| `user_message` | string | The prompt or "Continue with the task." |
+| `assistant_response` | string | Full raw response including tool calls |
+| `tool_calls` | array | `{type, filename, command}` per directive/tool call |
+| `tool_results` | array | `{type, filename, success, line_count}` per execution result |
+| `summary_context` | string | Last compaction summary if fired this session, null otherwise |
+| `metrics` | object | `{n_past, n_ctx, predicted_tokens, prompt_tokens, tok_per_sec, iteration, context_percent}` |
+| `outcome` | string | `"read"`, `"write"`, `"shell"`, `"done"`, `"error"`, `"no_tool_calls"` |
+| `quality_flag` | string | Always null — populated manually during review |
+
+### File Naming
+
+`training_{session_id}_{yyyyMMdd}.jsonl` in the configured folder (default: `training_logs/` next to the extension).
+
+### Hook Points
+
+`LogTrainingTurn()` is called in `DevMindToolWindowControl.xaml.cs` at three points:
+1. Tool Use loop — after `InjectToolResultMessages` (post-execution)
+2. TextDirective loop — after `ExecuteAsync` completes
+3. No-tool-calls stop path — when the model emits no tools
+
+### LlmClient Properties (added for TrainingLogger)
+
+- `LastCompactionSummary` — last entry in `_compactionSummaries` (null if none)
+- `SystemPromptContent` — `_conversationHistory[0].Content`
 
 ---
 
