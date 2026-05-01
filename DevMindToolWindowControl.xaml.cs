@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v7.4
+// File: DevMindToolWindowControl.xaml.cs  v7.5
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -102,7 +102,21 @@ namespace DevMind
             DevMindOptions.ProfileChanged += OnProfileChangedFromOptions;
             // Defer banner until after first layout pass so ViewportHeight is known for spacer calc
 #pragma warning disable VSTHRD001
-            _ = Dispatcher.BeginInvoke(new Action(AppendBanner), System.Windows.Threading.DispatcherPriority.Loaded);
+            _ = Dispatcher.BeginInvoke(new Action(() =>
+            {
+                AppendBanner();
+                // Attach profile-notification sink AFTER banner renders so any
+                // messages queued during early ProfileManager construction
+                // (e.g. corrupt profiles.json detected at startup) appear
+                // just after the banner rather than before it.
+                ProfileManager.AttachNotificationSink(msg =>
+                {
+                    _ = Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        AppendOutput(msg + "\n", OutputColor.Warning);
+                    }));
+                });
+            }), System.Windows.Threading.DispatcherPriority.Loaded);
 #pragma warning restore VSTHRD001
         }
 

@@ -1,205 +1,268 @@
 ﻿# DevMind — Project Context v7.0
 
 ## Project
-- **Product**: DevMind v7.0.180
+- **Product**: DevMind v7.0.181
 - **Company**: iOnline Consulting LLC
 - **Platform**: C#, WPF, .NET Framework 4.8
-- **Solution**: DevMind.slnx
+- **Solution**: Single-project VSIX extension (no .sln file)
 
 ## Context
-DevMind is a Visual Studio extension that provides an autonomous local LLM coding assistant embedded directly in the IDE. Developers use it to read, analyze, and modify code files through natural language commands. The extension integrates with OpenAI-compatible local LLM servers (LM Studio, llama-server, Ollama) and provides file system access, shell command execution, and build automation through a structured directive system.
+DevMind is a Visual Studio extension that provides a local LLM-powered coding assistant interface. It enables developers to interact with local LLM servers (LM Studio, Ollama, llama.cpp) to read code files, apply patches, create new files, run shell commands, and perform autonomous multi-step coding tasks. The extension integrates directly with the Visual Studio shell, providing a tool window for chat interaction and seamless file operations within the IDE.
 
-**Trust Model**: The user is a developer who intentionally configures all behavior — user-authored prompts and directives are trusted. The LLM acts as an agent executing the user's intent. File writes require explicit user confirmation for files not already known to the task, ensuring the user maintains control over all modifications.
+**Trust Model**: The user is a developer who intentionally configures all behavior — user-authored content is not untrusted input. The LLM is a local, user-controlled service; all file operations require explicit user confirmation (diff preview gate) unless the file is known to the current task.
 
 ## Architecture
 
 ### Entry Points
-- **`DevMindPackage.cs`** — VSIX package entry point. Registers the tool window, options page, and menu commands with Visual Studio shell on initialization.
-- **`DevMindCommand.cs`** — Command handler for Ctrl+Alt+D shortcut. Shows the DevMind tool window.
-- **`DevMindToolWindow.cs`** — Tool window factory. Creates the `DevMindToolWindowControl` with an `LlmClient` instance configured from user settings.
+- **`DevMindPackage.cs`** — VSIX package entry point. Registers the tool window, options page, and menu commands with the Visual Studio shell via `ToolkitPackage`. Initialization happens in `InitializeAsync()`.
+- **`DevMindCommand.cs`** — Command handler registered under `View > Other Windows > DevMind` with shortcut `Ctrl+Alt+D`. Shows the tool window.
+- **`DevMindToolWindow.cs`** — Tool window pane that creates the `DevMindToolWindowControl` and initializes the `LlmClient` with configured endpoint settings.
 
 ### Core Components
 
 #### UI Layer
-- **`DevMindToolWindowControl.xaml.cs`** — Main WPF control hosting the chat interface. Handles user input, LLM response streaming, and coordinates the agentic loop. Manages profile selection, system prompt editing, and training logging.
-- **`DevMindToolWindowControl.AgenticHost.cs`** — Implements `IAgenticHost` interface. Provides file read/write operations, shell command execution, and patch application. Contains `DiffHelper` for unified diff generation.
-- **`DevMindToolWindowControl.Context.cs`** — Context loading logic. Discovers and loads `DevMind.md`, `.agent.md` profiles, handles `READ` commands, extracts C# outlines for large files.
-- **`DevMindToolWindowControl.Patch.cs`** — PATCH directive handling. Parses FIND/REPLACE blocks, performs whitespace-normalized matching with fuzzy fallback (Levenshtein), applies patches with backup/undo support.
-- **`DevMindToolWindowControl.Shell.cs`** — Shell command execution. Runs PowerShell commands, captures output, parses TRX test result XML files.
+- **`DevMindToolWindowControl.xaml.cs`** — Main WPF control hosting the chat interface. Handles user input, LLM response streaming, output rendering, and coordinates the agentic loop. Contains:
+  - `SendToLlm()` — Main entry point for user messages
+  - `ProcessBatchInputAsync()` — Handles batched multi-directive inputs
+  - `SaveGeneratedFileAsync()` — Writes FILE: blocks to disk
+  - `BuildTextDirectivePrompt()` / `BuildBehavioralPrompt()` — Constructs system prompts
+  - `FindMSBuildPath()` — Discovers MSBuild.exe at runtime
+
+- **`DevMindToolWindowControl.AgenticHost.cs`** — Partial class implementing `IAgenticHost`. Provides:
+  - File write guards (`IsFileKnownToTask()`, `ConfirmUnreadFileWriteAsync()`)
+  - TRX test result parsing (`ParseTrxSummary()`)
+  - File not found message builder (`BuildFileNotFoundMessageAsync()`)
+  - `DiffHelper` — Unified diff generation for patch previews
+
+- **`DevMindToolWindowControl.Context.cs`** — Partial class handling context loading:
+  - `LoadDevMindContextAsync()` — Discovers and loads `DevMind.md` or `.agent.md` files
+  - `GetEditorContextAsync()` — Captures selected text and active file from VS editor
+  - `ApplyReadCommandAsync()` — Handles `READ:` directives
+  - `ExtractCSharpOutline()` — Generates class/method outlines for large files
+
+- **`DevMindToolWindowControl.Patch.cs`** — Partial class handling PATCH operations:
+  - `ResolvePatchAsync()` — Resolves PATCH blocks without applying
+  - `ApplyResolvedPatchAsync()` — Applies a resolved patch after diff preview confirmation
+  - `ApplyPatchAsync()` — Full patch application with fuzzy matching fallback
+  - `FindFuzzyMatch()` — Levenshtein-based fuzzy matching for near-misses
+  - `BuildPatchDiffView()` — Generates ±3 line context diff for preview cards
+
+- **`DevMindToolWindowControl.Shell.cs`** — Partial class for shell command execution:
+  - `RunShellCommandCaptureAsync()` — Executes PowerShell commands and captures output
+  - `SanitizeShellCommand()` — Collapses newlines in quoted strings
+  - `ParseShellDirectives()` — Extracts SHELL: commands from responses
+
+- **`DiffPreviewCard.xaml.cs`** — WPF control for inline diff preview. Shows ±3 lines of context, awaits user Apply/Skip decision via `TaskCompletionSource<bool>`.
+- **`DiffBatchBar.xaml.cs`** — Batch control bar for multiple diff cards (Apply All / Skip All).
+
+#### LLM Client
+- **`LlmClient.cs`** — HTTP client for OpenAI-compatible `/v1/chat/completions` endpoints. Key features:
+  - `SendMessageAsync()` — Streams LLM responses with token callbacks
+  - `DetectContextSizeAsync()` — Auto-detects context window from server endpoints
+  - `MicroCompactToolResultsAsync()` — Trims stale tool results with semantic summarization
+  - `BrainwashContextAsync()` — Full context replacement when compaction thrashes
+  - `EvictStaleContext()` — Age-based message eviction
+  - `ContextBudget` — Token budget tracking across buckets (system, protected, working)
+  - `NearlineCache` — RAM cache for trimmed content (instant recall)
 
 #### Agentic Loop
-- **`AgenticExecutor.cs`** — Executes parsed actions from LLM responses. Orchestrates the agentic loop: applies patches, runs shell commands, creates files, loads context, feeds results back to LLM. Supports batch patch operations with diff preview cards.
-- **`AgenticActionResolver.cs`** — Static resolver that evaluates `ResponseOutcome` and `ExecutionResult` to determine the next action type (Continue, Stop, Retry, LoadAndResubmit, etc.).
-- **`AgenticAction.cs`** — Data class representing the next action in the agentic loop.
-- **`ExecutionResult.cs`** — Captures execution outcomes (patches applied, shell exit codes, files created) for feedback into the next iteration.
+- **`AgenticExecutor.cs`** — Executes `AgenticAction` by calling `IAgenticHost` methods. Contains:
+  - `ExecuteAsync()` — Main execution loop, iterates through response blocks
+  - `ExecuteBlocksAsync()` — Processes individual blocks (PATCH, FILE, SHELL, READ, etc.)
+  - `ExecuteBatchPatchesAsync()` — Resolves all patches, shows diff preview cards, awaits user decisions
+  - `ExecuteLoadAndResubmitAsync()` — Loads files and resubmits original prompt
 
-#### Response Parsing
-- **`ResponseParser.cs`** — State machine parser for LLM responses. Extracts structured blocks: `FILE:`, `PATCH`, `READ`, `SHELL:`, `GREP`, `FIND`, `DELETE`, `RENAME`, `DIFF`, `TEST`, `SCRATCHPAD`, `DONE`.
-- **`ResponseClassifier.cs`** — Wraps `ResponseParser` output into `ResponseOutcome` with pre-computed flags (HasPatches, HasShellCommands, etc.).
-- **`ResponseOutcome.cs`** — Classification result with actionable block list and boolean flags for quick decision-making.
+- **`AgenticActionResolver.cs`** — Pure static resolver that evaluates `ResponseOutcome` and `ExecutionResult` to decide the next action (`ApplyAndBuild`, `RunShell`, `CreateFile`, `LoadAndResubmit`, `ContinueAgentic`, `RetryWithCorrection`, `Stop`, `AskUser`).
 
-#### LLM Communication
-- **`LlmClient.cs`** — HTTP client for OpenAI-compatible `/v1/chat/completions` endpoints. Handles context size detection, token budget tracking, streaming responses, tool call parsing, and context compaction.
-  - **`ContextBudget`** — Tracks token allocation across buckets (system prompt, protected turns, working history).
-  - **`NearlineCache`** — In-memory cache for content trimmed by `MicroCompactToolResults`, allowing instant recall.
-  - **`FileContentCache`** — Caches file content for efficient line-range reads.
-- **`ToolCallResult.cs`** — Unified representation of tool calls extracted from LLM responses.
-- **`ToolCallMapper.cs`** — Maps `ToolCallResult` objects to `ResponseBlock` instances for the executor.
-- **`ToolRegistry.cs`** — Builds the OpenAI-compatible `tools` JSON array for structured tool calling.
+- **`ResponseParser.cs`** — State machine parser for LLM responses. Recognizes blocks:
+  - `FILE:` / `END_FILE` — File creation
+  - `PATCH` / `END_PATCH` — File modifications with FIND/REPLACE pairs
+  - `SHELL:` — Shell command execution
+  - `READ` / `READ!` — File read requests (with optional line ranges)
+  - `GREP:` / `FIND:` — Text search in files
+  - `DELETE` / `RENAME` / `DIFF` / `TEST` — File operations
+  - `SCRATCHPAD:` / `END_SCRATCHPAD` — State tracking
+  - `DONE` / `task_done` — Task completion
+  - `RECALL_MEMORY` / `SAVE_MEMORY` / `LIST_MEMORY` — Cross-session memory
+
+- **`ResponseClassifier.cs`** — Wraps `ResponseParser.Parse()` to produce `ResponseOutcome` with pre-computed action flags.
+
+- **`AgenticAction.cs`** — Data class describing the next action in the agentic loop.
+
+- **`ExecutionResult.cs`** — Captures what happened during execution (patches applied, shell exit code, files created, errors).
+
+#### Tool Calling
+- **`ToolCallMapper.cs`** — Converts `List<ToolCallResult>` (from LLM tool calls) into `List<ResponseBlock>` for the executor.
+- **`ToolCallResult.cs`** — Unified representation of a single tool call (ID, name, arguments, thinking text).
+- **`ToolRegistry.cs`** — Builds the OpenAI-compatible `tools` JArray for structured tool calling. Defines 15 tools: `read_file`, `patch_file`, `create_file`, `run_shell`, `grep_file`, `find_in_files`, `delete_file`, `rename_file`, `diff_file`, `run_tests`, `recall_memory`, `save_memory`, `list_memory_topics`, `scratchpad`, `task_done`.
 
 #### Configuration & Profiles
-- **`DevMindOptionsPage.cs`** — Options page model with settings for endpoint, API key, model name, timeouts, context eviction, directive mode, and training logging. Supports named profiles via `ProfileManager`.
-- **`ProfileManager.cs`** — Manages named connection profiles stored in JSON. Supports create, read, update, delete, duplicate, and activate operations.
-- **`ProfileData.cs`** — Data class representing a single profile.
+- **`DevMindOptionsPage.cs`** — Options page under `Tools > Options > DevMind`. Contains:
+  - `DevMindOptions` — Settings model (endpoint URL, API key, model name, context eviction, directive mode, etc.)
+  - `LlmServerType` — Enum for server type (LlamaServer, LMStudio, Ollama, Custom)
+  - `ContextEvictionMode` — Aggressiveness of context compaction
+  - `DirectiveMode` — TextDirective vs ToolCalling communication
+  - Profile management (save, load, delete, rename profiles)
+
+- **`ProfileManager.cs`** — Manages named connection profiles stored in `profiles.json`. Provides CRUD operations and profile switching.
 
 #### Memory System
-- **`MemoryManager.cs`** — Cross-session memory via `MEMORY.md` index and topic files in `.devmind/memory/`. Supports `recall_memory`, `save_memory`, `list_memory` directives.
+- **`MemoryManager.cs`** — Cross-session memory via `.devmind/` folder:
+  - `MEMORY.md` — Index of topics
+  - `.devmind/<topic>.md` — Individual topic files
+  - Operations: `LoadIndex()`, `LoadTopic()`, `SaveTopic()`, `ListTopics()`, `DeleteTopic()`
 
-#### Diff Preview UI
-- **`DiffPreviewCard.xaml.cs`** — Inline diff preview card with Apply/Skip buttons. Shows unified diff with ±3 lines of context.
-- **`DiffBatchBar.xaml.cs`** — Batch control bar for applying/skipping all pending diff cards at once.
+#### Caching
+- **`FileContentCache.cs`** — In-memory cache for recently read files. Supports line-range retrieval.
+- **`NearlineCache.cs`** — RAM cache for content trimmed from context by `MicroCompactToolResults`. Allows instant recall.
 
-#### Supporting Types
-- **`PatchConfidence.cs`** — `PatchConfidence` enum (Exact, Fuzzy) and `PatchResolveResult` class for resolved patch data.
-- **`OutputColor.cs`** — Color categories for output panel text (Normal, Dim, Input, Error, Success, Thinking, Warning).
+#### Training Data Capture
+- **`TrainingLogger.cs`** — Captures fine-tuning training data as JSONL. Logs each turn with:
+  - System prompt, user message, assistant response
+  - Tool calls and tool results
+  - Metrics (tokens, context %, iteration count)
+  - Outcome classification (success, partial, error, etc.)
+
+#### Utilities
+- **`OutputColor.cs`** — Enum for output panel text colors (Normal, Dim, Input, Error, Success, Thinking, Warning).
 - **`PackageIds.cs`** — Package GUID and command ID constants.
+- **`PatchConfidence.cs`** — Enum (`Exact`, `Fuzzy`) and `PatchResolveResult` class for patch resolution results.
 - **`StringValidator.cs`** — Simple string validation utility.
-
-#### Training & Diagnostics
-- **`TrainingLogger.cs`** — Captures fine-tuning training data as JSONL. Logs turns with tool calls, tool results, metrics, and outcome classification.
+- **`ResponseOutcome.cs`** — Wrapper around parsed blocks with boolean flags for action types.
 
 ### Data Flow
-
-1. **User Input**: User types a prompt in the chat input box and presses Enter.
-2. **Context Assembly**: `DevMindToolWindowControl` loads `DevMind.md`, selected editor context, and system prompt.
-3. **LLM Request**: `LlmClient.SendMessageAsync` sends the conversation to the LLM endpoint with streaming enabled.
-4. **Response Streaming**: Tokens are streamed and displayed in the output panel. Thinking tokens (``) are optionally filtered.
-5. **Block Parsing**: `ResponseParser.Parse` extracts structured blocks from the complete response.
-6. **Action Resolution**: `AgenticActionResolver.Resolve` determines the next action based on parsed blocks and execution history.
-7. **Execution**: `AgenticExecutor.ExecuteAsync` performs the action (apply patches, run shell, create files, etc.).
-8. **Feedback Loop**: Execution results are fed back to the LLM, and the loop continues until depth limit or completion.
+1. User types message in tool window → `SendToLlm()` constructs system prompt + user message
+2. `LlmClient.SendMessageAsync()` streams response tokens
+3. Response is parsed by `ResponseParser` into `ResponseBlock`s
+4. `ResponseClassifier` produces `ResponseOutcome` with action flags
+5. `AgenticActionResolver` decides next action based on outcome + previous `ExecutionResult`
+6. `AgenticExecutor.ExecuteAsync()` performs actions via `IAgenticHost` methods
+7. Results are fed back to LLM for next iteration (up to `AgenticLoopMaxDepth` times)
+8. `LlmClient` manages context budget, evicts stale messages, compacts tool results
 
 ### Build Pipeline
-
-The `.csproj` defines a custom build pipeline:
-1. **`IncrementBuildCounter`** (Before `BeforeBuild`): Increments `build.counter`, stamps version into `AssemblyInfo.cs`, `source.extension.vsixmanifest`, and `manifest.json`.
-2. **Compile**: Standard .NET SDK compilation.
-3. **`StampVsixManifests`** (Before `CreateVsixContainer`): Re-applies version stamps to manifests before VSIX packaging.
+- **`DevMind.csproj`** — SDK-style project with custom targets:
+  - `IncrementBuildCounter` (BeforeBuild): Reads `build.counter`, increments, stamps version into `AssemblyInfo.cs` and VSIX manifests
+  - `StampVsixManifests` (BeforeCreateVsixContainer): Re-applies version to manifests before packaging
+  - Version format: `7.0.{build_counter}.0`
 
 ## Key Patterns
 
 ### Error Handling
-- **Async/Await**: All I/O operations use `async/await` with `CancellationToken` support.
-- **Try-Catch with Logging**: Errors are caught and displayed in the output panel using `AppendOutput(..., OutputColor.Error)`.
-- **Graceful Degradation**: File not found, patch mismatch, and shell command failures are reported non-fatally to allow continuation.
+- **Try-catch with logging**: Most async methods wrap operations in try-catch, appending errors to output panel via `AppendOutput(error, OutputColor.Error)`.
+- **Graceful degradation**: LLM connection failures show "Disconnected" status; missing files produce informative messages.
+- **Build command discovery**: `FindMSBuildPath()` checks `VSINSTALLDIR`, then `vswhere.exe`, then PATH.
 
 ### Configuration Loading
-- **Community.VisualStudio.Toolkit**: Uses `BaseOptionModel<T>` for settings persistence with profile support.
-- **ProfileManager**: Profiles stored as JSON in `%LOCALAPPDATA%\DevMind\profiles.json`.
+- **Community.VisualStudio.Toolkit**: Uses `BaseOptionModel<DevMindOptions>` for settings persistence.
+- **Profile-based**: `ProfileManager` loads `profiles.json` from extension directory, applies settings to `DevMindOptions`.
+- **Live settings**: `DevMindOptions.GetLiveInstanceAsync()` retrieves current settings.
 
 ### COM Interop
-- **Visual Studio SDK**: Uses `Microsoft.VisualStudio.Shell` and `EnvDTE` for editor integration (document access, solution exploration).
-- **`ReloadDocumentFromDisk`**: Forces VS to reload document buffers from disk after patch application.
+- **Visual Studio SDK**: Uses `Microsoft.VisualStudio.Shell` for package registration, tool windows, and command handling.
+- **EnvDTE**: Accesses active document, selection, and solution explorer via `DTE` object.
 
 ### External Tool Usage
-- **MSBuild Discovery**: `FindMSBuildPath` checks `VSINSTALLDIR` env var, then `vswhere.exe`, then fallback paths.
-- **PowerShell Execution**: `RunShellCommandCaptureAsync` uses `PowerShell` class for command execution with output capture.
-- **TRX Parsing**: `ParseTrxSummary` extracts test results from Visual Studio Test XML format.
+- **LLM Server**: HTTP client communicates with OpenAI-compatible endpoints (`/v1/chat/completions`, `/v1/models`, `/props`, `/api/v0/models`).
+- **PowerShell**: Shell commands execute via `powershell.exe -NoProfile -Command`.
+- **MSBuild**: Build commands invoke `MSBuild.exe /t:Build /p:Configuration=Release`.
+- **vswhere**: Used to discover Visual Studio installation path.
 
 ### Threading Model
-- **UI Thread**: All WPF UI updates occur on the UI thread.
-- **Background Work**: LLM communication, file I/O, and shell execution run on background threads via `async/await`.
-- **Cancellation**: `CancellationToken` passed through the agentic loop for user-initiated cancellation (Stop button).
+- **Async/await**: All I/O operations are async (file reads, HTTP requests, shell commands).
+- **UI thread**: WPF control updates happen on UI thread; background work uses `async Task`.
+- **CancellationToken**: Agentic loop supports cancellation via `_cts.Token`.
 
 ### Validation
-- **Whitespace-Normalized Matching**: PATCH FIND blocks are matched after collapsing all whitespace runs to single spaces.
-- **Fuzzy Fallback**: If exact match fails, Levenshtein similarity scoring with sliding window finds best match (≥85% threshold).
-- **File Write Guard**: Files not already known to the task require user confirmation before writing.
+- **Patch matching**: Whitespace-normalized exact match first, then fuzzy Levenshtein match (≥85% similarity).
+- **File write guard**: Confirms writes to files not mentioned in the current task.
+- **StringValidator**: Simple null/whitespace validation.
 
 ### Context Management
-- **Token Budgeting**: `ContextBudget` allocates tokens across buckets (system prompt, protected turns, working history, response headroom).
-- **Tiered Eviction**: `EvictStaleContext` drops old messages based on age relative to current turn.
-- **MicroCompact**: Trims stale tool result content when working budget exceeds threshold (default 85%).
-- **Brainwash**: Full context replacement as last resort when compaction thrashing is detected.
+- **Tiered eviction**: System prompt (pinned), protected turns (recent), working history (evicted first).
+- **MicroCompact**: Fires at 85% working budget, trims tool results with semantic summarization.
+- **Brainwash**: Full context replacement when compaction thrashes (multiple compactions with minimal reclamation).
+- **Nearline cache**: Trimmed content stays in RAM for instant recall.
 
 ## File Summary
-
 | File | Lines | Purpose |
 |------|-------|---------|
-| `AgenticAction.cs` | 70 | Action types and data class for agentic loop decisions |
-| `AgenticActionResolver.cs` | 105 | Resolves next action from response outcome and execution result |
-| `AgenticExecutor.cs` | 761 | Executes actions in the agentic loop (patches, shell, files) |
-| `DevMindCommand.cs` | 22 | Command handler for showing the tool window |
-| `DevMindOptionsPage.cs` | 544 | Options page model with LLM settings and profile management |
-| `DevMindPackage.cs` | 38 | VSIX package entry point |
-| `DevMindToolWindow.cs` | 56 | Tool window factory and pane definition |
-| `DevMindToolWindowControl.AgenticHost.cs` | 1380 | IAgenticHost implementation for file/shell operations |
-| `DevMindToolWindowControl.Context.cs` | 955 | Context loading (DevMind.md, agent profiles, READ commands) |
-| `DevMindToolWindowControl.Patch.cs` | 1074 | PATCH directive parsing, matching, and application |
-| `DevMindToolWindowControl.Shell.cs` | 364 | Shell command execution and TRX parsing |
-| `DevMindToolWindowControl.xaml.cs` | 2395 | Main WPF control with chat UI and agentic loop coordination |
-| `DiffBatchBar.xaml.cs` | 52 | Batch control bar for applying/skipping all diff cards |
-| `DiffPreviewCard.xaml.cs` | 244 | Inline diff preview card with Apply/Skip buttons |
-| `ExecutionResult.cs` | 56 | Captures execution outcomes for feedback loop |
-| `FileContentCache.cs` | 66 | In-memory cache for file content and line-range reads |
-| `IAgenticHost.cs` | 173 | Interface abstracting side effects from agentic logic |
-| `LlmClient.cs` | 3165 | HTTP client for LLM communication with context management |
-| `MemoryManager.cs` | 250 | Cross-session memory via MEMORY.md and topic files |
-| `NearlineCache.cs` | 101 | Cache for content trimmed by MicroCompact |
-| `OutputColor.cs` | 21 | Color categories for output panel text |
-| `PackageIds.cs` | 20 | Package GUID and command ID constants |
-| `PatchConfidence.cs` | 37 | Patch confidence enum and resolve result class |
-| `ProfileManager.cs` | 388 | Named connection profile management |
-| `ResponseClassifier.cs` | 36 | Wraps ResponseParser output into ResponseOutcome |
-| `ResponseOutcome.cs` | 138 | Classification result with actionable blocks and flags |
-| `ResponseParser.cs` | 993 | State machine parser for LLM response blocks |
-| `StringValidator.cs` | 7 | Simple string validation utility |
-| `ToolCallMapper.cs` | 225 | Maps ToolCallResult to ResponseBlock |
-| `ToolCallResult.cs` | 27 | Unified tool call representation |
-| `ToolRegistry.cs` | 230 | Builds OpenAI-compatible tools JSON array |
-| `TrainingLogger.cs` | 339 | Captures fine-tuning training data as JSONL |
-| `Properties\AssemblyInfo.cs` | 26 | Assembly metadata and versioning |
+| `AgenticAction.cs` | 63 | Defines ActionType enum and AgenticAction class for agentic loop decisions |
+| `AgenticActionResolver.cs` | 105 | Static resolver that decides next action from ResponseOutcome and ExecutionResult |
+| `AgenticExecutor.cs` | 761 | Executes AgenticAction by calling IAgenticHost methods; handles batch patches |
+| `DevMindCommand.cs` | 21 | Command handler for showing the DevMind tool window (Ctrl+Alt+D) |
+| `DevMindOptionsPage.cs` | 544 | Options page with DevMindOptions model, enums, and profile management |
+| `DevMindPackage.cs` | 39 | VSIX package entry point; registers tool window, options, commands |
+| `DevMindToolWindow.cs` | 52 | Tool window pane that creates DevMindToolWindowControl and LlmClient |
+| `DevMindToolWindowControl.AgenticHost.cs` | 1380 | IAgenticHost implementation: file write guards, TRX parsing, diff generation |
+| `DevMindToolWindowControl.Context.cs` | 955 | Context loading: DevMind.md, .agent.md, editor selection, READ commands |
+| `DevMindToolWindowControl.Patch.cs` | 1074 | PATCH handling: resolve, apply, fuzzy matching, diff preview |
+| `DevMindToolWindowControl.Shell.cs` | 364 | Shell command execution: PowerShell, sanitization, directive parsing |
+| `DevMindToolWindowControl.xaml.cs` | 2396 | Main WPF control: chat UI, LLM streaming, agentic loop coordination |
+| `DiffBatchBar.xaml.cs` | 52 | Batch control bar for multiple diff preview cards (Apply All / Skip All) |
+| `DiffPreviewCard.xaml.cs` | 244 | Inline diff preview card with Apply/Skip buttons and TaskCompletionSource |
+| `ExecutionResult.cs` | 58 | Captures execution outcomes: patches applied, shell exit code, files created |
+| `FileContentCache.cs` | 64 | In-memory cache for recently read files with line-range retrieval |
+| `IAgenticHost.cs` | 173 | Interface abstracting side effects from agentic decision logic |
+| `LlmClient.cs` | 3165 | HTTP client for LLM: streaming, context detection, compaction, budget tracking |
+| `MemoryManager.cs` | 250 | Cross-session memory: MEMORY.md index and .devmind/<topic>.md files |
+| `NearlineCache.cs` | 95 | RAM cache for trimmed content with instant recall |
+| `OutputColor.cs` | 21 | Enum for output panel text colors |
+| `PackageIds.cs` | 21 | Package GUID and command ID constants |
+| `PatchConfidence.cs` | 38 | PatchConfidence enum and PatchResolveResult class |
+| `ProfileManager.cs` | 388 | Profile CRUD operations and profile switching |
+| `ResponseClassifier.cs` | 42 | Wraps ResponseParser to produce ResponseOutcome with action flags |
+| `ResponseOutcome.cs` | 138 | Wrapper around parsed blocks with boolean flags for action types |
+| `ResponseParser.cs` | 993 | State machine parser for LLM responses (FILE, PATCH, SHELL, READ, etc.) |
+| `StringValidator.cs` | 6 | Simple string validation utility |
+| `ToolCallMapper.cs` | 225 | Maps ToolCallResult list to ResponseBlock list |
+| `ToolCallResult.cs` | 27 | Unified representation of a single tool call |
+| `ToolRegistry.cs` | 230 | Builds OpenAI-compatible tools array for structured tool calling |
+| `TrainingLogger.cs` | 345 | Captures fine-tuning training data as JSONL |
+| `Properties\AssemblyInfo.cs` | 26 | Assembly attributes: version, company, product info |
 
 ## Known Issues
-
-None identified. (No TODO, HACK, or FIXME comments found in the source code.)
+None identified. (No TODO, HACK, or FIXME comments found in source code.)
 
 ## Dependencies
 
 ### NuGet Packages
-- `Microsoft.VisualStudio.SDK` v17.0.32112.339 — Visual Studio SDK for extension development
-- `Microsoft.VSSDK.BuildTools` v17.14.2120 — Build tools for VSIX packaging
+- `Microsoft.VisualStudio.SDK` v17.0.32112.339 — Visual Studio extension SDK
+- `Microsoft.VSSDK.BuildTools` v17.14.2120 — VSIX build tools (build/analyzers only)
 - `Community.VisualStudio.Toolkit.17` v17.0.549 — Community toolkit for VS extensions
 - `Newtonsoft.Json` v13.0.1 — JSON serialization
-- `Microsoft.Extensions.Http` v3.1.8 — HTTP client abstraction
+- `Microsoft.Extensions.Http` v3.1.8 — HTTP client factory and pooling
 
 ### External Tools (Runtime)
-- **MSBuild.exe** — Discovered via `VSINSTALLDIR`, `vswhere.exe`, or fallback paths for building .NET projects
-- **PowerShell** — Used for shell command execution
-- **vswhere.exe** — Used for MSBuild discovery (optional)
+- **PowerShell** — Shell command execution
+- **MSBuild.exe** — Build commands (discovered via VSINSTALLDIR, vswhere.exe, or PATH)
+- **vswhere.exe** — Visual Studio installation discovery
+- **LLM Server** — OpenAI-compatible HTTP endpoint (LM Studio, Ollama, llama.cpp, or custom)
 
 ### Core Function
-The project uses no third-party SDKs for its core LLM agent functionality — all parsing, execution, and context management logic is custom-built.
+The project uses no third-party SDKs for its core function (LLM communication) beyond standard `System.Net.Http`. All agentic logic, parsing, and execution is custom-built.
 
 ## Coding Standards
-
-- **Language version**: C# 8.0 — no newer syntax (targeting .NET Framework 4.8)
+- **Language version**: C# 8.0 — no newer syntax (`.NET Framework 4.8` constraint).
 - **Naming**: 
   - PascalCase for public types and members
   - `_camelCase` for private fields
-  - `static class` for utility types with only static methods
-- **Error handling**: Try-catch with output panel logging; non-fatal errors reported as warnings
-- **Thread model**: 
-  - UI updates on UI thread
-  - Background work via `async/await` with `CancellationToken`
-  - No explicit thread pooling or task parallelism
-- **Build**: `dotnet build` or MSBuild with auto-incremented build counter
-- **Documentation**: XML doc comments on public APIs; inline comments for complex logic
-- **File organization**: Partial classes used for `DevMindToolWindowControl` to separate concerns (AgenticHost, Context, Patch, Shell)
-- **Versioning**: Build counter incremented on each build, stamped into assembly and VSIX manifests
+  - `I` prefix for interfaces
+  - Static classes for utility functions
+- **Error handling**: Try-catch with `AppendOutput(error, OutputColor.Error)`; graceful degradation for missing resources.
+- **Thread model**: Async/await for all I/O; UI updates on UI thread; `CancellationToken` for cancellation support.
+- **Build**: 
+  - Command: `msbuild DevMind.csproj /p:Configuration=Release`
+  - Auto-incrementing build counter in `build.counter`
+  - Version stamped into `AssemblyInfo.cs` and VSIX manifests before each build
+- **File operations**: 
+  - Full read for files <1000 lines; outline-first for larger files
+  - Whitespace-normalized patch matching with fuzzy fallback
+  - Encoding preservation (BOM detection) for file writes
+- **Configuration**: Profile-based settings via `ProfileManager`; live settings via `DevMindOptions.GetLiveInstanceAsync()`.
+- **Documentation**: XML doc comments on public APIs; inline comments for complex logic.
 
 ## Efficiency Guidelines
-
 - READ files in full unless they exceed 1000 lines.
 - Use parallel tool calls to read multiple files in one turn when possible.
 - Write findings incrementally with append_file — do not accumulate large outputs in context.
