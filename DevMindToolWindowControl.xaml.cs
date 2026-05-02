@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v7.9
+// File: DevMindToolWindowControl.xaml.cs  v7.10
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -45,6 +45,9 @@ namespace DevMind
         private string _pendingShellContext;
         private bool _shellLoopPending;
         private int _agenticDepth;
+        // True when a prose-finish re-prompt has already been fired for the current task.
+        // Cleared at the start of every user-initiated SendToLlm() (alongside _agenticDepth).
+        private bool _promptedForTaskDone;
         private int _blockByBlockStep;   // current step number (1-based); 0 = not in block-by-block mode
         private int _blockByBlockTotal;  // total step count for current block-by-block task
         private int _lastShellExitCode;
@@ -583,6 +586,7 @@ namespace DevMind
             if (!_shellLoopPending)
             {
                 _agenticDepth = 0;
+                _promptedForTaskDone = false;
             }
             _llmClient.IncrementTurn();
 
@@ -1271,19 +1275,62 @@ namespace DevMind
                                     && DevMindOptions.Instance.DirectiveMode != DirectiveMode.TextDirective)
                                 {
                                     // ══════════════════════════════════════════════════════════════
-                                    // No tool calls in non-TextDirective mode — model is done.
+                                    // No tool calls in non-TextDirective mode.
+                                    // Either the model is done answering a pure question (correct),
+                                    // OR the model did real work but produced prose instead of task_done (defect).
                                     // ══════════════════════════════════════════════════════════════
 
                                     // Check for text-based DONE signal as safety net
                                     if (outcome.IsDone)
                                         AppendOutput("Task complete.\n", OutputColor.Success);
 
-                                    // Stop — model chose not to call any tools
+                                    // ── Prose-finish detection ──
+                                    // Fires only when we're already mid-task (depth > 0 or shell loop pending).
+                                    // Day-1 first-turn prose responses to pure questions are NOT re-prompted —
+                                    // those are valid responses, not abandoned tasks.
+                                    string trimmedResponse = fullResponse?.Trim() ?? "";
+                                    bool insideAgenticCycle = _agenticDepth > 0 || _shellLoopPending;
+                                    bool prosePresent = trimmedResponse.Length > 40 && !outcome.HasAnyDirective && !outcome.IsDone;
+
+                                    if (insideAgenticCycle && prosePresent && !_promptedForTaskDone)
+                                    {
+                                        // Fire one-shot re-prompt asking for task_done.
+                                        // Skip LogTrainingTurn — the re-prompt's outcome will be logged when it completes.
+                                        _promptedForTaskDone = true;
+                                        _pendingShellContext =
+                                            "You produced a prose answer but did not call task_done. " +
+                                            "Call task_done now with your answer in the summary parameter. " +
+                                            "Do not repeat the answer in prose — only the tool call.";
+                                        InputTextBox.Text = "Continue with the task.";
+                                        _shellLoopPending = true;
+
+                                        if (DevMindOptions.Instance.ShowDebugOutput)
+                                            AppendOutput("[DIAG] Prose-finish detected — re-prompting for task_done.\n", OutputColor.Dim);
+
+                                        try { SendToLlm(); }
+                                        catch
+                                        {
+                                            _shellLoopPending = false;
+                                            _agenticDepth = 0;
+                                            _promptedForTaskDone = false;
+                                            StatusText.Text = "Error";
+                                            SetInputEnabled(true);
+                                            throw;
+                                        }
+                                        return;
+                                    }
+
+                                    // Stop — either pure-question response, already re-prompted once, or empty response
                                     _agenticDepth = 0;
                                     _pendingResubmitPrompt = null;
                                     LogTrainingTurn(text, fullResponse, outcome, null, null);
                                     if (DevMindOptions.Instance.ShowDebugOutput)
-                                        AppendOutput("[DIAG] Tool use loop: no tool calls — stopping.\n", OutputColor.Dim);
+                                    {
+                                        if (_promptedForTaskDone)
+                                            AppendOutput("[DIAG] Tool use loop: re-prompt also produced no tool calls — accepting prose-finish.\n", OutputColor.Dim);
+                                        else
+                                            AppendOutput("[DIAG] Tool use loop: no tool calls — stopping.\n", OutputColor.Dim);
+                                    }
                                     // fall through to completion
                                 }
                                 else
