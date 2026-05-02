@@ -1,4 +1,4 @@
-// File: ProfileManager.cs  v4.3
+// File: ProfileManager.cs  v4.4
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -91,7 +91,7 @@ namespace DevMind
 
         // ── Directives ───────────────────────────────────────────────────────
         [JsonProperty("directiveMode")]
-        public string DirectiveMode { get; set; } = nameof(DevMind.DirectiveMode.Auto);
+        public string DirectiveMode { get; set; } = nameof(DevMind.DirectiveMode.ToolUse);
 
         // ── Display ──────────────────────────────────────────────────────────
         [JsonProperty("showLlmThinking")]

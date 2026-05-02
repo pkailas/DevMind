@@ -1,4 +1,4 @@
-// File: DevMindOptions.Data.cs  v1.0
+// File: DevMindOptions.Data.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System.ComponentModel;
@@ -198,8 +198,8 @@ namespace DevMind
         [Category("Directives")]
         [DisplayName("Directive Mode")]
         [Description("How DevMind communicates directives to the LLM. ToolUse sends JSON Schema tools (requires --jinja on llama-server). TextDirective uses the legacy text format. Auto tries ToolUse first, falls back to TextDirective on error.")]
-        [DefaultValue(DirectiveMode.Auto)]
-        public DirectiveMode DirectiveMode { get; set; } = DirectiveMode.Auto;
+        [DefaultValue(DirectiveMode.ToolUse)]
+        public DirectiveMode DirectiveMode { get; set; } = DirectiveMode.ToolUse;
 
         // ── Display ──────────────────────────────────────────────────────────
 
