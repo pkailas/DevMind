@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v7.8
+// File: DevMindToolWindowControl.xaml.cs  v7.9
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -869,7 +869,14 @@ namespace DevMind
             string activeProjectPath = await GetActiveProjectPathAsync();
             string contextualMessage = BuildMessageWithContext(text, selectedText, fileName, fullContent, activeProjectPath);
 
-            if (!string.IsNullOrEmpty(_readContext))
+            // In ToolUse mode, file-read content is delivered via tool_result messages (G1 fix).
+            // _readContext prepend is now legacy: TextDirective mode still uses it for content delivery.
+            // TODO(piece 1d): Git reads (read_file("git log"|"git diff")) currently route through
+            // ApplyReadCommandAsync → _readContext only and have no tool_result content. In ToolUse mode
+            // they will silently produce empty tool results. Fix by either extending LoadFileContentAsync's
+            // ToolUse path to handle git, or by routing git output through a separate accumulator.
+            bool isToolUseMode = DevMindOptions.Instance.DirectiveMode != DirectiveMode.TextDirective;
+            if (!string.IsNullOrEmpty(_readContext) && !isToolUseMode)
             {
                 contextualMessage = _readContext + contextualMessage;
                 // _readContext intentionally kept alive — persists until /context clear or Restart clears it
