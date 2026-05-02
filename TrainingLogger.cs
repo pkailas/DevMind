@@ -1,4 +1,4 @@
-// File: TrainingLogger.cs  v7.0
+// File: TrainingLogger.cs  v7.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -174,7 +174,7 @@ namespace DevMind
                         calls.Add(new ToolCallEntry { Type = "diff", Filename = block.FileName });
                         break;
                     case BlockType.Done:
-                        calls.Add(new ToolCallEntry { Type = "done" });
+                        calls.Add(new ToolCallEntry { Type = "done", Summary = block.Content });
                         break;
                 }
             }
@@ -219,6 +219,14 @@ namespace DevMind
                     Success = result.ShellExitCode == 0,
                     LineCount = result.ShellOutput?.Split('\n').Length ?? 0
                 });
+            }
+
+            foreach (var kv in result.ToolResultContents)
+            {
+                string content = kv.Value;
+                if (content != null && content.Length > 2000)
+                    content = content.Substring(0, 1500) + $"[...truncated, total {kv.Value.Length} chars]" + kv.Value.Substring(kv.Value.Length - 500);
+                results.Add(new ToolResultEntry { Type = "read", Filename = kv.Key, Success = true, Content = content });
             }
 
             foreach (var err in result.Errors)
@@ -299,6 +307,9 @@ namespace DevMind
 
         [JsonProperty("command", NullValueHandling = NullValueHandling.Ignore)]
         public string Command { get; set; }
+
+        [JsonProperty("summary", NullValueHandling = NullValueHandling.Ignore)]
+        public string Summary { get; set; }
     }
 
     [JsonObject(MemberSerialization.OptIn)]
@@ -315,6 +326,9 @@ namespace DevMind
 
         [JsonProperty("line_count", DefaultValueHandling = DefaultValueHandling.Ignore)]
         public int LineCount { get; set; }
+
+        [JsonProperty("content", NullValueHandling = NullValueHandling.Ignore)]
+        public string Content { get; set; }
     }
 
     [JsonObject(MemberSerialization.OptIn)]

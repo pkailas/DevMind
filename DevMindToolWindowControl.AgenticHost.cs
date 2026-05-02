@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.AgenticHost.cs  v7.5
+// File: DevMindToolWindowControl.AgenticHost.cs  v7.6
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -271,12 +271,24 @@ namespace DevMind
         async Task<string> IAgenticHost.LoadFileContentAsync(
             string fileName, int rangeStart, int rangeEnd, bool forceFullRead)
         {
-            // Handle git commands: FileName starts with "git log" or "git diff"
+            // Handle git commands: keep TextDirective behavior — git output goes to _readContext.
+            // Git read variants are not yet adapted to return content; ToolUse will receive an empty
+            // tool result and the legacy _readContext prepend will deliver the content.
             if (fileName.StartsWith("git ", StringComparison.OrdinalIgnoreCase))
             {
                 await ApplyReadCommandAsync($"READ {fileName}", showOutline: false);
                 return string.Empty;
             }
+
+            bool isToolUseMode = DevMindOptions.Instance.DirectiveMode != DirectiveMode.TextDirective;
+
+            if (isToolUseMode)
+            {
+                // ── ToolUse path — render directly, return content, do NOT touch _readContext ──
+                return await LoadFileContentForToolUseAsync(fileName, rangeStart, rangeEnd, forceFullRead);
+            }
+
+            // ── TextDirective path — original behavior preserved ──
 
             // ── NearlineCache check — instant recall of recently trimmed file content ──
             if (rangeStart <= 0 && !forceFullRead && _llmClient?.NearlineCache != null)
@@ -314,6 +326,113 @@ namespace DevMind
 
             // Content is injected into LLM context by the above calls; not returned directly.
             return string.Empty;
+        }
+
+        /// <summary>
+        /// ToolUse-mode read: renders the [READ:filename] block (full, outline, or range)
+        /// and returns it as a string for delivery via the tool result message.
+        /// Does NOT write to _readContext. Updates _filesReadThisSession, _taskReadFiles,
+        /// the file cache, and DIFF snapshot — same side effects as the TextDirective path
+        /// minus the _readContext write.
+        /// </summary>
+        private async Task<string> LoadFileContentForToolUseAsync(
+            string fileName, int rangeStart, int rangeEnd, bool forceFullRead)
+        {
+            try
+            {
+                // ── NearlineCache hit — cached content is already wrapped in the [READ:…] block format
+                if (rangeStart <= 0 && !forceFullRead && _llmClient?.NearlineCache != null)
+                {
+                    string cacheKey = $"read:{fileName}";
+                    string cached = _llmClient.NearlineCache.Retrieve(cacheKey);
+                    if (cached != null)
+                    {
+                        AppendOutput($"[CACHE HIT] {fileName}\n", OutputColor.Dim);
+                        return cached;
+                    }
+                }
+
+                // ── Resolve file path
+                string normalizedHint = fileName.Replace('\\', '/');
+                string fileNameOnly;
+                try { fileNameOnly = Path.GetFileName(normalizedHint); }
+                catch { fileNameOnly = fileName; }
+
+                string fullPath = await FindFileInSolutionAsync(fileNameOnly, normalizedHint)
+                    ?? Path.Combine(_terminalWorkingDir, fileNameOnly);
+
+                if (!File.Exists(fullPath))
+                {
+                    AppendOutput($"[READ] File not found: {fileName}\n", OutputColor.Warning);
+                    string notFoundMsg = await BuildFileNotFoundMessageAsync("READ", fileName);
+                    return notFoundMsg;
+                }
+
+                CaptureFileSnapshot(fullPath);
+
+                // ── Range-read path
+                if (rangeStart > 0)
+                {
+                    // Ensure the file is in the cache for line-range access
+                    if (!_llmClient._fileCache.Contains(fileNameOnly))
+                    {
+                        var (diskContent, _) = ReadFilePreservingEncoding(fullPath);
+                        _llmClient._fileCache.Store(fileNameOnly, diskContent);
+                    }
+
+                    _taskReadFiles.Add(fileNameOnly);
+                    int totalLines = _llmClient._fileCache.GetLineCount(fileNameOnly);
+
+                    // Swap inverted range silently
+                    if (rangeStart > rangeEnd)
+                    {
+                        int tmp = rangeStart; rangeStart = rangeEnd; rangeEnd = tmp;
+                    }
+                    int clampedEnd   = Math.Min(rangeEnd,   totalLines);
+                    int clampedStart = Math.Max(1, rangeStart);
+
+                    string rangeContent = _llmClient._fileCache.GetLineRange(fileNameOnly, clampedStart, clampedEnd);
+                    if (rangeContent == null)
+                    {
+                        AppendOutput($"[READ] Range {rangeStart}-{rangeEnd} out of bounds for {fileNameOnly} ({totalLines} lines)\n", OutputColor.Error);
+                        return $"[READ] Range {rangeStart}-{rangeEnd} out of bounds for {fileNameOnly} ({totalLines} lines)";
+                    }
+
+                    var rawLines = rangeContent.Split('\n');
+                    var numbered = new System.Text.StringBuilder();
+                    for (int i = 0; i < rawLines.Length; i++)
+                        numbered.AppendLine($"{clampedStart + i}: {rawLines[i].TrimEnd('\r')}");
+
+                    bool clamped = clampedEnd < rangeEnd;
+                    string rangeBlock = RenderReadRangeBlock(fileNameOnly, clampedStart, clampedEnd, totalLines, numbered.ToString(), clamped);
+
+                    AppendOutput($"[READ] {fileNameOnly}:{clampedStart}-{clampedEnd} ({clampedEnd - clampedStart + 1} lines){(clamped ? " [clamped]" : "")}\n", OutputColor.Success);
+                    return rangeBlock;
+                }
+
+                // ── Full / outline path
+                var (content, _) = ReadFilePreservingEncoding(fullPath);
+                _llmClient._fileCache.Store(fileNameOnly, content);
+                _taskReadFiles.Add(fileNameOnly);
+                int lineCount = content.Split('\n').Length;
+
+                bool alreadyRead = _llmClient._filesReadThisSession.Contains(fileNameOnly);
+                _llmClient._filesReadThisSession.Add(fileNameOnly);
+
+                string rendered = RenderReadBlock(fileNameOnly, content, lineCount, forceFullRead, alreadyRead, out bool wasOutline);
+
+                if (wasOutline)
+                    AppendOutput($"[READ] {fullPath} ({lineCount} lines — outline{(alreadyRead ? ", re-read" : "")})\n", OutputColor.Success);
+                else
+                    AppendOutput($"[READ] Loaded {fullPath} ({lineCount} lines)\n", OutputColor.Success);
+
+                return rendered;
+            }
+            catch (Exception ex)
+            {
+                AppendOutput($"[READ ERROR] {fileName}: {ex.Message}\n", OutputColor.Error);
+                return $"[ERROR reading {fileName}: {ex.Message}]";
+            }
         }
 
         // ── IAgenticHost.AppendOutput ─────────────────────────────────────────────

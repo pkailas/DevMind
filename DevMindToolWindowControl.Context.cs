@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.Context.cs  v5.20
+// File: DevMindToolWindowControl.Context.cs  v5.21
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -366,6 +366,51 @@ namespace DevMind
             return afterClosing >= 0 ? trimmed.Substring(afterClosing + 1) : "";
         }
 
+        // ── READ rendering helpers ────────────────────────────────────────────
+
+        /// <summary>
+        /// Renders a READ result block for a file — either the full content wrapped in
+        /// "[READ:filename]\n…\n```\n&lt;content&gt;\n```\n\n" or the outline wrapped in
+        /// "[READ:filename] (N lines — outline only…)\n&lt;outline&gt;\n\n".
+        /// Pure rendering — no side effects, no _readContext writes, no _filesReadThisSession updates.
+        /// </summary>
+        private static string RenderReadBlock(
+            string fileNameOnly,
+            string content,
+            int lineCount,
+            bool forceFullRead,
+            bool alreadyRead,
+            out bool wasOutline)
+        {
+            bool injectOutline = (alreadyRead || lineCount >= ReadOutlineThresholdLines) && !forceFullRead;
+            wasOutline = injectOutline;
+            if (injectOutline)
+            {
+                string outlineText = LlmClient.GenerateOutline(fileNameOnly, content);
+                return $"[READ:{fileNameOnly}] ({lineCount} lines — outline only, use READ {fileNameOnly}:start-end for detail)\n{outlineText}\n\n";
+            }
+            return $"[READ:{fileNameOnly}]\nThe following files have been loaded for context:\n\n{fileNameOnly}\n```\n{content}\n```\n\n";
+        }
+
+        /// <summary>
+        /// Renders a line-range READ block for a file:
+        /// "[READ:filename:start-end] (lines start-end of total[ — clamped])\n```\n&lt;numbered&gt;\n```\n\n".
+        /// Pure rendering — no side effects.
+        /// </summary>
+        private static string RenderReadRangeBlock(
+            string fileNameOnly,
+            int clampedStart,
+            int clampedEnd,
+            int totalLines,
+            string numberedContent,
+            bool clamped)
+        {
+            string header = clamped
+                ? $"[READ:{fileNameOnly}:{clampedStart}-{clampedEnd}] (lines {clampedStart}-{clampedEnd} of {totalLines} total — clamped)"
+                : $"[READ:{fileNameOnly}:{clampedStart}-{clampedEnd}] (lines {clampedStart}-{clampedEnd} of {totalLines} total)";
+            return $"{header}\n```\n{numberedContent.TrimEnd('\r', '\n')}\n```\n\n";
+        }
+
         // ── READ command ──────────────────────────────────────────────────────
 
         private async Task ApplyReadCommandAsync(string input, bool showOutline = false)
@@ -465,28 +510,19 @@ namespace DevMind
                     // already saw the full content on the first read. This replaces the
                     // old post-append SqueezeReadContent/CompressLastUserReadBlocks approach.
                     bool alreadyRead = _llmClient._filesReadThisSession.Contains(fileNameOnly);
-                    bool injectOutline = (alreadyRead || lineCount >= ReadOutlineThresholdLines) && !isForceRead;
 
                     // Track that we've now read this file
                     _llmClient._filesReadThisSession.Add(fileNameOnly);
 
-                    if (injectOutline)
-                    {
-                        string outlineText = LlmClient.GenerateOutline(fileNameOnly, content);
-                        _readContext = (_readContext ?? "") +
-                            $"[READ:{fileNameOnly}] ({lineCount} lines — outline only, use READ {fileNameOnly}:start-end for detail)\n{outlineText}\n\n";
+                    string rendered = RenderReadBlock(fileNameOnly, content, lineCount, isForceRead, alreadyRead, out bool wasOutline);
+                    _readContext = (_readContext ?? "") + rendered;
+
+                    if (wasOutline)
                         AppendOutput($"[READ] {fullPath} ({lineCount} lines — outline{(alreadyRead ? ", re-read" : "")})\n", OutputColor.Success);
-                        if (showOutline)
-                            AppendOutlineToPanel(fullPath, content);
-                    }
                     else
-                    {
-                        _readContext = (_readContext ?? "") +
-                            $"[READ:{fileNameOnly}]\nThe following files have been loaded for context:\n\n{fileNameOnly}\n```\n{content}\n```\n\n";
                         AppendOutput($"[READ] Loaded {fullPath} ({lineCount} lines)\n", OutputColor.Success);
-                        if (showOutline)
-                            AppendOutlineToPanel(fullPath, content);
-                    }
+                    if (showOutline)
+                        AppendOutlineToPanel(fullPath, content);
                 }
 
                 InputTextBox.Text = "";
@@ -552,12 +588,8 @@ namespace DevMind
                     numbered.AppendLine($"{clampedStart + i}: {rawLines[i].TrimEnd('\r')}");
 
                 bool clamped = clampedEnd < endLine;
-                string header = clamped
-                    ? $"[READ:{fileNameOnly}:{clampedStart}-{clampedEnd}] (lines {clampedStart}-{clampedEnd} of {totalLines} total — clamped)"
-                    : $"[READ:{fileNameOnly}:{clampedStart}-{clampedEnd}] (lines {clampedStart}-{clampedEnd} of {totalLines} total)";
-
                 _readContext = (_readContext ?? "") +
-                    $"{header}\n```\n{numbered.ToString().TrimEnd('\r', '\n')}\n```\n\n";
+                    RenderReadRangeBlock(fileNameOnly, clampedStart, clampedEnd, totalLines, numbered.ToString(), clamped);
 
                 AppendOutput($"[READ] {fileNameOnly}:{clampedStart}-{clampedEnd} ({clampedEnd - clampedStart + 1} lines){(clamped ? " [clamped]" : "")}\n", OutputColor.Success);
 
