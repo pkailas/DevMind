@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v7.11
+// File: DevMindToolWindowControl.xaml.cs  v7.12
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -1053,7 +1053,7 @@ namespace DevMind
                                 System.Diagnostics.Debug.WriteLine($"[DEVMIND-DIAG] responseBuffer length={fullResponse.Length}");
                                 System.Diagnostics.Debug.WriteLine($"[DEVMIND-DIAG] responseBuffer first 500 chars: {(fullResponse.Length > 500 ? fullResponse.Substring(0, 500) : fullResponse)}");
 
-                                ResponseOutcome outcome;
+                                ResponseOutcome outcome = ResponseOutcome.Empty();
                                 var lastToolCalls = _llmClient.LastToolCalls;
                                 if (DevMindOptions.Instance.ShowDebugOutput)
                                     AppendOutput($"[DIAG] LastToolCalls: {lastToolCalls?.Count ?? 0}\n", OutputColor.Dim);
@@ -1080,17 +1080,10 @@ namespace DevMind
                                         }
                                     }
 
-                                    outcome = ResponseClassifier.Classify(toolBlocks);
+                                    outcome = new ResponseOutcome(toolBlocks);
                                     if (DevMindOptions.Instance.ShowDebugOutput)
                                         AppendOutput($"[DIAG] Tool use path: {lastToolCalls.Count} call(s) mapped to {toolBlocks.Count} block(s)\n", OutputColor.Dim);
                                     System.Diagnostics.Debug.WriteLine($"[DEVMIND-DIAG] Tool use path: {lastToolCalls.Count} tool call(s) → {toolBlocks.Count} block(s)");
-                                }
-                                else
-                                {
-                                    // Text directive fallback
-                                    if (DevMindOptions.Instance.ShowDebugOutput)
-                                        AppendOutput("[DIAG] Text directive fallback path\n", OutputColor.Dim);
-                                    outcome = ResponseClassifier.Classify(fullResponse);
                                 }
 
                                 var executor = new AgenticExecutor(this);
