@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v7.5
+// File: DevMindToolWindowControl.xaml.cs  v7.6
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -2133,11 +2133,23 @@ namespace DevMind
             {
                 case "read_file":
                 case "grep_file":
-                case "find_in_files":
                 case "diff_file":
-                    // Read-like operations — content was injected into context by the executor.
-                    // The model sees it via the next user message's context injection.
-                    return "[File content loaded into context]";
+                    {
+                        string key = tc.Arguments?.TryGetValue("filename", out string fn) == true ? fn : null;
+                        if (key != null && result.ToolResultContents != null &&
+                            result.ToolResultContents.TryGetValue(key, out string fileContent))
+                            return fileContent;
+                        return "[File content not available]";
+                    }
+
+                case "find_in_files":
+                    {
+                        string key = tc.Arguments?.TryGetValue("glob", out string g) == true ? g : null;
+                        if (key != null && result.ToolResultContents != null &&
+                            result.ToolResultContents.TryGetValue(key, out string findContent))
+                            return findContent;
+                        return "[Search results not available]";
+                    }
 
                 case "patch_file":
                     if (result.PatchedPaths != null && result.PatchedPaths.Count > 0)

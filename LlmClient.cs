@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v7.22
+// File: LlmClient.cs  v7.23
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -2943,9 +2943,10 @@ namespace DevMind
                         }
                     }
 
+                    string tcId = tc["id"]?.ToString();
                     results.Add(new ToolCallResult
                     {
-                        Id = tc["id"]?.ToString() ?? $"call_{results.Count}",
+                        Id = string.IsNullOrWhiteSpace(tcId) ? $"call_{results.Count}" : tcId,
                         Name = name,
                         Arguments = args,
                         ThinkingText = thinking
@@ -3042,9 +3043,10 @@ namespace DevMind
                 int index = kvp.Key;
                 var m = kvp.Value;
 
+                string metaId = m["id"]?.ToString();
                 var tc = new JObject
                 {
-                    ["id"] = m["id"]?.ToString() ?? $"call_{index}",
+                    ["id"] = string.IsNullOrWhiteSpace(metaId) ? $"call_{index}" : metaId,
                     ["type"] = m["type"]?.ToString() ?? "function",
                     ["function"] = new JObject
                     {
@@ -3094,9 +3096,10 @@ namespace DevMind
                     }
                 }
 
+                string tcIdArr = tc["id"]?.ToString();
                 results.Add(new ToolCallResult
                 {
-                    Id = tc["id"]?.ToString() ?? $"call_{results.Count}",
+                    Id = string.IsNullOrWhiteSpace(tcIdArr) ? $"call_{results.Count}" : tcIdArr,
                     Name = name,
                     Arguments = args
                 });

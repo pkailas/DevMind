@@ -1,4 +1,4 @@
-// File: AgenticExecutor.cs  v7.1
+// File: AgenticExecutor.cs  v7.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -234,8 +234,9 @@ namespace DevMind
                                     OutputColor.Dim);
                                 break;
                             }
-                            // GrepFileAsync injects results into _readContext and emits status as side effects
-                            await _host.GrepFileAsync(block.Pattern, block.FileName, grepStart, grepEnd);
+                            string grepContent = await _host.GrepFileAsync(block.Pattern, block.FileName, grepStart, grepEnd);
+                            if (grepContent != null)
+                                result.ToolResultContents[block.FileName] = grepContent;
                         }
                         catch (Exception ex)
                         {
@@ -262,8 +263,9 @@ namespace DevMind
                                     OutputColor.Dim);
                                 break;
                             }
-                            // FindInFilesAsync injects results into _readContext and emits status as side effects
-                            await _host.FindInFilesAsync(block.Pattern, block.GlobPattern, findStart, findEnd);
+                            string findContent = await _host.FindInFilesAsync(block.Pattern, block.GlobPattern, findStart, findEnd);
+                            if (findContent != null)
+                                result.ToolResultContents[block.GlobPattern] = findContent;
                         }
                         catch (Exception ex)
                         {
@@ -337,8 +339,9 @@ namespace DevMind
                                     OutputColor.Dim);
                                 break;
                             }
-                            // GetFileDiffAsync injects results into context as a side effect
-                            await _host.GetFileDiffAsync(block.FileName);
+                            string diffContent = await _host.GetFileDiffAsync(block.FileName);
+                            if (diffContent != null)
+                                result.ToolResultContents[block.FileName] = diffContent;
                         }
                         catch (Exception ex)
                         {
@@ -387,9 +390,11 @@ namespace DevMind
                                     OutputColor.Dim);
                                 break;
                             }
-                            await _host.LoadFileContentAsync(
+                            string readContent = await _host.LoadFileContentAsync(
                                 block.FileName, block.RangeStart, block.RangeEnd,
                                 block.ForceFullRead);
+                            if (readContent != null)
+                                result.ToolResultContents[block.FileName] = readContent;
                         }
                         catch (Exception ex)
                         {
