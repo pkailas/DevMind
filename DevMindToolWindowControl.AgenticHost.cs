@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.AgenticHost.cs  v7.6
+// File: DevMindToolWindowControl.AgenticHost.cs  v7.7
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -271,12 +271,20 @@ namespace DevMind
         async Task<string> IAgenticHost.LoadFileContentAsync(
             string fileName, int rangeStart, int rangeEnd, bool forceFullRead)
         {
-            // Handle git commands: keep TextDirective behavior — git output goes to _readContext.
-            // Git read variants are not yet adapted to return content; ToolUse will receive an empty
-            // tool result and the legacy _readContext prepend will deliver the content.
             if (fileName.StartsWith("git ", StringComparison.OrdinalIgnoreCase))
             {
-                await ApplyReadCommandAsync($"READ {fileName}", showOutline: false);
+                bool gitToolUseMode = DevMindOptions.Instance.DirectiveMode != DirectiveMode.TextDirective;
+                if (gitToolUseMode)
+                {
+                    return await LoadGitContentForToolUseAsync(fileName, rangeStart);
+                }
+                // TextDirective path — existing behavior preserved.
+                // For git log, append rangeStart as count if provided so ApplyReadCommandAsync
+                // sees it in the filename string (parsed via countPart extraction).
+                string gitCmd = (fileName.StartsWith("git log", StringComparison.OrdinalIgnoreCase) && rangeStart > 0)
+                    ? $"{fileName} {rangeStart}"
+                    : fileName;
+                await ApplyReadCommandAsync($"READ {gitCmd}", showOutline: false);
                 return string.Empty;
             }
 
@@ -433,6 +441,104 @@ namespace DevMind
                 AppendOutput($"[READ ERROR] {fileName}: {ex.Message}\n", OutputColor.Error);
                 return $"[ERROR reading {fileName}: {ex.Message}]";
             }
+        }
+
+        /// <summary>
+        /// ToolUse-mode git read: executes "git log" or "git diff" in the discovered git root,
+        /// renders output identically to ApplyReadGitCommandAsync's format, and returns the
+        /// rendered string for delivery via the tool result message. Does NOT write to _readContext.
+        ///
+        /// Honors rangeStart as the count for git log (default 10, max 50, clamped to 1-50).
+        /// rangeStart is ignored for git diff.
+        /// </summary>
+        private async Task<string> LoadGitContentForToolUseAsync(string fileName, int rangeStart)
+        {
+            string gitRoot = await FindGitRootAsync();
+            if (gitRoot == null)
+            {
+                AppendOutput("[READ] git: not a git repository\n", OutputColor.Error);
+                return "[READ] git: not a git repository\n";
+            }
+
+            string command;
+            string header;
+
+            if (fileName.StartsWith("git log", StringComparison.OrdinalIgnoreCase))
+            {
+                int count;
+                if (rangeStart > 0)
+                {
+                    count = rangeStart;
+                }
+                else
+                {
+                    string countPart = fileName.Substring("git log".Length).Trim();
+                    count = 10;
+                    if (!string.IsNullOrEmpty(countPart))
+                        int.TryParse(countPart, out count);
+                }
+                count = Math.Max(1, Math.Min(count, 50));
+                command = $"git log --oneline --no-decorate -{count}";
+                header = $"[READ] git log (last {count} commits)";
+            }
+            else if (fileName.StartsWith("git diff", StringComparison.OrdinalIgnoreCase))
+            {
+                string diffArgs = fileName.Substring("git diff".Length).Trim();
+                if (string.IsNullOrEmpty(diffArgs))
+                {
+                    command = "git diff";
+                    header = "[READ] git diff (working changes)";
+                }
+                else if (diffArgs.Equals("--staged", StringComparison.OrdinalIgnoreCase) ||
+                         diffArgs.Equals("--cached", StringComparison.OrdinalIgnoreCase))
+                {
+                    command = $"git diff {diffArgs}";
+                    header = "[READ] git diff --staged";
+                }
+                else
+                {
+                    command = $"git diff {diffArgs}";
+                    header = $"[READ] git diff {diffArgs}";
+                }
+            }
+            else
+            {
+                string errMsg = $"[READ] Unrecognized git command: {fileName}";
+                AppendOutput(errMsg + "\n", OutputColor.Error);
+                return errMsg + "\n";
+            }
+
+            string savedDir = _terminalWorkingDir;
+            _terminalWorkingDir = gitRoot;
+            var (output, exitCode) = await RunShellCommandCaptureAsync(command);
+            _terminalWorkingDir = savedDir;
+
+            if (exitCode != 0)
+            {
+                string errMsg = $"{header}\n(error — exit code {exitCode})\n{output}\n";
+                AppendOutput(errMsg, OutputColor.Error);
+                return errMsg;
+            }
+
+            const int MaxDiffLines = 500;
+            var outputLines = output.Split('\n');
+            string truncatedOutput;
+            if (outputLines.Length > MaxDiffLines)
+            {
+                int omitted = outputLines.Length - MaxDiffLines;
+                truncatedOutput = string.Join("\n", outputLines.Take(MaxDiffLines))
+                    + $"\n[... {omitted} lines omitted — use READ git diff <filename> for specific files]";
+            }
+            else
+            {
+                truncatedOutput = output;
+            }
+
+            if (string.IsNullOrWhiteSpace(truncatedOutput))
+                truncatedOutput = "(no output)";
+
+            AppendOutput($"{header}\n", OutputColor.Success);
+            return $"{header}\n```\n{truncatedOutput}\n```\n\n";
         }
 
         // ── IAgenticHost.AppendOutput ─────────────────────────────────────────────
