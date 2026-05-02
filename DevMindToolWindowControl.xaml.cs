@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v7.6
+// File: DevMindToolWindowControl.xaml.cs  v7.8
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -985,20 +985,18 @@ namespace DevMind
                 }
                 catch { }
 
-                // ── Behavioral rules (included regardless of directive mode) ──
-                string behavioralRules = BuildBehavioralPrompt(buildCommand, projectNamespace);
-
                 string llmDirective;
                 var directiveMode = DevMindOptions.Instance.DirectiveMode;
                 if (directiveMode == DirectiveMode.TextDirective)
                 {
                     // Full text directives — syntax descriptions + behavioral rules
+                    string behavioralRules = BuildBehavioralPrompt(buildCommand, projectNamespace);
                     llmDirective = BuildTextDirectivePrompt(buildCommand) + "\n\n" + behavioralRules;
                 }
                 else
                 {
-                    // ToolUse or Auto — tools are in the request body, system prompt has behavioral rules only
-                    llmDirective = behavioralRules;
+                    // ToolUse or Auto — tools are in the request body. Use ToolUse-specific prompt.
+                    llmDirective = BuildToolUsePrompt(buildCommand, projectNamespace);
                 }
 
                 string combined = $"{originalSystemPrompt}\n\n{llmDirective}";
@@ -2151,6 +2149,15 @@ namespace DevMind
                         return "[Search results not available]";
                     }
 
+                case "list_files":
+                    {
+                        string key = tc.Arguments?.TryGetValue("glob", out string lg) == true ? lg : null;
+                        if (key != null && result.ToolResultContents != null &&
+                            result.ToolResultContents.TryGetValue(key, out string listContent))
+                            return listContent;
+                        return "[ERROR: list_files result not captured]";
+                    }
+
                 case "patch_file":
                     if (result.PatchedPaths != null && result.PatchedPaths.Count > 0)
                         return $"[PATCH applied to {string.Join(", ", result.PatchedPaths)}]";
@@ -2285,6 +2292,71 @@ namespace DevMind
             sb.Append("If tests fail, fix the code with PATCH and TEST again.\n\n");
             sb.Append("## Build Verification\n");
             sb.Append($"After ANY code change emit: SHELL: {buildCommand}");
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// Builds the tool-use-mode system prompt — tool catalog, termination contract,
+        /// path format, build verification, editing workflow, large file strategy, and
+        /// action discipline. Used when DirectiveMode is ToolUse or Auto.
+        /// </summary>
+        private static string BuildToolUsePrompt(string buildCommand, string projectNamespace)
+        {
+            var sb = new System.Text.StringBuilder();
+
+            sb.Append("## Tool Catalog\n");
+            sb.Append("Reach for the right tool for each step:\n");
+            sb.Append("- Discovery (\"what files exist?\"): list_files with a glob pattern\n");
+            sb.Append("- Content search across files: find_in_files\n");
+            sb.Append("- Content search in a known file: grep_file\n");
+            sb.Append("- Reading a file: read_file (large files return an outline first; use start_line/end_line for targeted reads)\n");
+            sb.Append("- Editing an existing file: patch_file\n");
+            sb.Append("- Creating a new file: create_file\n");
+            sb.Append("- Running build: run_build\n");
+            sb.Append("- Running tests: run_tests\n");
+            sb.Append("- Tracking state: scratchpad\n");
+            sb.Append("- Saving cross-session knowledge: save_memory / recall_memory / list_memory_topics\n");
+            sb.Append("- Finishing: task_done\n\n");
+
+            sb.Append("## Termination Contract\n");
+            sb.Append("Every response must either contain a tool call OR call task_done. Free-form prose without a tool call is never a valid completion.\n");
+            sb.Append("After you have an answer or have finished a code change, your final action must be task_done with the answer or summary in the summary parameter.\n");
+            sb.Append("Do not type a final answer as prose and stop — that is an abandoned task, not a completion.\n\n");
+
+            sb.Append("## Path Format\n");
+            sb.Append("All file-path arguments to read_file, patch_file, create_file, grep_file, delete_file, diff_file, append_file, and rename_file must be absolute paths.\n");
+            sb.Append("When list_files or find_in_files returns paths, pass those exact strings to read_file — do not shorten to just the filename.\n\n");
+
+            sb.Append("## Build Verification\n");
+            sb.Append($"Build command: {buildCommand}\n");
+            sb.Append("After ANY code change (patch_file or create_file), call run_build to verify the build still passes.\n\n");
+
+            sb.Append("## Editing Workflow\n");
+            sb.Append("Call read_file before patch_file if you have not seen the file. The find argument to patch_file must be copied verbatim from read_file output — never reconstructed from memory.\n");
+            sb.Append("Do not call read_file on the same file multiple times. If you have an outline and a line range, that is sufficient context to write a patch_file. Act immediately.\n\n");
+
+            sb.Append("## Large File Strategy\n");
+            sb.Append("For files over 100 lines, read_file returns an outline (types, methods, signatures with line numbers) instead of full content.\n");
+            sb.Append("1. First read_file gets the outline.\n");
+            sb.Append("2. Use the outline to identify the exact line range you need.\n");
+            sb.Append("3. Call read_file with start_line and end_line for just that section.\n");
+            sb.Append("4. Call patch_file using only the content from that range.\n");
+            sb.Append("Do not set force_full=true on a large file unless explicitly asked. Work outline → range → patch.\n\n");
+
+            sb.Append("## Error Handling\n");
+            sb.Append("When a tool returns an error, read the error message before retrying. Do not retry the same call with minor variations of the same argument — diagnose first, then either fix the argument substantively or switch to a different tool.\n\n");
+
+            sb.Append("## Action Discipline\n");
+            sb.Append("After read_file, find_in_files, or grep_file returns content, act on it in the same overall task. Never call only read-style tools and stop without progress.\n");
+            sb.Append("Every turn during a code-change task must include at least one mutating tool call (patch_file, create_file, run_build, run_tests, run_shell) unless you are answering a question that requires no code change.\n");
+
+            // TODO: BlockByBlockMode regression — BuildBehavioralPrompt has a conditional block-by-block
+            // instructions section, BuildToolUsePrompt does not. Users with BlockByBlockMode != Off
+            // in ToolUse mode lose pacing guidance. Decide: include block-by-block in ToolUse, or
+            // document as TextDirective-only.
+            if (!string.IsNullOrEmpty(projectNamespace))
+                sb.Append($"\n## Namespace\nWhen creating new files, use the namespace '{projectNamespace}'.");
+
             return sb.ToString();
         }
 

@@ -1,4 +1,4 @@
-// File: ToolCallMapper.cs  v7.2
+// File: ToolCallMapper.cs  v7.4
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System.Collections.Generic;
@@ -186,6 +186,14 @@ namespace DevMind
                     return new ResponseBlock
                     {
                         Type = BlockType.ListMemory
+                    };
+
+                case "list_files":
+                    return new ResponseBlock
+                    {
+                        Type = BlockType.ListFiles,
+                        ListFilesGlob = GetArg(tc, "glob"),
+                        ListFilesRecursive = tc.Arguments?.ContainsKey("recursive") != true || GetBoolArg(tc, "recursive")
                     };
 
                 default:

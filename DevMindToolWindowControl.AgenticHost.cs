@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.AgenticHost.cs  v7.4
+// File: DevMindToolWindowControl.AgenticHost.cs  v7.5
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -545,6 +545,84 @@ namespace DevMind
             AppendOutput($"[FIND] {(hitCap ? MaxMatches + "+" : shownCount.ToString())} match{(shownCount == 1 ? "" : "es")} for \"{pattern}\" in {globPattern}\n", OutputColor.Success);
 
             return result;
+        }
+
+        // ── IAgenticHost.ListFilesAsync ───────────────────────────────────────────
+
+        async Task<string> IAgenticHost.ListFilesAsync(string glob, bool recursive, CancellationToken cancellationToken)
+        {
+            const int Cap = 200;
+
+            // Resolve search root (project directory preferred, fallback to working dir)
+            string searchDir = _terminalWorkingDir;
+            try
+            {
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+                var dte = await VS.GetServiceAsync<EnvDTE.DTE, EnvDTE.DTE>();
+                var project = dte?.ActiveDocument?.ProjectItem?.ContainingProject;
+                if (project != null)
+                {
+                    string projFile = project.FullName;
+                    if (!string.IsNullOrEmpty(projFile))
+                        searchDir = Path.GetDirectoryName(projFile);
+                }
+            }
+            catch { }
+
+            if (string.IsNullOrEmpty(searchDir))
+                return "[ERROR: project root unresolved]";
+
+            // Split glob into directory prefix and file pattern (e.g. "Services/*.cs" → dir="Services", pattern="*.cs")
+            string normalizedGlob = (glob ?? "").Replace('\\', '/');
+            string filePattern = normalizedGlob;
+            string effectiveRoot = searchDir;
+            int lastSlash = normalizedGlob.LastIndexOf('/');
+            if (lastSlash >= 0)
+            {
+                string dirPart = normalizedGlob.Substring(0, lastSlash);
+                filePattern = normalizedGlob.Substring(lastSlash + 1);
+                string candidate = Path.Combine(searchDir, dirPart.Replace('/', Path.DirectorySeparatorChar));
+                if (Directory.Exists(candidate))
+                    effectiveRoot = candidate;
+            }
+
+            if (string.IsNullOrWhiteSpace(filePattern))
+                return "[ERROR: glob pattern is empty]";
+
+            IEnumerable<string> matches;
+            try
+            {
+                if (recursive)
+                    matches = SafeEnumerateFilesGlob(effectiveRoot, filePattern).Where(f => !IsNoisePath(f));
+                else
+                    matches = Directory.EnumerateFiles(effectiveRoot, filePattern, SearchOption.TopDirectoryOnly)
+                        .Where(f => !IsNoisePath(f));
+            }
+            catch (Exception ex)
+            {
+                return $"[ERROR: {ex.Message}]";
+            }
+
+            var sorted = matches
+                .Select(Path.GetFullPath)
+                .OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (sorted.Count == 0)
+                return "[no matches]";
+
+            var sb = new System.Text.StringBuilder();
+            int shown = Math.Min(sorted.Count, Cap);
+            for (int i = 0; i < shown; i++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                sb.AppendLine(sorted[i]);
+            }
+            if (sorted.Count > Cap)
+                sb.AppendLine($"[truncated — {sorted.Count - Cap} more matches]");
+
+            AppendOutput($"[LIST] {shown} file{(shown == 1 ? "" : "s")} matching \"{glob}\"\n", OutputColor.Dim);
+            return sb.ToString().TrimEnd();
         }
 
         // ── IAgenticHost.DeleteFileAsync ──────────────────────────────────────────

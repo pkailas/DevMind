@@ -1,4 +1,4 @@
-// File: AgenticExecutor.cs  v7.2
+// File: AgenticExecutor.cs  v7.3
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -271,6 +271,33 @@ namespace DevMind
                         {
                             result.Errors.Add(ex.Message);
                             _host.AppendOutput($"[FIND ERROR] {block.GlobPattern}: {ex.Message}\n", OutputColor.Error);
+                        }
+                        break;
+
+                    case BlockType.ListFiles:
+                        try
+                        {
+                            string listKey = $"LIST:{block.ListFilesGlob}:{block.ListFilesRecursive}";
+                            if (string.Equals(listKey, _lastReadKey, StringComparison.OrdinalIgnoreCase))
+                                _lastReadRepeatCount++;
+                            else { _lastReadKey = listKey; _lastReadRepeatCount = 1; }
+                            if (_lastReadRepeatCount >= 3)
+                            {
+                                _host.AppendOutput(
+                                    "[LIST returned same content 3 times — possible parsing issue. " +
+                                    "Proceeding with available data. Try a different glob pattern.]\n",
+                                    OutputColor.Dim);
+                                break;
+                            }
+                            string listContent = await _host.ListFilesAsync(
+                                block.ListFilesGlob, block.ListFilesRecursive, _cancellationToken);
+                            if (listContent != null)
+                                result.ToolResultContents[block.ListFilesGlob ?? ""] = listContent;
+                        }
+                        catch (Exception ex)
+                        {
+                            result.Errors.Add(ex.Message);
+                            _host.AppendOutput($"[LIST ERROR] {block.ListFilesGlob}: {ex.Message}\n", OutputColor.Error);
                         }
                         break;
 

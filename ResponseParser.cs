@@ -1,4 +1,4 @@
-// File: ResponseParser.cs  v7.2
+// File: ResponseParser.cs  v7.3
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -8,7 +8,7 @@ using System.Text.RegularExpressions;
 
 namespace DevMind
 {
-    public enum BlockType { Text, File, Patch, Shell, ReadRequest, Scratchpad, Done, Grep, Find, Delete, Rename, Diff, Test, RecallMemory, SaveMemory, ListMemory, AppendFile }
+    public enum BlockType { Text, File, Patch, Shell, ReadRequest, Scratchpad, Done, Grep, Find, Delete, Rename, Diff, Test, RecallMemory, SaveMemory, ListMemory, AppendFile, ListFiles }
 
     public class ResponseBlock
     {
@@ -29,6 +29,8 @@ namespace DevMind
         public string MemoryContent { get; set; }     // for SaveMemory — content to save
         public string MemoryDescription { get; set; } // for SaveMemory — index description
         public bool FromToolCall { get; set; }        // true when block originated from a tool_call (skip fence stripping)
+        public string ListFilesGlob { get; set; }     // for ListFiles — glob pattern (e.g. *.cs, Services/*.cs)
+        public bool ListFilesRecursive { get; set; }  // for ListFiles — whether to recurse into subdirectories
     }
 
     public static class ResponseParser

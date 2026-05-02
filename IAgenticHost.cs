@@ -1,4 +1,4 @@
-// File: IAgenticHost.cs  v7.1
+// File: IAgenticHost.cs  v7.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System.Collections.Generic;
@@ -168,5 +168,16 @@ namespace DevMind
         /// Returns a formatted list of topics.
         /// </summary>
         Task<string> ListMemoryTopicsAsync();
+
+        /// <summary>
+        /// Enumerates files matching a glob pattern under the project root.
+        /// Returns absolute paths, alphabetically sorted, capped at 200 results.
+        /// Skips bin/, obj/, .vs/, .git/, node_modules/, packages/ directories.
+        /// </summary>
+        /// <param name="glob">Glob pattern (e.g., "*.cs", "Services/*.cs"). Required.</param>
+        /// <param name="recursive">If true (default), descends into subdirectories.</param>
+        /// <param name="cancellationToken">Cancellation token.</param>
+        /// <returns>Newline-separated absolute paths, or "[no matches]" if none, with truncation marker if capped.</returns>
+        Task<string> ListFilesAsync(string glob, bool recursive, CancellationToken cancellationToken = default);
     }
 }
