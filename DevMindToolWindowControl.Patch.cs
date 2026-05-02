@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.Patch.cs  v5.18
+// File: DevMindToolWindowControl.Patch.cs  v5.19
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -23,9 +23,6 @@ namespace DevMind
 {
     public partial class DevMindToolWindowControl : UserControl
     {
-        // Keyed by full path — populated by ApplyPatchAsync/ApplyPendingFuzzyPatchAsync, consumed by PATCH-RESULT injector in xaml.cs
-        private readonly Dictionary<string, string> _patchDiffCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
         // ── VS document reload ────────────────────────────────────────────────
 
         /// <summary>
@@ -623,9 +620,6 @@ namespace DevMind
                 }
                 catch { /* non-fatal — file was written, just not auto-reloaded */ }
 
-                // Build diff view for PATCH-RESULT injection (sorted ascending for display)
-                _patchDiffCache[fullPath] = BuildPatchDiffView(content, updated, resolvedBlocks);
-
                 // Refresh _readContext so the agentic loop reasons from the current file state.
                 if (_readContext != null)
                 {
@@ -700,9 +694,6 @@ namespace DevMind
                     ReloadDocumentFromDisk(pending.fullPath);
                 }
                 catch { /* non-fatal — file was written, just not auto-reloaded */ }
-
-                // Build diff view for PATCH-RESULT injection
-                _patchDiffCache[pending.fullPath] = BuildPatchDiffView(pending.content, updated, pending.resolvedBlocks);
 
                 // Refresh _readContext so the agentic loop reasons from the current file state.
                 if (_readContext != null)
@@ -988,9 +979,6 @@ namespace DevMind
                     ReloadDocumentFromDisk(resolved.FullPath);
                 }
                 catch { }
-
-                _patchDiffCache[resolved.FullPath] = BuildPatchDiffView(
-                    resolved.OriginalContent, updated, resolved.ResolvedBlocks);
 
                 if (_readContext != null)
                 {
