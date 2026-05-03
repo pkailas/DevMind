@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.Patch.cs  v5.19
+// File: DevMindToolWindowControl.Patch.cs  v5.20
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -620,24 +620,6 @@ namespace DevMind
                 }
                 catch { /* non-fatal — file was written, just not auto-reloaded */ }
 
-                // Refresh _readContext so the agentic loop reasons from the current file state.
-                if (_readContext != null)
-                {
-                    string patchedFileName = Path.GetFileName(fullPath);
-                    int entryStart = _readContext.IndexOf($"\n\n{patchedFileName}\n```\n", StringComparison.OrdinalIgnoreCase);
-                    if (entryStart >= 0)
-                    {
-                        int blockEnd = _readContext.IndexOf("\n```\n\n", entryStart + patchedFileName.Length, StringComparison.Ordinal);
-                        if (blockEnd >= 0)
-                        {
-                            _readContext = _readContext.Remove(entryStart, blockEnd + "\n```\n\n".Length - entryStart);
-                            int lineCount = updated.Split('\n').Length;
-                            _readContext += $"The following files have been loaded for context:\n\n{patchedFileName}\n```\n{updated}\n```\n\n";
-                            AppendOutput($"[PATCH] Context refreshed: {patchedFileName} ({lineCount} lines)\n", OutputColor.Dim);
-                        }
-                    }
-                }
-
                 int undosAvailable = _patchBackupStack.Count;
                 AppendOutput($"[PATCH] Applied to {fullPath} (undo depth: {undosAvailable})\n", OutputColor.Success);
                 if (clearInput)
@@ -695,24 +677,6 @@ namespace DevMind
                 }
                 catch { /* non-fatal — file was written, just not auto-reloaded */ }
 
-                // Refresh _readContext so the agentic loop reasons from the current file state.
-                if (_readContext != null)
-                {
-                    string patchedFileName = Path.GetFileName(pending.fullPath);
-                    int entryStart = _readContext.IndexOf($"\n\n{patchedFileName}\n```\n", StringComparison.OrdinalIgnoreCase);
-                    if (entryStart >= 0)
-                    {
-                        int blockEnd = _readContext.IndexOf("\n```\n\n", entryStart + patchedFileName.Length, StringComparison.Ordinal);
-                        if (blockEnd >= 0)
-                        {
-                            _readContext = _readContext.Remove(entryStart, blockEnd + "\n```\n\n".Length - entryStart);
-                            int lineCount = updated.Split('\n').Length;
-                            _readContext += $"The following files have been loaded for context:\n\n{patchedFileName}\n```\n{updated}\n```\n\n";
-                            AppendOutput($"[PATCH] Context refreshed: {patchedFileName} ({lineCount} lines)\n", OutputColor.Dim);
-                        }
-                    }
-                }
-
                 int undosAvailable = _patchBackupStack.Count;
                 AppendOutput($"[PATCH] Applied to {pending.fullPath} (undo depth: {undosAvailable})\n", OutputColor.Success);
             }
@@ -720,75 +684,6 @@ namespace DevMind
             {
                 AppendOutput($"[PATCH] Error: {ex.Message}\n", OutputColor.Error);
             }
-        }
-
-        // ── PATCH diff view ──────────────────────────────────────────────────
-
-        /// <summary>
-        /// Builds a compact diff-context view of what changed: ±3 lines of surrounding context
-        /// plus the replaced region with >>> CHANGED: / >>> ADDED: markers.
-        /// Line numbers reflect positions in the new (post-patch) file.
-        /// </summary>
-        private static string BuildPatchDiffView(
-            string oldContent,
-            string updatedContent,
-            List<(int origStart, int origEnd, string replaceText)> resolvedBlocks,
-            int contextLines = 3)
-        {
-            // Normalize to LF for consistent line counting and display
-            string oldNorm = oldContent.Replace("\r\n", "\n").Replace("\r", "\n");
-            string newNorm = updatedContent.Replace("\r\n", "\n").Replace("\r", "\n");
-            string[] newLines = newNorm.Split('\n');
-
-            var sb = new StringBuilder();
-
-            // Sort ascending by origStart for display (blocks were applied in descending order)
-            var sorted = resolvedBlocks.OrderBy(b => b.origStart).ToList();
-            int cumDelta = 0;  // cumulative char-level shift from earlier (lower origStart) replacements
-
-            foreach (var (origStart, origEnd, replaceText) in sorted)
-            {
-                string replaceNorm  = replaceText.Replace("\r\n", "\n").Replace("\r", "\n");
-                string[] replaceLines = replaceNorm.Split('\n');
-
-                // Char position of this block's start in the new content
-                int newStartChar = origStart + cumDelta;
-                newStartChar = Math.Min(newStartChar, newNorm.Length);
-
-                // 1-based line number in new file where replacement starts
-                int newLineNum = newNorm.Substring(0, newStartChar).Count(c => c == '\n') + 1;
-                int newEndLine = newLineNum + replaceLines.Length - 1;
-
-                // How many lines the old block spanned (for CHANGED vs ADDED labelling)
-                int safeLen    = Math.Min(origEnd - origStart, oldNorm.Length - origStart);
-                string oldBlock = safeLen > 0 ? oldNorm.Substring(origStart, safeLen) : string.Empty;
-                int oldLineCount = oldBlock.Length > 0 ? oldBlock.Split('\n').Length : 0;
-
-                sb.AppendLine($"--- Changed region (lines {newLineNum}-{newEndLine}) ---");
-
-                // Pre-context lines (from new file)
-                int preStart = Math.Max(0, newLineNum - 1 - contextLines);
-                for (int i = preStart; i < newLineNum - 1 && i < newLines.Length; i++)
-                    sb.AppendLine($"{i + 1}:     {newLines[i]}");
-
-                // Replacement lines with change markers
-                for (int i = 0; i < replaceLines.Length; i++)
-                {
-                    int lineNum = newLineNum + i;
-                    string marker = i < oldLineCount ? ">>> CHANGED:" : ">>> ADDED:  ";
-                    sb.AppendLine($"{lineNum}: {marker} {replaceLines[i]}");
-                }
-
-                // Post-context lines (from new file)
-                for (int i = newEndLine; i < newEndLine + contextLines && i < newLines.Length; i++)
-                    sb.AppendLine($"{i + 1}:     {newLines[i]}");
-
-                sb.AppendLine("--- End of changes ---");
-
-                cumDelta += replaceText.Length - (origEnd - origStart);
-            }
-
-            return sb.ToString().TrimEnd('\r', '\n');
         }
 
         // ── PATCH resolution (preview gate support) ─────────────────────────
@@ -980,23 +875,6 @@ namespace DevMind
                 }
                 catch { }
 
-                if (_readContext != null)
-                {
-                    string patchedFileName = Path.GetFileName(resolved.FullPath);
-                    int entryStart = _readContext.IndexOf($"\n\n{patchedFileName}\n```\n", StringComparison.OrdinalIgnoreCase);
-                    if (entryStart >= 0)
-                    {
-                        int blockEnd = _readContext.IndexOf("\n```\n\n", entryStart + patchedFileName.Length, StringComparison.Ordinal);
-                        if (blockEnd >= 0)
-                        {
-                            _readContext = _readContext.Remove(entryStart, blockEnd + "\n```\n\n".Length - entryStart);
-                            int lineCount = updated.Split('\n').Length;
-                            _readContext += $"The following files have been loaded for context:\n\n{patchedFileName}\n```\n{updated}\n```\n\n";
-                            AppendOutput($"[PATCH] Context refreshed: {patchedFileName} ({lineCount} lines)\n", OutputColor.Dim);
-                        }
-                    }
-                }
-
                 int undosAvailable = _patchBackupStack.Count;
                 AppendOutput($"[PATCH] Applied to {resolved.FullPath} (undo depth: {undosAvailable})\n", OutputColor.Success);
                 return resolved.FullPath;
@@ -1032,19 +910,12 @@ namespace DevMind
                     blockLines.RemoveAt(blockLines.Count - 1);
                 block = string.Join("\n", blockLines);
 
-                // Auto-READ the target file if it is not already loaded into _readContext.
-                // This ensures the model always has current file state before patching,
-                // regardless of whether it explicitly issued a READ directive.
                 string firstLine = block.Split('\n')[0];
                 string blockFileName = firstLine.Substring("PATCH ".Length).Trim();
                 string blockFileNameOnly = Path.GetFileName(blockFileName.Replace('\\', '/'));
                 if (!string.IsNullOrEmpty(blockFileNameOnly))
                 {
-                    // Resolve full path to match the format stored in _readContext by ApplyReadCommandAsync
-                    string resolvedPath = await FindFileInSolutionAsync(blockFileNameOnly, blockFileName.Replace('\\', '/'))
-                        ?? Path.Combine(_terminalWorkingDir, blockFileNameOnly);
-                    bool alreadyLoaded = _readContext != null && _readContext.Contains(resolvedPath);
-                    if (!alreadyLoaded)
+                    if (!_llmClient._fileCache.Contains(blockFileNameOnly))
                     {
                         AppendOutput($"[AUTO-READ] Loading {blockFileNameOnly} before patch...\n", OutputColor.Dim);
                         await ApplyReadCommandAsync($"READ {blockFileName}");

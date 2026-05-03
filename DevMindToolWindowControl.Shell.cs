@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.Shell.cs  v5.6
+// File: DevMindToolWindowControl.Shell.cs  v5.7
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -88,38 +88,6 @@ namespace DevMind
 #pragma warning disable VSSDK007
                 _ = ThreadHelper.JoinableTaskFactory.RunAsync(async delegate { await HandleAgentLoadCommandAsync(name); });
 #pragma warning restore VSSDK007
-                return;
-            }
-
-            // /context — show or clear READ-loaded file context
-            if (command.Equals("/context", StringComparison.OrdinalIgnoreCase) ||
-                command.Equals("context", StringComparison.OrdinalIgnoreCase))
-            {
-                if (string.IsNullOrEmpty(_readContext))
-                {
-                    AppendOutput("No READ context loaded.\n", OutputColor.Dim);
-                }
-                else
-                {
-                    // Extract filenames from the context headers
-                    var contextFiles = System.Text.RegularExpressions.Regex
-                        .Matches(_readContext, @"The following files have been loaded for context:\r?\n\r?\n(.+?)\r?\n")
-                        .Cast<System.Text.RegularExpressions.Match>()
-                        .Select(m => m.Groups[1].Value.Trim())
-                        .ToList();
-                    AppendOutput($"READ context: {contextFiles.Count} file(s) loaded:\n", OutputColor.Dim);
-                    foreach (var f in contextFiles)
-                        AppendOutput($"  • {f}\n", OutputColor.Dim);
-                    AppendOutput("Type /context clear to remove.\n", OutputColor.Dim);
-                }
-                return;
-            }
-
-            if (command.Equals("/context clear", StringComparison.OrdinalIgnoreCase) ||
-                command.Equals("context clear", StringComparison.OrdinalIgnoreCase))
-            {
-                _readContext = null;
-                AppendOutput("READ context cleared.\n", OutputColor.Dim);
                 return;
             }
 

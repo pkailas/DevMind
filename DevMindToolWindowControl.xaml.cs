@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v7.12
+// File: DevMindToolWindowControl.xaml.cs  v7.13
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -41,8 +41,6 @@ namespace DevMind
         private System.Windows.Threading.DispatcherTimer _thinkingTimer;
         private int _thinkingSeconds;
         private string _devMindContext;
-        private string _readContext;
-        private string _pendingShellContext;
         private bool _shellLoopPending;
         private int _agenticDepth;
         // True when a prose-finish re-prompt has already been fired for the current task.
@@ -56,7 +54,6 @@ namespace DevMind
         private readonly Stack<(string originalPath, string backupPath)> _patchBackupStack = new Stack<(string, string)>();
         private const int PatchBackupStackLimit = 10;
         private Paragraph _spacerParagraph;
-        private string _pendingResubmitPrompt;
         // Tracks filenames (filename-only, case-insensitive) that have been READ during the
         // current task. Cleared at the start of each new top-level user request.
         // Used by the unrelated-file write guard in AgenticHost.
@@ -371,9 +368,7 @@ namespace DevMind
             // Force DevMind.md reload on next Ask
             _devMindContext = null;
 
-            // Clear any READ-loaded file context
-            _readContext = null;
-            _pendingResubmitPrompt = null;
+            // Clear read file count
             _readFileCount = 0;
 
             // Clear per-conversation file snapshots (for DIFF directive)
@@ -574,6 +569,7 @@ namespace DevMind
             {
                 _agenticDepth = 0;
                 _promptedForTaskDone = false;
+                _taskReadFiles.Clear();
             }
             _llmClient.IncrementTurn();
 
@@ -812,23 +808,6 @@ namespace DevMind
             _inThinkBlock = false;
             _thinkBuffer.Clear();
 
-            // Capture original prompt for auto-resubmit after READ-only responses
-            // Only save when not already in an agentic or resubmit cycle
-            if (!_shellLoopPending && _pendingResubmitPrompt == null)
-            {
-                _pendingResubmitPrompt = text;
-                // Preserve files registered by pre-processed READ lines above —
-                // Clear() would wipe them, causing false positives in the write guard.
-                var preReadFiles = _taskReadFiles.Count > 0
-                    ? new HashSet<string>(_taskReadFiles, StringComparer.OrdinalIgnoreCase)
-                    : null;
-                _taskReadFiles.Clear();
-                if (preReadFiles != null)
-                    _taskReadFiles.UnionWith(preReadFiles);
-            }
-
-            System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] Post-READ: text='{text.Substring(0, Math.Min(text.Length, 120))}', _pendingResubmitPrompt set={_pendingResubmitPrompt != null}");
-
             InputTextBox.Text = "";
             SetInputEnabled(false);
 
@@ -859,12 +838,6 @@ namespace DevMind
 
             string activeProjectPath = await GetActiveProjectPathAsync();
             string contextualMessage = BuildMessageWithContext(text, selectedText, fileName, fullContent, activeProjectPath);
-
-            if (!string.IsNullOrEmpty(_pendingShellContext))
-            {
-                contextualMessage = _pendingShellContext + "\n\n" + contextualMessage;
-                _pendingShellContext = null;
-            }
 
             // Lazy-load project context once per session (DevMind.md / AGENTS.md / CLAUDE.md)
             if (_devMindContext == null)
@@ -1116,7 +1089,6 @@ namespace DevMind
                                     {
                                         AppendOutput("[AGENTIC] Task complete.\n", OutputColor.Success);
                                         _agenticDepth = 0;
-                                        _pendingResubmitPrompt = null;
                                         // fall through to completion
                                     }
                                     // Check for run/exec command — treat as task complete
@@ -1126,7 +1098,6 @@ namespace DevMind
                                     {
                                         AppendOutput("[AGENTIC] Run/exec command succeeded — treating as task complete.\n", OutputColor.Success);
                                         _agenticDepth = 0;
-                                        _pendingResubmitPrompt = null;
                                         // fall through to completion
                                     }
                                     // Check depth cap
@@ -1164,7 +1135,6 @@ namespace DevMind
                                         // Tool results are already in conversation as tool role messages.
                                         // Simple continuation prompt — the model has all the context it needs.
                                         InputTextBox.Text = "Continue with the task.";
-                                        _pendingShellContext = null;
 
                                         // Check cancellation before re-triggering
                                         if (_cts.IsCancellationRequested)
@@ -1214,11 +1184,10 @@ namespace DevMind
                                         // Fire one-shot re-prompt asking for task_done.
                                         // Skip LogTrainingTurn — the re-prompt's outcome will be logged when it completes.
                                         _promptedForTaskDone = true;
-                                        _pendingShellContext =
+                                        InputTextBox.Text =
                                             "You produced a prose answer but did not call task_done. " +
                                             "Call task_done now with your answer in the summary parameter. " +
                                             "Do not repeat the answer in prose — only the tool call.";
-                                        InputTextBox.Text = "Continue with the task.";
                                         _shellLoopPending = true;
 
                                         if (DevMindOptions.Instance.ShowDebugOutput)
@@ -1239,7 +1208,6 @@ namespace DevMind
 
                                     // Stop — either pure-question response, already re-prompted once, or empty response
                                     _agenticDepth = 0;
-                                    _pendingResubmitPrompt = null;
                                     LogTrainingTurn(text, fullResponse, outcome, null, null);
                                     if (DevMindOptions.Instance.ShowDebugOutput)
                                     {
@@ -1265,7 +1233,6 @@ namespace DevMind
                                 }
 
                                 _agenticDepth = 0;
-                                _pendingResubmitPrompt = null;
                                 _thinkingTimer?.Stop();
                                 _thinkingTimer = null;
                                 StatusText.Text = "Ready";
@@ -1300,7 +1267,6 @@ namespace DevMind
                                 _thinkingTimer = null;
                                 _shellLoopPending = false;
                                 _agenticDepth = 0;
-                                _pendingResubmitPrompt = null;
                                 AppendOutput($"\n[Error: {ex.Message}]\n", OutputColor.Error);
                                 StatusText.Text = "Error";
                                 SetInputEnabled(true);
@@ -1321,7 +1287,6 @@ namespace DevMind
                         StatusText.Text = "Stopped";
                         _shellLoopPending = false;
                         _agenticDepth = 0;
-                        _pendingResubmitPrompt = null;
                     }
                     // Do NOT reset _agenticDepth or SetInputEnabled here.
                     // The onComplete handler is dispatched via Dispatcher.BeginInvoke and

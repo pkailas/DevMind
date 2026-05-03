@@ -1,4 +1,4 @@
-// File: AgenticExecutor.cs  v7.3
+// File: AgenticExecutor.cs  v7.4
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -90,9 +90,6 @@ namespace DevMind
                         processFiles: true,
                         processPatches: true,
                         processShell: false);
-
-                case ActionType.LoadAndResubmit:
-                    return await ExecuteLoadAndResubmitAsync(action, outcome);
 
                 case ActionType.RetryWithCorrection:
                     if (!string.IsNullOrEmpty(action.CorrectionPrompt))
@@ -641,152 +638,5 @@ namespace DevMind
             }
         }
 
-        /// <summary>
-        /// Loads files specified in <paramref name="action"/>.FilesToRead and runs
-        /// any GREP operations from <paramref name="outcome"/>.Blocks. After loading,
-        /// signals the main loop to resubmit the request with the newly loaded content.
-        /// </summary>
-        /// <param name="action">The agentic action containing files to read.</param>
-        /// <param name="outcome">The response outcome that may contain GREP blocks.</param>
-        /// <returns>An <see cref="ExecutionResult"/> with None status to trigger resubmission.</returns>
-        private async Task<ExecutionResult> ExecuteLoadAndResubmitAsync(
-            AgenticAction action,
-            ResponseOutcome outcome)
-        {
-            foreach (string fileName in action.FilesToRead)
-            {
-                // Find the matching ReadRequest block to get range/force parameters
-                var readBlock = outcome?.Blocks?.FirstOrDefault(
-                    b => b.Type == BlockType.ReadRequest
-                      && string.Equals(b.FileName, fileName, StringComparison.OrdinalIgnoreCase));
-
-                int rangeStart    = readBlock?.RangeStart    ?? 0;
-                int rangeEnd      = readBlock?.RangeEnd      ?? 0;
-                bool forceFullRead = readBlock?.ForceFullRead ?? false;
-
-                string readKey = rangeStart > 0
-                    ? $"{fileName}:{rangeStart}-{rangeEnd}"
-                    : fileName;
-                if (string.Equals(readKey, _lastReadKey, StringComparison.OrdinalIgnoreCase))
-                    _lastReadRepeatCount++;
-                else { _lastReadKey = readKey; _lastReadRepeatCount = 1; }
-                if (_lastReadRepeatCount >= 3)
-                {
-                    _host.AppendOutput(
-                        "[READ returned same content 3 times — possible truncation or parsing issue. " +
-                        "Proceeding with available data. Use a different line range or try GREP to locate what you need.]\n",
-                        OutputColor.Dim);
-                    continue;
-                }
-
-                try
-                {
-                    await _host.LoadFileContentAsync(fileName, rangeStart, rangeEnd, forceFullRead);
-                }
-                catch (Exception ex)
-                {
-                    _host.AppendOutput($"[READ ERROR] {fileName}: {ex.Message}\n", OutputColor.Error);
-                }
-            }
-
-            // Execute any GREP blocks — results are injected into context as a side effect
-            if (outcome?.Blocks != null)
-            {
-                foreach (var block in outcome.Blocks)
-                {
-                    if (block.Type != BlockType.Grep) continue;
-                    try
-                    {
-                        int? grepStart = block.RangeStart > 0 ? (int?)block.RangeStart : null;
-                        int? grepEnd   = block.RangeEnd   > 0 ? (int?)block.RangeEnd   : null;
-                        string grepKey = $"GREP:{block.Pattern}@{block.FileName}" +
-                            (grepStart.HasValue ? $":{grepStart}-{grepEnd}" : "");
-                        if (string.Equals(grepKey, _lastReadKey, StringComparison.OrdinalIgnoreCase))
-                            _lastReadRepeatCount++;
-                        else { _lastReadKey = grepKey; _lastReadRepeatCount = 1; }
-                        if (_lastReadRepeatCount >= 3)
-                        {
-                            _host.AppendOutput(
-                                "[READ returned same content 3 times — possible truncation or parsing issue. " +
-                                "Proceeding with available data. Use a different line range or try GREP to locate what you need.]\n",
-                                OutputColor.Dim);
-                            continue;
-                        }
-                        // GrepFileAsync injects results into _readContext and emits status as side effects
-                        await _host.GrepFileAsync(block.Pattern, block.FileName, grepStart, grepEnd);
-                    }
-                    catch (Exception ex)
-                    {
-                        _host.AppendOutput($"[GREP ERROR] {block.FileName}: {ex.Message}\n", OutputColor.Error);
-                    }
-                }
-            }
-
-            // Execute any FIND blocks — results are injected into context as a side effect
-            if (outcome?.Blocks != null)
-            {
-                foreach (var block in outcome.Blocks)
-                {
-                    if (block.Type != BlockType.Find) continue;
-                    try
-                    {
-                        int? findStart = block.RangeStart > 0 ? (int?)block.RangeStart : null;
-                        int? findEnd   = block.RangeEnd   > 0 ? (int?)block.RangeEnd   : null;
-                        string findKey = $"FIND:{block.Pattern}@{block.GlobPattern}" +
-                            (findStart.HasValue ? $":{findStart}-{findEnd}" : "");
-                        if (string.Equals(findKey, _lastReadKey, StringComparison.OrdinalIgnoreCase))
-                            _lastReadRepeatCount++;
-                        else { _lastReadKey = findKey; _lastReadRepeatCount = 1; }
-                        if (_lastReadRepeatCount >= 3)
-                        {
-                            _host.AppendOutput(
-                                "[FIND returned same content 3 times — possible truncation or parsing issue. " +
-                                "Proceeding with available data. Use a different glob or line range.]\n",
-                                OutputColor.Dim);
-                            continue;
-                        }
-                        // FindInFilesAsync injects results into _readContext and emits status as side effects
-                        await _host.FindInFilesAsync(block.Pattern, block.GlobPattern, findStart, findEnd);
-                    }
-                    catch (Exception ex)
-                    {
-                        _host.AppendOutput($"[FIND ERROR] {block.GlobPattern}: {ex.Message}\n", OutputColor.Error);
-                    }
-                }
-            }
-
-            // Execute any DIFF blocks — results are injected into context as a side effect
-            if (outcome?.Blocks != null)
-            {
-                foreach (var block in outcome.Blocks)
-                {
-                    if (block.Type != BlockType.Diff) continue;
-                    try
-                    {
-                        string diffKey = $"DIFF:{block.FileName}";
-                        if (string.Equals(diffKey, _lastReadKey, StringComparison.OrdinalIgnoreCase))
-                            _lastReadRepeatCount++;
-                        else { _lastReadKey = diffKey; _lastReadRepeatCount = 1; }
-                        if (_lastReadRepeatCount >= 3)
-                        {
-                            _host.AppendOutput(
-                                "[DIFF returned same content 3 times — skipping.]\n",
-                                OutputColor.Dim);
-                            continue;
-                        }
-                        await _host.GetFileDiffAsync(block.FileName);
-                    }
-                    catch (Exception ex)
-                    {
-                        _host.AppendOutput($"[DIFF ERROR] {block.FileName}: {ex.Message}\n", OutputColor.Error);
-                    }
-                }
-            }
-
-            _host.AppendOutput("[AUTO-READ] File(s) loaded — resubmitting...\n", OutputColor.Dim);
-
-            // The main loop handles resubmission; we just signal nothing was executed
-            return ExecutionResult.None();
-        }
     }
 }

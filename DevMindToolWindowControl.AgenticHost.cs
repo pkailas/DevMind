@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.AgenticHost.cs  v7.7
+// File: DevMindToolWindowControl.AgenticHost.cs  v7.8
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -64,20 +64,12 @@ namespace DevMind
 
         /// <summary>
         /// Returns true if the model is allowed to write to the given file without user
-        /// confirmation — i.e., the file was read during the current task OR was explicitly
-        /// named in the user's original prompt.
+        /// confirmation — i.e., the file was read during the current task, or no files
+        /// have been read yet (new task / direct invocation — be permissive).
         /// </summary>
         private bool IsFileKnownToTask(string fileNameOnly)
         {
-            if (_taskReadFiles.Contains(fileNameOnly))
-                return true;
-            if (!string.IsNullOrEmpty(_pendingResubmitPrompt) &&
-                _pendingResubmitPrompt.IndexOf(fileNameOnly, StringComparison.OrdinalIgnoreCase) >= 0)
-                return true;
-            // No active task prompt recorded (e.g. direct invocation) — be permissive.
-            if (_pendingResubmitPrompt == null)
-                return true;
-            return false;
+            return _taskReadFiles.Contains(fileNameOnly) || _taskReadFiles.Count == 0;
         }
 
         /// <summary>
@@ -141,8 +133,7 @@ namespace DevMind
                         await FindFileInSolutionAsync(patchFileOnly, blockFileName.Replace('\\', '/'))
                         ?? Path.Combine(_terminalWorkingDir, patchFileOnly);
 
-                    bool alreadyLoaded = _readContext != null && _readContext.Contains(resolvedPath);
-                    if (!alreadyLoaded)
+                    if (!_llmClient._fileCache.Contains(patchFileOnly))
                     {
                         AppendOutput($"[AUTO-READ] Loading {patchFileOnly} before patch...\n", OutputColor.Dim);
                         await ApplyReadCommandAsync($"READ {blockFileName}");
@@ -292,25 +283,11 @@ namespace DevMind
 
             if (isToolUseMode)
             {
-                // ── ToolUse path — render directly, return content, do NOT touch _readContext ──
+                // ── ToolUse path — render directly, return content ──
                 return await LoadFileContentForToolUseAsync(fileName, rangeStart, rangeEnd, forceFullRead);
             }
 
             // ── TextDirective path — original behavior preserved ──
-
-            // ── NearlineCache check — instant recall of recently trimmed file content ──
-            if (rangeStart <= 0 && !forceFullRead && _llmClient?.NearlineCache != null)
-            {
-                string cacheKey = $"read:{fileName}";
-                string cached = _llmClient.NearlineCache.Retrieve(cacheKey);
-                if (cached != null)
-                {
-                    AppendOutput($"[CACHE HIT] {fileName}\n", OutputColor.Dim);
-                    // Inject cached content into _readContext — same path as a normal READ
-                    _readContext = (_readContext ?? "") + cached;
-                    return string.Empty;
-                }
-            }
 
             // Resolve file path and capture original snapshot (for DIFF support) before reading
             try
@@ -339,9 +316,7 @@ namespace DevMind
         /// <summary>
         /// ToolUse-mode read: renders the [READ:filename] block (full, outline, or range)
         /// and returns it as a string for delivery via the tool result message.
-        /// Does NOT write to _readContext. Updates _filesReadThisSession, _taskReadFiles,
-        /// the file cache, and DIFF snapshot — same side effects as the TextDirective path
-        /// minus the _readContext write.
+        /// Updates _filesReadThisSession, _taskReadFiles, the file cache, and DIFF snapshot.
         /// </summary>
         private async Task<string> LoadFileContentForToolUseAsync(
             string fileName, int rangeStart, int rangeEnd, bool forceFullRead)
@@ -446,7 +421,7 @@ namespace DevMind
         /// <summary>
         /// ToolUse-mode git read: executes "git log" or "git diff" in the discovered git root,
         /// renders output identically to ApplyReadGitCommandAsync's format, and returns the
-        /// rendered string for delivery via the tool result message. Does NOT write to _readContext.
+        /// rendered string for delivery via the tool result message.
         ///
         /// Honors rangeStart as the count for git log (default 10, max 50, clamped to 1-50).
         /// rangeStart is ignored for git diff.
@@ -623,7 +598,6 @@ namespace DevMind
             if (matches.Count == 0)
             {
                 string noMatch = $"GREP: no matches for \"{pattern}\" in {filename}";
-                _readContext = (_readContext ?? "") + noMatch + "\n\n";
                 AppendOutput($"[GREP] no matches for \"{pattern}\" in {filename}\n", OutputColor.Dim);
                 return noMatch;
             }
@@ -648,8 +622,6 @@ namespace DevMind
 
             string result = sb.ToString().TrimEnd('\r', '\n');
 
-            // Inject into read context so the LLM sees the results on resubmit (same pattern as ApplyReadCommandAsync)
-            _readContext = (_readContext ?? "") + result + "\n\n";
             _taskReadFiles.Add(fileNameOnly);
             AppendOutput($"[GREP] {totalMatches} match{(totalMatches == 1 ? "" : "es")} for \"{pattern}\" in {filename}\n", OutputColor.Success);
 
@@ -749,7 +721,6 @@ namespace DevMind
             if (allMatches.Count == 0)
             {
                 string noMatch = $"FIND: no matches for \"{pattern}\" in {globPattern}";
-                _readContext = (_readContext ?? "") + noMatch + "\n\n";
                 AppendOutput($"[FIND] no matches for \"{pattern}\" in {globPattern}\n", OutputColor.Dim);
                 return noMatch;
             }
@@ -766,7 +737,6 @@ namespace DevMind
 
             string result = sb.ToString().TrimEnd('\r', '\n');
 
-            _readContext = (_readContext ?? "") + result + "\n\n";
             AppendOutput($"[FIND] {(hitCap ? MaxMatches + "+" : shownCount.ToString())} match{(shownCount == 1 ? "" : "es")} for \"{pattern}\" in {globPattern}\n", OutputColor.Success);
 
             return result;
@@ -982,7 +952,6 @@ namespace DevMind
             if (!_fileSnapshots.ContainsKey(resolvedPath))
             {
                 string noSnap = $"DIFF: No changes — {filename} has not been modified this session.";
-                _readContext = (_readContext ?? "") + noSnap + "\n\n";
                 AppendOutput($"[DIFF] {filename}: not modified this session\n", OutputColor.Dim);
                 return noSnap;
             }
@@ -1000,7 +969,6 @@ namespace DevMind
             if (string.Equals(normOld, normNew, StringComparison.Ordinal))
             {
                 string noChange = $"DIFF: No changes detected in {filename}.";
-                _readContext = (_readContext ?? "") + noChange + "\n\n";
                 AppendOutput($"[DIFF] {filename}: no changes\n", OutputColor.Dim);
                 return noChange;
             }
@@ -1009,7 +977,6 @@ namespace DevMind
             string[] newLines = normNew.Split('\n');
 
             string diffResult = DiffHelper.GenerateUnifiedDiff(filename, oldLines, newLines);
-            _readContext = (_readContext ?? "") + diffResult + "\n\n";
 
             AppendOutput($"[DIFF] {filename}: changes shown ({oldLines.Length} → {newLines.Length} lines)\n", OutputColor.Dim);
 
@@ -1318,8 +1285,7 @@ namespace DevMind
                         await FindFileInSolutionAsync(patchFileOnly, blockFileName.Replace('\\', '/'))
                         ?? Path.Combine(_terminalWorkingDir, patchFileOnly);
 
-                    bool alreadyLoaded = _readContext != null && _readContext.Contains(resolvedPath);
-                    if (!alreadyLoaded)
+                    if (!_llmClient._fileCache.Contains(patchFileOnly))
                     {
                         AppendOutput($"[AUTO-READ] Loading {patchFileOnly} before patch...\n", OutputColor.Dim);
                         await ApplyReadCommandAsync($"READ {blockFileName}");

@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.Context.cs  v5.21
+// File: DevMindToolWindowControl.Context.cs  v5.22
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -372,7 +372,7 @@ namespace DevMind
         /// Renders a READ result block for a file — either the full content wrapped in
         /// "[READ:filename]\n…\n```\n&lt;content&gt;\n```\n\n" or the outline wrapped in
         /// "[READ:filename] (N lines — outline only…)\n&lt;outline&gt;\n\n".
-        /// Pure rendering — no side effects, no _readContext writes, no _filesReadThisSession updates.
+        /// Pure rendering — no side effects, no _filesReadThisSession updates.
         /// </summary>
         private static string RenderReadBlock(
             string fileNameOnly,
@@ -476,28 +476,8 @@ namespace DevMind
                     if (!File.Exists(fullPath))
                     {
                         AppendOutput($"[READ] File not found: {hint}\n", OutputColor.Warning);
-                        string notFoundMsg = await BuildFileNotFoundMessageAsync("READ", hint);
-                        _readContext = (_readContext ?? "") + notFoundMsg + "\n\n";
+                        await BuildFileNotFoundMessageAsync("READ", hint);
                         continue;
-                    }
-
-                    // Duplicate guard — skip if this file is already in context, unless RELOAD was used
-                    if (!isReload && _readContext != null && _readContext.Contains(fullPath))
-                    {
-                        AppendOutput($"[READ] {fileNameOnly} already in context — skipping.\n", OutputColor.Dim);
-                        continue;
-                    }
-
-                    // RELOAD — remove existing entry so it is replaced with fresh content
-                    if (isReload && _readContext != null)
-                    {
-                        int entryStart = _readContext.IndexOf($"\n\n{fileNameOnly}\n```\n", StringComparison.OrdinalIgnoreCase);
-                        if (entryStart >= 0)
-                        {
-                            int blockEnd = _readContext.IndexOf("\n```\n\n", entryStart + fileNameOnly.Length, StringComparison.Ordinal);
-                            if (blockEnd >= 0)
-                                _readContext = _readContext.Remove(entryStart, blockEnd + "\n```\n\n".Length - entryStart);
-                        }
                     }
 
                     var (content, _) = ReadFilePreservingEncoding(fullPath);
@@ -514,8 +494,7 @@ namespace DevMind
                     // Track that we've now read this file
                     _llmClient._filesReadThisSession.Add(fileNameOnly);
 
-                    string rendered = RenderReadBlock(fileNameOnly, content, lineCount, isForceRead, alreadyRead, out bool wasOutline);
-                    _readContext = (_readContext ?? "") + rendered;
+                    RenderReadBlock(fileNameOnly, content, lineCount, isForceRead, alreadyRead, out bool wasOutline);
 
                     if (wasOutline)
                         AppendOutput($"[READ] {fullPath} ({lineCount} lines — outline{(alreadyRead ? ", re-read" : "")})\n", OutputColor.Success);
@@ -551,8 +530,7 @@ namespace DevMind
                     if (!File.Exists(fullPath))
                     {
                         AppendOutput($"[READ] File not found: {fileHint}\n", OutputColor.Warning);
-                        string notFoundMsg = await BuildFileNotFoundMessageAsync("READ", fileHint);
-                        _readContext = (_readContext ?? "") + notFoundMsg + "\n\n";
+                        await BuildFileNotFoundMessageAsync("READ", fileHint);
                         return;
                     }
 
@@ -588,9 +566,6 @@ namespace DevMind
                     numbered.AppendLine($"{clampedStart + i}: {rawLines[i].TrimEnd('\r')}");
 
                 bool clamped = clampedEnd < endLine;
-                _readContext = (_readContext ?? "") +
-                    RenderReadRangeBlock(fileNameOnly, clampedStart, clampedEnd, totalLines, numbered.ToString(), clamped);
-
                 AppendOutput($"[READ] {fileNameOnly}:{clampedStart}-{clampedEnd} ({clampedEnd - clampedStart + 1} lines){(clamped ? " [clamped]" : "")}\n", OutputColor.Success);
 
                 // Display content for user-initiated reads
@@ -714,7 +689,7 @@ namespace DevMind
 
         /// <summary>
         /// Scans a user prompt for file/class references and auto-reads up to 3
-        /// files that are not already present in _readContext.
+        /// files not already in the file cache.
         /// </summary>
         private async Task AutoReadReferencedFilesAsync(string prompt)
         {
@@ -773,11 +748,6 @@ namespace DevMind
                 {
                     if (autoReadCount >= MaxAutoReads) break;
 
-                    // Skip if already loaded into context
-                    string tag = $"[READ:{candidate}]";
-                    if (_readContext != null && _readContext.IndexOf(tag, StringComparison.OrdinalIgnoreCase) >= 0)
-                        continue;
-
                     string fullPath = await FindFileInSolutionAsync(candidate);
                     if (fullPath == null || !File.Exists(fullPath)) continue;
 
@@ -821,16 +791,13 @@ namespace DevMind
 
         /// <summary>
         /// Handles "git log [N]" and "git diff [args]" READ variants.
-        /// Runs the appropriate git command and injects output into _readContext.
         /// </summary>
         private async Task ApplyReadGitCommandAsync(string gitArgs)
         {
             string gitRoot = await FindGitRootAsync();
             if (gitRoot == null)
             {
-                string msg = "[READ] git: not a git repository\n";
-                AppendOutput(msg, OutputColor.Error);
-                _readContext = (_readContext ?? "") + msg + "\n";
+                AppendOutput("[READ] git: not a git repository\n", OutputColor.Error);
                 return;
             }
 
@@ -883,9 +850,7 @@ namespace DevMind
 
             if (exitCode != 0)
             {
-                string errMsg = $"{header}\n(error — exit code {exitCode})\n{output}\n";
-                AppendOutput(errMsg, OutputColor.Error);
-                _readContext = (_readContext ?? "") + errMsg + "\n";
+                AppendOutput($"{header}\n(error — exit code {exitCode})\n{output}\n", OutputColor.Error);
                 return;
             }
 
@@ -907,8 +872,6 @@ namespace DevMind
             if (string.IsNullOrWhiteSpace(truncatedOutput))
                 truncatedOutput = "(no output)";
 
-            string contextBlock = $"{header}\n```\n{truncatedOutput}\n```\n\n";
-            _readContext = (_readContext ?? "") + contextBlock;
             AppendOutput($"{header}\n", OutputColor.Success);
         }
 
