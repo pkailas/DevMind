@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.AgenticHost.cs  v7.8
+// File: DevMindToolWindowControl.AgenticHost.cs  v7.9
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -33,8 +33,8 @@ namespace DevMind
         /// </summary>
         private void EnsureMemoryManager()
         {
-            if (_memoryManager == null && !string.IsNullOrEmpty(_terminalWorkingDir))
-                _memoryManager = new MemoryManager(_terminalWorkingDir);
+            if (_memoryManager == null && !string.IsNullOrEmpty(_shellRunner.WorkingDirectory))
+                _memoryManager = new MemoryManager(_shellRunner.WorkingDirectory);
         }
 
         // ── File snapshot tracking (for DIFF directive) ───────────────────────────
@@ -131,7 +131,7 @@ namespace DevMind
                 {
                     string resolvedPath =
                         await FindFileInSolutionAsync(patchFileOnly, blockFileName.Replace('\\', '/'))
-                        ?? Path.Combine(_terminalWorkingDir, patchFileOnly);
+                        ?? Path.Combine(_shellRunner.WorkingDirectory, patchFileOnly);
 
                     if (!_llmClient.FileCache.Contains(patchFileOnly))
                     {
@@ -155,10 +155,14 @@ namespace DevMind
         async Task<(int exitCode, string output)> IAgenticHost.RunShellAsync(string command)
         {
             AppendOutput($"[SHELL] > {command}\n", OutputColor.Dim);
-            var (output, exitCode) = await RunShellCommandCaptureAsync(command);
+            // Progress<T> captures the current SynchronizationContext (UI thread) so each
+            // Report() call is marshalled back to the UI thread — safe to call AppendOutput directly.
+            var progress = new Progress<ShellOutputLine>(o =>
+                AppendOutput(o.Line + "\n", o.IsError ? OutputColor.Error : OutputColor.Normal));
+            var (output, exitCode) = await _shellRunner.ExecuteAsync(
+                command, _cts?.Token ?? CancellationToken.None, onLine: progress);
             _lastShellExitCode = exitCode;
             _lastShellCommand  = command;
-            AppendOutput(output + "\n", OutputColor.Normal);
             return (exitCode, output);
         }
 
@@ -191,7 +195,7 @@ namespace DevMind
             {
                 if (Path.IsPathRooted(fileName))
                     return fileName;
-                return Path.Combine(_terminalWorkingDir, fileName);
+                return Path.Combine(_shellRunner.WorkingDirectory, fileName);
             }
             catch
             {
@@ -222,7 +226,7 @@ namespace DevMind
             try
             {
                 string resolvedPath = await FindFileInSolutionAsync(appendFileOnly, fileName.Replace('\\', '/'))
-                    ?? Path.Combine(_terminalWorkingDir, fileName);
+                    ?? Path.Combine(_shellRunner.WorkingDirectory, fileName);
 
                 if (File.Exists(resolvedPath))
                 {
@@ -297,7 +301,7 @@ namespace DevMind
                 catch { fileNameOnly = fileName; }
 
                 string fullPath = await FindFileInSolutionAsync(fileNameOnly, normalizedHint)
-                    ?? Path.Combine(_terminalWorkingDir, fileName);
+                    ?? Path.Combine(_shellRunner.WorkingDirectory, fileName);
 
                 if (!File.Exists(fullPath))
                 {
@@ -437,10 +441,18 @@ namespace DevMind
                 return errMsg + "\n";
             }
 
-            string savedDir = _terminalWorkingDir;
-            _terminalWorkingDir = gitRoot;
-            var (output, exitCode) = await RunShellCommandCaptureAsync(command);
-            _terminalWorkingDir = savedDir;
+            string savedDir = _shellRunner.WorkingDirectory;
+            _shellRunner.ChangeDirectory(gitRoot);
+            string output;
+            int exitCode;
+            try
+            {
+                (output, exitCode) = await _shellRunner.ExecuteAsync(command, _cts?.Token ?? CancellationToken.None);
+            }
+            finally
+            {
+                _shellRunner.ChangeDirectory(savedDir);
+            }
 
             if (exitCode != 0)
             {
@@ -487,7 +499,7 @@ namespace DevMind
 
         // ── IAgenticHost.GetWorkingDirectory ──────────────────────────────────────
 
-        string IAgenticHost.GetWorkingDirectory() => _terminalWorkingDir;
+        string IAgenticHost.GetWorkingDirectory() => _shellRunner.WorkingDirectory;
 
         // ── IAgenticHost.GrepFileAsync ────────────────────────────────────────────
 
@@ -501,7 +513,7 @@ namespace DevMind
             catch { fileNameOnly = filename; }
 
             string resolvedPath = await FindFileInSolutionAsync(fileNameOnly, filename.Replace('\\', '/'))
-                ?? Path.Combine(_terminalWorkingDir, filename);
+                ?? Path.Combine(_shellRunner.WorkingDirectory, filename);
 
             if (!File.Exists(resolvedPath))
                 return await BuildFileNotFoundMessageAsync("GREP", filename);
@@ -570,7 +582,7 @@ namespace DevMind
             const int MaxMatches = 100;
 
             // Determine search root (project directory preferred, fallback to working dir)
-            string searchDir = _terminalWorkingDir;
+            string searchDir = _shellRunner.WorkingDirectory;
             try
             {
                 await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
@@ -684,7 +696,7 @@ namespace DevMind
             const int Cap = 200;
 
             // Resolve search root (project directory preferred, fallback to working dir)
-            string searchDir = _terminalWorkingDir;
+            string searchDir = _shellRunner.WorkingDirectory;
             try
             {
                 await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
@@ -764,7 +776,7 @@ namespace DevMind
             catch { fileNameOnly = filename; }
 
             string resolvedPath = await FindFileInSolutionAsync(fileNameOnly, filename.Replace('\\', '/'))
-                ?? Path.Combine(_terminalWorkingDir, filename);
+                ?? Path.Combine(_shellRunner.WorkingDirectory, filename);
 
             if (!File.Exists(resolvedPath))
                 return await BuildFileNotFoundMessageAsync("DELETE", filename);
@@ -808,7 +820,7 @@ namespace DevMind
             catch { oldNameOnly = oldFilename; }
 
             string oldPath = await FindFileInSolutionAsync(oldNameOnly, oldFilename.Replace('\\', '/'))
-                ?? Path.Combine(_terminalWorkingDir, oldFilename);
+                ?? Path.Combine(_shellRunner.WorkingDirectory, oldFilename);
 
             if (!File.Exists(oldPath))
                 return await BuildFileNotFoundMessageAsync("RENAME", oldFilename);
@@ -819,13 +831,13 @@ namespace DevMind
             if (newHasDir)
             {
                 // Treat as relative to project/working directory
-                string projectDir = Path.GetDirectoryName(oldPath) ?? _terminalWorkingDir;
+                string projectDir = Path.GetDirectoryName(oldPath) ?? _shellRunner.WorkingDirectory;
                 newPath = Path.Combine(projectDir, newFilename.Replace('/', Path.DirectorySeparatorChar));
             }
             else
             {
                 // Same directory as the old file, just different name
-                newPath = Path.Combine(Path.GetDirectoryName(oldPath) ?? _terminalWorkingDir, newFilename);
+                newPath = Path.Combine(Path.GetDirectoryName(oldPath) ?? _shellRunner.WorkingDirectory, newFilename);
             }
 
             if (File.Exists(newPath))
@@ -882,7 +894,7 @@ namespace DevMind
             catch { fileNameOnly = filename; }
 
             string resolvedPath = await FindFileInSolutionAsync(fileNameOnly, filename.Replace('\\', '/'))
-                ?? Path.Combine(_terminalWorkingDir, filename);
+                ?? Path.Combine(_shellRunner.WorkingDirectory, filename);
 
             if (!_fileSnapshots.ContainsKey(resolvedPath))
             {
@@ -929,7 +941,7 @@ namespace DevMind
             {
                 try
                 {
-                    string[] csprojFiles = Directory.GetFiles(_terminalWorkingDir, "*.csproj", SearchOption.TopDirectoryOnly);
+                    string[] csprojFiles = Directory.GetFiles(_shellRunner.WorkingDirectory, "*.csproj", SearchOption.TopDirectoryOnly);
                     if (csprojFiles.Length == 1)
                     {
                         project = csprojFiles[0];
@@ -971,7 +983,7 @@ namespace DevMind
             }
             catch { }
 
-            string searchDir = projectDir ?? _terminalWorkingDir;
+            string searchDir = projectDir ?? _shellRunner.WorkingDirectory;
 
             if (looksLikeBare && !string.IsNullOrEmpty(searchDir))
             {
@@ -1015,7 +1027,7 @@ namespace DevMind
 
             try
             {
-                var result = await RunShellCommandCaptureAsync(cmd);
+                var result = await _shellRunner.ExecuteAsync(cmd, _cts?.Token ?? CancellationToken.None);
                 rawOutput = result.output;
                 exitCode  = result.exitCode;
             }
@@ -1056,7 +1068,7 @@ namespace DevMind
 
             try
             {
-                var fallback = await RunShellCommandCaptureAsync(fallbackCmd);
+                var fallback = await _shellRunner.ExecuteAsync(fallbackCmd, _cts?.Token ?? CancellationToken.None);
                 rawOutput = fallback.output;
                 exitCode  = fallback.exitCode;
             }
@@ -1218,7 +1230,7 @@ namespace DevMind
                 {
                     string resolvedPath =
                         await FindFileInSolutionAsync(patchFileOnly, blockFileName.Replace('\\', '/'))
-                        ?? Path.Combine(_terminalWorkingDir, patchFileOnly);
+                        ?? Path.Combine(_shellRunner.WorkingDirectory, patchFileOnly);
 
                     if (!_llmClient.FileCache.Contains(patchFileOnly))
                     {
@@ -1348,7 +1360,7 @@ namespace DevMind
             }
             catch { }
 
-            string searchDir = projectDir ?? _terminalWorkingDir;
+            string searchDir = projectDir ?? _shellRunner.WorkingDirectory;
 
             List<string> csFiles = null;
             try

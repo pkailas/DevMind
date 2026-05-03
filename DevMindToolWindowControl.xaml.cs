@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v7.13
+// File: DevMindToolWindowControl.xaml.cs  v7.14
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -33,7 +33,7 @@ namespace DevMind
         private CancellationTokenSource _cts;
         private (string fullPath, Encoding fileEncoding, string fileName, string content, List<(int origStart, int origEnd, string replaceText)> resolvedBlocks)? _pendingFuzzyPatch;
         private bool _suppressSystemPromptSave;
-        private string _terminalWorkingDir;
+        private ShellRunner _shellRunner;
         private readonly List<string> _terminalHistory = new List<string>();
         private int _terminalHistoryIndex = -1;
         private System.Windows.Threading.DispatcherTimer _generatingTimer;
@@ -81,7 +81,7 @@ namespace DevMind
             OutputBox.Document.PagePadding = new Thickness(0);
             InitOutputDocument();
             _llmClient = llmClient;
-            _terminalWorkingDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            _shellRunner = new ShellRunner(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
 
 #pragma warning disable VSSDK007 // Fire-and-forget to resolve solution directory is intentional
             _ = ThreadHelper.JoinableTaskFactory.RunAsync(async delegate
@@ -92,7 +92,7 @@ namespace DevMind
                     await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
                     var dte = await VS.GetServiceAsync<DTE, DTE>();
                     if (dte?.Solution?.FullName is string sln && !string.IsNullOrEmpty(sln))
-                        _terminalWorkingDir = Path.GetDirectoryName(sln);
+                        _shellRunner.ChangeDirectory(Path.GetDirectoryName(sln));
                 }
                 catch { }
             });
@@ -883,6 +883,7 @@ namespace DevMind
                 StatusText.Text = $"Thinking{agenticSuffix} ({_thinkingSeconds}s)";
             };
             _thinkingTimer.Start();
+            _cts?.Dispose();
             _cts = new CancellationTokenSource();
             _streamingTokenCount = 0;
 
@@ -954,7 +955,7 @@ namespace DevMind
                 // Load MEMORY.md cross-session memory index
                 try
                 {
-                    var memMgr = new MemoryManager(_terminalWorkingDir);
+                    var memMgr = new MemoryManager(_shellRunner.WorkingDirectory);
                     string memoryIndex = memMgr.LoadIndex();
                     if (!string.IsNullOrWhiteSpace(memoryIndex))
                         combined += $"\n\n--- Session Memory (MEMORY.md) ---\n{memoryIndex}\n---";
@@ -1507,7 +1508,7 @@ namespace DevMind
                     }
                 }
                 catch { }
-                string saveDir = projectDir ?? _terminalWorkingDir;
+                string saveDir = projectDir ?? _shellRunner.WorkingDirectory;
 
                 string fullPath = Path.Combine(saveDir, fileName);
 
