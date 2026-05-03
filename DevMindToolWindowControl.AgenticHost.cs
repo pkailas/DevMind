@@ -133,7 +133,7 @@ namespace DevMind
                         await FindFileInSolutionAsync(patchFileOnly, blockFileName.Replace('\\', '/'))
                         ?? Path.Combine(_terminalWorkingDir, patchFileOnly);
 
-                    if (!_llmClient._fileCache.Contains(patchFileOnly))
+                    if (!_llmClient.FileCache.Contains(patchFileOnly))
                     {
                         AppendOutput($"[AUTO-READ] Loading {patchFileOnly} before patch...\n", OutputColor.Dim);
                         await ApplyReadCommandAsync($"READ {blockFileName}");
@@ -243,7 +243,7 @@ namespace DevMind
                 }
 
                 // Invalidate cache so subsequent READs see the updated content
-                try { _llmClient._fileCache.Invalidate(appendFileOnly); } catch { }
+                try { _llmClient.FileCache.Invalidate(appendFileOnly); } catch { }
 
                 // Track completed files for brainwash context
                 _llmClient.TrackCompletedFiles(content);
@@ -312,14 +312,14 @@ namespace DevMind
                 if (rangeStart > 0)
                 {
                     // Ensure the file is in the cache for line-range access
-                    if (!_llmClient._fileCache.Contains(fileNameOnly))
+                    if (!_llmClient.FileCache.Contains(fileNameOnly))
                     {
                         var (diskContent, _) = ReadFilePreservingEncoding(fullPath);
-                        _llmClient._fileCache.Store(fileNameOnly, diskContent);
+                        _llmClient.FileCache.Store(fileNameOnly, diskContent);
                     }
 
                     _taskReadFiles.Add(fileNameOnly);
-                    int totalLines = _llmClient._fileCache.GetLineCount(fileNameOnly);
+                    int totalLines = _llmClient.FileCache.GetLineCount(fileNameOnly);
 
                     // Swap inverted range silently
                     if (rangeStart > rangeEnd)
@@ -329,7 +329,7 @@ namespace DevMind
                     int clampedEnd   = Math.Min(rangeEnd,   totalLines);
                     int clampedStart = Math.Max(1, rangeStart);
 
-                    string rangeContent = _llmClient._fileCache.GetLineRange(fileNameOnly, clampedStart, clampedEnd);
+                    string rangeContent = _llmClient.FileCache.GetLineRange(fileNameOnly, clampedStart, clampedEnd);
                     if (rangeContent == null)
                     {
                         AppendOutput($"[READ] Range {rangeStart}-{rangeEnd} out of bounds for {fileNameOnly} ({totalLines} lines)\n", OutputColor.Error);
@@ -350,12 +350,11 @@ namespace DevMind
 
                 // ── Full / outline path
                 var (content, _) = ReadFilePreservingEncoding(fullPath);
-                _llmClient._fileCache.Store(fileNameOnly, content);
+                _llmClient.FileCache.Store(fileNameOnly, content);
                 _taskReadFiles.Add(fileNameOnly);
                 int lineCount = content.Split('\n').Length;
 
-                bool alreadyRead = _llmClient._filesReadThisSession.Contains(fileNameOnly);
-                _llmClient._filesReadThisSession.Add(fileNameOnly);
+                bool alreadyRead = _llmClient.MarkFileRead(fileNameOnly);
 
                 string rendered = RenderReadBlock(fileNameOnly, content, lineCount, forceFullRead, alreadyRead, out bool wasOutline);
 
@@ -508,16 +507,16 @@ namespace DevMind
                 return await BuildFileNotFoundMessageAsync("GREP", filename);
 
             // Populate cache if needed
-            if (!_llmClient._fileCache.Contains(fileNameOnly))
+            if (!_llmClient.FileCache.Contains(fileNameOnly))
             {
                 string diskContent;
                 try { diskContent = File.ReadAllText(resolvedPath); }
                 catch (Exception ex) { return $"GREP: error reading {filename} — {ex.Message}"; }
-                _llmClient._fileCache.Store(fileNameOnly, diskContent);
+                _llmClient.FileCache.Store(fileNameOnly, diskContent);
             }
 
             // Get lines from cache
-            int totalFileLines = _llmClient._fileCache.GetLineCount(fileNameOnly);
+            int totalFileLines = _llmClient.FileCache.GetLineCount(fileNameOnly);
             int scanStart = startLine.HasValue ? Math.Max(1, startLine.Value) : 1;
             int scanEnd   = endLine.HasValue   ? Math.Min(totalFileLines, endLine.Value) : totalFileLines;
 
@@ -525,7 +524,7 @@ namespace DevMind
             var matches = new System.Collections.Generic.List<(int lineNum, string lineText)>();
             for (int lineNum = scanStart; lineNum <= scanEnd; lineNum++)
             {
-                string lineContent = _llmClient._fileCache.GetLineRange(fileNameOnly, lineNum, lineNum);
+                string lineContent = _llmClient.FileCache.GetLineRange(fileNameOnly, lineNum, lineNum);
                 if (lineContent == null) continue;
                 if (lineContent.IndexOf(pattern, StringComparison.OrdinalIgnoreCase) >= 0)
                     matches.Add((lineNum, lineContent));
@@ -626,21 +625,21 @@ namespace DevMind
                 catch { fileNameOnly = filePath; }
 
                 // Populate cache if needed
-                if (!_llmClient._fileCache.Contains(fileNameOnly))
+                if (!_llmClient.FileCache.Contains(fileNameOnly))
                 {
                     string diskContent;
                     try { diskContent = File.ReadAllText(filePath); }
                     catch { continue; }
-                    _llmClient._fileCache.Store(fileNameOnly, diskContent);
+                    _llmClient.FileCache.Store(fileNameOnly, diskContent);
                 }
 
-                int totalFileLines = _llmClient._fileCache.GetLineCount(fileNameOnly);
+                int totalFileLines = _llmClient.FileCache.GetLineCount(fileNameOnly);
                 int scanStart = startLine.HasValue ? Math.Max(1, startLine.Value) : 1;
                 int scanEnd   = endLine.HasValue   ? Math.Min(totalFileLines, endLine.Value) : totalFileLines;
 
                 for (int lineNum = scanStart; lineNum <= scanEnd; lineNum++)
                 {
-                    string lineContent = _llmClient._fileCache.GetLineRange(fileNameOnly, lineNum, lineNum);
+                    string lineContent = _llmClient.FileCache.GetLineRange(fileNameOnly, lineNum, lineNum);
                     if (lineContent == null) continue;
                     if (lineContent.IndexOf(pattern, StringComparison.OrdinalIgnoreCase) >= 0)
                     {
@@ -861,7 +860,7 @@ namespace DevMind
             }
 
             // Invalidate FileContentCache for the old filename
-            try { _llmClient._fileCache.Invalidate(oldNameOnly); } catch { }
+            try { _llmClient.FileCache.Invalidate(oldNameOnly); } catch { }
 
             // Open new file in VS editor
             try
@@ -1221,7 +1220,7 @@ namespace DevMind
                         await FindFileInSolutionAsync(patchFileOnly, blockFileName.Replace('\\', '/'))
                         ?? Path.Combine(_terminalWorkingDir, patchFileOnly);
 
-                    if (!_llmClient._fileCache.Contains(patchFileOnly))
+                    if (!_llmClient.FileCache.Contains(patchFileOnly))
                     {
                         AppendOutput($"[AUTO-READ] Loading {patchFileOnly} before patch...\n", OutputColor.Dim);
                         await ApplyReadCommandAsync($"READ {blockFileName}");

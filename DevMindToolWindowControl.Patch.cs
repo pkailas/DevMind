@@ -608,7 +608,7 @@ namespace DevMind
                 File.WriteAllText(fullPath, updated, fileEncoding);
 
                 // Store updated content in cache (replaces invalidation — no disk re-read needed)
-                _llmClient._fileCache.Store(Path.GetFileName(fullPath), updated);
+                _llmClient.FileCache.Store(Path.GetFileName(fullPath), updated);
 
                 // Reload the document in VS to suppress the "file changed externally" dialog.
                 // IVsPersistDocData.ReloadDocData forces the in-memory buffer to sync from disk
@@ -665,7 +665,7 @@ namespace DevMind
                 File.WriteAllText(pending.fullPath, updated, pending.fileEncoding);
 
                 // Store updated content in cache (replaces invalidation — no disk re-read needed)
-                _llmClient._fileCache.Store(Path.GetFileName(pending.fullPath), updated);
+                _llmClient.FileCache.Store(Path.GetFileName(pending.fullPath), updated);
 
                 // Reload the document in VS to suppress the "file changed externally" dialog.
                 // IVsPersistDocData.ReloadDocData forces the in-memory buffer to sync from disk
@@ -866,7 +866,7 @@ namespace DevMind
                 catch { }
 
                 File.WriteAllText(resolved.FullPath, updated, resolved.FileEncoding);
-                _llmClient._fileCache.Store(Path.GetFileName(resolved.FullPath), updated);
+                _llmClient.FileCache.Store(Path.GetFileName(resolved.FullPath), updated);
 
                 try
                 {
@@ -915,7 +915,7 @@ namespace DevMind
                 string blockFileNameOnly = Path.GetFileName(blockFileName.Replace('\\', '/'));
                 if (!string.IsNullOrEmpty(blockFileNameOnly))
                 {
-                    if (!_llmClient._fileCache.Contains(blockFileNameOnly))
+                    if (!_llmClient.FileCache.Contains(blockFileNameOnly))
                     {
                         AppendOutput($"[AUTO-READ] Loading {blockFileNameOnly} before patch...\n", OutputColor.Dim);
                         await ApplyReadCommandAsync($"READ {blockFileName}");

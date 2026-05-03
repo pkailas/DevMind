@@ -481,7 +481,7 @@ namespace DevMind
                     }
 
                     var (content, _) = ReadFilePreservingEncoding(fullPath);
-                    _llmClient._fileCache.Store(fileNameOnly, content);
+                    _llmClient.FileCache.Store(fileNameOnly, content);
                     _taskReadFiles.Add(fileNameOnly);
                     int lineCount = content.Split('\n').Length;
 
@@ -489,10 +489,7 @@ namespace DevMind
                     // this session, inject an outline instead of full content. The model
                     // already saw the full content on the first read. This replaces the
                     // old post-append SqueezeReadContent/CompressLastUserReadBlocks approach.
-                    bool alreadyRead = _llmClient._filesReadThisSession.Contains(fileNameOnly);
-
-                    // Track that we've now read this file
-                    _llmClient._filesReadThisSession.Add(fileNameOnly);
+                    bool alreadyRead = _llmClient.MarkFileRead(fileNameOnly);
 
                     RenderReadBlock(fileNameOnly, content, lineCount, isForceRead, alreadyRead, out bool wasOutline);
 
@@ -522,7 +519,7 @@ namespace DevMind
                 string fileNameOnly   = Path.GetFileName(normalizedHint);
 
                 // Ensure the file is in the cache; load from disk if not
-                if (!_llmClient._fileCache.Contains(fileNameOnly))
+                if (!_llmClient.FileCache.Contains(fileNameOnly))
                 {
                     string fullPath = await FindFileInSolutionAsync(fileNameOnly, normalizedHint)
                         ?? Path.Combine(_terminalWorkingDir, fileHint);
@@ -535,12 +532,12 @@ namespace DevMind
                     }
 
                     var (diskContent, _) = ReadFilePreservingEncoding(fullPath);
-                    _llmClient._fileCache.Store(fileNameOnly, diskContent);
+                    _llmClient.FileCache.Store(fileNameOnly, diskContent);
                     AppendOutput($"[READ] Cached {fullPath} for range access\n", OutputColor.Dim);
                 }
 
                 _taskReadFiles.Add(fileNameOnly);
-                int totalLines = _llmClient._fileCache.GetLineCount(fileNameOnly);
+                int totalLines = _llmClient.FileCache.GetLineCount(fileNameOnly);
 
                 // Swap inverted range silently
                 if (startLine > endLine)
@@ -552,7 +549,7 @@ namespace DevMind
                 int clampedEnd = Math.Min(endLine, totalLines);
                 int clampedStart = Math.Max(1, startLine);
 
-                string rangeContent = _llmClient._fileCache.GetLineRange(fileNameOnly, clampedStart, clampedEnd);
+                string rangeContent = _llmClient.FileCache.GetLineRange(fileNameOnly, clampedStart, clampedEnd);
                 if (rangeContent == null)
                 {
                     AppendOutput($"[READ] Range {startLine}-{endLine} out of bounds for {fileNameOnly} ({totalLines} lines)\n", OutputColor.Error);

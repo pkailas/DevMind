@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v7.24
+// File: LlmClient.cs  v7.25
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -111,7 +111,7 @@ namespace DevMind
         private readonly List<ChatMessage> _conversationHistory;
         private readonly List<string> _pendingDebugLog = new List<string>();
         private const string DefaultSystemPrompt = "You are a helpful coding assistant. Be concise and precise.";
-        internal readonly FileContentCache _fileCache = new FileContentCache();
+        private readonly FileContentCache _fileCache = new FileContentCache();
 
         /// <summary>
         /// Nearline RAM cache for content trimmed by MicroCompactToolResults.
@@ -171,7 +171,7 @@ namespace DevMind
         /// When a file IS in this set, subsequent READs produce an outline instead of full content.
         /// Cleared on ClearHistory().
         /// </summary>
-        internal readonly HashSet<string> _filesReadThisSession = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> _filesReadThisSession = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private string _baseUrl;
         private string _apiKey;
         private int _contextSize = 13372; // fallback default
@@ -971,6 +971,20 @@ namespace DevMind
                 _taskScratchpad = "";
                 _currentTurn = 0;
             }
+        }
+
+        /// <summary>Read-only access to the file content cache for host-layer operations.</summary>
+        public FileContentCache FileCache => _fileCache;
+
+        /// <summary>
+        /// Marks a file as read this session. Returns true if the file was already read
+        /// (caller should use outline mode); false if this is the first read (send full content).
+        /// </summary>
+        public bool MarkFileRead(string fileNameOnly)
+        {
+            bool alreadyRead = _filesReadThisSession.Contains(fileNameOnly);
+            _filesReadThisSession.Add(fileNameOnly);
+            return alreadyRead;
         }
 
         /// <summary>
@@ -2477,7 +2491,7 @@ namespace DevMind
         }
 
         /// <summary>Dispatches to the appropriate outline generator based on file extension.</summary>
-        internal static string GenerateOutline(string filename, string blockContent)
+        public static string GenerateOutline(string filename, string blockContent)
         {
             string ext = Path.GetExtension(filename ?? "").TrimStart('.').ToLowerInvariant();
             switch (ext)
