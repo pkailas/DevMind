@@ -43,6 +43,13 @@ namespace DevMind
         private string _devMindContext;
         private bool _shellLoopPending;
         private int _agenticDepth;
+        private string _consecutiveErrorToolName;
+        private int    _consecutiveErrorCount;
+        // Threshold 5 is a heuristic — gives slack for legitimate
+        // progressive debugging (shell → read → patch → shell cycles
+        // can run 3-4 rounds) without masking genuine stuck loops.
+        // Revisit if training-log data suggests a different value.
+        private const int ConsecutiveErrorAbortThreshold = 5;
         // True when a prose-finish re-prompt has already been fired for the current task.
         // Cleared at the start of every user-initiated SendToLlm() (alongside _agenticDepth).
         private bool _promptedForTaskDone;
@@ -570,6 +577,8 @@ namespace DevMind
                 _agenticDepth = 0;
                 _promptedForTaskDone = false;
                 _taskReadFiles.Clear();
+                _consecutiveErrorToolName = null;
+                _consecutiveErrorCount    = 0;
             }
             _llmClient.IncrementTurn();
 
@@ -1078,6 +1087,29 @@ namespace DevMind
                                     // ── Training data capture ──
                                     LogTrainingTurn(text, fullResponse, outcome, result, lastToolCalls);
 
+                                    // Update consecutive-error counter for stuck-loop detection.
+                                    // Keys on first tool call's name; non-success = errors or non-zero shell exit.
+                                    {
+                                        string primaryTool = lastToolCalls.Count > 0 ? lastToolCalls[0].Name : null;
+                                        bool turnHadError  = result.Errors.Count > 0
+                                                             || (result.ShellExitCode.HasValue && result.ShellExitCode.Value != 0);
+                                        if (primaryTool != null && turnHadError)
+                                        {
+                                            if (primaryTool == _consecutiveErrorToolName)
+                                                _consecutiveErrorCount++;
+                                            else
+                                            {
+                                                _consecutiveErrorToolName = primaryTool;
+                                                _consecutiveErrorCount    = 1;
+                                            }
+                                        }
+                                        else
+                                        {
+                                            _consecutiveErrorToolName = null;
+                                            _consecutiveErrorCount    = 0;
+                                        }
+                                    }
+
                                     // Check for explicit DONE signal (task_done tool call)
                                     if (outcome.IsDone)
                                     {
@@ -1091,6 +1123,26 @@ namespace DevMind
                                         && IsRunOrExecCommand(result.LastShellCommand))
                                     {
                                         AppendOutput("[AGENTIC] Run/exec command succeeded — treating as task complete.\n", OutputColor.Success);
+                                        _agenticDepth = 0;
+                                        // fall through to completion
+                                    }
+                                    // Check consecutive-error abort — same tool failing without resolution
+                                    else if (_consecutiveErrorCount >= ConsecutiveErrorAbortThreshold)
+                                    {
+                                        const int snippetLen = 250;
+                                        string firstError = result.Errors.Count > 0 ? result.Errors[0] : "(no error detail)";
+                                        string cmdLine    = result.LastShellCommand.Length > 0
+                                                            ? $"\nLast command: {result.LastShellCommand}" : "";
+                                        string outputSnip = result.ShellOutput.Length > 0
+                                                            ? $"\nOutput:\n{result.ShellOutput.Substring(0, Math.Min(result.ShellOutput.Length, snippetLen))}" : "";
+                                        AppendOutput(
+                                            $"[AGENTIC] Aborted: '{_consecutiveErrorToolName}' failed {_consecutiveErrorCount} " +
+                                            $"consecutive times with no resolution.\n" +
+                                            $"Last error: {firstError}{cmdLine}{outputSnip}\n" +
+                                            "Review the failure above and re-send with a corrected approach.\n",
+                                            OutputColor.Error);
+                                        _consecutiveErrorToolName = null;
+                                        _consecutiveErrorCount    = 0;
                                         _agenticDepth = 0;
                                         // fall through to completion
                                     }
