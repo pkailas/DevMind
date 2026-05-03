@@ -222,7 +222,7 @@ namespace DevMind
             try
             {
                 string resolvedPath = await FindFileInSolutionAsync(appendFileOnly, fileName.Replace('\\', '/'))
-                    ?? Path.Combine(_terminalWorkingDir, appendFileOnly);
+                    ?? Path.Combine(_terminalWorkingDir, fileName);
 
                 if (File.Exists(resolvedPath))
                 {
@@ -297,7 +297,7 @@ namespace DevMind
                 catch { fileNameOnly = fileName; }
 
                 string fullPath = await FindFileInSolutionAsync(fileNameOnly, normalizedHint)
-                    ?? Path.Combine(_terminalWorkingDir, fileNameOnly);
+                    ?? Path.Combine(_terminalWorkingDir, fileName);
 
                 if (!File.Exists(fullPath))
                 {
@@ -502,7 +502,7 @@ namespace DevMind
             catch { fileNameOnly = filename; }
 
             string resolvedPath = await FindFileInSolutionAsync(fileNameOnly, filename.Replace('\\', '/'))
-                ?? Path.Combine(_terminalWorkingDir, fileNameOnly);
+                ?? Path.Combine(_terminalWorkingDir, filename);
 
             if (!File.Exists(resolvedPath))
                 return await BuildFileNotFoundMessageAsync("GREP", filename);
@@ -765,7 +765,7 @@ namespace DevMind
             catch { fileNameOnly = filename; }
 
             string resolvedPath = await FindFileInSolutionAsync(fileNameOnly, filename.Replace('\\', '/'))
-                ?? Path.Combine(_terminalWorkingDir, fileNameOnly);
+                ?? Path.Combine(_terminalWorkingDir, filename);
 
             if (!File.Exists(resolvedPath))
                 return await BuildFileNotFoundMessageAsync("DELETE", filename);
@@ -809,7 +809,7 @@ namespace DevMind
             catch { oldNameOnly = oldFilename; }
 
             string oldPath = await FindFileInSolutionAsync(oldNameOnly, oldFilename.Replace('\\', '/'))
-                ?? Path.Combine(_terminalWorkingDir, oldNameOnly);
+                ?? Path.Combine(_terminalWorkingDir, oldFilename);
 
             if (!File.Exists(oldPath))
                 return await BuildFileNotFoundMessageAsync("RENAME", oldFilename);
@@ -883,7 +883,7 @@ namespace DevMind
             catch { fileNameOnly = filename; }
 
             string resolvedPath = await FindFileInSolutionAsync(fileNameOnly, filename.Replace('\\', '/'))
-                ?? Path.Combine(_terminalWorkingDir, fileNameOnly);
+                ?? Path.Combine(_terminalWorkingDir, filename);
 
             if (!_fileSnapshots.ContainsKey(resolvedPath))
             {
