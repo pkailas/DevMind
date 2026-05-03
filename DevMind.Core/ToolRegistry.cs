@@ -9,7 +9,7 @@ namespace DevMind
     /// Builds the OpenAI-compatible <c>tools</c> JArray for structured tool calling.
     /// Each DevMind directive is represented as a function tool with JSON Schema parameters.
     /// </summary>
-    internal static class ToolRegistry
+    public static class ToolRegistry
     {
         /// <summary>
         /// Builds the complete tools array for inclusion in the chat completion request.
