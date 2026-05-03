@@ -1686,60 +1686,6 @@ namespace DevMind
         }
 
         /// <summary>
-        /// Builds the behavioral rules that apply regardless of directive mode.
-        /// Includes: After PATCH, Before PATCH, Large File Strategy, Core rules,
-        /// Task Completion, Scratchpad, Block-by-Block, and namespace guidance.
-        /// </summary>
-        private static string BuildBehavioralPrompt(string buildCommand, string projectNamespace)
-        {
-            var sb = new System.Text.StringBuilder();
-            sb.Append("## Build Verification\n");
-            sb.Append($"Build command: {buildCommand}\n");
-            sb.Append("After ANY code change, run the build to verify it still passes.\n\n");
-            sb.Append("## After PATCH\n");
-            sb.Append("You receive [PATCH-RESULT:filename] with ±3 lines of context and >>> CHANGED:/>>> ADDED: markers.\n");
-            sb.Append("Full file is cached — use READ filename:start-end for more context.\n\n");
-            sb.Append("## Before PATCH\n");
-            sb.Append("Never output raw code blocks. Use FILE: for new files, PATCH for edits.\n");
-            sb.Append("READ the file first if you have not seen it. You may combine FILE, PATCH, SHELL in one response.\n");
-            sb.Append("FIND text must be copied verbatim from READ output — never reconstructed from memory.\n");
-            sb.Append("Do not read the same file multiple times. If you have an outline and a line range, that is sufficient context to write a PATCH. Act immediately.\n\n");
-            sb.Append("## Large File Strategy\n");
-            sb.Append("For files over 100 lines:\n");
-            sb.Append("1. First READ gets an outline (types, methods, signatures with line numbers).\n");
-            sb.Append("2. Use the outline to identify the exact line range you need.\n");
-            sb.Append("3. READ filename:start-end for just that section.\n");
-            sb.Append("4. PATCH using only the content from that range.\n");
-            sb.Append("Never READ! an entire large file unless explicitly asked. Work from outline → range → patch.\n\n");
-            sb.Append("## Core rules\n");
-            sb.Append("After a READ is loaded, act on it immediately in the same response. Never emit only READ directives and stop. Every response must include at least one PATCH, FILE, or SHELL directive unless you are responding to a question.\n\n");
-            sb.Append("## Task Completion\n");
-            sb.Append("When all steps of the task are complete and nothing remains to do, emit:\nDONE\n");
-            sb.Append("Only emit DONE when the task is truly finished. Do not emit DONE mid-task.\n\n");
-            sb.Append("## Scratchpad\n");
-            sb.Append("Emit a SCRATCHPAD: block (end with END_SCRATCHPAD on its own line) to track state across turns:\n");
-            sb.Append("SCRATCHPAD:\nGoal: <task>\nFiles: <file> (lines N-M)\nStatus: <PLANNING|PATCHING|BUILDING|DONE>\nLast: <action>\nNext: <step>\nEND_SCRATCHPAD");
-
-            if (DevMindOptions.Instance.BlockByBlockMode != BlockByBlockModeType.Off)
-            {
-                sb.Append("\n\n## Block-by-Block Mode (Active)\n");
-                sb.Append("You are operating in block-by-block mode for memory-constrained environments.\n");
-                sb.Append("Rules:\n");
-                sb.Append("1. Start each task by READing the file outline only — do not request full content.\n");
-                sb.Append("2. Each turn: READ one range, emit one PATCH, update SCRATCHPAD with remaining steps.\n");
-                sb.Append("3. Do not attempt multiple file sections in a single response.\n");
-                sb.Append("4. After each PATCH, mark that step done in SCRATCHPAD before continuing.\n");
-                sb.Append("5. If more steps remain, state the next step clearly and wait for the next turn.\n");
-                sb.Append("Work incrementally: outline → one range → one patch → repeat until done.");
-            }
-
-            if (!string.IsNullOrEmpty(projectNamespace))
-                sb.Append($"\n- When creating new files, use the namespace '{projectNamespace}'.");
-
-            return sb.ToString();
-        }
-
-        /// <summary>
         /// Discovers MSBuild.exe at runtime. Checks VSINSTALLDIR env var, then vswhere.exe,
         /// then known VS installation directories. Caches the result for the session.
         /// </summary>

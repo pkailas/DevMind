@@ -25,7 +25,7 @@ DevMind is a Visual Studio extension that provides a local LLM-powered coding as
   - `SendToLlm()` — Main entry point for user messages
   - `ProcessBatchInputAsync()` — Handles batched multi-directive inputs
   - `SaveGeneratedFileAsync()` — Writes FILE: blocks to disk
-  - `BuildTextDirectivePrompt()` / `BuildBehavioralPrompt()` — Constructs system prompts
+  - `BuildToolUsePrompt()` — Constructs the system prompt (tool catalog, behavioral rules, build config)
   - `FindMSBuildPath()` — Discovers MSBuild.exe at runtime
 
 - **`DevMindToolWindowControl.AgenticHost.cs`** — Partial class implementing `IAgenticHost`. Provides:
