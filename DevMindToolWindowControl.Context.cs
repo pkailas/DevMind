@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.Context.cs  v5.22
+// File: DevMindToolWindowControl.Context.cs  v5.23
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -471,7 +471,7 @@ namespace DevMind
                     string fileNameOnly = Path.GetFileName(normalizedHint);
 
                     string fullPath = await FindFileInSolutionAsync(fileNameOnly, normalizedHint)
-                        ?? Path.Combine(_terminalWorkingDir, hint);
+                        ?? Path.Combine(_shellRunner.WorkingDirectory, hint);
 
                     if (!File.Exists(fullPath))
                     {
@@ -522,7 +522,7 @@ namespace DevMind
                 if (!_llmClient.FileCache.Contains(fileNameOnly))
                 {
                     string fullPath = await FindFileInSolutionAsync(fileNameOnly, normalizedHint)
-                        ?? Path.Combine(_terminalWorkingDir, fileHint);
+                        ?? Path.Combine(_shellRunner.WorkingDirectory, fileHint);
 
                     if (!File.Exists(fullPath))
                     {
@@ -840,10 +840,18 @@ namespace DevMind
             }
 
             // Run the git command
-            string savedDir = _terminalWorkingDir;
-            _terminalWorkingDir = gitRoot;
-            var (output, exitCode) = await RunShellCommandCaptureAsync(command);
-            _terminalWorkingDir = savedDir;
+            string savedDir = _shellRunner.WorkingDirectory;
+            _shellRunner.ChangeDirectory(gitRoot);
+            string output;
+            int exitCode;
+            try
+            {
+                (output, exitCode) = await _shellRunner.ExecuteAsync(command, _cts?.Token ?? CancellationToken.None);
+            }
+            finally
+            {
+                _shellRunner.ChangeDirectory(savedDir);
+            }
 
             if (exitCode != 0)
             {
@@ -874,7 +882,7 @@ namespace DevMind
 
         /// <summary>
         /// Finds the git repository root by walking up from the project directory
-        /// or _terminalWorkingDir. Returns null if no .git directory is found.
+        /// or _shellRunner.WorkingDirectory. Returns null if no .git directory is found.
         /// </summary>
         private async Task<string> FindGitRootAsync()
         {
@@ -893,7 +901,7 @@ namespace DevMind
             catch { }
 
             if (string.IsNullOrEmpty(startDir))
-                startDir = _terminalWorkingDir;
+                startDir = _shellRunner.WorkingDirectory;
 
             // Walk up looking for .git
             string dir = startDir;

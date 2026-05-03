@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.Patch.cs  v5.20
+// File: DevMindToolWindowControl.Patch.cs  v5.21
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -475,7 +475,7 @@ namespace DevMind
                     return null;
                 }
                 string fullPath = await FindFileInSolutionAsync(fileNameOnly, normalizedFileName)
-                    ?? Path.Combine(_terminalWorkingDir, fileNameOnly);
+                    ?? Path.Combine(_shellRunner.WorkingDirectory, fileNameOnly);
 
                 if (!File.Exists(fullPath))
                 {
@@ -738,7 +738,7 @@ namespace DevMind
                     return null;
                 }
                 string fullPath = await FindFileInSolutionAsync(fileNameOnly, normalizedFileName)
-                    ?? Path.Combine(_terminalWorkingDir, fileNameOnly);
+                    ?? Path.Combine(_shellRunner.WorkingDirectory, fileNameOnly);
 
                 if (!File.Exists(fullPath))
                 {
