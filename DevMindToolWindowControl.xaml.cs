@@ -1041,17 +1041,11 @@ namespace DevMind
                                             AppendOutput($"[DIAG] Block: Type={tb.Type}, FileName={tb.FileName}, Command={tb.Command}, MemoryTopic={tb.MemoryTopic}\n", OutputColor.Dim);
                                     }
 
-                                    // Also parse text content for any prose alongside tool_calls
-                                    if (!string.IsNullOrWhiteSpace(fullResponse))
-                                    {
-                                        var textBlocks = ResponseParser.Parse(fullResponse);
-                                        // Prepend text blocks (prose) before tool blocks
-                                        foreach (var tb in textBlocks)
-                                        {
-                                            if (tb.Type == BlockType.Text)
-                                                toolBlocks.Insert(0, tb);
-                                        }
-                                    }
+                                    // Prepend any prose the model emitted alongside tool calls.
+                                    // fullResponse is already thinking-stripped by FilterChunk.
+                                    string prose = fullResponse.TrimEnd('\r', '\n');
+                                    if (!string.IsNullOrEmpty(prose))
+                                        toolBlocks.Insert(0, new ResponseBlock { Type = BlockType.Text, Content = prose });
 
                                     outcome = new ResponseOutcome(toolBlocks);
                                     if (DevMindOptions.Instance.ShowDebugOutput)
