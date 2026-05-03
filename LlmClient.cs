@@ -2802,12 +2802,7 @@ namespace DevMind
                 request["model"] = modelName;
             }
 
-            // Include tool definitions when DirectiveMode is ToolUse or Auto
-            var directiveMode = DevMindOptions.Instance.DirectiveMode;
-            if (directiveMode != DirectiveMode.TextDirective)
-            {
-                request["tools"] = ToolRegistry.BuildToolsArray();
-            }
+            request["tools"] = ToolRegistry.BuildToolsArray();
 
             return request.ToString(Formatting.None);
         }

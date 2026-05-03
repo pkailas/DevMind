@@ -263,54 +263,9 @@ namespace DevMind
             string fileName, int rangeStart, int rangeEnd, bool forceFullRead)
         {
             if (fileName.StartsWith("git ", StringComparison.OrdinalIgnoreCase))
-            {
-                bool gitToolUseMode = DevMindOptions.Instance.DirectiveMode != DirectiveMode.TextDirective;
-                if (gitToolUseMode)
-                {
-                    return await LoadGitContentForToolUseAsync(fileName, rangeStart);
-                }
-                // TextDirective path — existing behavior preserved.
-                // For git log, append rangeStart as count if provided so ApplyReadCommandAsync
-                // sees it in the filename string (parsed via countPart extraction).
-                string gitCmd = (fileName.StartsWith("git log", StringComparison.OrdinalIgnoreCase) && rangeStart > 0)
-                    ? $"{fileName} {rangeStart}"
-                    : fileName;
-                await ApplyReadCommandAsync($"READ {gitCmd}", showOutline: false);
-                return string.Empty;
-            }
+                return await LoadGitContentForToolUseAsync(fileName, rangeStart);
 
-            bool isToolUseMode = DevMindOptions.Instance.DirectiveMode != DirectiveMode.TextDirective;
-
-            if (isToolUseMode)
-            {
-                // ── ToolUse path — render directly, return content ──
-                return await LoadFileContentForToolUseAsync(fileName, rangeStart, rangeEnd, forceFullRead);
-            }
-
-            // ── TextDirective path — original behavior preserved ──
-
-            // Resolve file path and capture original snapshot (for DIFF support) before reading
-            try
-            {
-                string fileNameOnly;
-                try { fileNameOnly = Path.GetFileName(fileName.Replace('\\', '/')); }
-                catch { fileNameOnly = fileName; }
-                string resolvedPath = await FindFileInSolutionAsync(fileNameOnly, fileName.Replace('\\', '/'))
-                    ?? Path.Combine(_terminalWorkingDir, fileNameOnly);
-                if (File.Exists(resolvedPath))
-                    CaptureFileSnapshot(resolvedPath);
-            }
-            catch { }
-
-            if (rangeStart > 0)
-                await ApplyReadRangeAsync(fileName, rangeStart, rangeEnd);
-            else if (forceFullRead)
-                await ApplyReadCommandAsync("READ! " + fileName, showOutline: true);
-            else
-                await ApplyReadCommandAsync("READ " + fileName, showOutline: true);
-
-            // Content is injected into LLM context by the above calls; not returned directly.
-            return string.Empty;
+            return await LoadFileContentForToolUseAsync(fileName, rangeStart, rangeEnd, forceFullRead);
         }
 
         /// <summary>
@@ -520,25 +475,6 @@ namespace DevMind
 
         void IAgenticHost.AppendOutput(string text, OutputColor color)
             => AppendOutput(text, color);
-
-        // ── IAgenticHost.ResubmitPromptAsync ─────────────────────────────────────
-
-        // The main loop handles resubmission by setting InputTextBox.Text and calling
-        // SendToLlm(). The executor never needs the raw response string directly.
-        Task<string> IAgenticHost.ResubmitPromptAsync(string prompt)
-            => Task.FromResult(string.Empty);
-
-        // ── IAgenticHost.ShowConfirmationAsync ───────────────────────────────────
-
-        async Task<bool> IAgenticHost.ShowConfirmationAsync(string message)
-        {
-            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
-            var result = System.Windows.MessageBox.Show(
-                message, "DevMind",
-                System.Windows.MessageBoxButton.YesNo,
-                System.Windows.MessageBoxImage.Question);
-            return result == System.Windows.MessageBoxResult.Yes;
-        }
 
         // ── IAgenticHost.UpdateScratchpad ─────────────────────────────────────────
 

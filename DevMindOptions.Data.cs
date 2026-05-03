@@ -41,8 +41,6 @@ namespace DevMind
     {
         [Description("Tool Use")]
         ToolUse,
-        [Description("Text Directives")]
-        TextDirective,
         [Description("Auto")]
         Auto
     }
@@ -197,7 +195,7 @@ namespace DevMind
 
         [Category("Directives")]
         [DisplayName("Directive Mode")]
-        [Description("How DevMind communicates directives to the LLM. ToolUse sends JSON Schema tools (requires --jinja on llama-server). TextDirective uses the legacy text format. Auto tries ToolUse first, falls back to TextDirective on error.")]
+        [Description("How DevMind communicates directives to the LLM. ToolUse sends JSON Schema tool definitions (requires --jinja on llama-server). Auto is an alias for ToolUse, kept for profile compatibility.")]
         [DefaultValue(DirectiveMode.ToolUse)]
         public DirectiveMode DirectiveMode { get; set; } = DirectiveMode.ToolUse;
 

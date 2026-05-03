@@ -91,21 +91,9 @@ namespace DevMind
                         processPatches: true,
                         processShell: false);
 
-                case ActionType.RetryWithCorrection:
-                    if (!string.IsNullOrEmpty(action.CorrectionPrompt))
-                        _host.AppendOutput(action.CorrectionPrompt + "\n", OutputColor.Dim);
-                    return ExecutionResult.None();
-
-                case ActionType.ContinueAgentic:
-                    return ExecutionResult.None();
-
                 case ActionType.Stop:
                     if (!string.IsNullOrEmpty(action.StopReason))
                         _host.AppendOutput(action.StopReason + "\n", OutputColor.Dim);
-                    return ExecutionResult.None();
-
-                case ActionType.AskUser:
-                    await _host.ShowConfirmationAsync(action.StopReason ?? string.Empty);
                     return ExecutionResult.None();
 
                 default:

@@ -62,20 +62,6 @@ namespace DevMind
         void AppendOutput(string text, OutputColor color = OutputColor.Normal);
 
         /// <summary>
-        /// Resubmit a prompt to the LLM. Used for auto-READ resubmission
-        /// and retry-with-correction. Returns the raw response text.
-        /// The caller (executor) will classify the new response.
-        /// </summary>
-        Task<string> ResubmitPromptAsync(string prompt);
-
-        /// <summary>
-        /// Show a confirmation dialog to the user and return their choice.
-        /// Used for AskUser actions (e.g., fuzzy patch confirmation when
-        /// not in agentic mode).
-        /// </summary>
-        Task<bool> ShowConfirmationAsync(string message);
-
-        /// <summary>
         /// Update the scratchpad content in LlmClient.
         /// Called when a Scratchpad block is found in the response.
         /// </summary>

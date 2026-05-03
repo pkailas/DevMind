@@ -1162,9 +1162,8 @@ namespace DevMind
                                 else
                                 {
                                     // ══════════════════════════════════════════════════════════════
-                                    // No tool calls in non-TextDirective mode.
-                                    // Either the model is done answering a pure question (correct),
-                                    // OR the model did real work but produced prose instead of task_done (defect).
+                                    // Model produced no tool calls — either answered a question, or
+                                    // produced prose without task_done.
                                     // ══════════════════════════════════════════════════════════════
 
                                     // Check for text-based DONE signal as safety net
@@ -1686,10 +1685,6 @@ namespace DevMind
             sb.Append("After read_file, find_in_files, or grep_file returns content, act on it in the same overall task. Never call only read-style tools and stop without progress.\n");
             sb.Append("Every turn during a code-change task must include at least one mutating tool call (patch_file, create_file, run_build, run_tests, run_shell) unless you are answering a question that requires no code change.\n");
 
-            // TODO: BlockByBlockMode regression — BuildBehavioralPrompt has a conditional block-by-block
-            // instructions section, BuildToolUsePrompt does not. Users with BlockByBlockMode != Off
-            // in ToolUse mode lose pacing guidance. Decide: include block-by-block in ToolUse, or
-            // document as TextDirective-only.
             if (!string.IsNullOrEmpty(projectNamespace))
                 sb.Append($"\n## Namespace\nWhen creating new files, use the namespace '{projectNamespace}'.");
 
