@@ -51,6 +51,11 @@
     <Reference Include="System.Net.Http" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="DevMind.Core\DevMind.Core.csproj" />
+    <Compile Remove="DevMind.Core\**;DevMind.Cli\**" />
+  </ItemGroup>
+
   <!-- Import SDK targets to set TargetName, OutDir, IntermediateOutputPath, etc. -->
   <Import Project="Sdk.targets" Sdk="Microsoft.NET.Sdk" />
 
