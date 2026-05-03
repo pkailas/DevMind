@@ -1062,7 +1062,7 @@ namespace DevMind
                                     System.Diagnostics.Debug.WriteLine($"[DEVMIND-DIAG] Tool use path: {lastToolCalls.Count} tool call(s) → {toolBlocks.Count} block(s)");
                                 }
 
-                                var executor = new AgenticExecutor(this);
+                                var executor = new AgenticExecutor(this, DevMindOptions.Instance);
                                 executor.SetCancellationToken(_cts?.Token ?? CancellationToken.None);
                                 int maxDepth = DevMindOptions.Instance.AgenticLoopMaxDepth;
 

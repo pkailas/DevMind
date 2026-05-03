@@ -1,4 +1,4 @@
-// File: AgenticExecutor.cs  v7.4
+// File: AgenticExecutor.cs  v7.5
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -18,6 +18,7 @@ namespace DevMind
     public class AgenticExecutor
     {
         private readonly IAgenticHost _host;
+        private readonly ILlmOptions _options;
         private CancellationToken _cancellationToken;
 
         // Repetition guard — tracks consecutive identical READ/GREP requests to break infinite loops
@@ -28,9 +29,11 @@ namespace DevMind
         /// Initializes a new instance of the <see cref="AgenticExecutor"/> class.
         /// </summary>
         /// <param name="host">The agentic host that provides side-effect operations.</param>
-        public AgenticExecutor(IAgenticHost host)
+        /// <param name="options">Runtime options controlling pipeline behavior.</param>
+        public AgenticExecutor(IAgenticHost host, ILlmOptions options)
         {
             _host = host;
+            _options = options;
         }
 
         /// <summary>
@@ -484,7 +487,7 @@ namespace DevMind
             List<ResponseBlock> patchBlocks,
             ExecutionResult result)
         {
-            bool alwaysConfirm = DevMindOptions.Instance.AlwaysConfirmPatch;
+            bool alwaysConfirm = _options.AlwaysConfirmPatch;
 
             // Phase 1: Resolve all patches (parse + match, no side effects)
             var resolved = new List<PatchResolveResult>();

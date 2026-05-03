@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v7.23
+// File: LlmClient.cs  v7.24
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -106,6 +106,7 @@ namespace DevMind
     /// </summary>
     public sealed class LlmClient : IDisposable
     {
+        private readonly ILlmOptions _options;
         private HttpClient _httpClient;
         private readonly List<ChatMessage> _conversationHistory;
         private readonly List<string> _pendingDebugLog = new List<string>();
@@ -239,13 +240,14 @@ namespace DevMind
         /// <summary>
         /// Initializes a new instance of the <see cref="LlmClient"/> class.
         /// </summary>
-        public LlmClient()
+        public LlmClient(ILlmOptions options)
         {
+            _options = options;
             // Keep idle TCP connections alive for 10 minutes — prevents the pool from
             // killing connections mid-request when the server is processing a large prompt
             // (net48 equivalent of SocketsHttpHandler.PooledConnectionIdleTimeout).
             System.Net.ServicePointManager.MaxServicePointIdleTime = 600_000;
-            _httpClient = new HttpClient { Timeout = TimeSpan.FromMinutes(DevMindOptions.Instance.RequestTimeoutMinutes) };
+            _httpClient = new HttpClient { Timeout = TimeSpan.FromMinutes(_options.RequestTimeoutMinutes) };
             _conversationHistory = new List<ChatMessage>
             {
                 new ChatMessage("system", GetSystemPrompt())
@@ -264,7 +266,7 @@ namespace DevMind
             _apiKey  = apiKey;
             string apiKeyState = _apiKey == null ? "null" : _apiKey.Length == 0 ? "empty" : $"set (length={_apiKey.Length})";
             Debug.WriteLine($"[DevMind TRACE] Configure() called — _apiKey is {apiKeyState}, endpoint={_baseUrl}");
-            if (DevMindOptions.Instance.ShowDebugOutput)
+            if (_options.ShowDebugOutput)
                 _pendingDebugLog.Add($"\n[DEBUG] Configure() — API key: {apiKeyState}, endpoint: {_baseUrl}\n");
             RecreateHttpClient();
             _contextDetectionTask = DetectContextSizeAsync();
@@ -275,7 +277,7 @@ namespace DevMind
         /// </summary>
         private void ApplyHttpClientSettings(HttpClient client)
         {
-            client.Timeout = TimeSpan.FromMinutes(DevMindOptions.Instance.RequestTimeoutMinutes);
+            client.Timeout = TimeSpan.FromMinutes(_options.RequestTimeoutMinutes);
             client.DefaultRequestHeaders.Clear();
             client.DefaultRequestHeaders.Add("Accept", "text/event-stream");
             Debug.WriteLine($"[DevMind TRACE] ApplyHttpClientSettings — _apiKey is {(_apiKey == null ? "null" : _apiKey.Length == 0 ? "empty" : $"set (length={_apiKey.Length})")}");
@@ -287,7 +289,7 @@ namespace DevMind
             var authHeader = client.DefaultRequestHeaders.Authorization;
             bool authSet = authHeader != null;
             Debug.WriteLine($"[DevMind TRACE] ApplyHttpClientSettings — Authorization header {(authSet ? $"SET: scheme={authHeader.Scheme}, param length={authHeader.Parameter?.Length ?? 0}" : "NOT SET (null)")}");
-            if (DevMindOptions.Instance.ShowDebugOutput)
+            if (_options.ShowDebugOutput)
                 _pendingDebugLog.Add($"\n[DEBUG] ApplyHttpClientSettings() — Authorization header: {(authSet ? "SET" : "NOT SET")}\n");
         }
 
@@ -347,23 +349,21 @@ namespace DevMind
         /// </summary>
         public async Task DetectContextSizeAsync()
         {
-            var opts = DevMindOptions.Instance;
-
-            int manual = opts?.ManualContextSize ?? 0;
+            int manual = _options.ManualContextSize;
             if (manual > 0)
             {
                 _contextSize = manual;
                 _budget = new ContextBudget(_contextSize);
                 Debug.WriteLine($"[DevMind] Using manual context size: {_contextSize}");
-                if (DevMindOptions.Instance.ShowDebugOutput)
+                if (_options.ShowDebugOutput)
                     _pendingDebugLog.Add($"\n[DEBUG] DetectContextSizeAsync() — manual context override: {_contextSize:N0} tokens\n");
                 return;
             }
 
-            if (DevMindOptions.Instance.ShowDebugOutput)
+            if (_options.ShowDebugOutput)
                 _pendingDebugLog.Add($"\n[DEBUG] DetectContextSizeAsync() — auto-detecting context size (no manual override)\n");
 
-            LlmServerType serverType = opts?.ServerType ?? LlmServerType.LlamaServer;
+            LlmServerType serverType = _options.ServerType;
 
             string serverRoot = _baseUrl.EndsWith("/v1", StringComparison.OrdinalIgnoreCase)
                 ? _baseUrl.Substring(0, _baseUrl.Length - 3)
@@ -389,7 +389,7 @@ namespace DevMind
                         break;
 
                     case LlmServerType.Custom:
-                        string customPath = opts?.CustomContextEndpoint?.Trim() ?? "";
+                        string customPath = _options.CustomContextEndpoint?.Trim() ?? "";
                         url = string.IsNullOrEmpty(customPath)
                             ? serverRoot + "/props"
                             : (customPath.StartsWith("http", StringComparison.OrdinalIgnoreCase)
@@ -518,9 +518,9 @@ namespace DevMind
 
             // Tier 1: Trim stale tool result content in-place — runs ALWAYS, including agentic resubmits
             // If thrashing is detected, escalate to brainwash (full context replacement).
-            if (DevMindOptions.Instance.MicroCompactBrainwash && IsThrashing())
+            if (_options.MicroCompactBrainwash && IsThrashing())
             {
-                bool showDebug = DevMindOptions.Instance.ShowDebugOutput;
+                bool showDebug = _options.ShowDebugOutput;
                 string brainwashMsg = await BrainwashContextAsync(showDebug).ConfigureAwait(false);
                 if (brainwashMsg != null)
                     onToken(brainwashMsg);
@@ -573,7 +573,7 @@ namespace DevMind
                 // MicroCompact handles context pressure at its own threshold.
                 // The soft trim interferes by changing the conversation prefix (breaks KV cache
                 // on hybrid models like Mamba) and reclaims too little to prevent server 500s.
-                int microCompactThreshold = DevMindOptions.Instance.MicroCompactThreshold;
+                int microCompactThreshold = _options.MicroCompactThreshold;
                 if (microCompactThreshold > 0)
                 {
                     // Let MicroCompact handle it — skip soft/hard trim entirely
@@ -648,7 +648,7 @@ namespace DevMind
             int contextCeiling = ServerContextSize > 0 ? ServerContextSize : _budget.HistoryHardLimit;
 
             // If the estimated total exceeds the safe ceiling, try MicroCompact before aborting
-            if (grandTotal > contextCeiling * 0.85 && DevMindOptions.Instance.MicroCompactThreshold > 0)
+            if (grandTotal > contextCeiling * 0.85 && _options.MicroCompactThreshold > 0)
             {
                 string compactLog = await MicroCompactToolResultsAsync().ConfigureAwait(false);
                 if (!string.IsNullOrEmpty(compactLog))
@@ -718,7 +718,7 @@ namespace DevMind
             // swaps in a fresh connection pool so the chat request goes over a live TCP connection.
             await EnsureConnectionHealthAsync(cancellationToken).ConfigureAwait(false);
 
-            string modelName = DevMindOptions.Instance.ModelName;
+            string modelName = _options.ModelName;
             string requestJson = BuildRequestJson(modelName);
 
             string url = _baseUrl + "/chat/completions";
@@ -745,7 +745,7 @@ namespace DevMind
                 var fullResponse = new StringBuilder();
                 bool firstTokenReceived = false;
                 var firstTokenDeadline = DateTime.UtcNow.AddMinutes(
-                    DevMindOptions.Instance.FirstTokenTimeoutMinutes);
+                    _options.FirstTokenTimeoutMinutes);
                 string lastDataLine = null; // Track last SSE data line for tool_calls extraction
 
                 // Accumulate tool calls across SSE delta chunks.
@@ -770,7 +770,7 @@ namespace DevMind
                         var remaining = firstTokenDeadline - DateTime.UtcNow;
                         if (remaining <= TimeSpan.Zero)
                             throw new TimeoutException(
-                                $"No response received within {DevMindOptions.Instance.FirstTokenTimeoutMinutes} minute(s). " +
+                                $"No response received within {_options.FirstTokenTimeoutMinutes} minute(s). " +
                                 "The server may still be processing the prompt. " +
                                 "Increase 'First Token Timeout' in Tools > Options > DevMind.");
 
@@ -782,7 +782,7 @@ namespace DevMind
                             // If user cancelled, ThrowIfCancellationRequested gives clean exit.
                             cancellationToken.ThrowIfCancellationRequested();
                             throw new TimeoutException(
-                                $"No response received within {DevMindOptions.Instance.FirstTokenTimeoutMinutes} minute(s). " +
+                                $"No response received within {_options.FirstTokenTimeoutMinutes} minute(s). " +
                                 "The server may still be processing the prompt. " +
                                 "Increase 'First Token Timeout' in Tools > Options > DevMind.");
                         }
@@ -833,9 +833,9 @@ namespace DevMind
                 accumulatedToolCalls = BuildAccumulatedToolCalls(toolCallArgBuilders, toolCallMeta);
 
                 // Check for tool_calls in the SSE stream
-                if (DevMindOptions.Instance.ShowDebugOutput)
+                if (_options.ShowDebugOutput)
                     onToken($"\n[DIAG-SSE] lastDataLine: {(lastDataLine?.Length > 500 ? lastDataLine.Substring(0, 500) + "..." : lastDataLine)}\n");
-                if (DevMindOptions.Instance.ShowDebugOutput)
+                if (_options.ShowDebugOutput)
                     onToken($"\n[DIAG-TOOLS] Accumulated {accumulatedToolCalls?.Count ?? 0} tool call(s)\n");
 
                 // ── Parse server timings from lastDataLine ────────────────────
@@ -871,7 +871,7 @@ namespace DevMind
 
                 // ── Emit server timings status line ─────────────────────────
                 if (LastGeneratedTokens > 0
-                    && (DevMindOptions.Instance.ShowContextBudget || DevMindOptions.Instance.ShowDebugOutput))
+                    && (_options.ShowContextBudget || _options.ShowDebugOutput))
                 {
                     double genSec = LastGeneratedMs / 1000.0;
                     double tokPerSec = genSec > 0 ? LastGeneratedTokens / genSec : 0;
@@ -1010,9 +1010,9 @@ namespace DevMind
             _httpClient?.Dispose();
         }
 
-        private static string GetSystemPrompt()
+        private string GetSystemPrompt()
         {
-            string prompt = DevMindOptions.Instance.SystemPrompt;
+            string prompt = _options.SystemPrompt;
             return string.IsNullOrWhiteSpace(prompt) ? DefaultSystemPrompt : prompt;
         }
 
@@ -1045,8 +1045,8 @@ namespace DevMind
         /// </summary>
         public string EvictStaleContext()
         {
-            var mode = DevMindOptions.Instance.ContextEviction;
-            bool showDebug = DevMindOptions.Instance.ShowDebugOutput;
+            var mode = _options.ContextEviction;
+            bool showDebug = _options.ShowDebugOutput;
 
             var diagLog = new System.Text.StringBuilder();
 
@@ -1486,10 +1486,10 @@ namespace DevMind
         /// </summary>
         public async Task<string> MicroCompactToolResultsAsync()
         {
-            bool showDebug = DevMindOptions.Instance.ShowDebugOutput;
+            bool showDebug = _options.ShowDebugOutput;
 
             // ── Threshold gate: only compact when context pressure is high ────
-            int threshold = DevMindOptions.Instance.MicroCompactThreshold;
+            int threshold = _options.MicroCompactThreshold;
             if (threshold == 0)
                 return null; // disabled
 
@@ -1711,7 +1711,7 @@ namespace DevMind
 
             // ── Context summarization — replace dumb breadcrumbs with semantic summary ──
             string summaryLogExtra = "";
-            if (DevMindOptions.Instance.MicroCompactSummarize && trimmedOriginals.Count > 0)
+            if (_options.MicroCompactSummarize && trimmedOriginals.Count > 0)
             {
                 var sw = Stopwatch.StartNew();
                 string summary = await GenerateSummaryAsync(trimmedOriginals).ConfigureAwait(false);
@@ -1878,7 +1878,7 @@ namespace DevMind
                     ["chat_template_kwargs"] = new JObject { ["enable_thinking"] = false }
                 };
 
-                string modelName = DevMindOptions.Instance.ModelName;
+                string modelName = _options.ModelName;
                 if (!string.IsNullOrWhiteSpace(modelName))
                     request["model"] = modelName;
 
@@ -2792,7 +2792,7 @@ namespace DevMind
                 ["stream"] = true
             };
 
-            if (!DevMindOptions.Instance.ShowLlmThinking)
+            if (!_options.ShowLlmThinking)
             {
                 request["thinking"] = new JObject { ["type"] = "disabled" };
             }
