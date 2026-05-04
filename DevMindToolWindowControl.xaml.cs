@@ -846,7 +846,7 @@ namespace DevMind
                 await AutoReadReferencedFilesAsync(text);
 
             string activeProjectPath = await GetActiveProjectPathAsync();
-            string contextualMessage = BuildMessageWithContext(text, selectedText, fileName, fullContent, activeProjectPath);
+            string contextualMessage = ContextEngine.BuildMessageWithContext(text, selectedText, fileName, fullContent, activeProjectPath);
 
             // Lazy-load project context once per session (DevMind.md / AGENTS.md / CLAUDE.md)
             if (_devMindContext == null)

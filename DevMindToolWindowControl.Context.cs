@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.Context.cs  v5.23
+// File: DevMindToolWindowControl.Context.cs  v5.24
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -23,44 +23,17 @@ namespace DevMind
 {
     public partial class DevMindToolWindowControl : UserControl
     {
-        private static readonly HashSet<string> _noisePathSegments = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            { "bin", "obj", ".vs", ".git", "node_modules", "packages", ".idea" };
+        // Priority order for primary context file discovery
+        private static readonly string[] _contextFilePriority = { "DevMind.md", "AGENTS.md", "CLAUDE.md" };
 
-        // Files at or above this line count get an outline injection instead of full content
-        private const int ReadOutlineThresholdLines = 100;
+        // Supplemental files to check when DevMind.md is the primary
+        private static readonly string[] _supplementalFiles = { "AGENTS.md", "CLAUDE.md" };
 
-        private static bool IsNoisePath(string fullPath) =>
-            fullPath.Replace('\\', '/').Split('/')
-                .Any(seg => _noisePathSegments.Contains(seg));
+        // Currently loaded .agent.md profile name (null = none loaded)
+        private string _loadedAgentProfile;
 
-        /// <summary>
-        /// Recursively enumerates files matching a pattern, silently skipping
-        /// any directories that are inaccessible (permission errors, symlink loops, etc.).
-        /// </summary>
-        private static IEnumerable<string> SafeEnumerateFiles(string root, string pattern)
-        {
-            // Strip glob characters the LLM might accidentally include in a filename
-            string safePattern = pattern.Replace("*", "").Replace("?", "");
-            if (string.IsNullOrWhiteSpace(safePattern)) yield break;
-
-            var queue = new Queue<string>();
-            queue.Enqueue(root);
-            while (queue.Count > 0)
-            {
-                string dir = queue.Dequeue();
-                IEnumerable<string> files = Enumerable.Empty<string>();
-                try { files = Directory.EnumerateFiles(dir, safePattern); } catch { }
-                foreach (var f in files) yield return f;
-
-                IEnumerable<string> subdirs = Enumerable.Empty<string>();
-                try { subdirs = Directory.EnumerateDirectories(dir); } catch { }
-                foreach (var sub in subdirs)
-                {
-                    if (!_noisePathSegments.Contains(Path.GetFileName(sub)))
-                        queue.Enqueue(sub);
-                }
-            }
-        }
+        // Currently loaded .agent.md profile content (injected as supplemental)
+        private string _agentProfileContent;
 
         private async Task<string> FindFileInSolutionAsync(string fileName, string hint = null)
         {
@@ -72,14 +45,10 @@ namespace DevMind
                 var solutionDir = Path.GetDirectoryName(dte.Solution.FileName);
                 if (string.IsNullOrEmpty(solutionDir)) return null;
 
-                // Exclude output/tooling folders that could contain stale compiled copies.
-                // Use safe recursive enumeration — Directory.GetFiles(AllDirectories) throws
-                // on any inaccessible subdirectory (symlinks, ACL-denied folders, etc.)
-                var matches = SafeEnumerateFiles(solutionDir, fileName)
-                    .Where(m => !IsNoisePath(m))
+                var matches = ContextEngine.SafeEnumerateFiles(solutionDir, fileName)
+                    .Where(m => !ContextEngine.IsNoisePath(m))
                     .ToArray();
 
-                // If hint contains a path separator, prefer matches whose path contains the hint
                 if (!string.IsNullOrEmpty(hint) && (hint.Contains('/') || hint.Contains('\\')))
                 {
                     string normalizedHint = hint.Replace('\\', '/');
@@ -141,41 +110,7 @@ namespace DevMind
             }
         }
 
-        private static string GetLanguageHint(string fileName)
-        {
-            string ext = Path.GetExtension(fileName ?? "").TrimStart('.').ToLowerInvariant();
-            return ext switch
-            {
-                "cs"   => "csharp",
-                "vb"   => "vbnet",
-                "ts"   => "typescript",
-                "js"   => "javascript",
-                "py"   => "python",
-                "xml"  => "xml",
-                "xaml" => "xml",
-                "json" => "json",
-                "sql"  => "sql",
-                "cpp"  => "cpp",
-                "cc"   => "cpp",
-                "h"    => "cpp",
-                "hpp"  => "cpp",
-                _      => ext
-            };
-        }
-
         // ── Project context file discovery ───────────────────────────────────
-
-        // Priority order for primary context file discovery
-        private static readonly string[] _contextFilePriority = { "DevMind.md", "AGENTS.md", "CLAUDE.md" };
-
-        // Supplemental files to check when DevMind.md is the primary
-        private static readonly string[] _supplementalFiles = { "AGENTS.md", "CLAUDE.md" };
-
-        // Currently loaded .agent.md profile name (null = none loaded)
-        private string _loadedAgentProfile;
-
-        // Currently loaded .agent.md profile content (injected as supplemental)
-        private string _agentProfileContent;
 
         /// <summary>
         /// Discovers and loads project context files using the priority chain:
@@ -193,7 +128,6 @@ namespace DevMind
                 string solutionDir = System.IO.Path.GetDirectoryName(dte?.Solution?.FullName);
                 if (string.IsNullOrEmpty(solutionDir)) return null;
 
-                // Find primary context file
                 string primaryName = null;
                 string primaryContent = null;
                 foreach (string candidate in _contextFilePriority)
@@ -215,7 +149,6 @@ namespace DevMind
 
                 AppendOutput($"[CONTEXT] Primary: {primaryName} loaded\n", OutputColor.Dim);
 
-                // Supplemental: only when DevMind.md is the primary
                 if (string.Equals(primaryName, "DevMind.md", StringComparison.OrdinalIgnoreCase))
                 {
                     foreach (string suppName in _supplementalFiles)
@@ -328,7 +261,7 @@ namespace DevMind
                 }
 
                 string raw = File.ReadAllText(agentFile);
-                string content = StripYamlFrontmatter(raw);
+                string content = ContextEngine.StripYamlFrontmatter(raw);
 
                 _loadedAgentProfile = name;
                 _agentProfileContent = content;
@@ -344,72 +277,7 @@ namespace DevMind
             }
         }
 
-        /// <summary>
-        /// Strips YAML frontmatter (between opening --- and closing --- lines)
-        /// from a markdown document. Returns the remaining content.
-        /// </summary>
-        private static string StripYamlFrontmatter(string content)
-        {
-            if (content == null) return null;
-            string trimmed = content.TrimStart();
-            if (!trimmed.StartsWith("---")) return content;
-
-            // Find the closing ---
-            int firstNewline = trimmed.IndexOf('\n');
-            if (firstNewline < 0) return content;
-
-            int closingDash = trimmed.IndexOf("\n---", firstNewline, StringComparison.Ordinal);
-            if (closingDash < 0) return content;
-
-            // Skip past the closing --- line
-            int afterClosing = trimmed.IndexOf('\n', closingDash + 4);
-            return afterClosing >= 0 ? trimmed.Substring(afterClosing + 1) : "";
-        }
-
         // ── READ rendering helpers ────────────────────────────────────────────
-
-        /// <summary>
-        /// Renders a READ result block for a file — either the full content wrapped in
-        /// "[READ:filename]\n…\n```\n&lt;content&gt;\n```\n\n" or the outline wrapped in
-        /// "[READ:filename] (N lines — outline only…)\n&lt;outline&gt;\n\n".
-        /// Pure rendering — no side effects, no _filesReadThisSession updates.
-        /// </summary>
-        private static string RenderReadBlock(
-            string fileNameOnly,
-            string content,
-            int lineCount,
-            bool forceFullRead,
-            bool alreadyRead,
-            out bool wasOutline)
-        {
-            bool injectOutline = (alreadyRead || lineCount >= ReadOutlineThresholdLines) && !forceFullRead;
-            wasOutline = injectOutline;
-            if (injectOutline)
-            {
-                string outlineText = LlmClient.GenerateOutline(fileNameOnly, content);
-                return $"[READ:{fileNameOnly}] ({lineCount} lines — outline only, use READ {fileNameOnly}:start-end for detail)\n{outlineText}\n\n";
-            }
-            return $"[READ:{fileNameOnly}]\nThe following files have been loaded for context:\n\n{fileNameOnly}\n```\n{content}\n```\n\n";
-        }
-
-        /// <summary>
-        /// Renders a line-range READ block for a file:
-        /// "[READ:filename:start-end] (lines start-end of total[ — clamped])\n```\n&lt;numbered&gt;\n```\n\n".
-        /// Pure rendering — no side effects.
-        /// </summary>
-        private static string RenderReadRangeBlock(
-            string fileNameOnly,
-            int clampedStart,
-            int clampedEnd,
-            int totalLines,
-            string numberedContent,
-            bool clamped)
-        {
-            string header = clamped
-                ? $"[READ:{fileNameOnly}:{clampedStart}-{clampedEnd}] (lines {clampedStart}-{clampedEnd} of {totalLines} total — clamped)"
-                : $"[READ:{fileNameOnly}:{clampedStart}-{clampedEnd}] (lines {clampedStart}-{clampedEnd} of {totalLines} total)";
-            return $"{header}\n```\n{numberedContent.TrimEnd('\r', '\n')}\n```\n\n";
-        }
 
         // ── READ command ──────────────────────────────────────────────────────
 
@@ -418,7 +286,6 @@ namespace DevMind
             System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] ApplyReadCommandAsync ENTER — input='{input.Substring(0, Math.Min(input.Length, 120))}', showOutline={showOutline}");
             try
             {
-                // Support multi-line input: process each line starting with "READ " or "RELOAD "
                 var lines = input.Split('\n');
                 foreach (var rawLine in lines)
                 {
@@ -440,20 +307,16 @@ namespace DevMind
                         continue;
                     }
 
-                    // Intercept git commands: "git log [N]" and "git diff [args]"
                     if (hint.StartsWith("git ", StringComparison.OrdinalIgnoreCase))
                     {
                         await ApplyReadGitCommandAsync(hint);
                         continue;
                     }
 
-                    // Isolate filename — take first whitespace-delimited token only.
-                    // Handles "READ AgenticExecutor.cs and fix the bug" → "AgenticExecutor.cs"
                     int spaceIdx = hint.IndexOf(' ');
                     if (spaceIdx > 0)
                         hint = hint.Substring(0, spaceIdx);
 
-                    // Detect line-range suffix: filename.cs:400-450 or filename.cs:400 (single line)
                     var rangeMatch = Regex.Match(hint, @"^(.+):(\d+)(?:-(\d+))?$");
                     if (rangeMatch.Success)
                     {
@@ -466,7 +329,6 @@ namespace DevMind
                         continue;
                     }
 
-                    // Normalize separators; extract just the filename for directory search
                     string normalizedHint = hint.Replace('\\', '/');
                     string fileNameOnly = Path.GetFileName(normalizedHint);
 
@@ -485,13 +347,9 @@ namespace DevMind
                     _taskReadFiles.Add(fileNameOnly);
                     int lineCount = content.Split('\n').Length;
 
-                    // Pre-append compression (Rule 4): if we've already read this file
-                    // this session, inject an outline instead of full content. The model
-                    // already saw the full content on the first read. This replaces the
-                    // old post-append SqueezeReadContent/CompressLastUserReadBlocks approach.
                     bool alreadyRead = _llmClient.MarkFileRead(fileNameOnly);
 
-                    RenderReadBlock(fileNameOnly, content, lineCount, isForceRead, alreadyRead, out bool wasOutline);
+                    ContextEngine.RenderReadBlock(fileNameOnly, content, lineCount, isForceRead, alreadyRead, out bool wasOutline);
 
                     if (wasOutline)
                         AppendOutput($"[READ] {fullPath} ({lineCount} lines — outline{(alreadyRead ? ", re-read" : "")})\n", OutputColor.Success);
@@ -518,7 +376,6 @@ namespace DevMind
                 string normalizedHint = fileHint.Replace('\\', '/');
                 string fileNameOnly   = Path.GetFileName(normalizedHint);
 
-                // Ensure the file is in the cache; load from disk if not
                 if (!_llmClient.FileCache.Contains(fileNameOnly))
                 {
                     string fullPath = await FindFileInSolutionAsync(fileNameOnly, normalizedHint)
@@ -539,13 +396,11 @@ namespace DevMind
                 _taskReadFiles.Add(fileNameOnly);
                 int totalLines = _llmClient.FileCache.GetLineCount(fileNameOnly);
 
-                // Swap inverted range silently
                 if (startLine > endLine)
                 {
                     int tmp = startLine; startLine = endLine; endLine = tmp;
                 }
 
-                // Clamp endLine to actual file length
                 int clampedEnd = Math.Min(endLine, totalLines);
                 int clampedStart = Math.Max(1, startLine);
 
@@ -556,7 +411,6 @@ namespace DevMind
                     return;
                 }
 
-                // Prefix each line with its 1-based line number
                 var rawLines = rangeContent.Split('\n');
                 var numbered = new StringBuilder();
                 for (int i = 0; i < rawLines.Length; i++)
@@ -565,7 +419,6 @@ namespace DevMind
                 bool clamped = clampedEnd < endLine;
                 AppendOutput($"[READ] {fileNameOnly}:{clampedStart}-{clampedEnd} ({clampedEnd - clampedStart + 1} lines){(clamped ? " [clamped]" : "")}\n", OutputColor.Success);
 
-                // Display content for user-initiated reads
                 AppendOutput(numbered.ToString(), OutputColor.Dim);
             }
             catch (Exception ex)
@@ -578,7 +431,7 @@ namespace DevMind
         {
             string ext = Path.GetExtension(fullPath).ToLowerInvariant();
             if (ext != ".cs") return;
-            var outline = ExtractCSharpOutline(content);
+            var outline = ContextEngine.ExtractCSharpOutline(content);
             AppendOutput("  Outline:\n", OutputColor.Dim);
             if (outline.Count == 0)
             {
@@ -587,64 +440,6 @@ namespace DevMind
             }
             foreach (var entry in outline)
                 AppendOutput($"    {entry}\n", OutputColor.Dim);
-        }
-
-        private static List<string> ExtractCSharpOutline(string content)
-        {
-            var results = new List<string>();
-            string currentType = null;
-            var rawLines = content.Split('\n');
-
-            for (int i = 0; i < rawLines.Length; i++)
-            {
-                int lineNumber = i + 1;
-                string line = rawLines[i].TrimEnd('\r').Trim();
-
-                // Detect class/struct/interface/enum declarations
-                var typeMatch = Regex.Match(line,
-                    @"^(?:(?:public|private|protected|internal|static|abstract|sealed|partial)\s+)*(?:class|struct|interface|enum)\s+(\w+)");
-                if (typeMatch.Success)
-                {
-                    currentType = typeMatch.Value;
-                    results.Add($"{lineNumber,6}: {currentType}");
-                    continue;
-                }
-
-                // Detect methods: access modifier(s), return type, name, opening paren
-                var methodMatch = Regex.Match(line,
-                    @"^(?:(?:public|private|protected|internal)\s+)?(?:(?:static|async|override|virtual|abstract|sealed|new)\s+)*[\w<>\[\],\?\s]+\s+(\w+)\s*\(([^)]*)(\)?)");
-                if (methodMatch.Success)
-                {
-                    string name = methodMatch.Groups[1].Value;
-                    // Skip control flow keywords that look like method calls
-                    var skipKeywords = new HashSet<string> {
-                        "if", "for", "foreach", "while", "switch", "catch",
-                        "using", "lock", "return", "new", "throw", "typeof",
-                        "nameof", "sizeof", "default", "when", "var", "get", "set"
-                    };
-                    if (skipKeywords.Contains(name)) continue;
-                    string sig = methodMatch.Value.Trim();
-                    if (sig.Length > 100) sig = sig.Substring(0, 100) + "...";
-                    string indent = currentType != null ? "  " : "";
-                    results.Add($"{lineNumber,6}: {indent}{sig}");
-                    continue;
-                }
-
-                // Detect properties: type Name { get; set; } or type Name =>
-                var propMatch = Regex.Match(line,
-                    @"^(?:(?:public|private|protected|internal)\s+)?(?:(?:static|override|virtual|abstract|new)\s+)*[\w<>\[\],\?\s]+\s+(\w+)\s*(?:\{(?:\s*get|\s*set)|=>)");
-                if (propMatch.Success)
-                {
-                    string name = propMatch.Groups[1].Value;
-                    if (name == "get" || name == "set" || name == "new" || name == "return" || name == "var") continue;
-                    string sig = propMatch.Value.Trim();
-                    if (sig.Contains("=>")) sig = sig.Substring(0, sig.IndexOf("=>")).Trim();
-                    if (sig.Contains("{")) sig = sig.Substring(0, sig.IndexOf("{")).Trim();
-                    string indent = currentType != null ? "  " : "";
-                    results.Add($"{lineNumber,6}: {indent}{sig}");
-                }
-            }
-            return results;
         }
 
         private async Task<string> GetActiveProjectPathAsync()
@@ -657,7 +452,6 @@ namespace DevMind
 
                 EnvDTE.Project project = null;
 
-                // Try to get the active document's containing project
                 var activeDocItem = dte.ActiveDocument?.ProjectItem;
                 if (activeDocItem?.ContainingProject != null)
                 {
@@ -665,7 +459,6 @@ namespace DevMind
                 }
                 else if (dte.Solution.Projects.Count > 0)
                 {
-                    // Fallback to first project in solution
                     project = dte.Solution.Projects.Item(1);
                 }
 
@@ -698,44 +491,27 @@ namespace DevMind
                 string solutionDir = Path.GetDirectoryName(dte.Solution.FileName);
                 if (string.IsNullOrEmpty(solutionDir)) return;
 
-                var candidates = new LinkedList<string>(); // ordered, deduped by name
                 var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var candidates = new LinkedList<string>();
 
-                // 1. Explicit *.cs filenames mentioned in the prompt
-                foreach (Match m in Regex.Matches(prompt, @"\b([\w]+\.cs)\b", RegexOptions.IgnoreCase))
+                // 1 & 2. Explicit filenames and PascalCase heuristic (pure Core logic)
+                foreach (string name in ContextEngine.ExtractFileCandidates(prompt))
                 {
-                    string name = m.Groups[1].Value;
-                    if (seen.Add(name)) candidates.AddLast(name);
-                }
-
-                // 2. PascalCase words → try <Word>.cs (avoid common non-file words)
-                var skipWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-                {
-                    "I", "The", "This", "That", "When", "Where", "What", "How",
-                    "Add", "Fix", "Use", "Get", "Set", "Run", "Can", "Does", "Make",
-                    "Please", "Also", "Now", "Just", "Note", "PATCH", "READ", "FILE",
-                    "SHELL", "UNDO", "Wait", "True", "False", "Null"
-                };
-                foreach (Match m in Regex.Matches(prompt, @"\b([A-Z][a-zA-Z0-9]{2,})\b"))
-                {
-                    string word = m.Groups[1].Value;
-                    if (skipWords.Contains(word)) continue;
-                    string name = word + ".cs";
                     if (seen.Add(name)) candidates.AddLast(name);
                 }
 
                 // 3. "test" / "tests" keyword → find *Test*.cs files in solution
                 if (Regex.IsMatch(prompt, @"\btests?\b", RegexOptions.IgnoreCase))
                 {
-                    var testFiles = SafeEnumerateFilesGlob(solutionDir, "*.cs")
-                        .Where(f => !IsNoisePath(f))
+                    var testFiles = ContextEngine.SafeEnumerateFilesGlob(solutionDir, "*.cs")
+                        .Where(f => !ContextEngine.IsNoisePath(f))
                         .Where(f => Path.GetFileNameWithoutExtension(f)
                                         .IndexOf("Test", StringComparison.OrdinalIgnoreCase) >= 0)
                         .Select(f => Path.GetFileName(f))
                         .Distinct(StringComparer.OrdinalIgnoreCase)
                         .Take(3);
                     foreach (string tf in testFiles)
-                        if (seen.Add(tf)) candidates.AddLast(tf); // append so tests fill remaining slots
+                        if (seen.Add(tf)) candidates.AddLast(tf);
                 }
 
                 int autoReadCount = 0;
@@ -748,7 +524,6 @@ namespace DevMind
                     string fullPath = await FindFileInSolutionAsync(candidate);
                     if (fullPath == null || !File.Exists(fullPath)) continue;
 
-                    // Re-use ApplyReadCommandAsync to load the file consistently
                     await ApplyReadCommandAsync($"READ {candidate}", showOutline: false);
                     autoReadCount++;
                 }
@@ -759,28 +534,6 @@ namespace DevMind
             catch
             {
                 // Auto-read is best-effort; never block the send
-            }
-        }
-
-        // ── SafeEnumerateFilesGlob — glob pattern with * allowed ─────────────
-
-        private static IEnumerable<string> SafeEnumerateFilesGlob(string root, string globPattern)
-        {
-            var queue = new Queue<string>();
-            queue.Enqueue(root);
-            while (queue.Count > 0)
-            {
-                string dir = queue.Dequeue();
-                IEnumerable<string> files = Enumerable.Empty<string>();
-                try { files = Directory.EnumerateFiles(dir, globPattern); } catch { }
-                foreach (var f in files) yield return f;
-                IEnumerable<string> subdirs = Enumerable.Empty<string>();
-                try { subdirs = Directory.EnumerateDirectories(dir); } catch { }
-                foreach (var sub in subdirs)
-                {
-                    if (!_noisePathSegments.Contains(Path.GetFileName(sub)))
-                        queue.Enqueue(sub);
-                }
             }
         }
 
@@ -827,8 +580,6 @@ namespace DevMind
                 }
                 else
                 {
-                    // Could be a commit ref (HEAD~1, hash) or a filename
-                    // Pass through safely — git will validate the argument
                     command = $"git diff {diffArgs}";
                     header = $"[READ] git diff {diffArgs}";
                 }
@@ -839,7 +590,6 @@ namespace DevMind
                 return;
             }
 
-            // Run the git command
             string savedDir = _shellRunner.WorkingDirectory;
             _shellRunner.ChangeDirectory(gitRoot);
             string output;
@@ -859,7 +609,6 @@ namespace DevMind
                 return;
             }
 
-            // Truncate diff output at 500 lines
             const int MaxDiffLines = 500;
             var outputLines = output.Split('\n');
             string truncatedOutput;
@@ -881,15 +630,14 @@ namespace DevMind
         }
 
         /// <summary>
-        /// Finds the git repository root by walking up from the project directory
-        /// or _shellRunner.WorkingDirectory. Returns null if no .git directory is found.
+        /// Resolves the git repository root by asking DTE for a starting directory,
+        /// then delegates the walk-up to ContextEngine.FindGitRoot.
         /// </summary>
         private async Task<string> FindGitRootAsync()
         {
             string startDir = null;
             try
             {
-                // Prefer project directory via DTE
                 await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
                 var dte = await VS.GetServiceAsync<DTE, DTE>();
                 var project = dte?.ActiveDocument?.ProjectItem?.ContainingProject;
@@ -903,52 +651,7 @@ namespace DevMind
             if (string.IsNullOrEmpty(startDir))
                 startDir = _shellRunner.WorkingDirectory;
 
-            // Walk up looking for .git
-            string dir = startDir;
-            while (!string.IsNullOrEmpty(dir))
-            {
-                if (Directory.Exists(Path.Combine(dir, ".git")))
-                    return dir;
-                string parent = Path.GetDirectoryName(dir);
-                if (parent == dir) break;
-                dir = parent;
-            }
-            return null;
-        }
-
-        private static string BuildMessageWithContext(
-            string userMessage,
-            string selectedText,
-            string fileName,
-            string fullContent = null,
-            string activeProjectPath = null)
-        {
-            var contextBuilder = new StringBuilder();
-
-            // Include active project path if available
-            if (!string.IsNullOrEmpty(activeProjectPath))
-            {
-                contextBuilder.AppendLine($"[ACTIVE PROJECT: {activeProjectPath}]");
-                contextBuilder.AppendLine();
-            }
-
-            if (!string.IsNullOrEmpty(selectedText))
-            {
-                string header = string.IsNullOrEmpty(fileName)
-                    ? "Selected code:"
-                    : $"Selected code from {fileName}:";
-                return $"{contextBuilder}{header}\n```{GetLanguageHint(fileName)}\n{selectedText}\n```\n\n{userMessage}";
-            }
-
-            if (!string.IsNullOrEmpty(fullContent) && !string.IsNullOrEmpty(fileName))
-                return $"{contextBuilder}Active file ({fileName}):\n```{GetLanguageHint(fileName)}\n{fullContent}\n```\n\n{userMessage}";
-
-            if (!string.IsNullOrEmpty(fileName))
-                return $"{contextBuilder}[Active file: {fileName}]\n\n{userMessage}";
-
-            return !string.IsNullOrEmpty(activeProjectPath) 
-                ? $"{contextBuilder}{userMessage}" 
-                : userMessage;
+            return ContextEngine.FindGitRoot(startDir);
         }
     }
 }
