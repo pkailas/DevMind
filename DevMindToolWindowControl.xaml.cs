@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v7.16
+// File: DevMindToolWindowControl.xaml.cs  v7.18
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -65,6 +65,10 @@ namespace DevMind
         private int _undoCount = 0;
         private int _readFileCount = 0;
         private TrainingLogger _trainingLogger;
+        // Combined system prompt for the current task (user prompt + tool catalog + DevMind.md).
+        // Built on the first user-initiated turn; reused on agentic resubmits to keep the KV
+        // cache prefix stable. Never written back to DevMindOptions.Instance.SystemPrompt.
+        private string _currentCombinedPrompt;
 
         public DevMindToolWindowControl(LlmClient llmClient)
         {
@@ -825,18 +829,11 @@ namespace DevMind
             streamPara.Inlines.Add(streamRun);
             var responseBuffer = new StringBuilder();
 
-            // Temporarily inject the LLM directive and DevMind.md into the system prompt.
-            // UpdateSystemPrompt() in LlmClient runs synchronously at the start of
-            // SendMessageAsync, before the first await, so restoring immediately after
-            // RunAsync() returns is safe — no race condition.
-            //
-            // During agentic resubmits (_loopState.ShellLoopPending), skip reconstruction entirely.
-            // The combined system prompt was built on the first iteration and is still set
-            // in DevMindOptions.Instance.SystemPrompt (restored by the finally block of the
-            // previous iteration, then unchanged). Rebuilding from DTE on subsequent
-            // iterations risks wobble (null active doc, changed tabs) that would alter the
-            // system prompt string and invalidate the server's entire KV cache from position 0.
-            string originalSystemPrompt = _loopState.ShellLoopPending ? null : DevMindOptions.Instance.SystemPrompt;
+            // Build the combined system prompt on the first user-initiated turn and store it
+            // in _currentCombinedPrompt for the lifetime of this agentic task. Agentic
+            // resubmits reuse the stored value — no DTE re-fetch — so the KV cache prefix
+            // stays stable across iterations. The combined prompt is passed explicitly to
+            // SendMessageAsync; DevMindOptions.Instance.SystemPrompt is never overwritten.
 
             // Hoist buildCommand so it's accessible in the onComplete lambda for ToolCallMapper
             // VSIX projects fail with dotnet build — detect via .vsixmanifest sibling and use MSBuild instead
@@ -878,7 +875,7 @@ namespace DevMind
 
                 string llmDirective = LoopHelpers.BuildToolUsePrompt(buildCommand, projectNamespace);
 
-                string combined = $"{originalSystemPrompt}\n\n{llmDirective}";
+                string combined = $"{DevMindOptions.Instance.SystemPrompt}\n\n{llmDirective}";
                 if (!string.IsNullOrEmpty(_devMindContext))
                     combined += $"\n\n--- Project Context (DevMind.md) ---\n{_devMindContext}\n---";
 
@@ -892,15 +889,11 @@ namespace DevMind
                 }
                 catch { /* Memory loading is best-effort */ }
 
-                DevMindOptions.Instance.SystemPrompt = combined;
+                _currentCombinedPrompt = combined;
             }
 
             System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] About to call SendMessageAsync — contextualMessage length={contextualMessage.Length}");
 
-            // Guard: always restore the original system prompt, even if RunAsync throws
-            // synchronously or an exception propagates before RunAsync returns.
-            try
-            {
 #pragma warning disable VSSDK007
 #pragma warning disable VSTHRD100
             _ = ThreadHelper.JoinableTaskFactory.RunAsync(async delegate
@@ -1249,6 +1242,7 @@ namespace DevMind
                             }));
                         },
                         deferCompression: _loopState.ShellLoopPending,
+                        combinedSystemPrompt: _currentCombinedPrompt,
                         cancellationToken: _cts.Token);
                 }
                 finally
@@ -1277,16 +1271,6 @@ namespace DevMind
             });
 #pragma warning restore VSTHRD100
 #pragma warning restore VSSDK007
-            }
-            finally
-            {
-                // Restore original system prompt now that RunAsync has started and
-                // UpdateSystemPrompt() has captured the combined value synchronously
-                // before the first await in SendMessageAsync.
-                // originalSystemPrompt is null during agentic resubmits — skip restore.
-                if (originalSystemPrompt != null)
-                    DevMindOptions.Instance.SystemPrompt = originalSystemPrompt;
-            }
         }
 
         // ── Terminal strip ────────────────────────────────────────────────────

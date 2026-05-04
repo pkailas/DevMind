@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v7.25
+// File: LlmClient.cs  v7.26
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -478,6 +478,9 @@ namespace DevMind
         /// <param name="onError">Called if an error occurs during the request.</param>
         /// <param name="deferCompression">When true, eviction and budget management are skipped.
         /// Pass true during agentic iterations to preserve the KV cache prefix.</param>
+        /// <param name="combinedSystemPrompt">Pre-built combined system prompt (user prompt +
+        /// tool catalog + DevMind.md context). When non-null, preferred over
+        /// DevMindOptions.Instance.SystemPrompt. Pass null to use the options value (legacy path).</param>
         /// <param name="cancellationToken">Cancellation token to abort the request.</param>
         public async Task SendMessageAsync(
             string userMessage,
@@ -485,6 +488,7 @@ namespace DevMind
             Action onComplete,
             Action<Exception> onError,
             bool deferCompression = false,
+            string combinedSystemPrompt = null,
             CancellationToken cancellationToken = default)
         {
             System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] SendMessageAsync ENTER — userMessage length={userMessage?.Length ?? 0}, deferCompression={deferCompression}");
@@ -509,7 +513,7 @@ namespace DevMind
                 _pendingDebugLog.Clear();
             }
 
-            UpdateSystemPrompt();
+            UpdateSystemPrompt(combinedSystemPrompt);
 
             // ── Append-only context management ─────────────────────────────────────
             // What you store is what you send. What you send is what the cache sees.
@@ -1030,9 +1034,11 @@ namespace DevMind
             return string.IsNullOrWhiteSpace(prompt) ? DefaultSystemPrompt : prompt;
         }
 
-        private void UpdateSystemPrompt()
+        private void UpdateSystemPrompt(string combinedSystemPrompt = null)
         {
-            string prompt = GetSystemPrompt();
+            string prompt = !string.IsNullOrEmpty(combinedSystemPrompt)
+                ? combinedSystemPrompt
+                : GetSystemPrompt();
             if (_conversationHistory.Count > 0 && _conversationHistory[0].Role == "system")
             {
                 // Skip replacement if the prompt text is identical — preserves the KV cache prefix.
