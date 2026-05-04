@@ -16,15 +16,6 @@ namespace DevMind
     public interface IAgenticHost
     {
         /// <summary>
-        /// Apply a PATCH block to a file. Returns the resolved file path on
-        /// success, or null if the patch failed (FIND text not found, fuzzy
-        /// match rejected, ambiguous match, file not found, etc.).
-        /// The patchContent parameter is the full PATCH block text including
-        /// the "PATCH filename" header line and all FIND:/REPLACE: pairs.
-        /// </summary>
-        Task<string> ApplyPatchAsync(string patchContent);
-
-        /// <summary>
         /// Run a shell command and capture its output.
         /// Returns the exit code and combined stdout+stderr output.
         /// Uses the current terminal working directory.
