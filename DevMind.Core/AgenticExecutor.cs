@@ -1,4 +1,4 @@
-// File: AgenticExecutor.cs  v7.5
+// File: AgenticExecutor.cs  v7.6
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -131,6 +131,13 @@ namespace DevMind
             {
                 switch (block.Type)
                 {
+                    case BlockType.Done:
+                        // Render task_done.summary so the user sees the answer when the model
+                        // packs its response into the summary parameter instead of prose tokens.
+                        if (!string.IsNullOrWhiteSpace(block.Content))
+                            _host.AppendOutput(block.Content.TrimEnd('\r', '\n') + "\n", OutputColor.Normal);
+                        break;
+
                     case BlockType.Scratchpad:
                         try
                         {
