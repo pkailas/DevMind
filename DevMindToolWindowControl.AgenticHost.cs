@@ -346,7 +346,7 @@ namespace DevMind
                         numbered.AppendLine($"{clampedStart + i}: {rawLines[i].TrimEnd('\r')}");
 
                     bool clamped = clampedEnd < rangeEnd;
-                    string rangeBlock = RenderReadRangeBlock(fileNameOnly, clampedStart, clampedEnd, totalLines, numbered.ToString(), clamped);
+                    string rangeBlock = ContextEngine.RenderReadRangeBlock(fileNameOnly, clampedStart, clampedEnd, totalLines, numbered.ToString(), clamped);
 
                     AppendOutput($"[READ] {fileNameOnly}:{clampedStart}-{clampedEnd} ({clampedEnd - clampedStart + 1} lines){(clamped ? " [clamped]" : "")}\n", OutputColor.Success);
                     return rangeBlock;
@@ -360,7 +360,7 @@ namespace DevMind
 
                 bool alreadyRead = _llmClient.MarkFileRead(fileNameOnly);
 
-                string rendered = RenderReadBlock(fileNameOnly, content, lineCount, forceFullRead, alreadyRead, out bool wasOutline);
+                string rendered = ContextEngine.RenderReadBlock(fileNameOnly, content, lineCount, forceFullRead, alreadyRead, out bool wasOutline);
 
                 if (wasOutline)
                     AppendOutput($"[READ] {fullPath} ({lineCount} lines — outline{(alreadyRead ? ", re-read" : "")})\n", OutputColor.Success);
@@ -616,8 +616,8 @@ namespace DevMind
             IEnumerable<string> files;
             try
             {
-                files = SafeEnumerateFilesGlob(effectiveRoot, filePattern)
-                    .Where(f => !IsNoisePath(f))
+                files = ContextEngine.SafeEnumerateFilesGlob(effectiveRoot, filePattern)
+                    .Where(f => !ContextEngine.IsNoisePath(f))
                     .OrderBy(f => f, StringComparer.OrdinalIgnoreCase);
             }
             catch (Exception ex)
@@ -735,10 +735,10 @@ namespace DevMind
             try
             {
                 if (recursive)
-                    matches = SafeEnumerateFilesGlob(effectiveRoot, filePattern).Where(f => !IsNoisePath(f));
+                    matches = ContextEngine.SafeEnumerateFilesGlob(effectiveRoot, filePattern).Where(f => !ContextEngine.IsNoisePath(f));
                 else
                     matches = Directory.EnumerateFiles(effectiveRoot, filePattern, SearchOption.TopDirectoryOnly)
-                        .Where(f => !IsNoisePath(f));
+                        .Where(f => !ContextEngine.IsNoisePath(f));
             }
             catch (Exception ex)
             {
