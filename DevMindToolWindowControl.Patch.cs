@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.Patch.cs  v6.0
+// File: DevMindToolWindowControl.Patch.cs  v7.15  v6.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Microsoft.VisualStudio.Shell;
@@ -77,6 +77,7 @@ namespace DevMind
                 }
                 File.Copy(backupPath, originalPath, overwrite: true);
                 try { File.Delete(backupPath); } catch { }
+                _undoCount++;
                 int remaining = _patchBackupStack.Count;
                 AppendOutput($"[UNDO] Restored {Path.GetFileName(originalPath)} (undo depth remaining: {remaining})\n", OutputColor.Success);
                 InputTextBox.Text = "";
@@ -178,7 +179,7 @@ namespace DevMind
                         string fuzzyNormReplace = replaceText.Replace("\r\n", "\n");
                         string fuzzyFinalReplace = fileUsesCrlf ? fuzzyNormReplace.Replace("\n", "\r\n") : fuzzyNormReplace;
                         resolvedBlocks.Add((fuzzy.Value.origStart, fuzzy.Value.origEnd, fuzzyFinalReplace));
-                        if (_agenticDepth > 0)
+                        if (_loopState.AgenticDepth > 0)
                         {
                             // Agentic loop — auto-accept without prompting.
                             // continue to skip the tail resolvedBlocks.Add() below (block already added above).
@@ -424,6 +425,7 @@ namespace DevMind
                 }
                 catch { /* non-fatal — file was written, just not auto-reloaded */ }
 
+                _patchCount++;
                 int undosAvailable = _patchBackupStack.Count;
                 AppendOutput($"[PATCH] Applied to {resolved.FullPath} (undo depth: {undosAvailable})\n", OutputColor.Success);
                 return resolved.FullPath;

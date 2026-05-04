@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v7.14
+// File: DevMindToolWindowControl.xaml.cs  v7.15
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -41,23 +41,16 @@ namespace DevMind
         private System.Windows.Threading.DispatcherTimer _thinkingTimer;
         private int _thinkingSeconds;
         private string _devMindContext;
-        private bool _shellLoopPending;
-        private int _agenticDepth;
-        private string _consecutiveErrorToolName;
-        private int    _consecutiveErrorCount;
+        private readonly LoopState _loopState = new LoopState();
         // Threshold 5 is a heuristic — gives slack for legitimate
         // progressive debugging (shell → read → patch → shell cycles
         // can run 3-4 rounds) without masking genuine stuck loops.
         // Revisit if training-log data suggests a different value.
         private const int ConsecutiveErrorAbortThreshold = 5;
-        // True when a prose-finish re-prompt has already been fired for the current task.
-        // Cleared at the start of every user-initiated SendToLlm() (alongside _agenticDepth).
-        private bool _promptedForTaskDone;
         private int _lastShellExitCode;
         private string _lastShellCommand;
-        private bool _inThinkBlock;
-        private readonly StringBuilder _thinkBuffer = new StringBuilder();
-        private string _pendingThinkText;   // set by FilterChunk when ShowLlmThinking is true
+        private readonly ThinkFilter _thinkFilter = new ThinkFilter();
+        private string _pendingThinkText;
         private readonly Stack<(string originalPath, string backupPath)> _patchBackupStack = new Stack<(string, string)>();
         private const int PatchBackupStackLimit = 10;
         private Paragraph _spacerParagraph;
@@ -71,7 +64,6 @@ namespace DevMind
         private int _patchCount = 0;
         private int _undoCount = 0;
         private int _readFileCount = 0;
-        private static string _cachedMSBuildPath;
         private TrainingLogger _trainingLogger;
 
         public DevMindToolWindowControl(LlmClient llmClient)
@@ -361,9 +353,7 @@ namespace DevMind
             // Clear output
             InitOutputDocument();
 
-            // Reset think filter state
-            _inThinkBlock = false;
-            _thinkBuffer.Clear();
+            _thinkFilter.Reset();
 
             // Clear terminal history
             _terminalHistory.Clear();
@@ -467,7 +457,7 @@ namespace DevMind
                         PredictedTokens = _llmClient.LastGeneratedTokens,
                         PromptTokens = _llmClient.LastPromptTokens,
                         TokPerSec = Math.Round(tokPerSec, 1),
-                        Iteration = _agenticDepth,
+                        Iteration = _loopState.AgenticDepth,
                         ContextPercent = pct
                     },
                     Outcome = TrainingLogger.ClassifyOutcome(
@@ -496,62 +486,6 @@ namespace DevMind
             StopButton.IsEnabled = !enabled || _diffPreviewPending;
         }
 
-        // ── Think-block filter ────────────────────────────────────────────────
-
-        private string FilterChunk(string chunk)
-        {
-            _pendingThinkText = null;
-            bool showThinking = DevMindOptions.Instance.ShowLlmThinking;
-
-            if (_inThinkBlock)
-            {
-                _thinkBuffer.Append(chunk);
-                string bufStr = _thinkBuffer.ToString();
-                int closeIdx = bufStr.IndexOf("</think>", StringComparison.OrdinalIgnoreCase);
-                if (closeIdx >= 0)
-                {
-                    string after = bufStr.Substring(closeIdx + "</think>".Length);
-                    _inThinkBlock = false;
-                    // Show only the portion of the current chunk that falls before </think>
-                    int chunkCloseIdx = chunk.IndexOf("</think>", StringComparison.OrdinalIgnoreCase);
-                    if (showThinking && chunkCloseIdx > 0)
-                        _pendingThinkText = chunk.Substring(0, chunkCloseIdx);
-                    _thinkBuffer.Clear();
-                    return after;
-                }
-                if (showThinking)
-                    _pendingThinkText = chunk;
-                return string.Empty;
-            }
-
-            int openIdx = chunk.IndexOf("<think>", StringComparison.OrdinalIgnoreCase);
-            if (openIdx >= 0)
-            {
-                string before = chunk.Substring(0, openIdx);
-                string rest = chunk.Substring(openIdx + "<think>".Length);
-                _inThinkBlock = true;
-                _thinkBuffer.Clear();
-                _thinkBuffer.Append(rest);
-
-                int closeIdx = rest.IndexOf("</think>", StringComparison.OrdinalIgnoreCase);
-                if (closeIdx >= 0)
-                {
-                    string thinkContent = rest.Substring(0, closeIdx);
-                    string after = rest.Substring(closeIdx + "</think>".Length);
-                    _inThinkBlock = false;
-                    _thinkBuffer.Clear();
-                    if (showThinking && !string.IsNullOrEmpty(thinkContent))
-                        _pendingThinkText = "[THINKING] " + thinkContent;
-                    return before + after;
-                }
-                if (showThinking && !string.IsNullOrEmpty(rest))
-                    _pendingThinkText = "[THINKING] " + rest;
-                return before;
-            }
-
-            return chunk;
-        }
-
         // ── LLM ───────────────────────────────────────────────────────────────
 
 #pragma warning disable VSSDK007 // async void UI event handler is intentional
@@ -560,7 +494,7 @@ namespace DevMind
 #pragma warning restore VSTHRD100
 #pragma warning restore VSSDK007
         {
-            System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] SendToLlm ENTER — _shellLoopPending={_shellLoopPending}, _agenticDepth={_agenticDepth}");
+            System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] SendToLlm ENTER — _loopState.ShellLoopPending={_loopState.ShellLoopPending}, _loopState.AgenticDepth={_loopState.AgenticDepth}");
             string text = InputTextBox.Text?.Trim();
             if (string.IsNullOrEmpty(text))
             {
@@ -572,13 +506,10 @@ namespace DevMind
             // Reset agentic depth for user-initiated calls; preserve it for agentic re-triggers.
             // Increment turn counter on every call so tiered eviction and MicroCompact age tracking
             // see increasing turn numbers during the agentic loop.
-            if (!_shellLoopPending)
+            if (!_loopState.ShellLoopPending)
             {
-                _agenticDepth = 0;
-                _promptedForTaskDone = false;
+                _loopState.ResetForUserTurn();
                 _taskReadFiles.Clear();
-                _consecutiveErrorToolName = null;
-                _consecutiveErrorCount    = 0;
             }
             _llmClient.IncrementTurn();
 
@@ -814,8 +745,7 @@ namespace DevMind
                 }
             }
 
-            _inThinkBlock = false;
-            _thinkBuffer.Clear();
+            _thinkFilter.Reset();
 
             InputTextBox.Text = "";
             SetInputEnabled(false);
@@ -842,7 +772,7 @@ namespace DevMind
             }
 
             // Auto-read files referenced in the prompt (user-initiated turns only)
-            if (!_shellLoopPending)
+            if (!_loopState.ShellLoopPending)
                 await AutoReadReferencedFilesAsync(text);
 
             string activeProjectPath = await GetActiveProjectPathAsync();
@@ -868,8 +798,8 @@ namespace DevMind
             AppendOutput($"\n> {text}\n", OutputColor.Input);
             AppendNewLine();
 
-            StatusText.Text = _agenticDepth > 0
-                ? $"Thinking... (agentic {_agenticDepth}/{DevMindOptions.Instance.AgenticLoopMaxDepth})"
+            StatusText.Text = _loopState.AgenticDepth > 0
+                ? $"Thinking... (agentic {_loopState.AgenticDepth}/{DevMindOptions.Instance.AgenticLoopMaxDepth})"
                 : "Thinking...";
             _thinkingSeconds = 0;
             _thinkingTimer?.Stop();
@@ -877,8 +807,8 @@ namespace DevMind
             _thinkingTimer.Tick += (s, e) =>
             {
                 _thinkingSeconds++;
-                string agenticSuffix = _agenticDepth > 0
-                    ? $" (agentic {_agenticDepth}/{DevMindOptions.Instance.AgenticLoopMaxDepth})"
+                string agenticSuffix = _loopState.AgenticDepth > 0
+                    ? $" (agentic {_loopState.AgenticDepth}/{DevMindOptions.Instance.AgenticLoopMaxDepth})"
                     : "";
                 StatusText.Text = $"Thinking{agenticSuffix} ({_thinkingSeconds}s)";
             };
@@ -900,13 +830,13 @@ namespace DevMind
             // SendMessageAsync, before the first await, so restoring immediately after
             // RunAsync() returns is safe — no race condition.
             //
-            // During agentic resubmits (_shellLoopPending), skip reconstruction entirely.
+            // During agentic resubmits (_loopState.ShellLoopPending), skip reconstruction entirely.
             // The combined system prompt was built on the first iteration and is still set
             // in DevMindOptions.Instance.SystemPrompt (restored by the finally block of the
             // previous iteration, then unchanged). Rebuilding from DTE on subsequent
             // iterations risks wobble (null active doc, changed tabs) that would alter the
             // system prompt string and invalidate the server's entire KV cache from position 0.
-            string originalSystemPrompt = _shellLoopPending ? null : DevMindOptions.Instance.SystemPrompt;
+            string originalSystemPrompt = _loopState.ShellLoopPending ? null : DevMindOptions.Instance.SystemPrompt;
 
             // Hoist buildCommand so it's accessible in the onComplete lambda for ToolCallMapper
             // VSIX projects fail with dotnet build — detect via .vsixmanifest sibling and use MSBuild instead
@@ -917,7 +847,7 @@ namespace DevMind
                 bool isVsix = projectDir != null &&
                     (System.IO.File.Exists(System.IO.Path.Combine(projectDir, "source.extension.vsixmanifest")) ||
                      System.IO.File.Exists(System.IO.Path.Combine(projectDir, "extension.vsixmanifest")));
-                var msbuildPath = FindMSBuildPath();
+                var msbuildPath = LoopHelpers.FindMSBuildPath();
                 var msbuildInvoke = msbuildPath.Contains(" ") ? $"& \"{msbuildPath}\"" : msbuildPath;
                 buildCommand = isVsix
                     ? $"{msbuildInvoke} \"{activeProjectPath}\" /p:DeployExtension=false /p:Configuration=Release /verbosity:minimal"
@@ -925,12 +855,12 @@ namespace DevMind
             }
             else
             {
-                var msbuildPath = FindMSBuildPath();
+                var msbuildPath = LoopHelpers.FindMSBuildPath();
                 var msbuildInvoke = msbuildPath.Contains(" ") ? $"& \"{msbuildPath}\"" : msbuildPath;
                 buildCommand = $"{msbuildInvoke} \"C:\\Users\\pkailas.KAILAS\\source\\repos\\DevMind\\DevMind.slnx\" /p:DeployExtension=false /p:Configuration=Release /verbosity:minimal";
             }
 
-            if (!_shellLoopPending)
+            if (!_loopState.ShellLoopPending)
             {
                 string projectNamespace = null;
                 try
@@ -946,7 +876,7 @@ namespace DevMind
                 }
                 catch { }
 
-                string llmDirective = BuildToolUsePrompt(buildCommand, projectNamespace);
+                string llmDirective = LoopHelpers.BuildToolUsePrompt(buildCommand, projectNamespace);
 
                 string combined = $"{originalSystemPrompt}\n\n{llmDirective}";
                 if (!string.IsNullOrEmpty(_devMindContext))
@@ -988,7 +918,7 @@ namespace DevMind
                             {
 #pragma warning restore VSTHRD001, VSTHRD110
                                 if (_cts?.IsCancellationRequested == true) return;
-                                var visible = FilterChunk(token);
+                                var visible = _thinkFilter.Process(token, DevMindOptions.Instance.ShowLlmThinking, out _pendingThinkText);
 
                                 // Route thinking tokens to the dim think run
                                 if (_pendingThinkText != null)
@@ -1083,7 +1013,7 @@ namespace DevMind
                                     ExecutionResult result = await executor.ExecuteAsync(action, outcome);
 
                                     // Inject per-tool result messages so the model sees what happened
-                                    InjectToolResultMessages(lastToolCalls, result, outcome.Blocks);
+                                    LoopHelpers.InjectToolResultMessages(_llmClient, lastToolCalls, result, outcome.Blocks);
 
                                     // ── Training data capture ──
                                     LogTrainingTurn(text, fullResponse, outcome, result, lastToolCalls);
@@ -1096,18 +1026,18 @@ namespace DevMind
                                                              || (result.ShellExitCode.HasValue && result.ShellExitCode.Value != 0);
                                         if (primaryTool != null && turnHadError)
                                         {
-                                            if (primaryTool == _consecutiveErrorToolName)
-                                                _consecutiveErrorCount++;
+                                            if (primaryTool == _loopState.ConsecutiveErrorToolName)
+                                                _loopState.ConsecutiveErrorCount++;
                                             else
                                             {
-                                                _consecutiveErrorToolName = primaryTool;
-                                                _consecutiveErrorCount    = 1;
+                                                _loopState.ConsecutiveErrorToolName = primaryTool;
+                                                _loopState.ConsecutiveErrorCount    = 1;
                                             }
                                         }
                                         else
                                         {
-                                            _consecutiveErrorToolName = null;
-                                            _consecutiveErrorCount    = 0;
+                                            _loopState.ConsecutiveErrorToolName = null;
+                                            _loopState.ConsecutiveErrorCount    = 0;
                                         }
                                     }
 
@@ -1115,20 +1045,20 @@ namespace DevMind
                                     if (outcome.IsDone)
                                     {
                                         AppendOutput("[AGENTIC] Task complete.\n", OutputColor.Success);
-                                        _agenticDepth = 0;
+                                        _loopState.AgenticDepth = 0;
                                         // fall through to completion
                                     }
                                     // Check for run/exec command — treat as task complete
                                     else if (result.ShellExitCode.HasValue && result.ShellExitCode == 0
                                         && !string.IsNullOrEmpty(result.LastShellCommand)
-                                        && IsRunOrExecCommand(result.LastShellCommand))
+                                        && LoopHelpers.IsRunOrExecCommand(result.LastShellCommand))
                                     {
                                         AppendOutput("[AGENTIC] Run/exec command succeeded — treating as task complete.\n", OutputColor.Success);
-                                        _agenticDepth = 0;
+                                        _loopState.AgenticDepth = 0;
                                         // fall through to completion
                                     }
                                     // Check consecutive-error abort — same tool failing without resolution
-                                    else if (_consecutiveErrorCount >= ConsecutiveErrorAbortThreshold)
+                                    else if (_loopState.ConsecutiveErrorCount >= ConsecutiveErrorAbortThreshold)
                                     {
                                         const int snippetLen = 250;
                                         string firstError = result.Errors.Count > 0 ? result.Errors[0] : "(no error detail)";
@@ -1137,45 +1067,45 @@ namespace DevMind
                                         string outputSnip = result.ShellOutput.Length > 0
                                                             ? $"\nOutput:\n{result.ShellOutput.Substring(0, Math.Min(result.ShellOutput.Length, snippetLen))}" : "";
                                         AppendOutput(
-                                            $"[AGENTIC] Aborted: '{_consecutiveErrorToolName}' failed {_consecutiveErrorCount} " +
+                                            $"[AGENTIC] Aborted: '{_loopState.ConsecutiveErrorToolName}' failed {_loopState.ConsecutiveErrorCount} " +
                                             $"consecutive times with no resolution.\n" +
                                             $"Last error: {firstError}{cmdLine}{outputSnip}\n" +
                                             "Review the failure above and re-send with a corrected approach.\n",
                                             OutputColor.Error);
-                                        _consecutiveErrorToolName = null;
-                                        _consecutiveErrorCount    = 0;
-                                        _agenticDepth = 0;
+                                        _loopState.ConsecutiveErrorToolName = null;
+                                        _loopState.ConsecutiveErrorCount    = 0;
+                                        _loopState.AgenticDepth = 0;
                                         // fall through to completion
                                     }
                                     // Check depth cap
-                                    else if (maxDepth > 0 && _agenticDepth >= maxDepth)
+                                    else if (maxDepth > 0 && _loopState.AgenticDepth >= maxDepth)
                                     {
                                         if (result.ShellExitCode.HasValue && result.ShellExitCode != 0)
                                         {
                                             int undoDepth = _patchBackupStack.Count;
-                                            AppendOutput($"[AGENTIC] Depth cap reached ({_agenticDepth}) — build still failing.\n", OutputColor.Error);
+                                            AppendOutput($"[AGENTIC] Depth cap reached ({_loopState.AgenticDepth}) — build still failing.\n", OutputColor.Error);
                                             AppendOutput("Type UNDO to revert all changes, or continue editing manually.\n", OutputColor.Dim);
                                             AppendOutput($"({undoDepth} change(s) can be undone)\n", OutputColor.Dim);
                                         }
                                         else
                                         {
-                                            AppendOutput($"[AGENTIC] Depth cap reached ({_agenticDepth}). Stopping.\n", OutputColor.Dim);
+                                            AppendOutput($"[AGENTIC] Depth cap reached ({_loopState.AgenticDepth}). Stopping.\n", OutputColor.Dim);
                                         }
-                                        _agenticDepth = 0;
+                                        _loopState.AgenticDepth = 0;
                                         // fall through to completion
                                     }
                                     else
                                     {
                                         // ── Re-trigger: feed results back, let model decide next ──
 
-                                        _agenticDepth++;
+                                        _loopState.AgenticDepth++;
                                         {
                                             int agCtx = _llmClient.ServerContextSize > 0 ? _llmClient.ServerContextSize : _llmClient.MaxPromptTokens;
                                             int agUsed = _llmClient.LastContextUsed > 0 ? _llmClient.LastContextUsed : _llmClient.EstimateHistoryTokens();
                                             int agPct = agCtx > 0 ? (int)(agUsed * 100.0 / agCtx) : 0;
                                             string iterLabel = maxDepth > 0
-                                                ? $"Iteration {_agenticDepth}/{maxDepth}"
-                                                : $"Iteration {_agenticDepth}";
+                                                ? $"Iteration {_loopState.AgenticDepth}/{maxDepth}"
+                                                : $"Iteration {_loopState.AgenticDepth}";
                                             AppendOutput($"[AGENTIC] {iterLabel} — {agUsed:N0} / {agCtx:N0} ({agPct}%)\n", OutputColor.Dim);
                                         }
 
@@ -1186,19 +1116,19 @@ namespace DevMind
                                         // Check cancellation before re-triggering
                                         if (_cts.IsCancellationRequested)
                                         {
-                                            _shellLoopPending = false;
-                                            _agenticDepth = 0;
+                                            _loopState.ShellLoopPending = false;
+                                            _loopState.AgenticDepth = 0;
                                             AppendOutput("[AGENTIC] Cancelled.\n", OutputColor.Dim);
                                             StatusText.Text = "Stopped";
                                             SetInputEnabled(true);
                                             return;
                                         }
-                                        _shellLoopPending = true;
+                                        _loopState.ShellLoopPending = true;
                                         try { SendToLlm(); }
                                         catch
                                         {
-                                            _shellLoopPending = false;
-                                            _agenticDepth = 0;
+                                            _loopState.ShellLoopPending = false;
+                                            _loopState.AgenticDepth = 0;
                                             StatusText.Text = "Error";
                                             SetInputEnabled(true);
                                             throw;
@@ -1222,19 +1152,19 @@ namespace DevMind
                                     // Day-1 first-turn prose responses to pure questions are NOT re-prompted —
                                     // those are valid responses, not abandoned tasks.
                                     string trimmedResponse = fullResponse?.Trim() ?? "";
-                                    bool insideAgenticCycle = _agenticDepth > 0 || _shellLoopPending;
+                                    bool insideAgenticCycle = _loopState.AgenticDepth > 0 || _loopState.ShellLoopPending;
                                     bool prosePresent = trimmedResponse.Length > 40 && !outcome.HasAnyDirective && !outcome.IsDone;
 
-                                    if (insideAgenticCycle && prosePresent && !_promptedForTaskDone)
+                                    if (insideAgenticCycle && prosePresent && !_loopState.PromptedForTaskDone)
                                     {
                                         // Fire one-shot re-prompt asking for task_done.
                                         // Skip LogTrainingTurn — the re-prompt's outcome will be logged when it completes.
-                                        _promptedForTaskDone = true;
+                                        _loopState.PromptedForTaskDone = true;
                                         InputTextBox.Text =
                                             "You produced a prose answer but did not call task_done. " +
                                             "Call task_done now with your answer in the summary parameter. " +
                                             "Do not repeat the answer in prose — only the tool call.";
-                                        _shellLoopPending = true;
+                                        _loopState.ShellLoopPending = true;
 
                                         if (DevMindOptions.Instance.ShowDebugOutput)
                                             AppendOutput("[DIAG] Prose-finish detected — re-prompting for task_done.\n", OutputColor.Dim);
@@ -1242,9 +1172,9 @@ namespace DevMind
                                         try { SendToLlm(); }
                                         catch
                                         {
-                                            _shellLoopPending = false;
-                                            _agenticDepth = 0;
-                                            _promptedForTaskDone = false;
+                                            _loopState.ShellLoopPending = false;
+                                            _loopState.AgenticDepth = 0;
+                                            _loopState.PromptedForTaskDone = false;
                                             StatusText.Text = "Error";
                                             SetInputEnabled(true);
                                             throw;
@@ -1253,11 +1183,11 @@ namespace DevMind
                                     }
 
                                     // Stop — either pure-question response, already re-prompted once, or empty response
-                                    _agenticDepth = 0;
+                                    _loopState.AgenticDepth = 0;
                                     LogTrainingTurn(text, fullResponse, outcome, null, null);
                                     if (DevMindOptions.Instance.ShowDebugOutput)
                                     {
-                                        if (_promptedForTaskDone)
+                                        if (_loopState.PromptedForTaskDone)
                                             AppendOutput("[DIAG] Tool use loop: re-prompt also produced no tool calls — accepting prose-finish.\n", OutputColor.Dim);
                                         else
                                             AppendOutput("[DIAG] Tool use loop: no tool calls — stopping.\n", OutputColor.Dim);
@@ -1278,7 +1208,7 @@ namespace DevMind
                                     AppendOutput($"[CONTEXT] {cbUsed:N0} / {cbCtx:N0} ({cbPct}%)\n", cbColor);
                                 }
 
-                                _agenticDepth = 0;
+                                _loopState.AgenticDepth = 0;
                                 _thinkingTimer?.Stop();
                                 _thinkingTimer = null;
                                 StatusText.Text = "Ready";
@@ -1288,8 +1218,8 @@ namespace DevMind
                                 }
                                 catch (Exception onCompleteEx) when (!(onCompleteEx is OperationCanceledException))
                                 {
-                                    _shellLoopPending = false;
-                                    _agenticDepth = 0;
+                                    _loopState.ShellLoopPending = false;
+                                    _loopState.AgenticDepth = 0;
                                     _thinkingTimer?.Stop();
                                     _thinkingTimer = null;
                                     AppendOutput($"\n[onComplete error: {onCompleteEx.Message}]\n", OutputColor.Error);
@@ -1311,14 +1241,14 @@ namespace DevMind
                                 StopGeneratingAnimation();
                                 _thinkingTimer?.Stop();
                                 _thinkingTimer = null;
-                                _shellLoopPending = false;
-                                _agenticDepth = 0;
+                                _loopState.ShellLoopPending = false;
+                                _loopState.AgenticDepth = 0;
                                 AppendOutput($"\n[Error: {ex.Message}]\n", OutputColor.Error);
                                 StatusText.Text = "Error";
                                 SetInputEnabled(true);
                             }));
                         },
-                        deferCompression: _shellLoopPending,
+                        deferCompression: _loopState.ShellLoopPending,
                         cancellationToken: _cts.Token);
                 }
                 finally
@@ -1331,18 +1261,18 @@ namespace DevMind
                         _thinkingTimer = null;
                         AppendOutput("\n[Stopped]\n", OutputColor.Dim);
                         StatusText.Text = "Stopped";
-                        _shellLoopPending = false;
-                        _agenticDepth = 0;
+                        _loopState.ShellLoopPending = false;
+                        _loopState.AgenticDepth = 0;
                     }
-                    // Do NOT reset _agenticDepth or SetInputEnabled here.
+                    // Do NOT reset _loopState.AgenticDepth or SetInputEnabled here.
                     // The onComplete handler is dispatched via Dispatcher.BeginInvoke and
                     // may not have executed yet — resetting depth here causes a race where
                     // the counter resets to 0 on every iteration, preventing depth cap from
                     // ever being reached. All terminal paths in onComplete already reset
-                    // _agenticDepth = 0 and call SetInputEnabled(true).
-                    // _shellLoopPending is safe to clear unconditionally — it's a no-op
+                    // _loopState.AgenticDepth = 0 and call SetInputEnabled(true).
+                    // _loopState.ShellLoopPending is safe to clear unconditionally — it's a no-op
                     // when onComplete hasn't run yet (still false), and a cleanup when it has.
-                    _shellLoopPending = false;
+                    _loopState.ShellLoopPending = false;
                 }
             });
 #pragma warning restore VSTHRD100
@@ -1474,20 +1404,6 @@ namespace DevMind
             AppendOutput("─────────────────────────────────────────\n", OutputColor.Dim);
         }
 
-        /// <summary>
-        /// Returns true if the shell command is a run/exec invocation (not a build command).
-        /// These commands complete a task when they exit 0 and should not trigger agentic continuation.
-        /// </summary>
-        private static bool IsRunOrExecCommand(string command)
-        {
-            if (string.IsNullOrEmpty(command))
-                return false;
-            string cmd = command.Trim().ToLowerInvariant();
-            return cmd.Contains("dotnet run")
-                || cmd.Contains("dotnet exec")
-                || (cmd.EndsWith(".exe") && !cmd.Contains("msbuild") && !cmd.Contains("dotnet build"));
-        }
-
         private async Task SaveGeneratedFileAsync(string fileName, string code)
         {
             try
@@ -1556,261 +1472,6 @@ namespace DevMind
                 catch { }
                 AppendOutput($"✗ Failed to create {fileName}: {ex.Message}\n", OutputColor.Error);
             }
-        }
-
-        // ── Tool Result Injection ────────────────────────────────────────────
-
-        /// <summary>
-        /// After the executor processes tool calls, injects tool result messages into
-        /// conversation history so the model sees the outcome on the next turn.
-        /// </summary>
-        private void InjectToolResultMessages(List<ToolCallResult> toolCalls, ExecutionResult result,
-            List<ResponseBlock> executedBlocks)
-        {
-            foreach (var tc in toolCalls)
-            {
-                string resultContent = BuildToolResultContent(tc, result, executedBlocks);
-                _llmClient.AddToolResultMessage(tc.Id, resultContent);
-            }
-        }
-
-        /// <summary>
-        /// Builds the result content string for a single tool call based on the execution result.
-        /// </summary>
-        private static string BuildToolResultContent(ToolCallResult tc, ExecutionResult result,
-            List<ResponseBlock> executedBlocks)
-        {
-            switch (tc.Name)
-            {
-                case "read_file":
-                case "grep_file":
-                case "diff_file":
-                    {
-                        string key = tc.Arguments?.TryGetValue("filename", out string fn) == true ? fn : null;
-                        if (key != null && result.ToolResultContents != null &&
-                            result.ToolResultContents.TryGetValue(key, out string fileContent))
-                            return fileContent;
-                        return "[File content not available]";
-                    }
-
-                case "find_in_files":
-                    {
-                        string key = tc.Arguments?.TryGetValue("glob", out string g) == true ? g : null;
-                        if (key != null && result.ToolResultContents != null &&
-                            result.ToolResultContents.TryGetValue(key, out string findContent))
-                            return findContent;
-                        return "[Search results not available]";
-                    }
-
-                case "list_files":
-                    {
-                        string key = tc.Arguments?.TryGetValue("glob", out string lg) == true ? lg : null;
-                        if (key != null && result.ToolResultContents != null &&
-                            result.ToolResultContents.TryGetValue(key, out string listContent))
-                            return listContent;
-                        return "[ERROR: list_files result not captured]";
-                    }
-
-                case "patch_file":
-                    if (result.PatchedPaths != null && result.PatchedPaths.Count > 0)
-                        return $"[PATCH applied to {string.Join(", ", result.PatchedPaths)}]";
-                    if (result.Errors != null && result.Errors.Count > 0)
-                        return $"[PATCH-FAILED: {string.Join("; ", result.Errors)}]";
-                    return "[PATCH processed]";
-
-                case "create_file":
-                    if (result.FilesCreated != null && result.FilesCreated.Count > 0)
-                        return $"[File created: {string.Join(", ", result.FilesCreated)}]";
-                    return "[File created]";
-
-                case "append_file":
-                    if (result.FilesAppended != null && result.FilesAppended.Count > 0)
-                        return $"[Content appended to {string.Join(", ", result.FilesAppended)}]";
-                    return "[Content appended]";
-
-                case "run_shell":
-                case "run_build":
-                    if (!string.IsNullOrEmpty(result.ShellOutput))
-                        return result.ShellOutput;
-                    return result.ShellExitCode.HasValue
-                        ? $"[Shell exited with code {result.ShellExitCode}]"
-                        : "[Shell command executed]";
-
-                case "run_tests":
-                    return !string.IsNullOrEmpty(result.ShellOutput)
-                        ? result.ShellOutput
-                        : "[Tests executed]";
-
-                case "delete_file":
-                    if (result.FilesDeleted != null && result.FilesDeleted.Count > 0)
-                        return $"[Deleted: {string.Join(", ", result.FilesDeleted)}]";
-                    return "[File deleted]";
-
-                case "rename_file":
-                    if (result.FilesRenamed != null && result.FilesRenamed.Count > 0)
-                        return $"[Renamed: {string.Join(", ", result.FilesRenamed)}]";
-                    return "[File renamed]";
-
-                case "scratchpad":
-                    return "[Scratchpad updated]";
-
-                case "task_done":
-                    return "[Task complete]";
-
-                case "recall_memory":
-                    {
-                        var memBlock = executedBlocks?.FirstOrDefault(b => b.Type == BlockType.RecallMemory);
-                        return memBlock?.MemoryContent ?? "[Topic not found]";
-                    }
-
-                case "save_memory":
-                    {
-                        var memBlock = executedBlocks?.FirstOrDefault(b => b.Type == BlockType.SaveMemory);
-                        return memBlock?.MemoryDescription ?? "[Memory saved]";
-                    }
-
-                case "list_memory_topics":
-                    {
-                        var memBlock = executedBlocks?.FirstOrDefault(b => b.Type == BlockType.ListMemory);
-                        return memBlock?.MemoryContent ?? "[No memory topics found]";
-                    }
-
-                default:
-                    return "[Executed]";
-            }
-        }
-
-        // ── System Prompt Builders ──────────────────────────────────────────
-
-        private static string BuildToolUsePrompt(string buildCommand, string projectNamespace)
-        {
-            var sb = new System.Text.StringBuilder();
-
-            sb.Append("## Tool Catalog\n");
-            sb.Append("Reach for the right tool for each step:\n");
-            sb.Append("- Discovery (\"what files exist?\"): list_files with a glob pattern\n");
-            sb.Append("- Content search across files: find_in_files\n");
-            sb.Append("- Content search in a known file: grep_file\n");
-            sb.Append("- Reading a file: read_file (large files return an outline first; use start_line/end_line for targeted reads)\n");
-            sb.Append("- Editing an existing file: patch_file\n");
-            sb.Append("- Creating a new file: create_file\n");
-            sb.Append("- Running build: run_build\n");
-            sb.Append("- Running tests: run_tests\n");
-            sb.Append("- Tracking state: scratchpad\n");
-            sb.Append("- Saving cross-session knowledge: save_memory / recall_memory / list_memory_topics\n");
-            sb.Append("- Finishing: task_done\n\n");
-
-            sb.Append("## Termination Contract\n");
-            sb.Append("Every response must either contain a tool call OR call task_done. Free-form prose without a tool call is never a valid completion.\n");
-            sb.Append("After you have an answer or have finished a code change, your final action must be task_done with the answer or summary in the summary parameter.\n");
-            sb.Append("Do not type a final answer as prose and stop — that is an abandoned task, not a completion.\n\n");
-
-            sb.Append("## Path Format\n");
-            sb.Append("All file-path arguments to read_file, patch_file, create_file, grep_file, delete_file, diff_file, append_file, and rename_file must be absolute paths.\n");
-            sb.Append("When list_files or find_in_files returns paths, pass those exact strings to read_file — do not shorten to just the filename.\n\n");
-
-            sb.Append("## Build Verification\n");
-            sb.Append($"Build command: {buildCommand}\n");
-            sb.Append("After ANY code change (patch_file or create_file), call run_build to verify the build still passes.\n\n");
-
-            sb.Append("## Editing Workflow\n");
-            sb.Append("Call read_file before patch_file if you have not seen the file. The find argument to patch_file must be copied verbatim from read_file output — never reconstructed from memory.\n");
-            sb.Append("Do not call read_file on the same file multiple times. If you have an outline and a line range, that is sufficient context to write a patch_file. Act immediately.\n\n");
-
-            sb.Append("## Large File Strategy\n");
-            sb.Append("For files over 100 lines, read_file returns an outline (types, methods, signatures with line numbers) instead of full content.\n");
-            sb.Append("1. First read_file gets the outline.\n");
-            sb.Append("2. Use the outline to identify the exact line range you need.\n");
-            sb.Append("3. Call read_file with start_line and end_line for just that section.\n");
-            sb.Append("4. Call patch_file using only the content from that range.\n");
-            sb.Append("Do not set force_full=true on a large file unless explicitly asked. Work outline → range → patch.\n\n");
-
-            sb.Append("## Error Handling\n");
-            sb.Append("When a tool returns an error, read the error message before retrying. Do not retry the same call with minor variations of the same argument — diagnose first, then either fix the argument substantively or switch to a different tool.\n\n");
-
-            sb.Append("## Action Discipline\n");
-            sb.Append("After read_file, find_in_files, or grep_file returns content, act on it in the same overall task. Never call only read-style tools and stop without progress.\n");
-            sb.Append("Every turn during a code-change task must include at least one mutating tool call (patch_file, create_file, run_build, run_tests, run_shell) unless you are answering a question that requires no code change.\n");
-
-            if (!string.IsNullOrEmpty(projectNamespace))
-                sb.Append($"\n## Namespace\nWhen creating new files, use the namespace '{projectNamespace}'.");
-
-            return sb.ToString();
-        }
-
-        /// <summary>
-        /// Discovers MSBuild.exe at runtime. Checks VSINSTALLDIR env var, then vswhere.exe,
-        /// then known VS installation directories. Caches the result for the session.
-        /// </summary>
-        private static string FindMSBuildPath()
-        {
-            if (_cachedMSBuildPath != null)
-                return _cachedMSBuildPath;
-
-            // 1. Check VSINSTALLDIR environment variable
-            var vsInstallDir = Environment.GetEnvironmentVariable("VSINSTALLDIR");
-            if (!string.IsNullOrEmpty(vsInstallDir))
-            {
-                var candidate = System.IO.Path.Combine(vsInstallDir, "MSBuild", "Current", "Bin", "MSBuild.exe");
-                if (System.IO.File.Exists(candidate))
-                {
-                    _cachedMSBuildPath = candidate;
-                    return _cachedMSBuildPath;
-                }
-            }
-
-            // 2. Try vswhere.exe
-            var vswherePath = @"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe";
-            if (System.IO.File.Exists(vswherePath))
-            {
-                try
-                {
-                    var psi = new System.Diagnostics.ProcessStartInfo
-                    {
-                        FileName = vswherePath,
-                        Arguments = "-latest -requires Microsoft.Component.MSBuild -find MSBuild\\**\\Bin\\MSBuild.exe",
-                        RedirectStandardOutput = true,
-                        UseShellExecute = false,
-                        CreateNoWindow = true
-                    };
-                    using (var proc = System.Diagnostics.Process.Start(psi))
-                    {
-                        var output = proc.StandardOutput.ReadToEnd();
-                        proc.WaitForExit(5000);
-                        var firstLine = output?.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
-                        if (!string.IsNullOrEmpty(firstLine) && System.IO.File.Exists(firstLine))
-                        {
-                            _cachedMSBuildPath = firstLine;
-                            return _cachedMSBuildPath;
-                        }
-                    }
-                }
-                catch
-                {
-                    // vswhere failed — fall through to directory scan
-                }
-            }
-
-            // 3. Scan known VS installation directories
-            var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
-            var versions = new[] { "18", "2022", "2019" };
-            var editions = new[] { "Enterprise", "Professional", "Community", "BuildTools" };
-            foreach (var ver in versions)
-            {
-                foreach (var edition in editions)
-                {
-                    var candidate = System.IO.Path.Combine(programFiles, "Microsoft Visual Studio", ver, edition, "MSBuild", "Current", "Bin", "MSBuild.exe");
-                    if (System.IO.File.Exists(candidate))
-                    {
-                        _cachedMSBuildPath = candidate;
-                        return _cachedMSBuildPath;
-                    }
-                }
-            }
-
-            // 4. Last resort — bare msbuild, hope it's on PATH
-            _cachedMSBuildPath = "msbuild";
-            return _cachedMSBuildPath;
         }
 
     }
