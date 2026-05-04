@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v7.18
+// File: DevMindToolWindowControl.xaml.cs  v7.19
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -42,11 +42,6 @@ namespace DevMind
         private int _thinkingSeconds;
         private string _devMindContext;
         private readonly LoopState _loopState = new LoopState();
-        // Threshold 5 is a heuristic — gives slack for legitimate
-        // progressive debugging (shell → read → patch → shell cycles
-        // can run 3-4 rounds) without masking genuine stuck loops.
-        // Revisit if training-log data suggests a different value.
-        private const int ConsecutiveErrorAbortThreshold = 5;
         private int _lastShellExitCode;
         private string _lastShellCommand;
         private readonly ThinkFilter _thinkFilter = new ThinkFilter();
@@ -69,6 +64,7 @@ namespace DevMind
         // Built on the first user-initiated turn; reused on agentic resubmits to keep the KV
         // cache prefix stable. Never written back to DevMindOptions.Instance.SystemPrompt.
         private string _currentCombinedPrompt;
+        private LoopDriver _loopDriver;
 
         public DevMindToolWindowControl(LlmClient llmClient)
         {
@@ -78,6 +74,7 @@ namespace DevMind
             InitOutputDocument();
             _llmClient = llmClient;
             _shellRunner = new ShellRunner(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+            _loopDriver = new LoopDriver(_llmClient, this, this, DevMindOptions.Instance, _loopState);
 
 #pragma warning disable VSSDK007 // Fire-and-forget to resolve solution directory is intentional
             _ = ThreadHelper.JoinableTaskFactory.RunAsync(async delegate
@@ -951,263 +948,44 @@ namespace DevMind
                                 {
                                 await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
 
-                                AppendNewLine();
-
-                                // ── Classify → Decide → Execute pipeline ──────────────────────
-
                                 string fullResponse = responseBuffer.ToString();
                                 System.Diagnostics.Debug.WriteLine($"[DEVMIND-DIAG] responseBuffer length={fullResponse.Length}");
-                                System.Diagnostics.Debug.WriteLine($"[DEVMIND-DIAG] responseBuffer first 500 chars: {(fullResponse.Length > 500 ? fullResponse.Substring(0, 500) : fullResponse)}");
 
-                                ResponseOutcome outcome = ResponseOutcome.Empty();
-                                var lastToolCalls = _llmClient.LastToolCalls;
-                                if (DevMindOptions.Instance.ShowDebugOutput)
-                                    AppendOutput($"[DIAG] LastToolCalls: {lastToolCalls?.Count ?? 0}\n", OutputColor.Dim);
-                                if (lastToolCalls != null && lastToolCalls.Count > 0)
+                                var iter = await _loopDriver.ProcessIterationAsync(fullResponse, buildCommand, _cts?.Token ?? CancellationToken.None);
+
+                                if (iter.ShouldLogTurn)
+                                    LogTrainingTurn(text, iter.AssistantResponse, iter.Outcome, iter.Result, iter.ToolCalls);
+
+                                switch (iter.Kind)
                                 {
-                                    // Tool use path — map tool calls to response blocks
-                                    var toolBlocks = ToolCallMapper.Map(lastToolCalls, buildCommand);
+                                    case LoopIterationKind.Terminal:
+                                        _thinkingTimer?.Stop();
+                                        _thinkingTimer = null;
+                                        StatusText.Text = "Ready";
+                                        ContextIndicator.Text = "";
+                                        SetInputEnabled(true);
+                                        InputTextBox.Focus();
+                                        break;
 
-                                    if (DevMindOptions.Instance.ShowDebugOutput)
-                                    {
-                                        foreach (var tb in toolBlocks)
-                                            AppendOutput($"[DIAG] Block: Type={tb.Type}, FileName={tb.FileName}, Command={tb.Command}, MemoryTopic={tb.MemoryTopic}\n", OutputColor.Dim);
-                                    }
+                                    case LoopIterationKind.Cancelled:
+                                        StatusText.Text = "Stopped";
+                                        SetInputEnabled(true);
+                                        break;
 
-                                    // Prepend any prose the model emitted alongside tool calls.
-                                    // fullResponse is already thinking-stripped by FilterChunk.
-                                    string prose = fullResponse.TrimEnd('\r', '\n');
-                                    if (!string.IsNullOrEmpty(prose))
-                                        toolBlocks.Insert(0, new ResponseBlock { Type = BlockType.Text, Content = prose });
-
-                                    outcome = new ResponseOutcome(toolBlocks);
-                                    if (DevMindOptions.Instance.ShowDebugOutput)
-                                        AppendOutput($"[DIAG] Tool use path: {lastToolCalls.Count} call(s) mapped to {toolBlocks.Count} block(s)\n", OutputColor.Dim);
-                                    System.Diagnostics.Debug.WriteLine($"[DEVMIND-DIAG] Tool use path: {lastToolCalls.Count} tool call(s) → {toolBlocks.Count} block(s)");
-                                }
-
-                                var executor = new AgenticExecutor(this, DevMindOptions.Instance);
-                                executor.SetCancellationToken(_cts?.Token ?? CancellationToken.None);
-                                int maxDepth = DevMindOptions.Instance.AgenticLoopMaxDepth;
-
-                                if (DevMindOptions.Instance.ShowDebugOutput)
-                                    AppendOutput($"[DIAG] Outcome: HasPatches={outcome.HasPatches}, HasShell={outcome.HasShellCommands}, HasRead={outcome.HasReadRequests}, IsDone={outcome.IsDone}, IsReadOnly={outcome.IsReadOnly}\n", OutputColor.Dim);
-                                System.Diagnostics.Debug.WriteLine($"[DEVMIND-DIAG] Outcome: HasPatches={outcome.HasPatches} HasShell={outcome.HasShellCommands} HasFile={outcome.HasFileCreation} HasDelete={outcome.HasDeleteRequests} IsDone={outcome.IsDone} IsReadOnly={outcome.IsReadOnly} IsEmptyOrBareCode={outcome.IsEmptyOrBareCode}");
-
-                                if (lastToolCalls != null && lastToolCalls.Count > 0)
-                                {
-                                    // ══════════════════════════════════════════════════════════════
-                                    // Tool Use loop: model decides, we execute
-                                    // The model called tools — execute them all, inject results,
-                                    // resubmit so the model can decide what's next.
-                                    // ══════════════════════════════════════════════════════════════
-
-                                    var action = new AgenticAction { Type = ActionType.ApplyAndBuild };
-                                    ExecutionResult result = await executor.ExecuteAsync(action, outcome);
-
-                                    // Inject per-tool result messages so the model sees what happened
-                                    LoopHelpers.InjectToolResultMessages(_llmClient, lastToolCalls, result, outcome.Blocks);
-
-                                    // ── Training data capture ──
-                                    LogTrainingTurn(text, fullResponse, outcome, result, lastToolCalls);
-
-                                    // Update consecutive-error counter for stuck-loop detection.
-                                    // Keys on first tool call's name; non-success = errors or non-zero shell exit.
-                                    {
-                                        string primaryTool = lastToolCalls.Count > 0 ? lastToolCalls[0].Name : null;
-                                        bool turnHadError  = result.Errors.Count > 0
-                                                             || (result.ShellExitCode.HasValue && result.ShellExitCode.Value != 0);
-                                        if (primaryTool != null && turnHadError)
-                                        {
-                                            if (primaryTool == _loopState.ConsecutiveErrorToolName)
-                                                _loopState.ConsecutiveErrorCount++;
-                                            else
-                                            {
-                                                _loopState.ConsecutiveErrorToolName = primaryTool;
-                                                _loopState.ConsecutiveErrorCount    = 1;
-                                            }
-                                        }
-                                        else
-                                        {
-                                            _loopState.ConsecutiveErrorToolName = null;
-                                            _loopState.ConsecutiveErrorCount    = 0;
-                                        }
-                                    }
-
-                                    // Check for explicit DONE signal (task_done tool call)
-                                    if (outcome.IsDone)
-                                    {
-                                        AppendOutput("[AGENTIC] Task complete.\n", OutputColor.Success);
-                                        _loopState.AgenticDepth = 0;
-                                        // fall through to completion
-                                    }
-                                    // Check for run/exec command — treat as task complete
-                                    else if (result.ShellExitCode.HasValue && result.ShellExitCode == 0
-                                        && !string.IsNullOrEmpty(result.LastShellCommand)
-                                        && LoopHelpers.IsRunOrExecCommand(result.LastShellCommand))
-                                    {
-                                        AppendOutput("[AGENTIC] Run/exec command succeeded — treating as task complete.\n", OutputColor.Success);
-                                        _loopState.AgenticDepth = 0;
-                                        // fall through to completion
-                                    }
-                                    // Check consecutive-error abort — same tool failing without resolution
-                                    else if (_loopState.ConsecutiveErrorCount >= ConsecutiveErrorAbortThreshold)
-                                    {
-                                        const int snippetLen = 250;
-                                        string firstError = result.Errors.Count > 0 ? result.Errors[0] : "(no error detail)";
-                                        string cmdLine    = result.LastShellCommand.Length > 0
-                                                            ? $"\nLast command: {result.LastShellCommand}" : "";
-                                        string outputSnip = result.ShellOutput.Length > 0
-                                                            ? $"\nOutput:\n{result.ShellOutput.Substring(0, Math.Min(result.ShellOutput.Length, snippetLen))}" : "";
-                                        AppendOutput(
-                                            $"[AGENTIC] Aborted: '{_loopState.ConsecutiveErrorToolName}' failed {_loopState.ConsecutiveErrorCount} " +
-                                            $"consecutive times with no resolution.\n" +
-                                            $"Last error: {firstError}{cmdLine}{outputSnip}\n" +
-                                            "Review the failure above and re-send with a corrected approach.\n",
-                                            OutputColor.Error);
-                                        _loopState.ConsecutiveErrorToolName = null;
-                                        _loopState.ConsecutiveErrorCount    = 0;
-                                        _loopState.AgenticDepth = 0;
-                                        // fall through to completion
-                                    }
-                                    // Check depth cap
-                                    else if (maxDepth > 0 && _loopState.AgenticDepth >= maxDepth)
-                                    {
-                                        if (result.ShellExitCode.HasValue && result.ShellExitCode != 0)
-                                        {
-                                            int undoDepth = _patchBackupStack.Count;
-                                            AppendOutput($"[AGENTIC] Depth cap reached ({_loopState.AgenticDepth}) — build still failing.\n", OutputColor.Error);
-                                            AppendOutput("Type UNDO to revert all changes, or continue editing manually.\n", OutputColor.Dim);
-                                            AppendOutput($"({undoDepth} change(s) can be undone)\n", OutputColor.Dim);
-                                        }
-                                        else
-                                        {
-                                            AppendOutput($"[AGENTIC] Depth cap reached ({_loopState.AgenticDepth}). Stopping.\n", OutputColor.Dim);
-                                        }
-                                        _loopState.AgenticDepth = 0;
-                                        // fall through to completion
-                                    }
-                                    else
-                                    {
-                                        // ── Re-trigger: feed results back, let model decide next ──
-
-                                        _loopState.AgenticDepth++;
-                                        {
-                                            int agCtx = _llmClient.ServerContextSize > 0 ? _llmClient.ServerContextSize : _llmClient.MaxPromptTokens;
-                                            int agUsed = _llmClient.LastContextUsed > 0 ? _llmClient.LastContextUsed : _llmClient.EstimateHistoryTokens();
-                                            int agPct = agCtx > 0 ? (int)(agUsed * 100.0 / agCtx) : 0;
-                                            string iterLabel = maxDepth > 0
-                                                ? $"Iteration {_loopState.AgenticDepth}/{maxDepth}"
-                                                : $"Iteration {_loopState.AgenticDepth}";
-                                            AppendOutput($"[AGENTIC] {iterLabel} — {agUsed:N0} / {agCtx:N0} ({agPct}%)\n", OutputColor.Dim);
-                                        }
-
-                                        // Tool results are already in conversation as tool role messages.
-                                        // Simple continuation prompt — the model has all the context it needs.
-                                        InputTextBox.Text = "Continue with the task.";
-
-                                        // Check cancellation before re-triggering
-                                        if (_cts.IsCancellationRequested)
-                                        {
-                                            _loopState.ShellLoopPending = false;
-                                            _loopState.AgenticDepth = 0;
-                                            AppendOutput("[AGENTIC] Cancelled.\n", OutputColor.Dim);
-                                            StatusText.Text = "Stopped";
-                                            SetInputEnabled(true);
-                                            return;
-                                        }
-                                        _loopState.ShellLoopPending = true;
+                                    case LoopIterationKind.ShouldReTrigger:
+                                        InputTextBox.Text = iter.NextContextualMessage;
                                         try { SendToLlm(); }
                                         catch
                                         {
-                                            _loopState.ShellLoopPending = false;
-                                            _loopState.AgenticDepth = 0;
-                                            StatusText.Text = "Error";
-                                            SetInputEnabled(true);
-                                            throw;
-                                        }
-                                        return;
-                                    }
-                                }
-                                else
-                                {
-                                    // ══════════════════════════════════════════════════════════════
-                                    // Model produced no tool calls — either answered a question, or
-                                    // produced prose without task_done.
-                                    // ══════════════════════════════════════════════════════════════
-
-                                    // Check for text-based DONE signal as safety net
-                                    if (outcome.IsDone)
-                                        AppendOutput("Task complete.\n", OutputColor.Success);
-
-                                    // ── Prose-finish detection ──
-                                    // Fires only when we're already mid-task (depth > 0 or shell loop pending).
-                                    // Day-1 first-turn prose responses to pure questions are NOT re-prompted —
-                                    // those are valid responses, not abandoned tasks.
-                                    string trimmedResponse = fullResponse?.Trim() ?? "";
-                                    bool insideAgenticCycle = _loopState.AgenticDepth > 0 || _loopState.ShellLoopPending;
-                                    bool prosePresent = trimmedResponse.Length > 40 && !outcome.HasAnyDirective && !outcome.IsDone;
-
-                                    if (insideAgenticCycle && prosePresent && !_loopState.PromptedForTaskDone)
-                                    {
-                                        // Fire one-shot re-prompt asking for task_done.
-                                        // Skip LogTrainingTurn — the re-prompt's outcome will be logged when it completes.
-                                        _loopState.PromptedForTaskDone = true;
-                                        InputTextBox.Text =
-                                            "You produced a prose answer but did not call task_done. " +
-                                            "Call task_done now with your answer in the summary parameter. " +
-                                            "Do not repeat the answer in prose — only the tool call.";
-                                        _loopState.ShellLoopPending = true;
-
-                                        if (DevMindOptions.Instance.ShowDebugOutput)
-                                            AppendOutput("[DIAG] Prose-finish detected — re-prompting for task_done.\n", OutputColor.Dim);
-
-                                        try { SendToLlm(); }
-                                        catch
-                                        {
-                                            _loopState.ShellLoopPending = false;
-                                            _loopState.AgenticDepth = 0;
+                                            _loopState.ShellLoopPending    = false;
+                                            _loopState.AgenticDepth        = 0;
                                             _loopState.PromptedForTaskDone = false;
                                             StatusText.Text = "Error";
                                             SetInputEnabled(true);
                                             throw;
                                         }
                                         return;
-                                    }
-
-                                    // Stop — either pure-question response, already re-prompted once, or empty response
-                                    _loopState.AgenticDepth = 0;
-                                    LogTrainingTurn(text, fullResponse, outcome, null, null);
-                                    if (DevMindOptions.Instance.ShowDebugOutput)
-                                    {
-                                        if (_loopState.PromptedForTaskDone)
-                                            AppendOutput("[DIAG] Tool use loop: re-prompt also produced no tool calls — accepting prose-finish.\n", OutputColor.Dim);
-                                        else
-                                            AppendOutput("[DIAG] Tool use loop: no tool calls — stopping.\n", OutputColor.Dim);
-                                    }
-                                    // fall through to completion
                                 }
-
-                                // ── Completion ────────────────────────────────────────────────
-
-                                if (DevMindOptions.Instance.ShowContextBudget)
-                                {
-                                    int cbCtx  = _llmClient.ServerContextSize > 0 ? _llmClient.ServerContextSize : _llmClient.MaxPromptTokens;
-                                    int cbUsed = _llmClient.LastContextUsed > 0 ? _llmClient.LastContextUsed : _llmClient.EstimateHistoryTokens();
-                                    int cbPct  = cbCtx > 0 ? (int)(cbUsed * 100.0 / cbCtx) : 0;
-                                    OutputColor cbColor = cbPct < 60 ? OutputColor.Dim
-                                                        : cbPct < 80 ? OutputColor.Normal
-                                                        : OutputColor.Error;
-                                    AppendOutput($"[CONTEXT] {cbUsed:N0} / {cbCtx:N0} ({cbPct}%)\n", cbColor);
-                                }
-
-                                _loopState.AgenticDepth = 0;
-                                _thinkingTimer?.Stop();
-                                _thinkingTimer = null;
-                                StatusText.Text = "Ready";
-                                ContextIndicator.Text = "";
-                                SetInputEnabled(true);
-                                InputTextBox.Focus();
                                 }
                                 catch (Exception onCompleteEx) when (!(onCompleteEx is OperationCanceledException))
                                 {

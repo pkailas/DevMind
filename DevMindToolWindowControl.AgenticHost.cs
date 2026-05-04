@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.AgenticHost.cs  v7.9
+// File: DevMindToolWindowControl.AgenticHost.cs  v7.10
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -1392,6 +1392,8 @@ namespace DevMind
             AppendOutput("[MEMORY] Topics listed.\n", OutputColor.Dim);
             return index;
         }
+
+        int IAgenticHost.GetPatchBackupCount() => _patchBackupStack.Count;
     }
 
     /// <summary>
@@ -1513,7 +1515,6 @@ namespace DevMind
             return result;
         }
 
-        // Positional fallback for large files: compares lines by index, not LCS
         private static List<(char op, string text)> ComputePositionalEditScript(string[] a, string[] b)
         {
             var result = new List<(char, string)>(Math.Max(a.Length, b.Length));

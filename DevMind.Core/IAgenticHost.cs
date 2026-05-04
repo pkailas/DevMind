@@ -1,4 +1,4 @@
-// File: IAgenticHost.cs  v7.2
+// File: IAgenticHost.cs  v7.3
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System.Collections.Generic;
@@ -156,5 +156,8 @@ namespace DevMind
         /// <param name="cancellationToken">Cancellation token.</param>
         /// <returns>Newline-separated absolute paths, or "[no matches]" if none, with truncation marker if capped.</returns>
         Task<string> ListFilesAsync(string glob, bool recursive, CancellationToken cancellationToken = default);
+
+        /// <summary>Returns the number of PATCH backups on the undo stack.</summary>
+        int GetPatchBackupCount();
     }
 }
