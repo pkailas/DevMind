@@ -1,4 +1,4 @@
-// File: ILlmOptions.cs  v1.0
+// File: ILlmOptions.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 namespace DevMind
@@ -26,5 +26,6 @@ namespace DevMind
         bool MicroCompactSummarize { get; }
         bool MicroCompactBrainwash { get; }
         bool AlwaysConfirmPatch { get; }
+        int AgenticLoopMaxDepth { get; }
     }
 }

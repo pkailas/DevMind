@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.Context.cs  v5.24
+// File: DevMindToolWindowControl.Context.cs  v5.25
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -345,6 +345,7 @@ namespace DevMind
                     var (content, _) = PatchEngine.ReadFilePreservingEncoding(fullPath);
                     _llmClient.FileCache.Store(fileNameOnly, content);
                     _taskReadFiles.Add(fileNameOnly);
+                    _readFileCount++;
                     int lineCount = content.Split('\n').Length;
 
                     bool alreadyRead = _llmClient.MarkFileRead(fileNameOnly);
@@ -394,6 +395,7 @@ namespace DevMind
                 }
 
                 _taskReadFiles.Add(fileNameOnly);
+                _readFileCount++;
                 int totalLines = _llmClient.FileCache.GetLineCount(fileNameOnly);
 
                 if (startLine > endLine)
