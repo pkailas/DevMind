@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v7.15
+// File: DevMindToolWindowControl.xaml.cs  v7.16
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -25,7 +25,7 @@ namespace DevMind
     /// WPF control for the DevMind tool window.
     /// Displays a single-stream output view with Ask (LLM) and Run (shell) commands.
     /// </summary>
-    public partial class DevMindToolWindowControl : UserControl
+    public partial class DevMindToolWindowControl : UserControl, ILoopCallbacks
     {
         private readonly LlmClient _llmClient;
         private readonly ProfileManager _profileManager;
@@ -1473,6 +1473,63 @@ namespace DevMind
                 AppendOutput($"✗ Failed to create {fileName}: {ex.Message}\n", OutputColor.Error);
             }
         }
+
+        #region ILoopCallbacks
+
+        void ILoopCallbacks.AppendNewLine() => AppendNewLine();
+
+        void ILoopCallbacks.SetStatus(string text) => StatusText.Text = text;
+
+        void ILoopCallbacks.SetContextIndicator(string text) => ContextIndicator.Text = text;
+
+        void ILoopCallbacks.SetInputText(string text) => InputTextBox.Text = text;
+
+        string ILoopCallbacks.GetInputText() => InputTextBox.Text;
+
+        void ILoopCallbacks.FocusInput() => InputTextBox.Focus();
+
+        void ILoopCallbacks.SetInputEnabled(bool enabled) => SetInputEnabled(enabled);
+
+        void ILoopCallbacks.StartThinkingTimer(int depth, int maxDepth)
+        {
+            _thinkingSeconds = 0;
+            _thinkingTimer?.Stop();
+            _thinkingTimer = new System.Windows.Threading.DispatcherTimer
+            {
+                Interval = TimeSpan.FromSeconds(1)
+            };
+            _thinkingTimer.Tick += (s, e) =>
+            {
+                _thinkingSeconds++;
+                string agenticSuffix = depth > 0
+                    ? $" (agentic {depth}/{maxDepth})"
+                    : "";
+                StatusText.Text = $"Thinking{agenticSuffix} ({_thinkingSeconds}s)";
+            };
+            StatusText.Text = depth > 0
+                ? $"Thinking... (agentic {depth}/{maxDepth})"
+                : "Thinking...";
+            _thinkingTimer.Start();
+        }
+
+        void ILoopCallbacks.StopThinkingTimer()
+        {
+            _thinkingTimer?.Stop();
+            _thinkingTimer = null;
+        }
+
+        (int used, int total) ILoopCallbacks.GetContextMetrics()
+        {
+            int used  = _llmClient.LastContextUsed > 0
+                ? _llmClient.LastContextUsed
+                : _llmClient.EstimateHistoryTokens();
+            int total = _llmClient.ServerContextSize > 0
+                ? _llmClient.ServerContextSize
+                : _llmClient.MaxPromptTokens;
+            return (used, total);
+        }
+
+        #endregion
 
     }
 }
