@@ -91,65 +91,6 @@ namespace DevMind
             return answer == System.Windows.MessageBoxResult.Yes;
         }
 
-        // ── IAgenticHost.ApplyPatchAsync ──────────────────────────────────────────
-
-        async Task<string> IAgenticHost.ApplyPatchAsync(string patchContent)
-        {
-            // Extract the filename from the first line ("PATCH filename") for auto-READ.
-            string firstLine = (patchContent ?? string.Empty).Split('\n')[0];
-            string blockFileName = firstLine.Length > 5 ? firstLine.Substring(5).Trim() : string.Empty;
-
-            // Unrelated-file write guard: confirm before patching a file the model hasn't read.
-            if (!string.IsNullOrEmpty(blockFileName))
-            {
-                string guardFileOnly;
-                try { guardFileOnly = Path.GetFileName(blockFileName.Replace('\\', '/')); }
-                catch { guardFileOnly = blockFileName; }
-
-                if (!IsFileKnownToTask(guardFileOnly))
-                {
-                    bool approved = await ConfirmUnreadFileWriteAsync(guardFileOnly);
-                    if (!approved)
-                    {
-                        AppendOutput($"[WRITE GUARD] Patch to \"{guardFileOnly}\" blocked by user.\n", OutputColor.Dim);
-                        return null;
-                    }
-                    // User approved — treat the file as known so subsequent patches in this
-                    // response don't re-prompt for the same file.
-                    _taskReadFiles.Add(guardFileOnly);
-                }
-            }
-
-            // Auto-READ the target file into context if it is not already present.
-            if (!string.IsNullOrEmpty(blockFileName))
-            {
-                string patchFileOnly;
-                try { patchFileOnly = Path.GetFileName(blockFileName.Replace('\\', '/')); }
-                catch { patchFileOnly = blockFileName; }
-
-                if (!string.IsNullOrEmpty(patchFileOnly))
-                {
-                    string resolvedPath =
-                        await FindFileInSolutionAsync(patchFileOnly, blockFileName.Replace('\\', '/'))
-                        ?? Path.Combine(_shellRunner.WorkingDirectory, patchFileOnly);
-
-                    if (!_llmClient.FileCache.Contains(patchFileOnly))
-                    {
-                        AppendOutput($"[AUTO-READ] Loading {patchFileOnly} before patch...\n", OutputColor.Dim);
-                        await ApplyReadCommandAsync($"READ {blockFileName}");
-                    }
-
-                    // Capture pre-patch snapshot for DIFF support
-                    if (File.Exists(resolvedPath))
-                        CaptureFileSnapshot(resolvedPath);
-                }
-            }
-
-            AppendOutput($"[AUTO-PATCH] Executing PATCH {blockFileName}...\n", OutputColor.Dim);
-            // Returns full path on success, null on failure.
-            return await ApplyPatchAsync(patchContent, clearInput: false);
-        }
-
         // ── IAgenticHost.RunShellAsync ────────────────────────────────────────────
 
         async Task<(int exitCode, string output)> IAgenticHost.RunShellAsync(string command)

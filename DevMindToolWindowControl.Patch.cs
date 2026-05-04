@@ -435,47 +435,5 @@ namespace DevMind
             }
         }
 
-        // ── AUTO-PATCH ────────────────────────────────────────────────────────
-
-        // Returns distinct full paths of files that were successfully patched.
-        private async Task<List<string>> AutoExecutePatchAsync(string llmResponse)
-        {
-            var patched = new List<string>();
-            var patchStartPattern = new Regex(@"^PATCH\s+\S+\.\S+", RegexOptions.Multiline | RegexOptions.IgnoreCase);
-            var matches = patchStartPattern.Matches(llmResponse);
-            for (int i = 0; i < matches.Count; i++)
-            {
-                int start = matches[i].Index;
-                int end = i + 1 < matches.Count ? matches[i + 1].Index : llmResponse.Length;
-                string block = llmResponse.Substring(start, end - start).TrimEnd();
-
-                // Strip any trailing bare markdown fence (```) or "---" separator that wraps/follows the PATCH block.
-                // Fences appear when models like DeepSeek emit ```lang PATCH ... ``` around their output.
-                // "---" appears when models separate consecutive PATCH blocks with a horizontal rule.
-                var blockLines = block.Split('\n').ToList();
-                while (blockLines.Count > 0 && (
-                    Regex.IsMatch(blockLines[blockLines.Count - 1], @"^\s*```\s*$") ||
-                    blockLines[blockLines.Count - 1].Trim() == "---"))
-                    blockLines.RemoveAt(blockLines.Count - 1);
-                block = string.Join("\n", blockLines);
-
-                string firstLine = block.Split('\n')[0];
-                string blockFileName = firstLine.Substring("PATCH ".Length).Trim();
-                string blockFileNameOnly = Path.GetFileName(blockFileName.Replace('\\', '/'));
-                if (!string.IsNullOrEmpty(blockFileNameOnly))
-                {
-                    if (!_llmClient.FileCache.Contains(blockFileNameOnly))
-                    {
-                        AppendOutput($"[AUTO-READ] Loading {blockFileNameOnly} before patch...\n", OutputColor.Dim);
-                        await ApplyReadCommandAsync($"READ {blockFileName}");
-                    }
-                }
-
-                string appliedPath = await ApplyPatchAsync(block, clearInput: false);
-                if (appliedPath != null && !patched.Contains(appliedPath))
-                    patched.Add(appliedPath);
-            }
-            return patched;
-        }
     }
 }
