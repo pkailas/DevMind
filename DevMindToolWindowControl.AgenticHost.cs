@@ -188,7 +188,7 @@ namespace DevMind
 
             // In tool_use mode, content comes from structured JSON — backticks are
             // legitimate content, not markdown formatting. Skip fence stripping.
-            string fileContent = fromToolCall ? content : StripOuterCodeFence(content);
+            string fileContent = fromToolCall ? content : PatchEngine.StripOuterCodeFence(content);
             await SaveGeneratedFileAsync(fileName, fileContent);
             // Approximate the resolved path for agentic context / diff view purposes.
             try
@@ -318,7 +318,7 @@ namespace DevMind
                     // Ensure the file is in the cache for line-range access
                     if (!_llmClient.FileCache.Contains(fileNameOnly))
                     {
-                        var (diskContent, _) = ReadFilePreservingEncoding(fullPath);
+                        var (diskContent, _) = PatchEngine.ReadFilePreservingEncoding(fullPath);
                         _llmClient.FileCache.Store(fileNameOnly, diskContent);
                     }
 
@@ -353,7 +353,7 @@ namespace DevMind
                 }
 
                 // ── Full / outline path
-                var (content, _) = ReadFilePreservingEncoding(fullPath);
+                var (content, _) = PatchEngine.ReadFilePreservingEncoding(fullPath);
                 _llmClient.FileCache.Store(fileNameOnly, content);
                 _taskReadFiles.Add(fileNameOnly);
                 int lineCount = content.Split('\n').Length;

@@ -480,7 +480,7 @@ namespace DevMind
                         continue;
                     }
 
-                    var (content, _) = ReadFilePreservingEncoding(fullPath);
+                    var (content, _) = PatchEngine.ReadFilePreservingEncoding(fullPath);
                     _llmClient.FileCache.Store(fileNameOnly, content);
                     _taskReadFiles.Add(fileNameOnly);
                     int lineCount = content.Split('\n').Length;
@@ -531,7 +531,7 @@ namespace DevMind
                         return;
                     }
 
-                    var (diskContent, _) = ReadFilePreservingEncoding(fullPath);
+                    var (diskContent, _) = PatchEngine.ReadFilePreservingEncoding(fullPath);
                     _llmClient.FileCache.Store(fileNameOnly, diskContent);
                     AppendOutput($"[READ] Cached {fullPath} for range access\n", OutputColor.Dim);
                 }
