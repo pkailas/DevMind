@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v7.19
+// File: DevMindToolWindowControl.xaml.cs  v7.20
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -351,10 +351,14 @@ namespace DevMind
 
         private void RestartButton_Click(object sender, RoutedEventArgs e)
         {
+            // Cancel any in-flight LLM request or ProcessIterationAsync before resetting state.
+            _cts?.Cancel();
+
             // Clear output
             InitOutputDocument();
 
             _thinkFilter.Reset();
+            _loopState.ResetForUserTurn();
 
             // Clear terminal history
             _terminalHistory.Clear();
@@ -382,13 +386,14 @@ namespace DevMind
                 try { File.Delete(backupPath); } catch { }
             }
 
-    // Reset stats counters
+            // Reset stats counters
             _patchCount = 0;
             _undoCount = 0;
 
             ResetTrainingLogger();
 
             AppendOutput("DevMind restarted.\n", OutputColor.Dim);
+            SetInputEnabled(true);
 
             // Re-detect context size after restart/reconnect
 #pragma warning disable VSSDK007 // Fire-and-forget is intentional for background detection
@@ -973,6 +978,15 @@ namespace DevMind
                                         break;
 
                                     case LoopIterationKind.ShouldReTrigger:
+                                        if (_cts?.IsCancellationRequested == true)
+                                        {
+                                            _loopState.ShellLoopPending    = false;
+                                            _loopState.AgenticDepth        = 0;
+                                            _loopState.PromptedForTaskDone = false;
+                                            StatusText.Text = "Stopped";
+                                            SetInputEnabled(true);
+                                            break;
+                                        }
                                         InputTextBox.Text = iter.NextContextualMessage;
                                         try { SendToLlm(); }
                                         catch
@@ -1028,6 +1042,8 @@ namespace DevMind
                     await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
                     if (_cts.IsCancellationRequested)
                     {
+                        // When cancelled, LlmClient swallows the OCE and never calls onComplete.
+                        // Nobody else will re-enable input, so we must do it here.
                         StopGeneratingAnimation();
                         _thinkingTimer?.Stop();
                         _thinkingTimer = null;
@@ -1035,13 +1051,15 @@ namespace DevMind
                         StatusText.Text = "Stopped";
                         _loopState.ShellLoopPending = false;
                         _loopState.AgenticDepth = 0;
+                        SetInputEnabled(true);
                     }
-                    // Do NOT reset _loopState.AgenticDepth or SetInputEnabled here.
-                    // The onComplete handler is dispatched via Dispatcher.BeginInvoke and
-                    // may not have executed yet — resetting depth here causes a race where
-                    // the counter resets to 0 on every iteration, preventing depth cap from
-                    // ever being reached. All terminal paths in onComplete already reset
-                    // _loopState.AgenticDepth = 0 and call SetInputEnabled(true).
+                    // Do NOT call SetInputEnabled(true) unconditionally here.
+                    // In the non-cancelled path the onComplete handler was dispatched via
+                    // Dispatcher.BeginInvoke and may not have executed yet — calling
+                    // SetInputEnabled here before it runs would race with its own call and
+                    // could reset state mid-iteration. All terminal paths in onComplete already
+                    // call SetInputEnabled(true). The cancellation branch above is exempt from
+                    // this constraint because onComplete is never dispatched when cancelled.
                     // _loopState.ShellLoopPending is safe to clear unconditionally — it's a no-op
                     // when onComplete hasn't run yet (still false), and a cleanup when it has.
                     _loopState.ShellLoopPending = false;
