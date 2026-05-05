@@ -1,4 +1,4 @@
-# CLAUDE.md — DevMind Developer Reference  v2.0
+# CLAUDE.md — DevMind Developer Reference  v2.1
 
 ## Project Overview
 
@@ -24,24 +24,35 @@
 | `DevMindToolWindowControl.AgenticHost.cs` | `IAgenticHost` implementation — bridges pipeline to VS/UI side effects; calls `StripOuterCodeFence` on saved file content |
 | `DevMindToolWindowControl.Context.cs` | Editor context, DevMind.md loading, READ command, file search, `BuildMessageWithContext` |
 | `DevMindToolWindowControl.Patch.cs` | PATCH command — parsing, whitespace-normalized matching, fuzzy matching, UNDO, backup stack; `StripOuterCodeFence` applied to FIND/REPLACE text |
-| `DevMindToolWindowControl.Shell.cs` | Shell execution — `RunShellCommand`, `RunShellCommandCaptureAsync`, `ParseShellDirectives` |
+| `DevMindToolWindowControl.Shell.cs` | Shell execution — `RunShellCommand` (interactive terminal); delegates to `ShellRunner.ExecuteAsync` |
 | `ResponseParser.cs` | Parses complete LLM responses into typed blocks (File, Patch, Shell, ReadRequest, Text) |
 | `ResponseClassifier.cs` | Wraps `ResponseParser.Parse()` and returns `ResponseOutcome` — abstraction boundary |
 | `ResponseOutcome.cs` | Wraps parsed blocks with pre-computed boolean flags (HasPatches, IsDone, IsReadOnly, etc.) |
 | `AgenticActionResolver.cs` | Pure static: maps `ResponseOutcome` + `ExecutionResult` → `AgenticAction` (9 priority rules) |
-| `AgenticExecutor.cs` | Executes an `AgenticAction` via `IAgenticHost`; the only class with side effects in the pipeline |
 | `AgenticAction.cs` / `ActionType` | Decision output — describes the next step the agentic loop should take |
 | `ExecutionResult.cs` | Captures what happened during execution (patches applied/failed, shell result, files created) |
-| `IAgenticHost.cs` | Interface abstracting all VS/file-system/UI side effects from the pipeline |
-| `OutputColor.cs` | Public enum for output panel color categories |
-| `LlmClient.cs` | HTTP client — SSE streaming to OpenAI-compatible `/v1/chat/completions` |
 | `DevMindOptionsPage.cs` | VS Tools > Options settings — EndpointUrl, ApiKey, ModelName, ServerType, CustomContextEndpoint, SystemPrompt, AgenticLoopMaxDepth, ShowLlmThinking, profile management actions |
 | `ProfileManager.cs` | Named connection profiles — CRUD, save/load, apply to settings. Stored in `%LOCALAPPDATA%\DevMind\profiles.json` |
-| `FileContentCache.cs` | In-memory line-indexed file cache — powers `READ filename:start-end` line-range access |
 | `DiffPreviewCard.xaml/.cs` | Inline diff preview card — rendered in OutputBox for PATCH confirmation; exposes `Task<bool> UserDecision` |
 | `DiffBatchBar.xaml/.cs` | Batch action bar — "Apply All / Skip All" shown when 2+ PATCH blocks need confirmation |
-| `PatchConfidence.cs` | `PatchConfidence` enum (`Exact`, `Fuzzy`) + `PatchResolveResult` class for two-phase PATCH resolution |
 | `StringValidator.cs` | Trivial utility: `StringValidator.IsValid(string)` — checks `!IsNullOrWhiteSpace` |
+| `TrainingLogger.cs` | Captures fine-tuning training data as append-only JSONL — one file per session, gated behind `TrainingLogEnabled` setting |
+
+**DevMind.Core** (netstandard2.0 — no VS/WPF dependencies):
+
+| File | Purpose |
+|------|---------|
+| `DevMind.Core/ShellRunner.cs` | Platform-agnostic shell executor — `WorkingDirectory` state, streaming via `IProgress<ShellOutputLine>`, taskkill process-tree cancellation; also contains `ShellOutputLine` struct |
+| `DevMind.Core/LlmClient.cs` | HTTP client — SSE streaming to OpenAI-compatible `/v1/chat/completions` |
+| `DevMind.Core/AgenticExecutor.cs` | Executes an `AgenticAction` via `IAgenticHost`; the only class with side effects in the pipeline |
+| `DevMind.Core/IAgenticHost.cs` | Interface abstracting all VS/file-system/UI side effects from the pipeline |
+| `DevMind.Core/FileContentCache.cs` | In-memory line-indexed file cache — powers `READ filename:start-end` line-range access |
+| `DevMind.Core/PatchConfidence.cs` | `PatchConfidence` enum (`Exact`, `Fuzzy`) + `PatchResolveResult` class for two-phase PATCH resolution |
+| `DevMind.Core/ToolRegistry.cs` | Tool registration and lookup for agentic directive dispatch |
+| `DevMind.Core/OutputColor.cs` | Public enum for output panel color categories |
+| `DevMind.Core/BlockType.cs` | Enum of parsed LLM response block types |
+| `DevMind.Core/LlmEnums.cs` | Shared enums for LLM client configuration |
+| `DevMind.Core/ILlmOptions.cs` | Interface for LLM settings consumed by `LlmClient` |
 
 ### Data Flow
 
@@ -50,7 +61,7 @@ User types → InputTextBox
   Enter      → SendToLlm() → LlmClient.SendMessageAsync()
                 → onToken: filter → accumulate into responseBuffer → display (suppressed during FILE: blocks)
                 → onComplete: classify → decide → execute → continue-or-stop
-  Ctrl+Enter → RunShellCommand() → powershell.exe / cmd.exe → stdout/stderr → AppendOutput()
+  Ctrl+Enter → RunShellCommand() → ShellRunner.ExecuteAsync() → powershell.exe / cmd.exe → IProgress<ShellOutputLine> → AppendOutput()
 ```
 
 ### Agentic Pipeline (v6.0+)
@@ -135,10 +146,14 @@ Prior to v5.0, DevMind pre-committed to a response strategy by scanning the user
 v5.0 eliminates this. All tokens stream into a single buffer. `ResponseParser.Parse()` classifies the complete response after streaming. File creation is triggered by an explicit `FILE:` directive from the LLM, not by guessing from the prompt.
 
 ### Shell Command Handling
-`_terminalWorkingDir` tracks the current working directory. `cd` is intercepted before spawning a process — relative and absolute paths resolved via `Path.GetFullPath`, `~` / bare `cd` reset to user profile. Commands run via `powershell.exe` (standard Windows path) or fall back to `cmd.exe`. History maintained in `_terminalHistory` (deduped, appended) with `_terminalHistoryIndex` for Up/Down navigation in InputTextBox. stdout and stderr are read concurrently to prevent deadlocks. A **120-second hard timeout** kills the process and reports a timeout error; both interactive and captured variants share this logic.
+`ShellRunner` (in `DevMind.Core`) owns working directory state and all process execution. `_shellRunner.WorkingDirectory` is the authoritative current directory. `cd` is intercepted in `RunShellCommand` before reaching `ShellRunner` — relative and absolute paths resolved, `~` / bare `cd` reset to user profile. Commands run via `powershell.exe` (standard Windows path) or fall back to `cmd.exe`. History maintained in `_terminalHistory` (deduped, appended) with `_terminalHistoryIndex` for Up/Down navigation in InputTextBox.
+
+`ShellRunner.ExecuteAsync` uses event-based async reading (`OutputDataReceived`/`ErrorDataReceived` + `BeginOutputReadLine`/`BeginErrorReadLine`) so each line is streamed to the caller via `IProgress<ShellOutputLine>` as it arrives. `ShellOutputLine.IsError` distinguishes stderr (red) from stdout (normal color). A **120-second hard timeout** kills the process and reports a timeout error. Both the interactive terminal path (`RunShellCommand`) and the agentic path (`IAgenticHost.RunShellAsync`) share `ShellRunner.ExecuteAsync`.
+
+**Process tree kill**: Cancellation and timeout both use `taskkill /F /T /PID` rather than `proc.Kill()`. `proc.Kill()` only kills the immediate process (e.g. `powershell.exe`); child processes (e.g. `ping.exe` spawned by a script) inherit the stdout pipe write handle and keep the stream alive until they exit naturally. `taskkill /F /T` kills the entire process tree atomically. This is Windows-specific; cross-platform kill is deferred to Phase C.10+.
 
 ### Cancellation
-`_cts` (`CancellationTokenSource`) is created fresh in `SendToLlm()` and passed to `LlmClient.SendMessageAsync()`. `OperationCanceledException` is swallowed silently in `LlmClient` — cancellation is not treated as an error. Stop button is enabled (`IsEnabled`) during generation and during diff preview (`_diffPreviewPending`); Ask/Run are disabled. Cancellation is checked before agentic re-triggers to prevent frozen loops. When Stop is pressed during diff preview, all pending `DiffPreviewCard` decisions are cancelled via `TrySetCanceled()`.
+`_cts` (`CancellationTokenSource`) is created fresh at two sites: `SendToLlm()` (LLM generation) and `RunShellCommand()` (interactive terminal). Both sites call `_cts?.Dispose()` before reassigning to avoid OS handle leaks. The token is passed to `ShellRunner.ExecuteAsync` (via `_cts?.Token ?? CancellationToken.None`) so Stop kills both LLM streams and running shell commands. `OperationCanceledException` is swallowed silently in `LlmClient` — cancellation is not treated as an error. Stop button is enabled (`IsEnabled`) during generation, shell execution, and diff preview (`_diffPreviewPending`); Ask/Run are disabled. Cancellation is checked before agentic re-triggers to prevent frozen loops. When Stop is pressed during diff preview, all pending `DiffPreviewCard` decisions are cancelled via `TrySetCanceled()`.
 
 **SSE read loop**: After the first token is received, the SSE read loop uses 500ms cancellation polling — `Task.WhenAny(readTask, Task.Delay(500, cancellationToken))` — so the Stop button responds promptly even when the server holds the connection open between SSE lines.
 
@@ -489,6 +504,8 @@ Fields: `_suppressDisplay`.
 | `RequestTimeoutMinutes` | `10` | Max minutes for a complete LLM response; sets `HttpClient.Timeout` |
 | `ContextEviction` | `Balanced` | `Off` / `Balanced` / `Aggressive` — proactive turn dropping by age threshold (8 turns for Balanced, 5 for Aggressive) |
 | `ShowDebugOutput` | `false` | Enable debug logging to OutputBox for context management and directive execution |
+| `TrainingLogEnabled` | `false` | Capture fine-tuning training data as JSONL after each agentic turn; no overhead when disabled |
+| `TrainingLogFolder` | `` (empty) | Folder for training JSONL files; empty = `training_logs/` next to the extension |
 
 Settings are accessed via `DevMindOptions.Instance` (synchronous) or `GetLiveInstanceAsync()` (async). The `DevMindOptions.Saved` event fires when the user saves options, triggering `LlmClient.Configure()` and a background connection test.
 
@@ -700,6 +717,47 @@ During LLM generation, the status bar displays `Generating... (N tokens)` showin
 - `/reload` — clears cached DevMind.md, reloads on next Ask
 - `/context` — shows currently loaded READ files
 - `/context clear` — wipes READ context without restarting
+
+---
+
+## Training Data Logger
+
+`TrainingLogger` captures fine-tuning training data as append-only JSONL, gated behind the `TrainingLogEnabled` setting (default `false`). When disabled, zero overhead — the guard check is the first line of `LogTurn()`.
+
+### JSONL Schema
+
+Each line is a JSON object with these fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `session_id` | string | Unique per `/restart` (12-char hex) |
+| `turn_number` | int | From `LlmClient.CurrentTurn` |
+| `timestamp` | string | ISO 8601 UTC |
+| `system_prompt` | string | Full system prompt (first turn only, null after) |
+| `user_message` | string | The prompt or "Continue with the task." |
+| `assistant_response` | string | Full raw response including tool calls |
+| `tool_calls` | array | `{type, filename, command}` per directive/tool call |
+| `tool_results` | array | `{type, filename, success, line_count}` per execution result |
+| `summary_context` | string | Last compaction summary if fired this session, null otherwise |
+| `metrics` | object | `{n_past, n_ctx, predicted_tokens, prompt_tokens, tok_per_sec, iteration, context_percent}` |
+| `outcome` | string | `"read"`, `"write"`, `"shell"`, `"done"`, `"error"`, `"no_tool_calls"` |
+| `quality_flag` | string | Always null — populated manually during review |
+
+### File Naming
+
+`training_{session_id}_{yyyyMMdd}.jsonl` in the configured folder (default: `training_logs/` next to the extension).
+
+### Hook Points
+
+`LogTrainingTurn()` is called in `DevMindToolWindowControl.xaml.cs` at three points:
+1. Tool Use loop — after `InjectToolResultMessages` (post-execution)
+2. TextDirective loop — after `ExecuteAsync` completes
+3. No-tool-calls stop path — when the model emits no tools
+
+### LlmClient Properties (added for TrainingLogger)
+
+- `LastCompactionSummary` — last entry in `_compactionSummaries` (null if none)
+- `SystemPromptContent` — `_conversationHistory[0].Content`
 
 ---
 

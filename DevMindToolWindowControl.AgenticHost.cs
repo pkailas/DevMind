@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.AgenticHost.cs  v1.9.2
+// File: DevMindToolWindowControl.AgenticHost.cs  v7.11
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -23,6 +23,20 @@ namespace DevMind
     /// </summary>
     public partial class DevMindToolWindowControl : UserControl, IAgenticHost
     {
+        // ── Memory Manager ───────────────────────────────────────────────────────
+
+        private MemoryManager _memoryManager;
+
+        /// <summary>
+        /// Initializes the MemoryManager for the current working directory.
+        /// Called when the solution directory is available.
+        /// </summary>
+        private void EnsureMemoryManager()
+        {
+            if (_memoryManager == null && !string.IsNullOrEmpty(_shellRunner.WorkingDirectory))
+                _memoryManager = new MemoryManager(_shellRunner.WorkingDirectory);
+        }
+
         // ── File snapshot tracking (for DIFF directive) ───────────────────────────
 
         // Stores original file content keyed by full path, captured before first patch/read.
@@ -50,20 +64,12 @@ namespace DevMind
 
         /// <summary>
         /// Returns true if the model is allowed to write to the given file without user
-        /// confirmation — i.e., the file was read during the current task OR was explicitly
-        /// named in the user's original prompt.
+        /// confirmation — i.e., the file was read during the current task, or no files
+        /// have been read yet (new task / direct invocation — be permissive).
         /// </summary>
         private bool IsFileKnownToTask(string fileNameOnly)
         {
-            if (_taskReadFiles.Contains(fileNameOnly))
-                return true;
-            if (!string.IsNullOrEmpty(_pendingResubmitPrompt) &&
-                _pendingResubmitPrompt.IndexOf(fileNameOnly, StringComparison.OrdinalIgnoreCase) >= 0)
-                return true;
-            // No active task prompt recorded (e.g. direct invocation) — be permissive.
-            if (_pendingResubmitPrompt == null)
-                return true;
-            return false;
+            return _taskReadFiles.Contains(fileNameOnly) || _taskReadFiles.Count == 0;
         }
 
         /// <summary>
@@ -75,7 +81,7 @@ namespace DevMind
             await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
             AppendOutput(
                 $"[WRITE GUARD] \"{fileNameOnly}\" was not read during this task — asking for approval.\n",
-                OutputColor.Dim);
+                OutputColor.Warning);
             var answer = System.Windows.MessageBox.Show(
                 $"DevMind wants to write to \"{fileNameOnly}\", but that file was not read during this task " +
                 $"and was not mentioned in your request.\n\nAllow this write?",
@@ -85,81 +91,25 @@ namespace DevMind
             return answer == System.Windows.MessageBoxResult.Yes;
         }
 
-        // ── IAgenticHost.ApplyPatchAsync ──────────────────────────────────────────
-
-        async Task<string> IAgenticHost.ApplyPatchAsync(string patchContent)
-        {
-            // Extract the filename from the first line ("PATCH filename") for auto-READ.
-            string firstLine = (patchContent ?? string.Empty).Split('\n')[0];
-            string blockFileName = firstLine.Length > 5 ? firstLine.Substring(5).Trim() : string.Empty;
-
-            // Unrelated-file write guard: confirm before patching a file the model hasn't read.
-            if (!string.IsNullOrEmpty(blockFileName))
-            {
-                string guardFileOnly;
-                try { guardFileOnly = Path.GetFileName(blockFileName.Replace('\\', '/')); }
-                catch { guardFileOnly = blockFileName; }
-
-                if (!IsFileKnownToTask(guardFileOnly))
-                {
-                    bool approved = await ConfirmUnreadFileWriteAsync(guardFileOnly);
-                    if (!approved)
-                    {
-                        AppendOutput($"[WRITE GUARD] Patch to \"{guardFileOnly}\" blocked by user.\n", OutputColor.Dim);
-                        return null;
-                    }
-                    // User approved — treat the file as known so subsequent patches in this
-                    // response don't re-prompt for the same file.
-                    _taskReadFiles.Add(guardFileOnly);
-                }
-            }
-
-            // Auto-READ the target file into context if it is not already present.
-            if (!string.IsNullOrEmpty(blockFileName))
-            {
-                string patchFileOnly;
-                try { patchFileOnly = Path.GetFileName(blockFileName.Replace('\\', '/')); }
-                catch { patchFileOnly = blockFileName; }
-
-                if (!string.IsNullOrEmpty(patchFileOnly))
-                {
-                    string resolvedPath =
-                        await FindFileInSolutionAsync(patchFileOnly, blockFileName.Replace('\\', '/'))
-                        ?? Path.Combine(_terminalWorkingDir, patchFileOnly);
-
-                    bool alreadyLoaded = _readContext != null && _readContext.Contains(resolvedPath);
-                    if (!alreadyLoaded)
-                    {
-                        AppendOutput($"[AUTO-READ] Loading {patchFileOnly} before patch...\n", OutputColor.Dim);
-                        await ApplyReadCommandAsync($"READ {blockFileName}");
-                    }
-
-                    // Capture pre-patch snapshot for DIFF support
-                    if (File.Exists(resolvedPath))
-                        CaptureFileSnapshot(resolvedPath);
-                }
-            }
-
-            AppendOutput($"[AUTO-PATCH] Executing PATCH {blockFileName}...\n", OutputColor.Dim);
-            // Returns full path on success, null on failure.
-            return await ApplyPatchAsync(patchContent, clearInput: false);
-        }
-
         // ── IAgenticHost.RunShellAsync ────────────────────────────────────────────
 
         async Task<(int exitCode, string output)> IAgenticHost.RunShellAsync(string command)
         {
             AppendOutput($"[SHELL] > {command}\n", OutputColor.Dim);
-            var (output, exitCode) = await RunShellCommandCaptureAsync(command);
+            // Progress<T> captures the current SynchronizationContext (UI thread) so each
+            // Report() call is marshalled back to the UI thread — safe to call AppendOutput directly.
+            var progress = new Progress<ShellOutputLine>(o =>
+                AppendOutput(o.Line + "\n", o.IsError ? OutputColor.Error : OutputColor.Normal));
+            var (output, exitCode) = await _shellRunner.ExecuteAsync(
+                command, _cts?.Token ?? CancellationToken.None, onLine: progress);
             _lastShellExitCode = exitCode;
             _lastShellCommand  = command;
-            AppendOutput(output + "\n", OutputColor.Normal);
             return (exitCode, output);
         }
 
         // ── IAgenticHost.SaveFileAsync ────────────────────────────────────────────
 
-        async Task<string> IAgenticHost.SaveFileAsync(string fileName, string content)
+        async Task<string> IAgenticHost.SaveFileAsync(string fileName, string content, bool fromToolCall)
         {
             // Unrelated-file write guard: confirm before creating/overwriting an unread file.
             string saveFileOnly;
@@ -177,17 +127,78 @@ namespace DevMind
                 _taskReadFiles.Add(saveFileOnly);
             }
 
-            await SaveGeneratedFileAsync(fileName, StripOuterCodeFence(content));
+            // In tool_use mode, content comes from structured JSON — backticks are
+            // legitimate content, not markdown formatting. Skip fence stripping.
+            string fileContent = fromToolCall ? content : PatchEngine.StripOuterCodeFence(content);
+            await SaveGeneratedFileAsync(fileName, fileContent);
             // Approximate the resolved path for agentic context / diff view purposes.
             try
             {
                 if (Path.IsPathRooted(fileName))
                     return fileName;
-                return Path.Combine(_terminalWorkingDir, fileName);
+                return Path.Combine(_shellRunner.WorkingDirectory, fileName);
             }
             catch
             {
                 return fileName;
+            }
+        }
+
+        // ── IAgenticHost.AppendFileAsync ──────────────────────────────────────────
+
+        async Task<string> IAgenticHost.AppendFileAsync(string fileName, string content)
+        {
+            // Unrelated-file write guard: confirm before appending to an unread file.
+            string appendFileOnly;
+            try { appendFileOnly = Path.GetFileName(fileName.Replace('\\', '/')); }
+            catch { appendFileOnly = fileName; }
+
+            if (!IsFileKnownToTask(appendFileOnly))
+            {
+                bool approved = await ConfirmUnreadFileWriteAsync(appendFileOnly);
+                if (!approved)
+                {
+                    AppendOutput($"[WRITE GUARD] File append to \"{appendFileOnly}\" blocked by user.\n", OutputColor.Dim);
+                    return null;
+                }
+                _taskReadFiles.Add(appendFileOnly);
+            }
+
+            try
+            {
+                string resolvedPath = await FindFileInSolutionAsync(appendFileOnly, fileName.Replace('\\', '/'))
+                    ?? Path.Combine(_shellRunner.WorkingDirectory, fileName);
+
+                if (File.Exists(resolvedPath))
+                {
+                    // Append with a newline separator to avoid content merging
+                    string existing = File.ReadAllText(resolvedPath);
+                    string separator = existing.Length > 0 && !existing.EndsWith("\n") ? "\n" : "";
+                    File.WriteAllText(resolvedPath, existing + separator + content);
+                    AppendOutput($"[APPEND] Appended to {appendFileOnly}\n", OutputColor.Success);
+                }
+                else
+                {
+                    // File does not exist — create it with the content
+                    string dir = Path.GetDirectoryName(resolvedPath);
+                    if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                        Directory.CreateDirectory(dir);
+                    File.WriteAllText(resolvedPath, content);
+                    AppendOutput($"[APPEND] Created {appendFileOnly}\n", OutputColor.Success);
+                }
+
+                // Invalidate cache so subsequent READs see the updated content
+                try { _llmClient.FileCache.Invalidate(appendFileOnly); } catch { }
+
+                // Track completed files for brainwash context
+                _llmClient.TrackCompletedFiles(content);
+
+                return resolvedPath;
+            }
+            catch (Exception ex)
+            {
+                AppendOutput($"[APPEND ERROR] {fileName}: {ex.Message}\n", OutputColor.Error);
+                return null;
             }
         }
 
@@ -196,60 +207,226 @@ namespace DevMind
         async Task<string> IAgenticHost.LoadFileContentAsync(
             string fileName, int rangeStart, int rangeEnd, bool forceFullRead)
         {
-            // Handle git commands: FileName starts with "git log" or "git diff"
             if (fileName.StartsWith("git ", StringComparison.OrdinalIgnoreCase))
-            {
-                await ApplyReadCommandAsync($"READ {fileName}", showOutline: false);
-                return string.Empty;
-            }
+                return await LoadGitContentForToolUseAsync(fileName, rangeStart);
 
-            // Resolve file path and capture original snapshot (for DIFF support) before reading
+            return await LoadFileContentForToolUseAsync(fileName, rangeStart, rangeEnd, forceFullRead);
+        }
+
+        /// <summary>
+        /// ToolUse-mode read: renders the [READ:filename] block (full, outline, or range)
+        /// and returns it as a string for delivery via the tool result message.
+        /// Updates _filesReadThisSession, _taskReadFiles, the file cache, and DIFF snapshot.
+        /// </summary>
+        private async Task<string> LoadFileContentForToolUseAsync(
+            string fileName, int rangeStart, int rangeEnd, bool forceFullRead)
+        {
             try
             {
+                // ── NearlineCache hit — cached content is already wrapped in the [READ:…] block format
+                if (rangeStart <= 0 && !forceFullRead && _llmClient?.NearlineCache != null)
+                {
+                    string cacheKey = $"read:{fileName}";
+                    string cached = _llmClient.NearlineCache.Retrieve(cacheKey);
+                    if (cached != null)
+                    {
+                        AppendOutput($"[CACHE HIT] {fileName}\n", OutputColor.Dim);
+                        return cached;
+                    }
+                }
+
+                // ── Resolve file path
+                string normalizedHint = fileName.Replace('\\', '/');
                 string fileNameOnly;
-                try { fileNameOnly = Path.GetFileName(fileName.Replace('\\', '/')); }
+                try { fileNameOnly = Path.GetFileName(normalizedHint); }
                 catch { fileNameOnly = fileName; }
-                string resolvedPath = await FindFileInSolutionAsync(fileNameOnly, fileName.Replace('\\', '/'))
-                    ?? Path.Combine(_terminalWorkingDir, fileNameOnly);
-                if (File.Exists(resolvedPath))
-                    CaptureFileSnapshot(resolvedPath);
+
+                string fullPath = await FindFileInSolutionAsync(fileNameOnly, normalizedHint)
+                    ?? Path.Combine(_shellRunner.WorkingDirectory, fileName);
+
+                if (!File.Exists(fullPath))
+                {
+                    AppendOutput($"[READ] File not found: {fileName}\n", OutputColor.Warning);
+                    string notFoundMsg = await BuildFileNotFoundMessageAsync("READ", fileName);
+                    return notFoundMsg;
+                }
+
+                CaptureFileSnapshot(fullPath);
+
+                // ── Range-read path
+                if (rangeStart > 0)
+                {
+                    // Ensure the file is in the cache for line-range access
+                    if (!_llmClient.FileCache.Contains(fileNameOnly))
+                    {
+                        var (diskContent, _) = PatchEngine.ReadFilePreservingEncoding(fullPath);
+                        _llmClient.FileCache.Store(fileNameOnly, diskContent);
+                    }
+
+                    _taskReadFiles.Add(fileNameOnly);
+                    int totalLines = _llmClient.FileCache.GetLineCount(fileNameOnly);
+
+                    // Swap inverted range silently
+                    if (rangeStart > rangeEnd)
+                    {
+                        int tmp = rangeStart; rangeStart = rangeEnd; rangeEnd = tmp;
+                    }
+                    int clampedEnd   = Math.Min(rangeEnd,   totalLines);
+                    int clampedStart = Math.Max(1, rangeStart);
+
+                    string rangeContent = _llmClient.FileCache.GetLineRange(fileNameOnly, clampedStart, clampedEnd);
+                    if (rangeContent == null)
+                    {
+                        AppendOutput($"[READ] Range {rangeStart}-{rangeEnd} out of bounds for {fileNameOnly} ({totalLines} lines)\n", OutputColor.Error);
+                        return $"[READ] Range {rangeStart}-{rangeEnd} out of bounds for {fileNameOnly} ({totalLines} lines)";
+                    }
+
+                    var rawLines = rangeContent.Split('\n');
+                    var numbered = new System.Text.StringBuilder();
+                    for (int i = 0; i < rawLines.Length; i++)
+                        numbered.AppendLine($"{clampedStart + i}: {rawLines[i].TrimEnd('\r')}");
+
+                    bool clamped = clampedEnd < rangeEnd;
+                    string rangeBlock = ContextEngine.RenderReadRangeBlock(fileNameOnly, clampedStart, clampedEnd, totalLines, numbered.ToString(), clamped);
+
+                    AppendOutput($"[READ] {fileNameOnly}:{clampedStart}-{clampedEnd} ({clampedEnd - clampedStart + 1} lines){(clamped ? " [clamped]" : "")}\n", OutputColor.Success);
+                    return rangeBlock;
+                }
+
+                // ── Full / outline path
+                var (content, _) = PatchEngine.ReadFilePreservingEncoding(fullPath);
+                _llmClient.FileCache.Store(fileNameOnly, content);
+                _taskReadFiles.Add(fileNameOnly);
+                int lineCount = content.Split('\n').Length;
+
+                bool alreadyRead = _llmClient.MarkFileRead(fileNameOnly);
+
+                string rendered = ContextEngine.RenderReadBlock(fileNameOnly, content, lineCount, forceFullRead, alreadyRead, out bool wasOutline);
+
+                if (wasOutline)
+                    AppendOutput($"[READ] {fullPath} ({lineCount} lines — outline{(alreadyRead ? ", re-read" : "")})\n", OutputColor.Success);
+                else
+                    AppendOutput($"[READ] Loaded {fullPath} ({lineCount} lines)\n", OutputColor.Success);
+
+                return rendered;
             }
-            catch { }
+            catch (Exception ex)
+            {
+                AppendOutput($"[READ ERROR] {fileName}: {ex.Message}\n", OutputColor.Error);
+                return $"[ERROR reading {fileName}: {ex.Message}]";
+            }
+        }
 
-            if (rangeStart > 0)
-                await ApplyReadRangeAsync(fileName, rangeStart, rangeEnd);
-            else if (forceFullRead)
-                await ApplyReadCommandAsync("READ! " + fileName, showOutline: true);
+        /// <summary>
+        /// ToolUse-mode git read: executes "git log" or "git diff" in the discovered git root,
+        /// renders output identically to ApplyReadGitCommandAsync's format, and returns the
+        /// rendered string for delivery via the tool result message.
+        ///
+        /// Honors rangeStart as the count for git log (default 10, max 50, clamped to 1-50).
+        /// rangeStart is ignored for git diff.
+        /// </summary>
+        private async Task<string> LoadGitContentForToolUseAsync(string fileName, int rangeStart)
+        {
+            string gitRoot = await FindGitRootAsync();
+            if (gitRoot == null)
+            {
+                AppendOutput("[READ] git: not a git repository\n", OutputColor.Error);
+                return "[READ] git: not a git repository\n";
+            }
+
+            string command;
+            string header;
+
+            if (fileName.StartsWith("git log", StringComparison.OrdinalIgnoreCase))
+            {
+                int count;
+                if (rangeStart > 0)
+                {
+                    count = rangeStart;
+                }
+                else
+                {
+                    string countPart = fileName.Substring("git log".Length).Trim();
+                    count = 10;
+                    if (!string.IsNullOrEmpty(countPart))
+                        int.TryParse(countPart, out count);
+                }
+                count = Math.Max(1, Math.Min(count, 50));
+                command = $"git log --oneline --no-decorate -{count}";
+                header = $"[READ] git log (last {count} commits)";
+            }
+            else if (fileName.StartsWith("git diff", StringComparison.OrdinalIgnoreCase))
+            {
+                string diffArgs = fileName.Substring("git diff".Length).Trim();
+                if (string.IsNullOrEmpty(diffArgs))
+                {
+                    command = "git diff";
+                    header = "[READ] git diff (working changes)";
+                }
+                else if (diffArgs.Equals("--staged", StringComparison.OrdinalIgnoreCase) ||
+                         diffArgs.Equals("--cached", StringComparison.OrdinalIgnoreCase))
+                {
+                    command = $"git diff {diffArgs}";
+                    header = "[READ] git diff --staged";
+                }
+                else
+                {
+                    command = $"git diff {diffArgs}";
+                    header = $"[READ] git diff {diffArgs}";
+                }
+            }
             else
-                await ApplyReadCommandAsync("READ " + fileName, showOutline: true);
+            {
+                string errMsg = $"[READ] Unrecognized git command: {fileName}";
+                AppendOutput(errMsg + "\n", OutputColor.Error);
+                return errMsg + "\n";
+            }
 
-            // Content is injected into LLM context by the above calls; not returned directly.
-            return string.Empty;
+            string savedDir = _shellRunner.WorkingDirectory;
+            _shellRunner.ChangeDirectory(gitRoot);
+            string output;
+            int exitCode;
+            try
+            {
+                (output, exitCode) = await _shellRunner.ExecuteAsync(command, _cts?.Token ?? CancellationToken.None);
+            }
+            finally
+            {
+                _shellRunner.ChangeDirectory(savedDir);
+            }
+
+            if (exitCode != 0)
+            {
+                string errMsg = $"{header}\n(error — exit code {exitCode})\n{output}\n";
+                AppendOutput(errMsg, OutputColor.Error);
+                return errMsg;
+            }
+
+            const int MaxDiffLines = 500;
+            var outputLines = output.Split('\n');
+            string truncatedOutput;
+            if (outputLines.Length > MaxDiffLines)
+            {
+                int omitted = outputLines.Length - MaxDiffLines;
+                truncatedOutput = string.Join("\n", outputLines.Take(MaxDiffLines))
+                    + $"\n[... {omitted} lines omitted — use READ git diff <filename> for specific files]";
+            }
+            else
+            {
+                truncatedOutput = output;
+            }
+
+            if (string.IsNullOrWhiteSpace(truncatedOutput))
+                truncatedOutput = "(no output)";
+
+            AppendOutput($"{header}\n", OutputColor.Success);
+            return $"{header}\n```\n{truncatedOutput}\n```\n\n";
         }
 
         // ── IAgenticHost.AppendOutput ─────────────────────────────────────────────
 
         void IAgenticHost.AppendOutput(string text, OutputColor color)
             => AppendOutput(text, color);
-
-        // ── IAgenticHost.ResubmitPromptAsync ─────────────────────────────────────
-
-        // The main loop handles resubmission by setting InputTextBox.Text and calling
-        // SendToLlm(). The executor never needs the raw response string directly.
-        Task<string> IAgenticHost.ResubmitPromptAsync(string prompt)
-            => Task.FromResult(string.Empty);
-
-        // ── IAgenticHost.ShowConfirmationAsync ───────────────────────────────────
-
-        async Task<bool> IAgenticHost.ShowConfirmationAsync(string message)
-        {
-            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
-            var result = System.Windows.MessageBox.Show(
-                message, "DevMind",
-                System.Windows.MessageBoxButton.YesNo,
-                System.Windows.MessageBoxImage.Question);
-            return result == System.Windows.MessageBoxResult.Yes;
-        }
 
         // ── IAgenticHost.UpdateScratchpad ─────────────────────────────────────────
 
@@ -263,7 +440,7 @@ namespace DevMind
 
         // ── IAgenticHost.GetWorkingDirectory ──────────────────────────────────────
 
-        string IAgenticHost.GetWorkingDirectory() => _terminalWorkingDir;
+        string IAgenticHost.GetWorkingDirectory() => _shellRunner.WorkingDirectory;
 
         // ── IAgenticHost.GrepFileAsync ────────────────────────────────────────────
 
@@ -277,22 +454,22 @@ namespace DevMind
             catch { fileNameOnly = filename; }
 
             string resolvedPath = await FindFileInSolutionAsync(fileNameOnly, filename.Replace('\\', '/'))
-                ?? Path.Combine(_terminalWorkingDir, fileNameOnly);
+                ?? Path.Combine(_shellRunner.WorkingDirectory, filename);
 
             if (!File.Exists(resolvedPath))
                 return await BuildFileNotFoundMessageAsync("GREP", filename);
 
             // Populate cache if needed
-            if (!_llmClient._fileCache.Contains(fileNameOnly))
+            if (!_llmClient.FileCache.Contains(fileNameOnly))
             {
                 string diskContent;
                 try { diskContent = File.ReadAllText(resolvedPath); }
                 catch (Exception ex) { return $"GREP: error reading {filename} — {ex.Message}"; }
-                _llmClient._fileCache.Store(fileNameOnly, diskContent);
+                _llmClient.FileCache.Store(fileNameOnly, diskContent);
             }
 
             // Get lines from cache
-            int totalFileLines = _llmClient._fileCache.GetLineCount(fileNameOnly);
+            int totalFileLines = _llmClient.FileCache.GetLineCount(fileNameOnly);
             int scanStart = startLine.HasValue ? Math.Max(1, startLine.Value) : 1;
             int scanEnd   = endLine.HasValue   ? Math.Min(totalFileLines, endLine.Value) : totalFileLines;
 
@@ -300,7 +477,7 @@ namespace DevMind
             var matches = new System.Collections.Generic.List<(int lineNum, string lineText)>();
             for (int lineNum = scanStart; lineNum <= scanEnd; lineNum++)
             {
-                string lineContent = _llmClient._fileCache.GetLineRange(fileNameOnly, lineNum, lineNum);
+                string lineContent = _llmClient.FileCache.GetLineRange(fileNameOnly, lineNum, lineNum);
                 if (lineContent == null) continue;
                 if (lineContent.IndexOf(pattern, StringComparison.OrdinalIgnoreCase) >= 0)
                     matches.Add((lineNum, lineContent));
@@ -309,7 +486,6 @@ namespace DevMind
             if (matches.Count == 0)
             {
                 string noMatch = $"GREP: no matches for \"{pattern}\" in {filename}";
-                _readContext = (_readContext ?? "") + noMatch + "\n\n";
                 AppendOutput($"[GREP] no matches for \"{pattern}\" in {filename}\n", OutputColor.Dim);
                 return noMatch;
             }
@@ -334,8 +510,6 @@ namespace DevMind
 
             string result = sb.ToString().TrimEnd('\r', '\n');
 
-            // Inject into read context so the LLM sees the results on resubmit (same pattern as ApplyReadCommandAsync)
-            _readContext = (_readContext ?? "") + result + "\n\n";
             _taskReadFiles.Add(fileNameOnly);
             AppendOutput($"[GREP] {totalMatches} match{(totalMatches == 1 ? "" : "es")} for \"{pattern}\" in {filename}\n", OutputColor.Success);
 
@@ -349,7 +523,7 @@ namespace DevMind
             const int MaxMatches = 100;
 
             // Determine search root (project directory preferred, fallback to working dir)
-            string searchDir = _terminalWorkingDir;
+            string searchDir = _shellRunner.WorkingDirectory;
             try
             {
                 await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
@@ -383,8 +557,8 @@ namespace DevMind
             IEnumerable<string> files;
             try
             {
-                files = SafeEnumerateFilesGlob(effectiveRoot, filePattern)
-                    .Where(f => !IsNoisePath(f))
+                files = ContextEngine.SafeEnumerateFilesGlob(effectiveRoot, filePattern)
+                    .Where(f => !ContextEngine.IsNoisePath(f))
                     .OrderBy(f => f, StringComparer.OrdinalIgnoreCase);
             }
             catch (Exception ex)
@@ -404,21 +578,21 @@ namespace DevMind
                 catch { fileNameOnly = filePath; }
 
                 // Populate cache if needed
-                if (!_llmClient._fileCache.Contains(fileNameOnly))
+                if (!_llmClient.FileCache.Contains(fileNameOnly))
                 {
                     string diskContent;
                     try { diskContent = File.ReadAllText(filePath); }
                     catch { continue; }
-                    _llmClient._fileCache.Store(fileNameOnly, diskContent);
+                    _llmClient.FileCache.Store(fileNameOnly, diskContent);
                 }
 
-                int totalFileLines = _llmClient._fileCache.GetLineCount(fileNameOnly);
+                int totalFileLines = _llmClient.FileCache.GetLineCount(fileNameOnly);
                 int scanStart = startLine.HasValue ? Math.Max(1, startLine.Value) : 1;
                 int scanEnd   = endLine.HasValue   ? Math.Min(totalFileLines, endLine.Value) : totalFileLines;
 
                 for (int lineNum = scanStart; lineNum <= scanEnd; lineNum++)
                 {
-                    string lineContent = _llmClient._fileCache.GetLineRange(fileNameOnly, lineNum, lineNum);
+                    string lineContent = _llmClient.FileCache.GetLineRange(fileNameOnly, lineNum, lineNum);
                     if (lineContent == null) continue;
                     if (lineContent.IndexOf(pattern, StringComparison.OrdinalIgnoreCase) >= 0)
                     {
@@ -435,7 +609,6 @@ namespace DevMind
             if (allMatches.Count == 0)
             {
                 string noMatch = $"FIND: no matches for \"{pattern}\" in {globPattern}";
-                _readContext = (_readContext ?? "") + noMatch + "\n\n";
                 AppendOutput($"[FIND] no matches for \"{pattern}\" in {globPattern}\n", OutputColor.Dim);
                 return noMatch;
             }
@@ -452,10 +625,87 @@ namespace DevMind
 
             string result = sb.ToString().TrimEnd('\r', '\n');
 
-            _readContext = (_readContext ?? "") + result + "\n\n";
             AppendOutput($"[FIND] {(hitCap ? MaxMatches + "+" : shownCount.ToString())} match{(shownCount == 1 ? "" : "es")} for \"{pattern}\" in {globPattern}\n", OutputColor.Success);
 
             return result;
+        }
+
+        // ── IAgenticHost.ListFilesAsync ───────────────────────────────────────────
+
+        async Task<string> IAgenticHost.ListFilesAsync(string glob, bool recursive, CancellationToken cancellationToken)
+        {
+            const int Cap = 200;
+
+            // Resolve search root (project directory preferred, fallback to working dir)
+            string searchDir = _shellRunner.WorkingDirectory;
+            try
+            {
+                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+                var dte = await VS.GetServiceAsync<EnvDTE.DTE, EnvDTE.DTE>();
+                var project = dte?.ActiveDocument?.ProjectItem?.ContainingProject;
+                if (project != null)
+                {
+                    string projFile = project.FullName;
+                    if (!string.IsNullOrEmpty(projFile))
+                        searchDir = Path.GetDirectoryName(projFile);
+                }
+            }
+            catch { }
+
+            if (string.IsNullOrEmpty(searchDir))
+                return "[ERROR: project root unresolved]";
+
+            // Split glob into directory prefix and file pattern (e.g. "Services/*.cs" → dir="Services", pattern="*.cs")
+            string normalizedGlob = (glob ?? "").Replace('\\', '/');
+            string filePattern = normalizedGlob;
+            string effectiveRoot = searchDir;
+            int lastSlash = normalizedGlob.LastIndexOf('/');
+            if (lastSlash >= 0)
+            {
+                string dirPart = normalizedGlob.Substring(0, lastSlash);
+                filePattern = normalizedGlob.Substring(lastSlash + 1);
+                string candidate = Path.Combine(searchDir, dirPart.Replace('/', Path.DirectorySeparatorChar));
+                if (Directory.Exists(candidate))
+                    effectiveRoot = candidate;
+            }
+
+            if (string.IsNullOrWhiteSpace(filePattern))
+                return "[ERROR: glob pattern is empty]";
+
+            IEnumerable<string> matches;
+            try
+            {
+                if (recursive)
+                    matches = ContextEngine.SafeEnumerateFilesGlob(effectiveRoot, filePattern).Where(f => !ContextEngine.IsNoisePath(f));
+                else
+                    matches = Directory.EnumerateFiles(effectiveRoot, filePattern, SearchOption.TopDirectoryOnly)
+                        .Where(f => !ContextEngine.IsNoisePath(f));
+            }
+            catch (Exception ex)
+            {
+                return $"[ERROR: {ex.Message}]";
+            }
+
+            var sorted = matches
+                .Select(Path.GetFullPath)
+                .OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (sorted.Count == 0)
+                return "[no matches]";
+
+            var sb = new System.Text.StringBuilder();
+            int shown = Math.Min(sorted.Count, Cap);
+            for (int i = 0; i < shown; i++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                sb.AppendLine(sorted[i]);
+            }
+            if (sorted.Count > Cap)
+                sb.AppendLine($"[truncated — {sorted.Count - Cap} more matches]");
+
+            AppendOutput($"[LIST] {shown} file{(shown == 1 ? "" : "s")} matching \"{glob}\"\n", OutputColor.Dim);
+            return sb.ToString().TrimEnd();
         }
 
         // ── IAgenticHost.DeleteFileAsync ──────────────────────────────────────────
@@ -467,7 +717,7 @@ namespace DevMind
             catch { fileNameOnly = filename; }
 
             string resolvedPath = await FindFileInSolutionAsync(fileNameOnly, filename.Replace('\\', '/'))
-                ?? Path.Combine(_terminalWorkingDir, fileNameOnly);
+                ?? Path.Combine(_shellRunner.WorkingDirectory, filename);
 
             if (!File.Exists(resolvedPath))
                 return await BuildFileNotFoundMessageAsync("DELETE", filename);
@@ -511,7 +761,7 @@ namespace DevMind
             catch { oldNameOnly = oldFilename; }
 
             string oldPath = await FindFileInSolutionAsync(oldNameOnly, oldFilename.Replace('\\', '/'))
-                ?? Path.Combine(_terminalWorkingDir, oldNameOnly);
+                ?? Path.Combine(_shellRunner.WorkingDirectory, oldFilename);
 
             if (!File.Exists(oldPath))
                 return await BuildFileNotFoundMessageAsync("RENAME", oldFilename);
@@ -522,13 +772,13 @@ namespace DevMind
             if (newHasDir)
             {
                 // Treat as relative to project/working directory
-                string projectDir = Path.GetDirectoryName(oldPath) ?? _terminalWorkingDir;
+                string projectDir = Path.GetDirectoryName(oldPath) ?? _shellRunner.WorkingDirectory;
                 newPath = Path.Combine(projectDir, newFilename.Replace('/', Path.DirectorySeparatorChar));
             }
             else
             {
                 // Same directory as the old file, just different name
-                newPath = Path.Combine(Path.GetDirectoryName(oldPath) ?? _terminalWorkingDir, newFilename);
+                newPath = Path.Combine(Path.GetDirectoryName(oldPath) ?? _shellRunner.WorkingDirectory, newFilename);
             }
 
             if (File.Exists(newPath))
@@ -563,7 +813,7 @@ namespace DevMind
             }
 
             // Invalidate FileContentCache for the old filename
-            try { _llmClient._fileCache.Invalidate(oldNameOnly); } catch { }
+            try { _llmClient.FileCache.Invalidate(oldNameOnly); } catch { }
 
             // Open new file in VS editor
             try
@@ -585,12 +835,11 @@ namespace DevMind
             catch { fileNameOnly = filename; }
 
             string resolvedPath = await FindFileInSolutionAsync(fileNameOnly, filename.Replace('\\', '/'))
-                ?? Path.Combine(_terminalWorkingDir, fileNameOnly);
+                ?? Path.Combine(_shellRunner.WorkingDirectory, filename);
 
             if (!_fileSnapshots.ContainsKey(resolvedPath))
             {
                 string noSnap = $"DIFF: No changes — {filename} has not been modified this session.";
-                _readContext = (_readContext ?? "") + noSnap + "\n\n";
                 AppendOutput($"[DIFF] {filename}: not modified this session\n", OutputColor.Dim);
                 return noSnap;
             }
@@ -608,7 +857,6 @@ namespace DevMind
             if (string.Equals(normOld, normNew, StringComparison.Ordinal))
             {
                 string noChange = $"DIFF: No changes detected in {filename}.";
-                _readContext = (_readContext ?? "") + noChange + "\n\n";
                 AppendOutput($"[DIFF] {filename}: no changes\n", OutputColor.Dim);
                 return noChange;
             }
@@ -617,7 +865,6 @@ namespace DevMind
             string[] newLines = normNew.Split('\n');
 
             string diffResult = DiffHelper.GenerateUnifiedDiff(filename, oldLines, newLines);
-            _readContext = (_readContext ?? "") + diffResult + "\n\n";
 
             AppendOutput($"[DIFF] {filename}: changes shown ({oldLines.Length} → {newLines.Length} lines)\n", OutputColor.Dim);
 
@@ -629,6 +876,33 @@ namespace DevMind
         async Task<string> IAgenticHost.RunTestsAsync(string project, string filter)
         {
             const int MaxFailedTests = 10;
+
+            // Auto-detect project when none specified: look for *.csproj in working directory.
+            if (string.IsNullOrWhiteSpace(project))
+            {
+                try
+                {
+                    string[] csprojFiles = Directory.GetFiles(_shellRunner.WorkingDirectory, "*.csproj", SearchOption.TopDirectoryOnly);
+                    if (csprojFiles.Length == 1)
+                    {
+                        project = csprojFiles[0];
+                        AppendOutput($"[TEST] Auto-detected project: {Path.GetFileName(project)}\n", OutputColor.Dim);
+                    }
+                    else if (csprojFiles.Length > 1)
+                    {
+                        project = csprojFiles[0];
+                        AppendOutput($"[TEST] Multiple .csproj files found — using {Path.GetFileName(project)}\n", OutputColor.Dim);
+                    }
+                    else
+                    {
+                        return "[TEST] No project specified and no .csproj found in working directory.";
+                    }
+                }
+                catch
+                {
+                    return "[TEST] No project specified.";
+                }
+            }
 
             // Resolve project path — if it looks like a bare name (no path separators, no .csproj ext),
             // search for a matching .csproj in the solution/working directory.
@@ -650,9 +924,9 @@ namespace DevMind
             }
             catch { }
 
-            string searchDir = projectDir ?? _terminalWorkingDir;
+            string searchDir = projectDir ?? _shellRunner.WorkingDirectory;
 
-            if (looksLikeBare)
+            if (looksLikeBare && !string.IsNullOrEmpty(searchDir))
             {
                 // Search for <project>.csproj or just project if it already ends with .csproj
                 string searchName = project.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase)
@@ -665,7 +939,7 @@ namespace DevMind
                 }
                 catch { }
             }
-            else if (!Path.IsPathRooted(resolvedProject))
+            else if (!looksLikeBare && !Path.IsPathRooted(resolvedProject) && !string.IsNullOrEmpty(searchDir))
             {
                 resolvedProject = Path.Combine(searchDir, resolvedProject.Replace('/', Path.DirectorySeparatorChar));
             }
@@ -677,16 +951,31 @@ namespace DevMind
             // Remove stale TRX from a previous run
             try { if (File.Exists(trxFile)) File.Delete(trxFile); } catch { }
 
-            // Build command
-            string quotedProject = resolvedProject.Contains(' ')
-                ? $"\"{resolvedProject}\"" : resolvedProject;
+            // Build command — quote project path if it contains spaces
+            string quotedProject = (resolvedProject ?? project).Contains(' ')
+                ? $"\"{resolvedProject ?? project}\"" : (resolvedProject ?? project);
+            string filterArg = !string.IsNullOrWhiteSpace(filter)
+                ? $" --filter \"{filter.Trim('\"')}\"" : "";
+
+            // Phase 1: try with TRX logger for structured output
             string cmd = $"dotnet test {quotedProject} --no-build --verbosity quiet" +
-                         $" --logger \"trx;LogFileName={trxFile}\"";
-            if (!string.IsNullOrWhiteSpace(filter))
-                cmd += $" --filter \"{filter.Trim('\"')}\"";
+                         $" --logger \"trx;LogFileName={trxFile}\"{filterArg}";
 
             AppendOutput($"[TEST] > {cmd}\n", OutputColor.Dim);
-            var (rawOutput, exitCode) = await RunShellCommandCaptureAsync(cmd);
+
+            string rawOutput = null;
+            int exitCode = -1;
+
+            try
+            {
+                var result = await _shellRunner.ExecuteAsync(cmd, _cts?.Token ?? CancellationToken.None);
+                rawOutput = result.output;
+                exitCode  = result.exitCode;
+            }
+            catch (Exception ex)
+            {
+                AppendOutput($"[TEST] Shell execution failed: {ex.Message}\n", OutputColor.Dim);
+            }
 
             // Try TRX parsing first
             try
@@ -694,14 +983,41 @@ namespace DevMind
                 if (File.Exists(trxFile))
                 {
                     string trxContent = File.ReadAllText(trxFile);
-                    string summary = ParseTrxSummary(trxContent, MaxFailedTests, resolvedProject, filter);
-                    try { File.Delete(trxFile); } catch { }
-                    return summary;
+                    if (!string.IsNullOrWhiteSpace(trxContent))
+                    {
+                        string summary = ParseTrxSummary(trxContent, MaxFailedTests, resolvedProject ?? project, filter);
+                        try { File.Delete(trxFile); } catch { }
+                        if (!string.IsNullOrWhiteSpace(summary))
+                            return summary;
+                    }
                 }
             }
-            catch { }
+            catch (Exception trxEx)
+            {
+                AppendOutput($"[TEST] TRX parse failed: {trxEx.Message}\n", OutputColor.Dim);
+            }
 
-            // Fallback: return raw console output
+            // If we got usable raw output from the TRX run, return it
+            if (!string.IsNullOrWhiteSpace(rawOutput) && rawOutput != "(no output)")
+                return rawOutput;
+
+            // Phase 2: fallback — re-run without --no-build and without TRX logger
+            // so we get plain console output even for projects that don't produce TRX
+            string fallbackCmd = $"dotnet test {quotedProject} --verbosity normal{filterArg}";
+            AppendOutput($"[TEST] TRX unavailable, falling back to console output.\n", OutputColor.Dim);
+            AppendOutput($"[TEST] > {fallbackCmd}\n", OutputColor.Dim);
+
+            try
+            {
+                var fallback = await _shellRunner.ExecuteAsync(fallbackCmd, _cts?.Token ?? CancellationToken.None);
+                rawOutput = fallback.output;
+                exitCode  = fallback.exitCode;
+            }
+            catch (Exception ex)
+            {
+                return $"[TEST] Failed to run tests: {ex.Message}";
+            }
+
             return string.IsNullOrWhiteSpace(rawOutput)
                 ? $"TEST: no output (exit code {exitCode})"
                 : rawOutput;
@@ -713,12 +1029,18 @@ namespace DevMind
         /// </summary>
         private static string ParseTrxSummary(string trxXml, int maxFailedTests, string project, string filter)
         {
+            if (string.IsNullOrWhiteSpace(trxXml))
+                return null;
+
             // TRX files use the VS test results namespace
             XDocument doc = XDocument.Parse(trxXml);
+            if (doc?.Root == null)
+                return null;
+
             XNamespace ns = "http://microsoft.com/schemas/VisualStudio/TeamTest/2010";
 
             // Counters element: total, passed, failed, etc.
-            var counters = doc.Descendants(ns + "Counters").FirstOrDefault();
+            var counters = doc.Descendants(ns + "Counters")?.FirstOrDefault();
             int total   = counters != null ? (int?)counters.Attribute("total")   ?? 0 : 0;
             int passed  = counters != null ? (int?)counters.Attribute("passed")  ?? 0 : 0;
             int failed  = counters != null ? (int?)counters.Attribute("failed")  ?? 0 : 0;
@@ -728,7 +1050,7 @@ namespace DevMind
             // Handle zero tests found
             if (total == 0)
             {
-                string projectShort = Path.GetFileName(project);
+                string projectShort = Path.GetFileName(project ?? "unknown");
                 if (!string.IsNullOrWhiteSpace(filter))
                 {
                     return $"[TEST] No tests found matching filter \"{filter.Trim('\"')}\" in {projectShort}";
@@ -738,7 +1060,7 @@ namespace DevMind
 
             // Duration from TestRun summary
             double totalSecs = 0;
-            var runInfos = doc.Descendants(ns + "Times").FirstOrDefault();
+            var runInfos = doc.Descendants(ns + "Times")?.FirstOrDefault();
             if (runInfos != null)
             {
                 string start  = (string)runInfos.Attribute("start");
@@ -759,10 +1081,13 @@ namespace DevMind
                 sb.AppendLine();
                 sb.AppendLine("FAILED:");
 
-                var unitTestResults = doc.Descendants(ns + "UnitTestResult")
-                    .Where(r => string.Equals((string)r.Attribute("outcome"), "Failed", StringComparison.OrdinalIgnoreCase))
-                    .Take(maxFailedTests)
-                    .ToList();
+                var failedResults = doc.Descendants(ns + "UnitTestResult");
+                var unitTestResults = failedResults != null
+                    ? failedResults
+                        .Where(r => string.Equals((string)r.Attribute("outcome"), "Failed", StringComparison.OrdinalIgnoreCase))
+                        .Take(maxFailedTests)
+                        .ToList()
+                    : new List<XElement>();
 
                 foreach (var tr in unitTestResults)
                 {
@@ -776,7 +1101,8 @@ namespace DevMind
                     sb.AppendLine($"  {name}{durStr}");
 
                     // Error message from Output/ErrorInfo/Message
-                    var errorMsg = tr.Descendants(ns + "Message").FirstOrDefault()?.Value;
+                    var messages = tr.Descendants(ns + "Message");
+                    var errorMsg = messages?.FirstOrDefault()?.Value;
                     if (!string.IsNullOrWhiteSpace(errorMsg))
                     {
                         // Trim to first 3 lines to keep output compact
@@ -809,7 +1135,7 @@ namespace DevMind
 
         // ── IAgenticHost.ResolvePatchAsync ───────────────────────────────────────
 
-        async Task<PatchResolveResult> IAgenticHost.ResolvePatchAsync(string patchContent)
+        async Task<PatchResolveResult> IAgenticHost.ResolvePatchAsync(string patchContent, bool fromToolCall)
         {
             // Extract filename for auto-READ and write guard
             string firstLine = (patchContent ?? string.Empty).Split('\n')[0];
@@ -845,10 +1171,9 @@ namespace DevMind
                 {
                     string resolvedPath =
                         await FindFileInSolutionAsync(patchFileOnly, blockFileName.Replace('\\', '/'))
-                        ?? Path.Combine(_terminalWorkingDir, patchFileOnly);
+                        ?? Path.Combine(_shellRunner.WorkingDirectory, patchFileOnly);
 
-                    bool alreadyLoaded = _readContext != null && _readContext.Contains(resolvedPath);
-                    if (!alreadyLoaded)
+                    if (!_llmClient.FileCache.Contains(patchFileOnly))
                     {
                         AppendOutput($"[AUTO-READ] Loading {patchFileOnly} before patch...\n", OutputColor.Dim);
                         await ApplyReadCommandAsync($"READ {blockFileName}");
@@ -859,7 +1184,7 @@ namespace DevMind
                 }
             }
 
-            return await ResolvePatchAsync(patchContent);
+            return await ResolvePatchAsync(patchContent, fromToolCall);
         }
 
         // ── IAgenticHost.ApplyResolvedPatchAsync ────────────────────────────────
@@ -976,7 +1301,7 @@ namespace DevMind
             }
             catch { }
 
-            string searchDir = projectDir ?? _terminalWorkingDir;
+            string searchDir = projectDir ?? _shellRunner.WorkingDirectory;
 
             List<string> csFiles = null;
             try
@@ -1005,147 +1330,70 @@ namespace DevMind
             return sb.ToString().TrimEnd('\r', '\n');
         }
 
+        // ── IAgenticHost.RecallMemoryAsync ──────────────────────────────────────
+
+        async Task<string> IAgenticHost.RecallMemoryAsync(string topic)
+        {
+            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+            EnsureMemoryManager();
+            if (_memoryManager == null)
+                return "Memory not available: no solution open";
+
+            string content = _memoryManager.LoadTopic(topic);
+            if (content == null)
+            {
+                AppendOutput($"[MEMORY] Topic not found: {topic}\n", OutputColor.Dim);
+                return $"Topic not found: {topic}";
+            }
+
+            AppendOutput($"[MEMORY] Recalled: {topic}\n", OutputColor.Dim);
+            return content;
+        }
+
+        // ── IAgenticHost.SaveMemoryAsync ────────────────────────────────────────
+
+        async Task<string> IAgenticHost.SaveMemoryAsync(string topic, string content, string description)
+        {
+            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+            EnsureMemoryManager();
+            if (_memoryManager == null)
+                return "Memory not available: no solution open";
+
+            _memoryManager.SaveTopic(topic, content, description);
+            string desc = string.IsNullOrEmpty(description) ? topic : description;
+            AppendOutput($"[MEMORY] Saved: [{topic}] {desc}\n", OutputColor.Success);
+            return $"Memory saved: [{topic}] {desc}";
+        }
+
+        // ── IAgenticHost.ListMemoryTopicsAsync ──────────────────────────────────
+
+        async Task<string> IAgenticHost.ListMemoryTopicsAsync()
+        {
+            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+            EnsureMemoryManager();
+            if (_memoryManager == null)
+                return "Memory not available: no solution open";
+
+            string index = _memoryManager.LoadIndex();
+            if (string.IsNullOrWhiteSpace(index))
+            {
+                var topics = _memoryManager.ListTopics();
+                if (topics.Count == 0)
+                {
+                    AppendOutput("[MEMORY] No memory topics found.\n", OutputColor.Dim);
+                    return "No memory topics found. Use save_memory to create one.";
+                }
+                // Fallback: list topic slugs without descriptions
+                string list = string.Join("\n", topics.Select(t => $"- [{t}]"));
+                AppendOutput($"[MEMORY] {topics.Count} topic(s) available.\n", OutputColor.Dim);
+                return list;
+            }
+
+            AppendOutput("[MEMORY] Topics listed.\n", OutputColor.Dim);
+            return index;
+        }
+
+        int IAgenticHost.GetPatchBackupCount() => _patchBackupStack.Count;
     }
 
-    // ── Diff algorithm helper ─────────────────────────────────────────────────────
-
-    /// <summary>
-    /// Produces a simple unified-style diff between two sets of lines.
-    /// Used by the DIFF directive to show per-conversation file changes.
-    /// </summary>
-    internal static class DiffHelper
-    {
-        private const int Context    = 3;
-        private const int MaxOutput  = 200;
-        private const long LcsSizeLimit = 2_000_000L; // m*n threshold for LCS vs. positional diff
-
-        public static string GenerateUnifiedDiff(string filename, string[] oldLines, string[] newLines)
-        {
-            var edits = ComputeEditScript(oldLines, newLines);
-
-            var sb = new System.Text.StringBuilder();
-            sb.AppendLine($"--- {filename} (original)");
-            sb.AppendLine($"+++ {filename} (current)");
-
-            // Annotate each edit with absolute 1-based old/new line numbers
-            var annotated = new List<(char op, string text, int oldLn, int newLn)>();
-            int oldLn = 1, newLn = 1;
-            foreach (var (op, text) in edits)
-            {
-                if      (op == ' ') { annotated.Add((op, text, oldLn, newLn)); oldLn++; newLn++; }
-                else if (op == '-') { annotated.Add((op, text, oldLn,      0)); oldLn++; }
-                else                { annotated.Add((op, text,      0, newLn)); newLn++; }
-            }
-
-            // Mark changed indices
-            bool[] changed = new bool[annotated.Count];
-            bool anyChange = false;
-            for (int i = 0; i < annotated.Count; i++)
-            {
-                changed[i] = annotated[i].op != ' ';
-                if (changed[i]) anyChange = true;
-            }
-
-            if (!anyChange)
-                return $"DIFF: No changes detected in {filename}.";
-
-            int outputLines = 2; // header lines already appended
-            bool truncated  = false;
-
-            int idx = 0;
-            while (idx < annotated.Count && !truncated)
-            {
-                if (!changed[idx]) { idx++; continue; }
-
-                // Expand hunk: merge consecutive change regions within 2*Context gap
-                int hunkStart = Math.Max(0, idx - Context);
-                int hunkEnd   = idx;
-                while (hunkEnd < annotated.Count)
-                {
-                    int nextChange = hunkEnd + 1;
-                    while (nextChange < annotated.Count && !changed[nextChange]) nextChange++;
-                    if (nextChange < annotated.Count && nextChange - hunkEnd <= 2 * Context + 1)
-                        hunkEnd = nextChange;
-                    else
-                        break;
-                }
-                hunkEnd = Math.Min(annotated.Count - 1, hunkEnd + Context);
-
-                // Hunk separator
-                if (outputLines < MaxOutput) { sb.AppendLine("---"); outputLines++; }
-
-                for (int i = hunkStart; i <= hunkEnd; i++)
-                {
-                    if (outputLines >= MaxOutput) { truncated = true; break; }
-                    var (op, text, oln, nln) = annotated[i];
-                    string lineNum = (op == '+') ? nln.ToString() : oln.ToString();
-                    sb.AppendLine($"{op} {lineNum,5}: {text}");
-                    outputLines++;
-                }
-
-                idx = hunkEnd + 1;
-            }
-
-            string result = sb.ToString().TrimEnd('\r', '\n');
-            if (truncated)
-                result += $"\n... (truncated at {MaxOutput} lines — use READ for full file)";
-            return result;
-        }
-
-        // ── Edit script computation ───────────────────────────────────────────────
-
-        private static List<(char op, string text)> ComputeEditScript(string[] a, string[] b)
-        {
-            int m = a.Length, n = b.Length;
-
-            // For very large file pairs, fall back to positional comparison to avoid OOM
-            if ((long)m * n > LcsSizeLimit)
-                return ComputePositionalEditScript(a, b);
-
-            // Standard LCS DP (bottom-up, suffix direction)
-            int[,] dp = new int[m + 1, n + 1];
-            for (int i = m - 1; i >= 0; i--)
-                for (int j = n - 1; j >= 0; j--)
-                    dp[i, j] = string.Equals(a[i], b[j], StringComparison.Ordinal)
-                        ? dp[i + 1, j + 1] + 1
-                        : Math.Max(dp[i + 1, j], dp[i, j + 1]);
-
-            // Backtrack
-            var result = new List<(char, string)>(m + n);
-            int ai = 0, bi = 0;
-            while (ai < m && bi < n)
-            {
-                if (string.Equals(a[ai], b[bi], StringComparison.Ordinal))
-                    { result.Add((' ', a[ai])); ai++; bi++; }
-                else if (dp[ai + 1, bi] >= dp[ai, bi + 1])
-                    { result.Add(('-', a[ai])); ai++; }
-                else
-                    { result.Add(('+', b[bi])); bi++; }
-            }
-            while (ai < m) { result.Add(('-', a[ai])); ai++; }
-            while (bi < n) { result.Add(('+', b[bi])); bi++; }
-
-            return result;
-        }
-
-        // Positional fallback for large files: compares lines by index, not LCS
-        private static List<(char op, string text)> ComputePositionalEditScript(string[] a, string[] b)
-        {
-            var result = new List<(char, string)>(Math.Max(a.Length, b.Length));
-            int maxLen = Math.Max(a.Length, b.Length);
-            for (int i = 0; i < maxLen; i++)
-            {
-                if (i < a.Length && i < b.Length)
-                {
-                    if (string.Equals(a[i], b[i], StringComparison.Ordinal))
-                        result.Add((' ', a[i]));
-                    else
-                        { result.Add(('-', a[i])); result.Add(('+', b[i])); }
-                }
-                else if (i < a.Length) result.Add(('-', a[i]));
-                else                   result.Add(('+', b[i]));
-            }
-            return result;
-        }
-    }
 }

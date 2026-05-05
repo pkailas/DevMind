@@ -17,3 +17,10 @@ packages/
 [Rr]elease/
 x64/
 x86/
+
+## Local scratch files
+DevMind_Builder.md
+DevMind_CodeReview.md
+DevMind_Template.md
+CodeReview.md
+CodeReviewBenchmarkWithBugs/
