@@ -1,4 +1,4 @@
-// File: McpServices.cs  v1.3
+// File: McpServices.cs  v2.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Diagnostic policy: all Console.Write / Console.WriteLine calls in this project
@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 using DevMind;
 
@@ -37,17 +38,31 @@ namespace DevMind.McpServer
         public HashSet<string> FilesRead { get; } =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        // ── Tool serialization ───────────────────────────────────────────────────
-        // The MCP SDK dispatches each tool/call on its own Task by default.
-        // Tools that touch shared state (file system, _fileSnapshots, FileCache)
-        // must execute one at a time within a session. SemaphoreSlim(1,1) is the
-        // session-level gate; every tool method acquires it before doing any work.
+        // ── Tool dispatch: Channel-based FIFO queue ──────────────────────────────
+        // The MCP SDK dispatches each tool/call on its own Task concurrently.
+        // SemaphoreSlim(1,1) serializes execution but is not FIFO — the scheduler
+        // picks an arbitrary waiter on release, producing out-of-order responses.
+        //
+        // Fix: an unbounded Channel<DispatchItem> with a single consumer task.
+        // Channel writes happen in protocol-message order (the SDK reads stdin
+        // sequentially, so Task starts are ordered; TryWrite on an unbounded
+        // channel is synchronous and contention-free). The consumer drains FIFO,
+        // executing one work item at a time, guaranteeing both serialization and
+        // arrival-order responses.
 
-        private readonly SemaphoreSlim _toolGate = new SemaphoreSlim(1, 1);
+        private sealed record DispatchItem(
+            Func<Task<string>>              Work,
+            TaskCompletionSource<string>    Tcs,
+            CancellationToken               Ct);
+
+        private readonly Channel<DispatchItem> _dispatchChannel =
+            Channel.CreateUnbounded<DispatchItem>(
+                new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
+
+        private readonly Task _consumerTask;
 
         // Session-baseline snapshots: absolute path → original content captured at first read
-        // or first patch. Powers diff_file. The lock is kept even though _toolGate already
-        // serializes tool access — defensive practice in case the gate is ever widened.
+        // or first patch. Powers diff_file.
         private readonly Dictionary<string, string> _fileSnapshots =
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private readonly object _snapshotLock = new object();
@@ -65,21 +80,71 @@ namespace DevMind.McpServer
             Memory    = new MemoryManager(WorkingDirectory);
             FileCache = new FileContentCache();
             Shell     = new ShellRunner(WorkingDirectory);
+
+            _consumerTask = DrainChannelAsync();
         }
 
-        public void Dispose() => _toolGate.Dispose();
+        public void Dispose()
+        {
+            _dispatchChannel.Writer.TryComplete();
+            _consumerTask.Wait(TimeSpan.FromSeconds(2));
+        }
 
-        // ── Gate helper ──────────────────────────────────────────────────────────
+        // ── Dispatch helpers ─────────────────────────────────────────────────────
 
         /// <summary>
-        /// Acquires the session-level tool gate, executes <paramref name="work"/>,
-        /// then releases the gate. Ensures tool calls are strictly sequential.
+        /// Enqueues <paramref name="work"/> for strictly sequential FIFO execution
+        /// by the single consumer task. Returns a Task that resolves when the work
+        /// completes (or is cancelled / faulted).
         /// </summary>
-        public async Task<T> WithGateAsync<T>(Func<Task<T>> work, CancellationToken ct)
+        public async Task<string> EnqueueAsync(Func<Task<string>> work, CancellationToken ct)
         {
-            await _toolGate.WaitAsync(ct).ConfigureAwait(false);
-            try   { return await work().ConfigureAwait(false); }
-            finally { _toolGate.Release(); }
+            var tcs  = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var item = new DispatchItem(work, tcs, ct);
+
+            // Register cancellation so a cancelled request does not block the consumer.
+            var reg = ct.Register(() => tcs.TrySetCanceled(ct));
+            try
+            {
+                // TryWrite on an unbounded channel never fails.
+                _dispatchChannel.Writer.TryWrite(item);
+                return await tcs.Task.ConfigureAwait(false);
+            }
+            finally
+            {
+                reg.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// Single consumer: drains _dispatchChannel sequentially for the lifetime
+        /// of the process. Each item executes completely before the next is read.
+        /// </summary>
+        private async Task DrainChannelAsync()
+        {
+            await foreach (var item in _dispatchChannel.Reader.ReadAllAsync().ConfigureAwait(false))
+            {
+                // If the caller already cancelled before the consumer got here, skip the work.
+                if (item.Ct.IsCancellationRequested)
+                {
+                    item.Tcs.TrySetCanceled(item.Ct);
+                    continue;
+                }
+
+                try
+                {
+                    string result = await item.Work().ConfigureAwait(false);
+                    item.Tcs.TrySetResult(result);
+                }
+                catch (OperationCanceledException ex)
+                {
+                    item.Tcs.TrySetCanceled(ex.CancellationToken);
+                }
+                catch (Exception ex)
+                {
+                    item.Tcs.TrySetException(ex);
+                }
+            }
         }
 
         // ── Snapshot helpers ─────────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-// File: DevMindTools.cs  v4.0
+// File: DevMindTools.cs  v4.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Diagnostic policy: never write to Console.Out / Console.WriteLine in this file.
@@ -11,8 +11,8 @@
 //   This redirects all Core diagnostic output to stderr.
 //
 // Tool serialization:
-//   Every tool method wraps its body in _svc.WithGateAsync(...). The session-level
-//   SemaphoreSlim(1,1) in McpServices ensures strictly sequential tool execution,
+//   Every tool method enqueues its body via _svc.EnqueueAsync(...). The Channel-based
+//   single consumer in McpServices ensures strictly sequential FIFO tool execution,
 //   preventing file-handle conflicts and dictionary races when a bursty client
 //   (test harness, Claude Desktop batch) sends multiple requests simultaneously.
 //
@@ -22,7 +22,7 @@
 //                       diff_file (upgraded in Phase C), recall_memory.
 //   Phase C (complete): patch_file, create_file, append_file, delete_file,
 //                       rename_file, save_memory; diff_file real unified diffs.
-//   Phase C fix (this): all 16 tools serialized via _svc.WithGateAsync.
+//   Phase C fix v2 (this): Channel<DispatchItem> FIFO dispatch via _svc.EnqueueAsync.
 //   Phase D: run_shell, run_build, run_tests (shell / streaming tools).
 
 using System;
@@ -53,7 +53,7 @@ internal sealed class DevMindTools
         "recalling a specific topic with recall_memory.")]
     public async Task<string> ListMemoryTopics(CancellationToken cancellationToken = default)
     {
-        return await _svc.WithGateAsync(async () =>
+        return await _svc.EnqueueAsync(async () =>
         {
             string index = _svc.Memory.LoadIndex();
             if (!string.IsNullOrWhiteSpace(index))
@@ -82,7 +82,7 @@ internal sealed class DevMindTools
         [Description("When true, bypasses the outline threshold and returns full file content.")] bool? force_full = null,
         CancellationToken cancellationToken = default)
     {
-        return await _svc.WithGateAsync(async () =>
+        return await _svc.EnqueueAsync(async () =>
         {
             try
             {
@@ -149,7 +149,7 @@ internal sealed class DevMindTools
         [Description("If true (default), searches all subdirectories.")] bool recursive = true,
         CancellationToken cancellationToken = default)
     {
-        return await _svc.WithGateAsync(async () =>
+        return await _svc.EnqueueAsync(async () =>
         {
             const int Cap = 200;
             try
@@ -220,7 +220,7 @@ internal sealed class DevMindTools
         [Description("1-based end line to restrict the search window.")] int? end_line = null,
         CancellationToken cancellationToken = default)
     {
-        return await _svc.WithGateAsync(async () =>
+        return await _svc.EnqueueAsync(async () =>
         {
             const int MaxMatches = 50;
             try
@@ -284,7 +284,7 @@ internal sealed class DevMindTools
         [Description("1-based end line to restrict the search window within each file.")] int? end_line = null,
         CancellationToken cancellationToken = default)
     {
-        return await _svc.WithGateAsync(async () =>
+        return await _svc.EnqueueAsync(async () =>
         {
             const int MaxMatches = 100;
             try
@@ -377,7 +377,7 @@ internal sealed class DevMindTools
         [Description("Absolute file path.")] string filename,
         CancellationToken cancellationToken = default)
     {
-        return await _svc.WithGateAsync(async () =>
+        return await _svc.EnqueueAsync(async () =>
         {
             try
             {
@@ -424,7 +424,7 @@ internal sealed class DevMindTools
         [Description("The topic slug to recall (e.g., 'auth-system', 'build-quirks').")] string topic,
         CancellationToken cancellationToken = default)
     {
-        return await _svc.WithGateAsync(async () =>
+        return await _svc.EnqueueAsync(async () =>
         {
             string content = _svc.Memory.LoadTopic(topic);
             if (content == null)
@@ -453,7 +453,7 @@ internal sealed class DevMindTools
         [Description("Replacement text.")] string replace,
         CancellationToken cancellationToken = default)
     {
-        return await _svc.WithGateAsync(async () =>
+        return await _svc.EnqueueAsync(async () =>
         {
             try
             {
@@ -523,7 +523,7 @@ internal sealed class DevMindTools
         [Description("The complete content for the new file.")] string content,
         CancellationToken cancellationToken = default)
     {
-        return await _svc.WithGateAsync(async () =>
+        return await _svc.EnqueueAsync(async () =>
         {
             try
             {
@@ -562,7 +562,7 @@ internal sealed class DevMindTools
         [Description("Content to append to the end of the file.")] string content,
         CancellationToken cancellationToken = default)
     {
-        return await _svc.WithGateAsync(async () =>
+        return await _svc.EnqueueAsync(async () =>
         {
             try
             {
@@ -613,7 +613,7 @@ internal sealed class DevMindTools
         [Description("Absolute file path.")] string filename,
         CancellationToken cancellationToken = default)
     {
-        return await _svc.WithGateAsync(async () =>
+        return await _svc.EnqueueAsync(async () =>
         {
             try
             {
@@ -647,7 +647,7 @@ internal sealed class DevMindTools
         [Description("New absolute file path.")] string new_filename,
         CancellationToken cancellationToken = default)
     {
-        return await _svc.WithGateAsync(async () =>
+        return await _svc.EnqueueAsync(async () =>
         {
             try
             {
@@ -698,7 +698,7 @@ internal sealed class DevMindTools
         [Description("Short one-line description for the memory index.")] string? description = null,
         CancellationToken cancellationToken = default)
     {
-        return await _svc.WithGateAsync(async () =>
+        return await _svc.EnqueueAsync(async () =>
         {
             try
             {
@@ -725,7 +725,7 @@ internal sealed class DevMindTools
         [Description("The shell command to execute.")] string command,
         CancellationToken cancellationToken = default)
     {
-        return await _svc.WithGateAsync(
+        return await _svc.EnqueueAsync(
             () => Task.FromException<string>(new NotImplementedException("run_shell is implemented in Phase D.")),
             cancellationToken);
     }
@@ -737,7 +737,7 @@ internal sealed class DevMindTools
         "(VSIX projects use MSBuild; other projects use dotnet build). No parameters needed.")]
     public async Task<string> RunBuild(CancellationToken cancellationToken = default)
     {
-        return await _svc.WithGateAsync(
+        return await _svc.EnqueueAsync(
             () => Task.FromException<string>(new NotImplementedException("run_build is implemented in Phase D.")),
             cancellationToken);
     }
@@ -751,7 +751,7 @@ internal sealed class DevMindTools
         [Description("Test filter expression (e.g., 'FullyQualifiedName~SomeTest').")] string? filter = null,
         CancellationToken cancellationToken = default)
     {
-        return await _svc.WithGateAsync(
+        return await _svc.EnqueueAsync(
             () => Task.FromException<string>(new NotImplementedException("run_tests is implemented in Phase D.")),
             cancellationToken);
     }
