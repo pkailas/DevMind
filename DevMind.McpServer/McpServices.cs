@@ -1,4 +1,4 @@
-// File: McpServices.cs  v1.2
+// File: McpServices.cs  v1.3
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Diagnostic policy: all Console.Write / Console.WriteLine calls in this project
@@ -10,6 +10,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using DevMind;
 
 namespace DevMind.McpServer
@@ -20,7 +22,7 @@ namespace DevMind.McpServer
     /// Owns the ShellRunner, FileContentCache, MemoryManager, and session-level
     /// tracking dictionaries shared by all tool methods.
     /// </summary>
-    internal sealed class McpServices
+    internal sealed class McpServices : IDisposable
     {
         public string WorkingDirectory { get; }
         public MemoryManager          Memory    { get; }
@@ -35,9 +37,17 @@ namespace DevMind.McpServer
         public HashSet<string> FilesRead { get; } =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+        // ── Tool serialization ───────────────────────────────────────────────────
+        // The MCP SDK dispatches each tool/call on its own Task by default.
+        // Tools that touch shared state (file system, _fileSnapshots, FileCache)
+        // must execute one at a time within a session. SemaphoreSlim(1,1) is the
+        // session-level gate; every tool method acquires it before doing any work.
+
+        private readonly SemaphoreSlim _toolGate = new SemaphoreSlim(1, 1);
+
         // Session-baseline snapshots: absolute path → original content captured at first read
-        // or first patch. Powers diff_file. Locked for defensive thread safety even though
-        // stdio MCP is single-threaded in practice.
+        // or first patch. Powers diff_file. The lock is kept even though _toolGate already
+        // serializes tool access — defensive practice in case the gate is ever widened.
         private readonly Dictionary<string, string> _fileSnapshots =
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private readonly object _snapshotLock = new object();
@@ -56,6 +66,23 @@ namespace DevMind.McpServer
             FileCache = new FileContentCache();
             Shell     = new ShellRunner(WorkingDirectory);
         }
+
+        public void Dispose() => _toolGate.Dispose();
+
+        // ── Gate helper ──────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Acquires the session-level tool gate, executes <paramref name="work"/>,
+        /// then releases the gate. Ensures tool calls are strictly sequential.
+        /// </summary>
+        public async Task<T> WithGateAsync<T>(Func<Task<T>> work, CancellationToken ct)
+        {
+            await _toolGate.WaitAsync(ct).ConfigureAwait(false);
+            try   { return await work().ConfigureAwait(false); }
+            finally { _toolGate.Release(); }
+        }
+
+        // ── Snapshot helpers ─────────────────────────────────────────────────────
 
         /// <summary>
         /// Captures the current on-disk content of <paramref name="fullPath"/> into
@@ -79,7 +106,6 @@ namespace DevMind.McpServer
 
             lock (_snapshotLock)
             {
-                // Re-check inside lock in case another call raced us.
                 if (!_fileSnapshots.ContainsKey(fullPath))
                     _fileSnapshots[fullPath] = content ?? string.Empty;
             }
