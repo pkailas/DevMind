@@ -1,4 +1,4 @@
-// File: Program.cs  v1.0
+// File: Program.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -139,6 +139,11 @@ namespace DevMind
                 string lineAccum = string.Empty;
 
                 callbacks.StartThinkingTimer(state.AgenticDepth, options.AgenticLoopMaxDepth);
+
+                // LlmClient swallows OperationCanceledException silently without calling
+                // onComplete or onError. Without this registration, await tcs.Task below
+                // would block forever after Ctrl+C.
+                using var cancelReg = cts.Token.Register(() => tcs.TrySetCanceled(cts.Token));
 
                 await llmClient.SendMessageAsync(
                     currentPrompt,
