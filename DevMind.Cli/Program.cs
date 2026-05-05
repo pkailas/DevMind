@@ -1,4 +1,4 @@
-// File: Program.cs  v1.1
+// File: Program.cs  v1.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -134,8 +134,9 @@ namespace DevMind
 
                 var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
                 var responseBuffer = new StringBuilder();
-                bool timerStopped = false;
-                bool suppressDisplay = false; // FILE: / END_FILE suppression
+                bool timerStopped      = false;
+                bool generatingStarted = false;
+                bool suppressDisplay   = false; // FILE: / END_FILE suppression
                 string lineAccum = string.Empty;
 
                 callbacks.StartThinkingTimer(state.AgenticDepth, options.AgenticLoopMaxDepth);
@@ -161,7 +162,14 @@ namespace DevMind
                         if (string.IsNullOrEmpty(visible)) return;
 
                         if (!timerStopped) { callbacks.StopThinkingTimer(); timerStopped = true; }
+                        if (!generatingStarted)
+                        {
+                            callbacks.StartGeneratingTimer(
+                                state.AgenticDepth + 1, options.AgenticLoopMaxDepth);
+                            generatingStarted = true;
+                        }
 
+                        callbacks.IncrementTokenCount();
                         responseBuffer.Append(visible);
 
                         // Check completed lines for FILE: / END_FILE at newline boundaries.
@@ -179,7 +187,7 @@ namespace DevMind
                         }
 
                         if (!suppressDisplay)
-                            Console.Write(visible);
+                            callbacks.WriteStreamingToken(visible);
                     },
                     onComplete: () => tcs.TrySetResult(true),
                     onError: ex => tcs.TrySetException(ex),
@@ -193,19 +201,24 @@ namespace DevMind
                 }
                 catch (OperationCanceledException)
                 {
-                    if (!timerStopped) callbacks.StopThinkingTimer();
-                    Console.WriteLine("\n[Stopped]");
+                    if (!timerStopped)      callbacks.StopThinkingTimer();
+                    if (generatingStarted)  callbacks.StopGeneratingTimer();
+                    // StopGeneratingTimer leaves cursor at col 0 of the cleared status row;
+                    // omit the leading \n so [Stopped] lands on that row rather than one below.
+                    Console.WriteLine(generatingStarted ? "[Stopped]" : "\n[Stopped]");
                     return;
                 }
                 catch (Exception ex)
                 {
-                    if (!timerStopped) callbacks.StopThinkingTimer();
+                    if (!timerStopped)     callbacks.StopThinkingTimer();
+                    if (generatingStarted) callbacks.StopGeneratingTimer();
                     Console.Error.WriteLine($"\n[ERROR] {ex.Message}");
                     return;
                 }
                 finally
                 {
-                    if (!timerStopped) callbacks.StopThinkingTimer();
+                    if (!timerStopped)     callbacks.StopThinkingTimer();
+                    if (generatingStarted) callbacks.StopGeneratingTimer(); // idempotent
                 }
 
                 LoopIterationResult iter;
