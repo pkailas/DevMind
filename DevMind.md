@@ -269,3 +269,4 @@ The project uses no third-party SDKs for its core function (LLM communication) b
 - Do not re-read output files to verify — trust the tool result confirmation.
 - Move to the next step immediately after each action completes.
 - Prefer creating a file once with full content over multiple small appends when the content is ready.
+
