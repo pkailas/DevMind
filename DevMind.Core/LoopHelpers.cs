@@ -34,7 +34,7 @@ namespace DevMind
         /// After the executor processes tool calls, injects tool result messages into
         /// conversation history so the model sees the outcome on the next turn.
         /// </summary>
-        public static void InjectToolResultMessages(LlmClient llmClient,
+        public static void InjectToolResultMessages(ILlmClient llmClient,
             List<ToolCallResult> toolCalls, ExecutionResult result, List<ResponseBlock> executedBlocks)
         {
             foreach (var tc in toolCalls)

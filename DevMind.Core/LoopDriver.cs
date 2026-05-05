@@ -16,7 +16,7 @@ namespace DevMind
     /// </summary>
     public sealed class LoopDriver
     {
-        private readonly LlmClient _llmClient;
+        private readonly ILlmClient _llmClient;
         private readonly IAgenticHost _agenticHost;
         private readonly ILoopCallbacks _callbacks;
         private readonly ILlmOptions _options;
@@ -27,7 +27,7 @@ namespace DevMind
         private const int ConsecutiveErrorAbortThreshold = 5;
 
         public LoopDriver(
-            LlmClient llmClient,
+            ILlmClient llmClient,
             IAgenticHost agenticHost,
             ILoopCallbacks callbacks,
             ILlmOptions options,

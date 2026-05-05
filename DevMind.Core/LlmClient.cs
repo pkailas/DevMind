@@ -104,7 +104,7 @@ namespace DevMind
     /// HTTP client for communicating with OpenAI-compatible /v1/chat/completions endpoints
     /// using Server-Sent Events (SSE) for streaming responses.
     /// </summary>
-    public sealed class LlmClient : IDisposable
+    public sealed class LlmClient : ILlmClient, IDisposable
     {
         private readonly ILlmOptions _options;
         private HttpClient _httpClient;
