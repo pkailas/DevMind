@@ -1,4 +1,4 @@
-// File: DevMindTools.cs  v4.1
+// File: DevMindTools.cs  v4.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Diagnostic policy: never write to Console.Out / Console.WriteLine in this file.
@@ -22,8 +22,8 @@
 //                       diff_file (upgraded in Phase C), recall_memory.
 //   Phase C (complete): patch_file, create_file, append_file, delete_file,
 //                       rename_file, save_memory; diff_file real unified diffs.
-//   Phase C fix v2 (this): Channel<DispatchItem> FIFO dispatch via _svc.EnqueueAsync.
-//   Phase D: run_shell, run_build, run_tests (shell / streaming tools).
+//   Phase C fix v2: Channel<DispatchItem> FIFO dispatch via _svc.EnqueueAsync.
+//   Phase D (this): run_shell, run_build, run_tests with streaming progress.
 
 using System;
 using System.Collections.Generic;
@@ -35,6 +35,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using DevMind;
 using DevMind.McpServer;
+using ModelContextProtocol;
 using ModelContextProtocol.Server;
 
 [McpServerToolType]
@@ -714,46 +715,105 @@ internal sealed class DevMindTools
         }, cancellationToken);
     }
 
-    // ── Phase D stubs: shell / streaming tools ───────────────────────────────
+    // ── Phase D: shell / streaming tools ────────────────────────────────────
 
     [McpServerTool(Name = "run_shell")]
     [Description(
         "Execute a shell command and return its output. Commands run via PowerShell with a " +
         "120-second timeout. Use this for git commands and operations no other tool covers. " +
-        "Do not use run_shell to list or search files — use list_files or find_in_files instead.")]
+        "Do not use run_shell to list or search files — use list_files or find_in_files instead. " +
+        "Progress notifications stream output lines to the client during long-running commands.")]
     public async Task<string> RunShell(
         [Description("The shell command to execute.")] string command,
+        IProgress<ProgressNotificationValue>? progress = null,
         CancellationToken cancellationToken = default)
     {
-        return await _svc.EnqueueAsync(
-            () => Task.FromException<string>(new NotImplementedException("run_shell is implemented in Phase D.")),
-            cancellationToken);
+        return await _svc.EnqueueAsync(async () =>
+        {
+            try
+            {
+                IProgress<ShellOutputLine>? bridgedProgress = progress != null
+                    ? new Progress<ShellOutputLine>(line =>
+                        progress.Report(new ProgressNotificationValue { Progress = 0, Message = line.Line }))
+                    : null;
+
+                var (output, exitCode) = await _svc.Shell.ExecuteAsync(
+                    command, cancellationToken, onLine: bridgedProgress);
+
+                return CapShellOutput(output, exitCode);
+            }
+            catch (Exception ex)
+            {
+                return $"[run_shell error] {ex.Message}";
+            }
+        }, cancellationToken);
     }
 
     [McpServerTool(Name = "run_build")]
     [Description(
         "Run the project build command. Call this after ANY code change (patch_file or create_file). " +
-        "The build command is auto-detected from the working directory " +
-        "(VSIX projects use MSBuild; other projects use dotnet build). No parameters needed.")]
-    public async Task<string> RunBuild(CancellationToken cancellationToken = default)
+        "The build command is auto-detected from the working directory: VSIX projects (detected via " +
+        ".vsixmanifest) use MSBuild; other projects use dotnet build against the first .sln/.slnx found. " +
+        "Progress notifications stream build output to the client. No parameters needed.")]
+    public async Task<string> RunBuild(
+        IProgress<ProgressNotificationValue>? progress = null,
+        CancellationToken cancellationToken = default)
     {
-        return await _svc.EnqueueAsync(
-            () => Task.FromException<string>(new NotImplementedException("run_build is implemented in Phase D.")),
-            cancellationToken);
+        return await _svc.EnqueueAsync(async () =>
+        {
+            try
+            {
+                string buildCommand = DetectBuildCommand();
+
+                IProgress<ShellOutputLine>? bridgedProgress = progress != null
+                    ? new Progress<ShellOutputLine>(line =>
+                        progress.Report(new ProgressNotificationValue { Progress = 0, Message = line.Line }))
+                    : null;
+
+                var (output, exitCode) = await _svc.Shell.ExecuteAsync(
+                    buildCommand, cancellationToken, onLine: bridgedProgress);
+
+                return CapShellOutput(output, exitCode);
+            }
+            catch (Exception ex)
+            {
+                return $"[run_build error] {ex.Message}";
+            }
+        }, cancellationToken);
     }
 
     [McpServerTool(Name = "run_tests")]
     [Description(
-        "Run dotnet test and return structured pass/fail results. " +
-        "Only failed tests show details. Use run_tests after making changes to verify correctness.")]
+        "Run dotnet test and return test output. Use run_tests after making changes to verify " +
+        "correctness. Omit project to run all tests in the working directory. " +
+        "Progress notifications stream test output to the client during the run.")]
     public async Task<string> RunTests(
         [Description("Project file name (e.g., 'MyProject.csproj'). Omit to run all tests.")] string? project = null,
         [Description("Test filter expression (e.g., 'FullyQualifiedName~SomeTest').")] string? filter = null,
+        IProgress<ProgressNotificationValue>? progress = null,
         CancellationToken cancellationToken = default)
     {
-        return await _svc.EnqueueAsync(
-            () => Task.FromException<string>(new NotImplementedException("run_tests is implemented in Phase D.")),
-            cancellationToken);
+        return await _svc.EnqueueAsync(async () =>
+        {
+            try
+            {
+                string testCommand = BuildTestCommand(project, filter);
+
+                IProgress<ShellOutputLine>? bridgedProgress = progress != null
+                    ? new Progress<ShellOutputLine>(line =>
+                        progress.Report(new ProgressNotificationValue { Progress = 0, Message = line.Line }))
+                    : null;
+
+                var (output, exitCode) = await _svc.Shell.ExecuteAsync(
+                    testCommand, cancellationToken, onLine: bridgedProgress);
+
+                return CapShellOutput(output, exitCode);
+            }
+            catch (Exception ex)
+            {
+                return $"[run_tests error] {ex.Message}";
+            }
+        }, cancellationToken);
     }
 
     // ── Private helpers ──────────────────────────────────────────────────────
@@ -916,5 +976,182 @@ internal sealed class DevMindTools
         for (int i = 0; i < shown; i++) sb.AppendLine($"  {csFiles[i]}");
         if (csFiles.Count > MaxFiles) sb.AppendLine($"  ... and {csFiles.Count - MaxFiles} more");
         return sb.ToString().TrimEnd('\r', '\n');
+    }
+
+    /// <summary>
+    /// Truncates shell output to at most 1000 lines or 50 KB (whichever is hit first),
+    /// and prepends the exit code. Truncation is performed at a newline boundary to
+    /// avoid splitting UTF-8 sequences.
+    /// </summary>
+    private static string CapShellOutput(string output, int exitCode)
+    {
+        const int MaxLines = 1_000;
+        const int MaxBytes = 50_000;
+
+        string prefix = $"[exit code: {exitCode}]\n";
+
+        if (string.IsNullOrEmpty(output))
+            return prefix + "(no output)";
+
+        // ── Line cap ─────────────────────────────────────────────────────────
+        string[] lines     = output.Split('\n');
+        int      totalLines = lines.Length;
+        bool     linesCapped = totalLines > MaxLines;
+        string   working     = linesCapped
+            ? string.Join("\n", lines, 0, MaxLines)
+            : output;
+
+        // ── Byte cap (truncate at last newline before MaxBytes) ───────────────
+        byte[] bytes      = Encoding.UTF8.GetBytes(working);
+        int    totalBytes = bytes.Length;
+        bool   bytesCapped = totalBytes > MaxBytes;
+        if (bytesCapped)
+        {
+            // Find the last newline before the byte limit so we don't split a line.
+            int cutAt = MaxBytes;
+            while (cutAt > 0 && bytes[cutAt] != (byte)'\n') cutAt--;
+            working = Encoding.UTF8.GetString(bytes, 0, cutAt > 0 ? cutAt : MaxBytes);
+        }
+
+        var sb = new StringBuilder(prefix);
+        sb.Append(working);
+
+        if (linesCapped)
+            sb.Append($"\n[output truncated — {totalLines} lines total, showing first {MaxLines}]");
+        else if (bytesCapped)
+            sb.Append($"\n[output truncated — {totalBytes} bytes total, showing first {MaxBytes} bytes]");
+
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Auto-detects the correct build command for the current working directory.
+    /// VSIX projects (detected via *.vsixmanifest) use MSBuild; others use dotnet build.
+    /// </summary>
+    private string DetectBuildCommand()
+    {
+        string wd = _svc.WorkingDirectory;
+
+        // Detect VSIX: search for *.vsixmanifest under WorkingDirectory.
+        string? vsixManifest = null;
+        try
+        {
+            var candidates = Directory.GetFiles(wd, "*.vsixmanifest", SearchOption.AllDirectories)
+                .Where(f => !ContextEngine.IsNoisePath(f))
+                .ToArray();
+            if (candidates.Length > 0) vsixManifest = candidates[0];
+        }
+        catch { }
+
+        if (vsixManifest != null)
+        {
+            // VSIX project — use MSBuild.
+            // Find the first .sln/.slnx in WorkingDirectory or one level up.
+            string? solution = FindSolutionFile(wd);
+            string  target   = solution ?? wd;
+            string  msbuild  = LoopHelpers.FindMSBuildPath();
+            string  invoke   = msbuild.Contains(" ") ? $"& \"{msbuild}\"" : msbuild;
+
+            // If MSBuild was only found as the bare "msbuild" fallback and this is a non-VS
+            // environment (no VSINSTALLDIR, no vswhere hit), fall back to dotnet build with
+            // an explanatory note rather than a silent failure.
+            if (msbuild == "msbuild" &&
+                string.IsNullOrEmpty(Environment.GetEnvironmentVariable("VSINSTALLDIR")))
+            {
+                Console.Error.WriteLine(
+                    "[McpServer] Warning: VSIX project detected but MSBuild not found via " +
+                    "VSINSTALLDIR or vswhere. Falling back to dotnet build (may fail for VSIX).");
+                return solution != null
+                    ? $"dotnet build \"{solution}\" /p:DeployExtension=false"
+                    : $"dotnet build \"{wd}\" /p:DeployExtension=false";
+            }
+
+            return solution != null
+                ? $"{invoke} \"{solution}\" /p:DeployExtension=false /verbosity:minimal"
+                : $"{invoke} \"{wd}\" /p:DeployExtension=false /verbosity:minimal";
+        }
+        else
+        {
+            // Non-VSIX — use dotnet build.
+            string? solution = FindSolutionFile(wd);
+            return solution != null
+                ? $"dotnet build \"{solution}\""
+                : $"dotnet build \"{wd}\"";
+        }
+    }
+
+    /// <summary>
+    /// Searches <paramref name="dir"/> for a *.sln or *.slnx file, then one level up.
+    /// Returns the first match, or null if none found.
+    /// </summary>
+    private static string? FindSolutionFile(string dir)
+    {
+        foreach (string pattern in new[] { "*.slnx", "*.sln" })
+        {
+            try
+            {
+                var hits = Directory.GetFiles(dir, pattern, SearchOption.TopDirectoryOnly);
+                if (hits.Length > 0) return hits[0];
+            }
+            catch { }
+        }
+        // One level up.
+        string? parent = Path.GetDirectoryName(dir);
+        if (parent != null && parent != dir)
+        {
+            foreach (string pattern in new[] { "*.slnx", "*.sln" })
+            {
+                try
+                {
+                    var hits = Directory.GetFiles(parent, pattern, SearchOption.TopDirectoryOnly);
+                    if (hits.Length > 0) return hits[0];
+                }
+                catch { }
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Builds the dotnet test command string from optional project and filter arguments.
+    /// </summary>
+    private string BuildTestCommand(string? project, string? filter)
+    {
+        string wd = _svc.WorkingDirectory;
+        var sb = new StringBuilder("dotnet test --no-build --verbosity normal");
+
+        if (!string.IsNullOrWhiteSpace(project))
+        {
+            // Resolve project: absolute path → use as-is; bare name → search under WorkingDirectory.
+            string projectPath;
+            if (Path.IsPathRooted(project))
+            {
+                projectPath = project;
+            }
+            else
+            {
+                // Try hint-relative first.
+                string candidate = Path.Combine(wd, project);
+                if (File.Exists(candidate))
+                {
+                    projectPath = candidate;
+                }
+                else
+                {
+                    // Basename search.
+                    string nameOnly = Path.GetFileName(project);
+                    var found = Directory.GetFiles(wd, nameOnly, SearchOption.AllDirectories)
+                        .Where(f => !ContextEngine.IsNoisePath(f))
+                        .ToArray();
+                    projectPath = found.Length > 0 ? found[0] : candidate;
+                }
+            }
+            sb.Append($" \"{projectPath}\"");
+        }
+
+        if (!string.IsNullOrWhiteSpace(filter))
+            sb.Append($" --filter \"{filter}\"");
+
+        return sb.ToString();
     }
 }
