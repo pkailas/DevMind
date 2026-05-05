@@ -1,4 +1,4 @@
-// File: ConsoleLoopCallbacks.cs  v1.2
+// File: ConsoleLoopCallbacks.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -13,15 +13,15 @@ namespace DevMind
     /// output is a terminal; silently skipped when redirected.
     /// </para>
     /// <para>
-    /// All console writes during streaming — both the token write path and the generating-status
-    /// timer — go through <c>_consoleLock</c> so the two threads never interleave output.
+    /// Input text (_pendingInput) is written by <see cref="SetInputText"/> and consumed by
+    /// <see cref="GetInputText"/> (read-and-clear). The REPL reads it after LoopDriver
+    /// returns ShouldReTrigger to get the next message to send.
     /// </para>
     /// <para>
-    /// <b>Partial-line tracking</b>: <c>_partialLine</c> accumulates streaming content on the
-    /// current (incomplete) line. When the 500ms timer overwrites the partial line with a status
-    /// string, <c>WriteStreamingToken</c> restores <c>_partialLine</c> before writing the next
-    /// token so no streaming content is lost. This removes the need for cursor-position guessing
-    /// and lets the status render unconditionally every 500ms.
+    /// All console writes during streaming — both the token write path and the generating-status
+    /// timer — go through <c>_consoleLock</c> so the two threads never interleave output.
+    /// The generating status line renders only when <c>_cursorAtLineStart</c> is true (after a \n
+    /// in the stream) so it never overwrites mid-line streaming content.
     /// </para>
     /// </summary>
     public sealed class ConsoleLoopCallbacks : ILoopCallbacks
@@ -49,11 +49,8 @@ namespace DevMind
         private int    _generatingMaxDepth;
 
         // Both guarded by _consoleLock.
-        // _statusOnScreen: generating status string is the last thing written on the current line.
-        // _partialLine: streaming content accumulated on the current (incomplete) line since
-        //               last \n. Restored before each new token write when _statusOnScreen is true.
-        private bool   _statusOnScreen;
-        private string _partialLine = string.Empty;
+        private bool _statusOnScreen;       // generating status line is the last thing on screen
+        private bool _cursorAtLineStart;    // last char written to console was \n
 
         public ConsoleLoopCallbacks(ILlmClient llmClient)
         {
@@ -130,8 +127,7 @@ namespace DevMind
         // ── Generating-status API (called from Program.RunTurnAsync) ──────────────
 
         /// <summary>
-        /// Starts the 500ms generating-status timer. Resets token count, elapsed clock,
-        /// and partial-line buffer.
+        /// Starts the 500ms generating-status timer. Resets token count and elapsed clock.
         /// Must be called after <see cref="StopThinkingTimer"/> on the first visible token.
         /// </summary>
         /// <param name="depth">1-based agentic iteration number (AgenticDepth + 1).</param>
@@ -140,8 +136,8 @@ namespace DevMind
         {
             lock (_consoleLock)
             {
-                _statusOnScreen = false;
-                _partialLine    = string.Empty;
+                _statusOnScreen    = false;
+                _cursorAtLineStart = false;
             }
             lock (_timerLock)
             {
@@ -158,7 +154,6 @@ namespace DevMind
         /// <summary>
         /// Stops the generating-status timer and erases the status line from the console.
         /// Idempotent — safe to call multiple times (e.g. from both catch and finally).
-        /// Does NOT restore the partial line — callers are responsible for their own newlines.
         /// </summary>
         public void StopGeneratingTimer()
         {
@@ -177,9 +172,8 @@ namespace DevMind
 
         /// <summary>
         /// Writes a streaming token to the console, coordinating with the generating-status
-        /// timer via <c>_consoleLock</c>. If the status line is on screen, restores the
-        /// buffered partial-line content first so no streaming text is lost, then writes the
-        /// new token and updates the partial-line buffer.
+        /// timer via <c>_consoleLock</c>. If the status line is on screen, it is erased first
+        /// so the token lands on the correct row, then the status re-renders on the next tick.
         /// </summary>
         public void WriteStreamingToken(string token)
         {
@@ -187,19 +181,12 @@ namespace DevMind
             {
                 if (_statusOnScreen && !Console.IsOutputRedirected)
                 {
-                    // Restore the partial streaming line that the status overwrote,
-                    // so the new token continues seamlessly after it.
-                    Console.Write($"\r\x1b[2K{_partialLine}");
+                    Console.Write("\r\x1b[2K");
                     _statusOnScreen = false;
                 }
                 Console.Write(token);
-
-                // Track content on the current partial line (since the last \n).
-                int lastNl = token.LastIndexOf('\n');
-                if (lastNl >= 0)
-                    _partialLine = token.Substring(lastNl + 1);
-                else
-                    _partialLine += token;
+                if (token.Length > 0)
+                    _cursorAtLineStart = token[token.Length - 1] == '\n';
             }
         }
 
@@ -215,10 +202,11 @@ namespace DevMind
         {
             lock (_consoleLock)
             {
-                if (Console.IsOutputRedirected) return;
+                // Only render when cursor is genuinely at a line start — prevents overwriting
+                // mid-line streaming content that hasn't wrapped to a new line yet.
+                if (Console.IsOutputRedirected || !_cursorAtLineStart) return;
 
-                // Interlocked.Add(ref, 0) is a full-fence read — stronger than Volatile.Read.
-                int    tokens  = Interlocked.Add(ref _tokenCount, 0);
+                int    tokens  = Volatile.Read(ref _tokenCount);
                 double elapsed = (Environment.TickCount64 - _generateStartMs) / 1000.0;
                 int    rate    = elapsed > 0.01 ? (int)(tokens / elapsed) : 0;
                 string iter    = _generatingMaxDepth > 0
@@ -227,10 +215,10 @@ namespace DevMind
                 string status  =
                     $"[Generating {tokens} tokens, {elapsed:F1}s, {rate} tok/s{iter}]";
 
-                // \r\x1b[2K clears the current line (replacing any partial streaming content
-                // or the previous status string). The partial-line content is preserved in
-                // _partialLine and will be restored by WriteStreamingToken on the next token.
-                Console.Write($"\r\x1b[2K{status}");
+                // \r\x1b[2K clears the current line regardless of whether status was
+                // already there. Trailing \r returns cursor to col 0 so the next token
+                // write (via WriteStreamingToken) erases this line cleanly.
+                Console.Write($"\r\x1b[2K{status}\r");
                 _statusOnScreen = true;
             }
         }
