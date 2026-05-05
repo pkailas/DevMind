@@ -1,4 +1,4 @@
-# CLAUDE.md — DevMind Developer Reference  v2.1
+# CLAUDE.md — DevMind Developer Reference  v2.2
 
 ## Project Overview
 
@@ -44,8 +44,10 @@
 |------|---------|
 | `DevMind.Core/ShellRunner.cs` | Platform-agnostic shell executor — `WorkingDirectory` state, streaming via `IProgress<ShellOutputLine>`, taskkill process-tree cancellation; also contains `ShellOutputLine` struct |
 | `DevMind.Core/LlmClient.cs` | HTTP client — SSE streaming to OpenAI-compatible `/v1/chat/completions` |
-| `DevMind.Core/AgenticExecutor.cs` | Executes an `AgenticAction` via `IAgenticHost`; the only class with side effects in the pipeline |
-| `DevMind.Core/IAgenticHost.cs` | Interface abstracting all VS/file-system/UI side effects from the pipeline |
+| `DevMind.Core/LoopDriver.cs` | Drives one post-stream-complete agentic iteration: classify → execute → decide → signal. Returns `LoopIterationResult` to the extension's thin `onComplete` switch. Owns all `LoopState` mutations. |
+| `DevMind.Core/LoopIterationResult.cs` | `LoopIterationResult` DTO + `LoopIterationKind` enum (`Terminal`, `ShouldReTrigger`, `Cancelled`). Carries `AssistantResponse`, `Outcome`, `Result`, `ToolCalls`, `NextContextualMessage`, `ShouldLogTurn`. |
+| `DevMind.Core/AgenticExecutor.cs` | Executes an `AgenticAction` via `IAgenticHost`; the only class with side effects in the pipeline. Also renders `BlockType.Done` content (task_done.summary) to the output panel. |
+| `DevMind.Core/IAgenticHost.cs` | Interface abstracting all VS/file-system/UI side effects from the pipeline. Includes `GetPatchBackupCount()` — supplies UNDO stack depth to `LoopDriver` for the depth-cap message. |
 | `DevMind.Core/FileContentCache.cs` | In-memory line-indexed file cache — powers `READ filename:start-end` line-range access |
 | `DevMind.Core/PatchConfidence.cs` | `PatchConfidence` enum (`Exact`, `Fuzzy`) + `PatchResolveResult` class for two-phase PATCH resolution |
 | `DevMind.Core/ToolRegistry.cs` | Tool registration and lookup for agentic directive dispatch |
@@ -66,19 +68,27 @@ User types → InputTextBox
 
 ### Agentic Pipeline (v6.0+)
 
-The `onComplete` handler runs the classify → decide → execute pipeline:
+The `onComplete` handler is a thin switch over `LoopIterationResult.Kind`. All pipeline logic lives in `LoopDriver.ProcessIterationAsync`:
 
 ```
-fullResponse
-  → ResponseClassifier.Classify()    → ResponseOutcome  (HasPatches, IsDone, IsReadOnly, …)
-  → AgenticActionResolver.Resolve()  → AgenticAction    (ApplyAndBuild, LoadAndResubmit, Stop, …)
-  → AgenticExecutor.ExecuteAsync()   → ExecutionResult  (PatchedPaths, ShellExitCode, Errors, …)
-  → AgenticActionResolver.Resolve()  → next AgenticAction  (Continue or Stop)
-  → re-trigger SendToLlm() or fall through to completion
+fullResponse (from responseBuffer)
+  → LoopDriver.ProcessIterationAsync()
+      → ToolCallMapper.Map()          → ResponseOutcome / tool blocks
+      → AgenticExecutor.ExecuteAsync() → ExecutionResult
+      → LoopHelpers.InjectToolResultMessages()
+      → consecutive-error / depth-cap / IsDone checks
+      → returns LoopIterationResult { Kind, NextContextualMessage, ShouldLogTurn, … }
+
+onComplete switch (DevMindToolWindowControl.xaml.cs):
+  Terminal       → restore Ready UI state
+  Cancelled      → show Stopped
+  ShouldReTrigger → guard _cts cancellation, set InputTextBox.Text, call SendToLlm()
 ```
 
 `AgenticExecutor` calls `IAgenticHost` methods (implemented on `DevMindToolWindowControl.AgenticHost.cs`)
 to perform side effects without knowing about VS, WPF, or file system details.
+
+`LoopDriver` is constructed once per `DevMindToolWindowControl` instance and reused across all agentic turns. `AgenticExecutor` is constructed fresh per `ProcessIterationAsync` call to reset its repetition guard state.
 
 ### Response Dispatcher (v5.0+)
 
@@ -156,6 +166,12 @@ v5.0 eliminates this. All tokens stream into a single buffer. `ResponseParser.Pa
 `_cts` (`CancellationTokenSource`) is created fresh at two sites: `SendToLlm()` (LLM generation) and `RunShellCommand()` (interactive terminal). Both sites call `_cts?.Dispose()` before reassigning to avoid OS handle leaks. The token is passed to `ShellRunner.ExecuteAsync` (via `_cts?.Token ?? CancellationToken.None`) so Stop kills both LLM streams and running shell commands. `OperationCanceledException` is swallowed silently in `LlmClient` — cancellation is not treated as an error. Stop button is enabled (`IsEnabled`) during generation, shell execution, and diff preview (`_diffPreviewPending`); Ask/Run are disabled. Cancellation is checked before agentic re-triggers to prevent frozen loops. When Stop is pressed during diff preview, all pending `DiffPreviewCard` decisions are cancelled via `TrySetCanceled()`.
 
 **SSE read loop**: After the first token is received, the SSE read loop uses 500ms cancellation polling — `Task.WhenAny(readTask, Task.Delay(500, cancellationToken))` — so the Stop button responds promptly even when the server holds the connection open between SSE lines.
+
+**Stop mid-loop (`onComplete` never called)**: When the user presses Stop during generation, `LlmClient` swallows the `OperationCanceledException` and never invokes `onComplete`. The `finally` block is the sole cleanup path. Inside `finally`, when `_cts.IsCancellationRequested` is true, `SetInputEnabled(true)` is called explicitly — otherwise the input bar stays locked because `onComplete` was never dispatched.
+
+**Restart mid-loop**: `RestartButton_Click` begins with `_cts?.Cancel()` to cancel any in-flight generation or agentic resubmit. It then calls `_loopState.ResetForUserTurn()` to clear `AgenticDepth`, `ShellLoopPending`, and `PromptedForTaskDone`, followed by `SetInputEnabled(true)` after the restart banner is displayed. Without the `_cts?.Cancel()` call, an active `LoopDriver` iteration could return `ShouldReTrigger` and re-trigger `SendToLlm()` against the newly cleared conversation history.
+
+**ShouldReTrigger cancellation guard**: The `ShouldReTrigger` case in the `onComplete` switch checks `_cts?.IsCancellationRequested == true` before calling `SendToLlm()`. If cancellation is already set (e.g. Restart fired between the iteration completing and the switch executing), loop state is reset and the UI is restored to Stopped instead of re-triggering.
 
 ### Thread Model
 All UI updates must be dispatched to the main thread. The `onToken`, `onComplete`, and `onError` callbacks from `LlmClient` use `Dispatcher.BeginInvoke` (FIFO queue) rather than `ThreadHelper.JoinableTaskFactory.Run` to avoid blocking the SSE streaming reader and to guarantee FIFO token ordering. VSSDK007/VSTHRD001/VSTHRD110 pragmas suppress fire-and-forget and dispatcher warnings for these intentional patterns.
@@ -365,6 +381,7 @@ DONE
 - Emitted by the model when a multi-step task is fully complete.
 - Stops the agentic loop immediately; no further re-triggers.
 - Preferred over relying on build exit codes alone for tasks that don't involve a build step.
+- **task_done tool call**: Some models (e.g. Gemma 4) emit completion as a `task_done` tool call with a `summary` parameter instead of the literal `DONE` directive. `ToolCallMapper` maps this to `BlockType.Done` with `block.Content = summary`. `AgenticExecutor.ExecuteBlocksAsync` renders `block.Content` via `AppendOutput(..., OutputColor.Normal)` before `LoopDriver` appends `"[AGENTIC] Task complete.\n"`. If `block.Content` is empty, only the task-complete banner is shown.
 
 ### SCRATCHPAD — Model State Tracking
 ```
@@ -396,11 +413,11 @@ After `onComplete` processes all directive blocks, DevMind decides whether to re
 7. **Bare code block** — response had fenced code but no directives → retry once with correction prompt.
 8. **Depth cap** (`AgenticLoopMaxDepth`, default 5) → stop, suggest UNDO.
 
-State fields: `_agenticDepth`, `_shellLoopPending`, `_lastShellExitCode`, `_pendingShellContext`, `_pendingResubmitPrompt`.
+State fields are owned by `LoopState` (in `DevMind.Core`): `AgenticDepth`, `ShellLoopPending`, `ConsecutiveErrorCount`, `ConsecutiveErrorToolName`, `PromptedForTaskDone`. The extension also holds `_pendingResubmitPrompt` for auto-READ resubmit.
 
 **File reloading**: After applying a PATCH, `ReloadDocData` is used to refresh open VS editor buffers — replaces prior `VS.Documents.OpenAsync` to avoid spurious "file changed on disk" dialogs.
 
-Error recovery: `onError` and `finally` both reset `_agenticDepth` and `_shellLoopPending` unconditionally when no re-trigger is active, preventing permanent UI freezes.
+Error recovery: `onError` and `finally` both reset loop state unconditionally when no re-trigger is active, preventing permanent UI freezes. The `finally` block calls `SetInputEnabled(true)` when `_cts.IsCancellationRequested` is true (Stop path), since `onComplete` is never dispatched by `LlmClient` on cancellation.
 
 ---
 
@@ -513,12 +530,15 @@ Settings are accessed via `DevMindOptions.Instance` (synchronous) or `GetLiveIns
 
 ## Runtime System Prompt Injection
 
-At the start of each `SendToLlm()` call, DevMind temporarily injects into the system prompt:
+At the start of each `SendToLlm()` call, DevMind assembles a combined system prompt and passes it explicitly to `LlmClient.SendMessageAsync` via the `combinedSystemPrompt` parameter. It never mutates `DevMindOptions.Instance.SystemPrompt`. The combined prompt is stored in `_currentCombinedPrompt` on the extension so agentic resubmits reuse the same object without rebuilding.
+
+The combined prompt concatenates in order:
 
 1. **LLM directives** — FILE:/END_FILE, PATCH, SHELL:, READ, DONE syntax and rules.
 2. **DefaultNamespace** — the active project's namespace (e.g. "When creating new files, use the namespace 'DevMindTestBed'").
 3. **Active project path** — DTE walks active document → containing `.csproj`; path injected so the model knows which project to target for builds and file creation.
 4. **DevMind.md** — project-specific context from solution root (lazy-loaded, cached until `/reload`).
+5. **User system prompt** — from `DevMindOptions.Instance.SystemPrompt`.
 
 **Stability**: `UpdateSystemPrompt()` in `LlmClient` compares the new prompt text against the current system message via `string.Equals(..., Ordinal)` and skips replacement if identical — this preserves the KV cache prefix across agentic resubmits. The system prompt is not rebuilt during agentic iterations.
 
@@ -749,10 +769,17 @@ Each line is a JSON object with these fields:
 
 ### Hook Points
 
-`LogTrainingTurn()` is called in `DevMindToolWindowControl.xaml.cs` at three points:
-1. Tool Use loop — after `InjectToolResultMessages` (post-execution)
-2. TextDirective loop — after `ExecuteAsync` completes
-3. No-tool-calls stop path — when the model emits no tools
+`LogTrainingTurn()` is called from the thin `onComplete` switch in `DevMindToolWindowControl.xaml.cs` based on `iter.ShouldLogTurn`:
+
+```csharp
+if (iter.ShouldLogTurn)
+    LogTrainingTurn(text, iter.AssistantResponse, iter.Outcome, iter.Result, iter.ToolCalls);
+```
+
+`LoopIterationResult.ShouldLogTurn` is set by `LoopDriver`:
+- `Terminal` — always `true`
+- `ShouldReTrigger` — `true` when tool calls were made and logged (controlled by `shouldLog` parameter); `false` for the prose-finish re-prompt (no actual work to log yet)
+- `Cancelled` — always `false`
 
 ### LlmClient Properties (added for TrainingLogger)
 
@@ -794,7 +821,7 @@ Each line is a JSON object with these fields:
 
 1. Add a new `BlockType` value to `ResponseParser.cs`.
 2. Add parsing logic in `ResponseParser.Parse()`.
-3. Add a `case` in the `onComplete` execute loop in `DevMindToolWindowControl.xaml.cs`.
+3. Add a `case` in `AgenticExecutor.ExecuteBlocksAsync` in `DevMind.Core/AgenticExecutor.cs`.
 4. Update the runtime `llmDirective` string to teach the model the new syntax.
 5. Document in `DevMind.md`.
 
