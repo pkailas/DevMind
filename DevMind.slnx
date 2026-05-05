@@ -10,4 +10,5 @@
   </Project>
   <Project Path="DevMind.Core/DevMind.Core.csproj" />
   <Project Path="DevMind.Cli/DevMind.Cli.csproj" />
+  <Project Path="DevMind.McpServer/DevMind.McpServer.csproj" />
 </Solution>
