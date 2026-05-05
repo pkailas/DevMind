@@ -1,4 +1,4 @@
-// File: ConsoleAgenticHost.cs  v1.0
+// File: ConsoleAgenticHost.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -13,8 +13,9 @@ namespace DevMind
 {
     /// <summary>
     /// Console implementation of <see cref="IAgenticHost"/> for the DevMind CLI REPL.
-    /// Commit 2a: Groups 1+2 — straight-port and filesystem methods.
-    /// Commit 2b adds Group 3: ResolvePatchAsync, ApplyResolvedPatchAsync, ShowDiffPreviewAsync.
+    /// Groups 1+2: straight-port and filesystem methods.
+    /// Group 3: ResolvePatchAsync, ApplyResolvedPatchAsync, ShowDiffPreviewAsync with
+    /// four-way y/n/a/q confirm prompt.
     /// </summary>
     public sealed class ConsoleAgenticHost : IAgenticHost
     {
@@ -35,16 +36,28 @@ namespace DevMind
 
         private readonly MemoryManager _memoryManager;
 
-        // _patchBackupCount is declared and incremented in Commit 2b (ApplyResolvedPatchAsync).
+        // Patch undo stack — mirrors the WPF extension's backup stack behavior.
+        private const int PatchBackupStackLimit = 10;
+        private readonly Stack<(string filePath, string backupPath)> _patchBackupStack =
+            new Stack<(string, string)>();
+
+        // When true, ShowDiffPreviewAsync auto-approves remaining patches this session
+        // (set by typing 'a' at the four-way prompt). Cleared on ResetSession().
+        private bool _alwaysApprove;
+
+        // Called by ShowDiffPreviewAsync on 'q' to cancel the enclosing agentic turn.
+        // Wired to cts.Cancel() in Program.cs (Commit 4). Defaults to no-op.
+        private readonly Action _cancelTurn;
 
         // Set by the REPL loop before each agentic turn so RunShellAsync respects Ctrl+C.
         public CancellationToken CancellationToken { get; set; } = CancellationToken.None;
 
         // ── Construction ─────────────────────────────────────────────────────────
 
-        public ConsoleAgenticHost(string workingDirectory)
+        public ConsoleAgenticHost(string workingDirectory, Action cancelTurn = null)
         {
-            _shellRunner = new ShellRunner(workingDirectory);
+            _shellRunner  = new ShellRunner(workingDirectory);
+            _cancelTurn   = cancelTurn ?? (() => { });
             if (!string.IsNullOrEmpty(workingDirectory))
                 _memoryManager = new MemoryManager(workingDirectory);
         }
@@ -61,6 +74,7 @@ namespace DevMind
             _fileSnapshots.Clear();
             _fileCache.InvalidateAll();
             _taskReadFiles.Clear();
+            _alwaysApprove = false;
         }
 
         // ── IAgenticHost.AppendOutput ─────────────────────────────────────────────
@@ -249,7 +263,7 @@ namespace DevMind
 
         // ── IAgenticHost.GetPatchBackupCount ──────────────────────────────────────
 
-        int IAgenticHost.GetPatchBackupCount() => 0; // field + increment added in Commit 2b
+        int IAgenticHost.GetPatchBackupCount() => _patchBackupStack.Count;
 
         // ── IAgenticHost.RecallMemoryAsync ────────────────────────────────────────
 
@@ -615,26 +629,175 @@ namespace DevMind
             return Task.FromResult(diffResult);
         }
 
-        // ── IAgenticHost Group 3 — implemented in Commit 2b ───────────────────────
+        // ── IAgenticHost.ResolvePatchAsync ────────────────────────────────────────
 
-        Task<PatchResolveResult> IAgenticHost.ResolvePatchAsync(string patchContent, bool fromToolCall)
-            => throw new NotImplementedException("ResolvePatchAsync implemented in Commit 2b");
+        async Task<PatchResolveResult> IAgenticHost.ResolvePatchAsync(string patchContent, bool fromToolCall)
+        {
+            try
+            {
+                // Extract filename from "PATCH <filename>" header line
+                string firstLine = (patchContent ?? string.Empty).Split('\n')[0];
+                string blockFileName = firstLine.Length > 5 ? firstLine.Substring(5).Trim() : string.Empty;
+
+                if (string.IsNullOrEmpty(blockFileName))
+                {
+                    AppendOutput("[PATCH] No filename specified.\n", OutputColor.Error);
+                    return null;
+                }
+
+                string normalizedHint = blockFileName.Replace('\\', '/');
+                string fileNameOnly   = SafeGetFileName(blockFileName);
+
+                // Write guard
+                if (!IsFileKnownToTask(fileNameOnly))
+                {
+                    bool approved = await ConfirmUnreadFileWriteAsync(fileNameOnly);
+                    if (!approved)
+                    {
+                        AppendOutput($"[WRITE GUARD] Patch to \"{fileNameOnly}\" blocked.\n", OutputColor.Dim);
+                        return null;
+                    }
+                    _taskReadFiles.Add(fileNameOnly);
+                }
+
+                // Resolve file path; load into cache if absent
+                string fullPath = FindFile(fileNameOnly, normalizedHint)
+                    ?? Path.Combine(_shellRunner.WorkingDirectory, fileNameOnly);
+
+                if (!File.Exists(fullPath))
+                {
+                    AppendOutput($"[PATCH] File not found: {fullPath}\n", OutputColor.Warning);
+                    return null;
+                }
+
+                if (!_fileCache.Contains(fileNameOnly))
+                {
+                    AppendOutput($"[AUTO-READ] Loading {fileNameOnly} before patch...\n", OutputColor.Dim);
+                    var (cached, _enc) = PatchEngine.ReadFilePreservingEncoding(fullPath);
+                    _fileCache.Store(fileNameOnly, cached);
+                    _filesRead.Add(fileNameOnly);
+                    _taskReadFiles.Add(fileNameOnly);
+                }
+
+                CaptureFileSnapshot(fullPath);
+
+                var (content, encoding) = PatchEngine.ReadFilePreservingEncoding(fullPath);
+                return PatchEngine.ResolvePatch(patchContent, fullPath, blockFileName, content, encoding,
+                    fromToolCall, AppendOutput);
+            }
+            catch (Exception ex)
+            {
+                AppendOutput($"[PATCH] Error: {ex.Message}\n", OutputColor.Error);
+                return null;
+            }
+        }
+
+        // ── IAgenticHost.ApplyResolvedPatchAsync ──────────────────────────────────
 
         Task<string> IAgenticHost.ApplyResolvedPatchAsync(PatchResolveResult resolved)
-            => throw new NotImplementedException("ApplyResolvedPatchAsync implemented in Commit 2b");
+        {
+            try
+            {
+                string backupDir = Path.Combine(Path.GetTempPath(), "DevMind");
+                var result = PatchEngine.ApplyPatch(resolved, backupDir);
+
+                if (!result.Success)
+                {
+                    AppendOutput($"[PATCH] Error: {result.Error}\n", OutputColor.Error);
+                    return Task.FromResult<string>(null);
+                }
+
+                if (result.BackupPath != null)
+                {
+                    // Enforce stack depth limit — evict oldest backup file
+                    if (_patchBackupStack.Count >= PatchBackupStackLimit)
+                    {
+                        var entries = _patchBackupStack.ToArray();
+                        var oldest  = entries[entries.Length - 1];
+                        try { File.Delete(oldest.backupPath); } catch { }
+                        _patchBackupStack.Clear();
+                        for (int i = entries.Length - 2; i >= 0; i--)
+                            _patchBackupStack.Push(entries[i]);
+                    }
+                    _patchBackupStack.Push((resolved.FullPath, result.BackupPath));
+                }
+
+                // Refresh the file cache with updated content
+                _fileCache.Store(SafeGetFileName(resolved.FullPath), result.UpdatedContent);
+
+                int undosAvailable = _patchBackupStack.Count;
+                AppendOutput($"[PATCH] Applied to {resolved.FullPath} (undo depth: {undosAvailable})\n",
+                    OutputColor.Success);
+                return Task.FromResult(resolved.FullPath);
+            }
+            catch (Exception ex)
+            {
+                AppendOutput($"[PATCH] Error: {ex.Message}\n", OutputColor.Error);
+                return Task.FromResult<string>(null);
+            }
+        }
+
+        // ── IAgenticHost.ShowDiffPreviewAsync ─────────────────────────────────────
+        // Four-way prompt: y = apply, n = skip, a = apply + auto-approve rest, q = cancel turn.
 
         Task<List<int>> IAgenticHost.ShowDiffPreviewAsync(
             List<PatchResolveResult> resolvedPatches, CancellationToken cancellationToken)
-            => throw new NotImplementedException("ShowDiffPreviewAsync implemented in Commit 2b");
+        {
+            var approved = new List<int>();
+
+            for (int i = 0; i < resolvedPatches.Count; i++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var r = resolvedPatches[i];
+                string badge = r.Confidence == PatchConfidence.Fuzzy ? " [Fuzzy ⚠]" : " [Exact ✓]";
+
+                // Print unified diff for this patch
+                AppendOutput($"\n[PATCH] {r.FileName}{badge}\n", OutputColor.Dim);
+                string patched  = ComputePatchedContent(r);
+                string[] oldLns = r.OriginalContent.Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
+                string[] newLns = patched.Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
+                AppendOutput(DiffHelper.GenerateUnifiedDiff(r.FileName, oldLns, newLns) + "\n",
+                    OutputColor.Normal);
+
+                if (_alwaysApprove)
+                {
+                    approved.Add(i);
+                    AppendOutput($"[PATCH] Auto-approved ({i + 1}/{resolvedPatches.Count})\n", OutputColor.Dim);
+                    continue;
+                }
+
+                // Four-way prompt loop — repeats on unrecognized input
+                while (true)
+                {
+                    AppendOutput($"Apply patch to {r.FileName}? [y/n/a/q] ", OutputColor.Warning);
+                    string answer = (Console.ReadLine() ?? "").Trim().ToLowerInvariant();
+
+                    if (answer == "y")      { approved.Add(i); break; }
+                    if (answer == "n")      { break; }
+                    if (answer == "a")      { _alwaysApprove = true; approved.Add(i); break; }
+                    if (answer == "q")      { _cancelTurn(); throw new OperationCanceledException(); }
+                    // Unrecognized: prompt again
+                    AppendOutput("Please enter y, n, a, or q.\n", OutputColor.Dim);
+                }
+            }
+
+            return Task.FromResult(approved);
+        }
 
         // ── Private helpers ───────────────────────────────────────────────────────
 
         private bool IsFileKnownToTask(string fileNameOnly)
             => _taskReadFiles.Contains(fileNameOnly) || _taskReadFiles.Count == 0;
 
-        // Commit 2a stub: always approves. Replaced in Commit 2b with console Y/N/A/Q prompt.
         private Task<bool> ConfirmUnreadFileWriteAsync(string fileNameOnly)
-            => Task.FromResult(true);
+        {
+            AppendOutput(
+                $"[WRITE GUARD] \"{fileNameOnly}\" was not read during this task. Allow write? [y/N] ",
+                OutputColor.Warning);
+            string answer = (Console.ReadLine() ?? "").Trim();
+            return Task.FromResult(answer.Equals("y", StringComparison.OrdinalIgnoreCase));
+        }
 
         private string ResolveWritePath(string fileName)
         {
@@ -703,6 +866,19 @@ namespace DevMind
             for (int i = 0; i < shown; i++) sb.AppendLine($"  {csFiles[i]}");
             if (csFiles.Count > MaxFiles) sb.AppendLine($"  ... and {csFiles.Count - MaxFiles} more");
             return sb.ToString().TrimEnd('\r', '\n');
+        }
+
+        // Applies resolved patch blocks to OriginalContent in memory — used by ShowDiffPreviewAsync
+        // to generate the before/after diff without writing to disk.
+        private static string ComputePatchedContent(PatchResolveResult r)
+        {
+            var blocks = r.ResolvedBlocks
+                .OrderByDescending(b => b.origStart)
+                .ToList();
+            string updated = r.OriginalContent;
+            foreach (var (origStart, origEnd, finalReplace) in blocks)
+                updated = updated.Substring(0, origStart) + finalReplace + updated.Substring(origEnd);
+            return updated;
         }
 
         private void CaptureFileSnapshot(string fullPath)
