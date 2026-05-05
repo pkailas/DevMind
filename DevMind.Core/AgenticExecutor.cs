@@ -1,4 +1,4 @@
-// File: AgenticExecutor.cs  v2.0.0
+// File: AgenticExecutor.cs  v7.6
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -18,6 +18,7 @@ namespace DevMind
     public class AgenticExecutor
     {
         private readonly IAgenticHost _host;
+        private readonly ILlmOptions _options;
         private CancellationToken _cancellationToken;
 
         // Repetition guard — tracks consecutive identical READ/GREP requests to break infinite loops
@@ -28,9 +29,11 @@ namespace DevMind
         /// Initializes a new instance of the <see cref="AgenticExecutor"/> class.
         /// </summary>
         /// <param name="host">The agentic host that provides side-effect operations.</param>
-        public AgenticExecutor(IAgenticHost host)
+        /// <param name="options">Runtime options controlling pipeline behavior.</param>
+        public AgenticExecutor(IAgenticHost host, ILlmOptions options)
         {
             _host = host;
+            _options = options;
         }
 
         /// <summary>
@@ -91,24 +94,9 @@ namespace DevMind
                         processPatches: true,
                         processShell: false);
 
-                case ActionType.LoadAndResubmit:
-                    return await ExecuteLoadAndResubmitAsync(action, outcome);
-
-                case ActionType.RetryWithCorrection:
-                    if (!string.IsNullOrEmpty(action.CorrectionPrompt))
-                        _host.AppendOutput(action.CorrectionPrompt + "\n", OutputColor.Dim);
-                    return ExecutionResult.None();
-
-                case ActionType.ContinueAgentic:
-                    return ExecutionResult.None();
-
                 case ActionType.Stop:
                     if (!string.IsNullOrEmpty(action.StopReason))
                         _host.AppendOutput(action.StopReason + "\n", OutputColor.Dim);
-                    return ExecutionResult.None();
-
-                case ActionType.AskUser:
-                    await _host.ShowConfirmationAsync(action.StopReason ?? string.Empty);
                     return ExecutionResult.None();
 
                 default:
@@ -143,6 +131,13 @@ namespace DevMind
             {
                 switch (block.Type)
                 {
+                    case BlockType.Done:
+                        // Render task_done.summary so the user sees the answer when the model
+                        // packs its response into the summary parameter instead of prose tokens.
+                        if (!string.IsNullOrWhiteSpace(block.Content))
+                            _host.AppendOutput(block.Content.TrimEnd('\r', '\n') + "\n", OutputColor.Normal);
+                        break;
+
                     case BlockType.Scratchpad:
                         try
                         {
@@ -159,7 +154,7 @@ namespace DevMind
                         if (!processFiles) break;
                         try
                         {
-                            string savedPath = await _host.SaveFileAsync(block.FileName, block.Content);
+                            string savedPath = await _host.SaveFileAsync(block.FileName, block.Content, block.FromToolCall);
                             if (!string.IsNullOrEmpty(savedPath))
                             {
                                 result.FilesCreated.Add(savedPath);
@@ -171,6 +166,25 @@ namespace DevMind
                         {
                             result.Errors.Add(ex.Message);
                             _host.AppendOutput($"[FILE ERROR] {block.FileName}: {ex.Message}\n", OutputColor.Error);
+                        }
+                        break;
+
+                    case BlockType.AppendFile:
+                        if (!processFiles) break;
+                        try
+                        {
+                            string appendedPath = await _host.AppendFileAsync(block.FileName, block.Content);
+                            if (!string.IsNullOrEmpty(appendedPath))
+                            {
+                                result.FilesAppended.Add(appendedPath);
+                                _lastReadKey = null;
+                                _lastReadRepeatCount = 0;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            result.Errors.Add(ex.Message);
+                            _host.AppendOutput($"[APPEND ERROR] {block.FileName}: {ex.Message}\n", OutputColor.Error);
                         }
                         break;
 
@@ -215,8 +229,9 @@ namespace DevMind
                                     OutputColor.Dim);
                                 break;
                             }
-                            // GrepFileAsync injects results into _readContext and emits status as side effects
-                            await _host.GrepFileAsync(block.Pattern, block.FileName, grepStart, grepEnd);
+                            string grepContent = await _host.GrepFileAsync(block.Pattern, block.FileName, grepStart, grepEnd);
+                            if (grepContent != null)
+                                result.ToolResultContents[block.FileName] = grepContent;
                         }
                         catch (Exception ex)
                         {
@@ -243,13 +258,41 @@ namespace DevMind
                                     OutputColor.Dim);
                                 break;
                             }
-                            // FindInFilesAsync injects results into _readContext and emits status as side effects
-                            await _host.FindInFilesAsync(block.Pattern, block.GlobPattern, findStart, findEnd);
+                            string findContent = await _host.FindInFilesAsync(block.Pattern, block.GlobPattern, findStart, findEnd);
+                            if (findContent != null)
+                                result.ToolResultContents[block.GlobPattern] = findContent;
                         }
                         catch (Exception ex)
                         {
                             result.Errors.Add(ex.Message);
                             _host.AppendOutput($"[FIND ERROR] {block.GlobPattern}: {ex.Message}\n", OutputColor.Error);
+                        }
+                        break;
+
+                    case BlockType.ListFiles:
+                        try
+                        {
+                            string listKey = $"LIST:{block.ListFilesGlob}:{block.ListFilesRecursive}";
+                            if (string.Equals(listKey, _lastReadKey, StringComparison.OrdinalIgnoreCase))
+                                _lastReadRepeatCount++;
+                            else { _lastReadKey = listKey; _lastReadRepeatCount = 1; }
+                            if (_lastReadRepeatCount >= 3)
+                            {
+                                _host.AppendOutput(
+                                    "[LIST returned same content 3 times — possible parsing issue. " +
+                                    "Proceeding with available data. Try a different glob pattern.]\n",
+                                    OutputColor.Dim);
+                                break;
+                            }
+                            string listContent = await _host.ListFilesAsync(
+                                block.ListFilesGlob, block.ListFilesRecursive, _cancellationToken);
+                            if (listContent != null)
+                                result.ToolResultContents[block.ListFilesGlob ?? ""] = listContent;
+                        }
+                        catch (Exception ex)
+                        {
+                            result.Errors.Add(ex.Message);
+                            _host.AppendOutput($"[LIST ERROR] {block.ListFilesGlob}: {ex.Message}\n", OutputColor.Error);
                         }
                         break;
 
@@ -318,8 +361,9 @@ namespace DevMind
                                     OutputColor.Dim);
                                 break;
                             }
-                            // GetFileDiffAsync injects results into context as a side effect
-                            await _host.GetFileDiffAsync(block.FileName);
+                            string diffContent = await _host.GetFileDiffAsync(block.FileName);
+                            if (diffContent != null)
+                                result.ToolResultContents[block.FileName] = diffContent;
                         }
                         catch (Exception ex)
                         {
@@ -368,14 +412,55 @@ namespace DevMind
                                     OutputColor.Dim);
                                 break;
                             }
-                            await _host.LoadFileContentAsync(
+                            string readContent = await _host.LoadFileContentAsync(
                                 block.FileName, block.RangeStart, block.RangeEnd,
                                 block.ForceFullRead);
+                            if (readContent != null)
+                                result.ToolResultContents[block.FileName] = readContent;
                         }
                         catch (Exception ex)
                         {
                             result.Errors.Add(ex.Message);
                             _host.AppendOutput($"[READ ERROR] {block.FileName}: {ex.Message}\n", OutputColor.Error);
+                        }
+                        break;
+
+                    case BlockType.RecallMemory:
+                        try
+                        {
+                            string recallResult = await _host.RecallMemoryAsync(block.MemoryTopic);
+                            block.MemoryContent = recallResult; // Store for tool result injection
+                        }
+                        catch (Exception ex)
+                        {
+                            block.MemoryContent = $"Error recalling memory: {ex.Message}";
+                            _host.AppendOutput($"[MEMORY ERROR] {ex.Message}\n", OutputColor.Error);
+                        }
+                        break;
+
+                    case BlockType.SaveMemory:
+                        try
+                        {
+                            string saveResult = await _host.SaveMemoryAsync(
+                                block.MemoryTopic, block.MemoryContent, block.MemoryDescription);
+                            block.MemoryDescription = saveResult; // Reuse field for result message
+                        }
+                        catch (Exception ex)
+                        {
+                            _host.AppendOutput($"[MEMORY ERROR] {ex.Message}\n", OutputColor.Error);
+                        }
+                        break;
+
+                    case BlockType.ListMemory:
+                        try
+                        {
+                            string listResult = await _host.ListMemoryTopicsAsync();
+                            block.MemoryContent = listResult; // Store for tool result injection
+                        }
+                        catch (Exception ex)
+                        {
+                            block.MemoryContent = $"Error listing memory: {ex.Message}";
+                            _host.AppendOutput($"[MEMORY ERROR] {ex.Message}\n", OutputColor.Error);
                         }
                         break;
 
@@ -409,7 +494,7 @@ namespace DevMind
             List<ResponseBlock> patchBlocks,
             ExecutionResult result)
         {
-            bool alwaysConfirm = DevMindOptions.Instance.AlwaysConfirmPatch;
+            bool alwaysConfirm = _options.AlwaysConfirmPatch;
 
             // Phase 1: Resolve all patches (parse + match, no side effects)
             var resolved = new List<PatchResolveResult>();
@@ -420,7 +505,7 @@ namespace DevMind
                 var block = patchBlocks[i];
                 try
                 {
-                    var resolveResult = await _host.ResolvePatchAsync(block.Content);
+                    var resolveResult = await _host.ResolvePatchAsync(block.Content, block.FromToolCall);
                     if (resolveResult != null)
                     {
                         resolved.Add(resolveResult);
@@ -551,152 +636,5 @@ namespace DevMind
             }
         }
 
-        /// <summary>
-        /// Loads files specified in <paramref name="action"/>.FilesToRead and runs
-        /// any GREP operations from <paramref name="outcome"/>.Blocks. After loading,
-        /// signals the main loop to resubmit the request with the newly loaded content.
-        /// </summary>
-        /// <param name="action">The agentic action containing files to read.</param>
-        /// <param name="outcome">The response outcome that may contain GREP blocks.</param>
-        /// <returns>An <see cref="ExecutionResult"/> with None status to trigger resubmission.</returns>
-        private async Task<ExecutionResult> ExecuteLoadAndResubmitAsync(
-            AgenticAction action,
-            ResponseOutcome outcome)
-        {
-            foreach (string fileName in action.FilesToRead)
-            {
-                // Find the matching ReadRequest block to get range/force parameters
-                var readBlock = outcome?.Blocks?.FirstOrDefault(
-                    b => b.Type == BlockType.ReadRequest
-                      && string.Equals(b.FileName, fileName, StringComparison.OrdinalIgnoreCase));
-
-                int rangeStart    = readBlock?.RangeStart    ?? 0;
-                int rangeEnd      = readBlock?.RangeEnd      ?? 0;
-                bool forceFullRead = readBlock?.ForceFullRead ?? false;
-
-                string readKey = rangeStart > 0
-                    ? $"{fileName}:{rangeStart}-{rangeEnd}"
-                    : fileName;
-                if (string.Equals(readKey, _lastReadKey, StringComparison.OrdinalIgnoreCase))
-                    _lastReadRepeatCount++;
-                else { _lastReadKey = readKey; _lastReadRepeatCount = 1; }
-                if (_lastReadRepeatCount >= 3)
-                {
-                    _host.AppendOutput(
-                        "[READ returned same content 3 times — possible truncation or parsing issue. " +
-                        "Proceeding with available data. Use a different line range or try GREP to locate what you need.]\n",
-                        OutputColor.Dim);
-                    continue;
-                }
-
-                try
-                {
-                    await _host.LoadFileContentAsync(fileName, rangeStart, rangeEnd, forceFullRead);
-                }
-                catch (Exception ex)
-                {
-                    _host.AppendOutput($"[READ ERROR] {fileName}: {ex.Message}\n", OutputColor.Error);
-                }
-            }
-
-            // Execute any GREP blocks — results are injected into context as a side effect
-            if (outcome?.Blocks != null)
-            {
-                foreach (var block in outcome.Blocks)
-                {
-                    if (block.Type != BlockType.Grep) continue;
-                    try
-                    {
-                        int? grepStart = block.RangeStart > 0 ? (int?)block.RangeStart : null;
-                        int? grepEnd   = block.RangeEnd   > 0 ? (int?)block.RangeEnd   : null;
-                        string grepKey = $"GREP:{block.Pattern}@{block.FileName}" +
-                            (grepStart.HasValue ? $":{grepStart}-{grepEnd}" : "");
-                        if (string.Equals(grepKey, _lastReadKey, StringComparison.OrdinalIgnoreCase))
-                            _lastReadRepeatCount++;
-                        else { _lastReadKey = grepKey; _lastReadRepeatCount = 1; }
-                        if (_lastReadRepeatCount >= 3)
-                        {
-                            _host.AppendOutput(
-                                "[READ returned same content 3 times — possible truncation or parsing issue. " +
-                                "Proceeding with available data. Use a different line range or try GREP to locate what you need.]\n",
-                                OutputColor.Dim);
-                            continue;
-                        }
-                        // GrepFileAsync injects results into _readContext and emits status as side effects
-                        await _host.GrepFileAsync(block.Pattern, block.FileName, grepStart, grepEnd);
-                    }
-                    catch (Exception ex)
-                    {
-                        _host.AppendOutput($"[GREP ERROR] {block.FileName}: {ex.Message}\n", OutputColor.Error);
-                    }
-                }
-            }
-
-            // Execute any FIND blocks — results are injected into context as a side effect
-            if (outcome?.Blocks != null)
-            {
-                foreach (var block in outcome.Blocks)
-                {
-                    if (block.Type != BlockType.Find) continue;
-                    try
-                    {
-                        int? findStart = block.RangeStart > 0 ? (int?)block.RangeStart : null;
-                        int? findEnd   = block.RangeEnd   > 0 ? (int?)block.RangeEnd   : null;
-                        string findKey = $"FIND:{block.Pattern}@{block.GlobPattern}" +
-                            (findStart.HasValue ? $":{findStart}-{findEnd}" : "");
-                        if (string.Equals(findKey, _lastReadKey, StringComparison.OrdinalIgnoreCase))
-                            _lastReadRepeatCount++;
-                        else { _lastReadKey = findKey; _lastReadRepeatCount = 1; }
-                        if (_lastReadRepeatCount >= 3)
-                        {
-                            _host.AppendOutput(
-                                "[FIND returned same content 3 times — possible truncation or parsing issue. " +
-                                "Proceeding with available data. Use a different glob or line range.]\n",
-                                OutputColor.Dim);
-                            continue;
-                        }
-                        // FindInFilesAsync injects results into _readContext and emits status as side effects
-                        await _host.FindInFilesAsync(block.Pattern, block.GlobPattern, findStart, findEnd);
-                    }
-                    catch (Exception ex)
-                    {
-                        _host.AppendOutput($"[FIND ERROR] {block.GlobPattern}: {ex.Message}\n", OutputColor.Error);
-                    }
-                }
-            }
-
-            // Execute any DIFF blocks — results are injected into context as a side effect
-            if (outcome?.Blocks != null)
-            {
-                foreach (var block in outcome.Blocks)
-                {
-                    if (block.Type != BlockType.Diff) continue;
-                    try
-                    {
-                        string diffKey = $"DIFF:{block.FileName}";
-                        if (string.Equals(diffKey, _lastReadKey, StringComparison.OrdinalIgnoreCase))
-                            _lastReadRepeatCount++;
-                        else { _lastReadKey = diffKey; _lastReadRepeatCount = 1; }
-                        if (_lastReadRepeatCount >= 3)
-                        {
-                            _host.AppendOutput(
-                                "[DIFF returned same content 3 times — skipping.]\n",
-                                OutputColor.Dim);
-                            continue;
-                        }
-                        await _host.GetFileDiffAsync(block.FileName);
-                    }
-                    catch (Exception ex)
-                    {
-                        _host.AppendOutput($"[DIFF ERROR] {block.FileName}: {ex.Message}\n", OutputColor.Error);
-                    }
-                }
-            }
-
-            _host.AppendOutput("[AUTO-READ] File(s) loaded — resubmitting...\n", OutputColor.Dim);
-
-            // The main loop handles resubmission; we just signal nothing was executed
-            return ExecutionResult.None();
-        }
     }
 }

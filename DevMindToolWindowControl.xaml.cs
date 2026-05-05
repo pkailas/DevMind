@@ -1,4 +1,4 @@
-// File: DevMindToolWindowControl.xaml.cs  v5.0.69
+// File: DevMindToolWindowControl.xaml.cs  v7.20
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Community.VisualStudio.Toolkit;
@@ -25,7 +25,7 @@ namespace DevMind
     /// WPF control for the DevMind tool window.
     /// Displays a single-stream output view with Ask (LLM) and Run (shell) commands.
     /// </summary>
-    public partial class DevMindToolWindowControl : UserControl
+    public partial class DevMindToolWindowControl : UserControl, ILoopCallbacks
     {
         private readonly LlmClient _llmClient;
         private readonly ProfileManager _profileManager;
@@ -33,7 +33,7 @@ namespace DevMind
         private CancellationTokenSource _cts;
         private (string fullPath, Encoding fileEncoding, string fileName, string content, List<(int origStart, int origEnd, string replaceText)> resolvedBlocks)? _pendingFuzzyPatch;
         private bool _suppressSystemPromptSave;
-        private string _terminalWorkingDir;
+        private ShellRunner _shellRunner;
         private readonly List<string> _terminalHistory = new List<string>();
         private int _terminalHistoryIndex = -1;
         private System.Windows.Threading.DispatcherTimer _generatingTimer;
@@ -41,33 +41,30 @@ namespace DevMind
         private System.Windows.Threading.DispatcherTimer _thinkingTimer;
         private int _thinkingSeconds;
         private string _devMindContext;
-        private string _readContext;
-        private string _pendingShellContext;
-        private bool _shellLoopPending;
-        private int _agenticDepth;
-        private int _blockByBlockStep;   // current step number (1-based); 0 = not in block-by-block mode
-        private int _blockByBlockTotal;  // total step count for current block-by-block task
+        private readonly LoopState _loopState = new LoopState();
         private int _lastShellExitCode;
         private string _lastShellCommand;
-        private bool _inThinkBlock;
-        private readonly StringBuilder _thinkBuffer = new StringBuilder();
-        private string _pendingThinkText;   // set by FilterChunk when ShowLlmThinking is true
+        private readonly ThinkFilter _thinkFilter = new ThinkFilter();
+        private string _pendingThinkText;
         private readonly Stack<(string originalPath, string backupPath)> _patchBackupStack = new Stack<(string, string)>();
         private const int PatchBackupStackLimit = 10;
         private Paragraph _spacerParagraph;
-        private string _pendingResubmitPrompt;
         // Tracks filenames (filename-only, case-insensitive) that have been READ during the
         // current task. Cleared at the start of each new top-level user request.
         // Used by the unrelated-file write guard in AgenticHost.
         internal readonly HashSet<string> _taskReadFiles =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        private Action _batchOnComplete;
-        private bool _suppressDisplay;
         private bool _diffPreviewPending;
         private int _streamingTokenCount;
         private int _patchCount = 0;
         private int _undoCount = 0;
         private int _readFileCount = 0;
+        private TrainingLogger _trainingLogger;
+        // Combined system prompt for the current task (user prompt + tool catalog + DevMind.md).
+        // Built on the first user-initiated turn; reused on agentic resubmits to keep the KV
+        // cache prefix stable. Never written back to DevMindOptions.Instance.SystemPrompt.
+        private string _currentCombinedPrompt;
+        private LoopDriver _loopDriver;
 
         public DevMindToolWindowControl(LlmClient llmClient)
         {
@@ -76,7 +73,8 @@ namespace DevMind
             OutputBox.Document.PagePadding = new Thickness(0);
             InitOutputDocument();
             _llmClient = llmClient;
-            _terminalWorkingDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            _shellRunner = new ShellRunner(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+            _loopDriver = new LoopDriver(_llmClient, this, this, DevMindOptions.Instance, _loopState);
 
 #pragma warning disable VSSDK007 // Fire-and-forget to resolve solution directory is intentional
             _ = ThreadHelper.JoinableTaskFactory.RunAsync(async delegate
@@ -87,11 +85,12 @@ namespace DevMind
                     await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
                     var dte = await VS.GetServiceAsync<DTE, DTE>();
                     if (dte?.Solution?.FullName is string sln && !string.IsNullOrEmpty(sln))
-                        _terminalWorkingDir = Path.GetDirectoryName(sln);
+                        _shellRunner.ChangeDirectory(Path.GetDirectoryName(sln));
                 }
                 catch { }
             });
 
+            ResetTrainingLogger();
             LoadSystemPromptText();
             _profileManager = new ProfileManager();
             PopulateProfileComboBox();
@@ -99,7 +98,21 @@ namespace DevMind
             DevMindOptions.ProfileChanged += OnProfileChangedFromOptions;
             // Defer banner until after first layout pass so ViewportHeight is known for spacer calc
 #pragma warning disable VSTHRD001
-            _ = Dispatcher.BeginInvoke(new Action(AppendBanner), System.Windows.Threading.DispatcherPriority.Loaded);
+            _ = Dispatcher.BeginInvoke(new Action(() =>
+            {
+                AppendBanner();
+                // Attach profile-notification sink AFTER banner renders so any
+                // messages queued during early ProfileManager construction
+                // (e.g. corrupt profiles.json detected at startup) appear
+                // just after the banner rather than before it.
+                ProfileManager.AttachNotificationSink(msg =>
+                {
+                    _ = Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        AppendOutput(msg + "\n", OutputColor.Warning);
+                    }));
+                });
+            }), System.Windows.Threading.DispatcherPriority.Loaded);
 #pragma warning restore VSTHRD001
         }
 
@@ -150,6 +163,7 @@ namespace DevMind
                     OutputColor.Error    => new SolidColorBrush(Color.FromRgb(0xF4, 0x48, 0x47)),
                     OutputColor.Success  => new SolidColorBrush(Color.FromRgb(0x4E, 0xC9, 0x4E)),
                     OutputColor.Thinking => new SolidColorBrush(Color.FromRgb(0x6A, 0x6A, 0x8A)),
+                    OutputColor.Warning  => new SolidColorBrush(Color.FromRgb(0xFF, 0xB9, 0x00)),
                     _                    => new SolidColorBrush(Color.FromRgb(0xCC, 0xCC, 0xCC)),
                 }
             };
@@ -337,12 +351,14 @@ namespace DevMind
 
         private void RestartButton_Click(object sender, RoutedEventArgs e)
         {
+            // Cancel any in-flight LLM request or ProcessIterationAsync before resetting state.
+            _cts?.Cancel();
+
             // Clear output
             InitOutputDocument();
 
-            // Reset think filter state
-            _inThinkBlock = false;
-            _thinkBuffer.Clear();
+            _thinkFilter.Reset();
+            _loopState.ResetForUserTurn();
 
             // Clear terminal history
             _terminalHistory.Clear();
@@ -354,9 +370,7 @@ namespace DevMind
             // Force DevMind.md reload on next Ask
             _devMindContext = null;
 
-            // Clear any READ-loaded file context
-            _readContext = null;
-            _pendingResubmitPrompt = null;
+            // Clear read file count
             _readFileCount = 0;
 
             // Clear per-conversation file snapshots (for DIFF directive)
@@ -372,11 +386,14 @@ namespace DevMind
                 try { File.Delete(backupPath); } catch { }
             }
 
-    // Reset stats counters
+            // Reset stats counters
             _patchCount = 0;
             _undoCount = 0;
 
+            ResetTrainingLogger();
+
             AppendOutput("DevMind restarted.\n", OutputColor.Dim);
+            SetInputEnabled(true);
 
             // Re-detect context size after restart/reconnect
 #pragma warning disable VSSDK007 // Fire-and-forget is intentional for background detection
@@ -398,68 +415,81 @@ namespace DevMind
             StatusText.Text = "Cleared";
         }
 
+        private void ResetTrainingLogger()
+        {
+            string folder = DevMindOptions.Instance.TrainingLogFolder;
+            System.Diagnostics.Debug.WriteLine($"[ResetTrainingLogger] TrainingLogFolder='{folder}'");
+            _trainingLogger = new TrainingLogger(Guid.NewGuid().ToString("N").Substring(0, 12),
+                string.IsNullOrWhiteSpace(folder) ? null : folder);
+        }
+
+        private void LogTrainingTurn(
+            string userMessage,
+            string assistantResponse,
+            ResponseOutcome outcome,
+            ExecutionResult result,
+            List<ToolCallResult> toolCalls)
+        {
+            if (!DevMindOptions.Instance.TrainingLogEnabled || _trainingLogger == null)
+                return;
+
+            try
+            {
+                bool hasErrors = result?.Errors?.Count > 0
+                    || (result?.ShellExitCode.HasValue == true && result.ShellExitCode != 0);
+                bool hasToolCalls = toolCalls?.Count > 0
+                    || (outcome?.Blocks?.Any(b => b.Type != BlockType.Text && b.Type != BlockType.Scratchpad) == true);
+
+                int nCtx = _llmClient.ServerContextSize > 0 ? _llmClient.ServerContextSize : _llmClient.MaxPromptTokens;
+                int nPast = _llmClient.LastContextUsed;
+                int pct = nCtx > 0 ? (int)(nPast * 100.0 / nCtx) : 0;
+                double tokPerSec = _llmClient.LastGeneratedMs > 0
+                    ? _llmClient.LastGeneratedTokens * 1000.0 / _llmClient.LastGeneratedMs
+                    : 0;
+
+                var data = new TrainingTurnData
+                {
+                    TurnNumber = _llmClient.CurrentTurn,
+                    SystemPrompt = _llmClient.SystemPromptContent,
+                    UserMessage = userMessage,
+                    AssistantResponse = assistantResponse,
+                    ToolCalls = TrainingLogger.ExtractToolCalls(outcome?.Blocks),
+                    ToolResults = TrainingLogger.ExtractToolResults(result),
+                    SummaryContext = _llmClient.LastCompactionSummary,
+                    Metrics = new MetricsEntry
+                    {
+                        NPast = nPast,
+                        NCtx = nCtx,
+                        PredictedTokens = _llmClient.LastGeneratedTokens,
+                        PromptTokens = _llmClient.LastPromptTokens,
+                        TokPerSec = Math.Round(tokPerSec, 1),
+                        Iteration = _loopState.AgenticDepth,
+                        ContextPercent = pct
+                    },
+                    Outcome = TrainingLogger.ClassifyOutcome(
+                        outcome?.IsDone == true,
+                        hasErrors,
+                        outcome?.HasReadRequests == true,
+                        outcome?.HasPatches == true,
+                        outcome?.HasFileCreation == true,
+                        outcome?.HasShellCommands == true,
+                        hasToolCalls)
+                };
+
+                _trainingLogger.LogTurn(data);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[TrainingLogger] LogTrainingTurn failed: {ex.Message}");
+            }
+        }
+
         private void SetInputEnabled(bool enabled)
         {
             InputTextBox.IsEnabled = enabled;
             AskButton.IsEnabled = enabled;
             RunButton.IsEnabled = enabled;
             StopButton.IsEnabled = !enabled || _diffPreviewPending;
-        }
-
-        // ── Think-block filter ────────────────────────────────────────────────
-
-        private string FilterChunk(string chunk)
-        {
-            _pendingThinkText = null;
-            bool showThinking = DevMindOptions.Instance.ShowLlmThinking;
-
-            if (_inThinkBlock)
-            {
-                _thinkBuffer.Append(chunk);
-                string bufStr = _thinkBuffer.ToString();
-                int closeIdx = bufStr.IndexOf("</think>", StringComparison.OrdinalIgnoreCase);
-                if (closeIdx >= 0)
-                {
-                    string after = bufStr.Substring(closeIdx + "</think>".Length);
-                    _inThinkBlock = false;
-                    // Show only the portion of the current chunk that falls before </think>
-                    int chunkCloseIdx = chunk.IndexOf("</think>", StringComparison.OrdinalIgnoreCase);
-                    if (showThinking && chunkCloseIdx > 0)
-                        _pendingThinkText = chunk.Substring(0, chunkCloseIdx);
-                    _thinkBuffer.Clear();
-                    return after;
-                }
-                if (showThinking)
-                    _pendingThinkText = chunk;
-                return string.Empty;
-            }
-
-            int openIdx = chunk.IndexOf("<think>", StringComparison.OrdinalIgnoreCase);
-            if (openIdx >= 0)
-            {
-                string before = chunk.Substring(0, openIdx);
-                string rest = chunk.Substring(openIdx + "<think>".Length);
-                _inThinkBlock = true;
-                _thinkBuffer.Clear();
-                _thinkBuffer.Append(rest);
-
-                int closeIdx = rest.IndexOf("</think>", StringComparison.OrdinalIgnoreCase);
-                if (closeIdx >= 0)
-                {
-                    string thinkContent = rest.Substring(0, closeIdx);
-                    string after = rest.Substring(closeIdx + "</think>".Length);
-                    _inThinkBlock = false;
-                    _thinkBuffer.Clear();
-                    if (showThinking && !string.IsNullOrEmpty(thinkContent))
-                        _pendingThinkText = "[THINKING] " + thinkContent;
-                    return before + after;
-                }
-                if (showThinking && !string.IsNullOrEmpty(rest))
-                    _pendingThinkText = "[THINKING] " + rest;
-                return before;
-            }
-
-            return chunk;
         }
 
         // ── LLM ───────────────────────────────────────────────────────────────
@@ -470,7 +500,7 @@ namespace DevMind
 #pragma warning restore VSTHRD100
 #pragma warning restore VSSDK007
         {
-            System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] SendToLlm ENTER — _shellLoopPending={_shellLoopPending}, _agenticDepth={_agenticDepth}");
+            System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] SendToLlm ENTER — _loopState.ShellLoopPending={_loopState.ShellLoopPending}, _loopState.AgenticDepth={_loopState.AgenticDepth}");
             string text = InputTextBox.Text?.Trim();
             if (string.IsNullOrEmpty(text))
             {
@@ -479,22 +509,15 @@ namespace DevMind
             }
             System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] SendToLlm text={text.Substring(0, Math.Min(text.Length, 120))}...");
 
-            // [WAIT] batch: if the input contains a line that is exactly "[WAIT]" (case-insensitive),
-            // split into blocks and send each block sequentially, waiting for completion between them.
-            if (!_shellLoopPending && ContainsWaitSeparator(text))
-            {
-                System.Diagnostics.Debug.WriteLine("[DevMind TRACE] SendToLlm EXIT — routed to ProcessBatchInputAsync");
-                await ProcessBatchInputAsync(text);
-                return;
-            }
-
             // Reset agentic depth for user-initiated calls; preserve it for agentic re-triggers.
-            // Increment turn counter so tiered eviction ages previous turns correctly.
-            if (!_shellLoopPending)
+            // Increment turn counter on every call so tiered eviction and MicroCompact age tracking
+            // see increasing turn numbers during the agentic loop.
+            if (!_loopState.ShellLoopPending)
             {
-                _agenticDepth = 0;
-                _llmClient.IncrementTurn();
+                _loopState.ResetForUserTurn();
+                _taskReadFiles.Clear();
             }
+            _llmClient.IncrementTurn();
 
             // Known /command handlers — must be checked before the generic shell router below
             if (text.Equals("/stats", StringComparison.OrdinalIgnoreCase))
@@ -728,25 +751,7 @@ namespace DevMind
                 }
             }
 
-            _inThinkBlock = false;
-            _thinkBuffer.Clear();
-
-            // Capture original prompt for auto-resubmit after READ-only responses
-            // Only save when not already in an agentic or resubmit cycle
-            if (!_shellLoopPending && _pendingResubmitPrompt == null)
-            {
-                _pendingResubmitPrompt = text;
-                // Preserve files registered by pre-processed READ lines above —
-                // Clear() would wipe them, causing false positives in the write guard.
-                var preReadFiles = _taskReadFiles.Count > 0
-                    ? new HashSet<string>(_taskReadFiles, StringComparer.OrdinalIgnoreCase)
-                    : null;
-                _taskReadFiles.Clear();
-                if (preReadFiles != null)
-                    _taskReadFiles.UnionWith(preReadFiles);
-            }
-
-            System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] Post-READ: text='{text.Substring(0, Math.Min(text.Length, 120))}', _pendingResubmitPrompt set={_pendingResubmitPrompt != null}");
+            _thinkFilter.Reset();
 
             InputTextBox.Text = "";
             SetInputEnabled(false);
@@ -773,23 +778,11 @@ namespace DevMind
             }
 
             // Auto-read files referenced in the prompt (user-initiated turns only)
-            if (!_shellLoopPending)
+            if (!_loopState.ShellLoopPending)
                 await AutoReadReferencedFilesAsync(text);
 
             string activeProjectPath = await GetActiveProjectPathAsync();
-            string contextualMessage = BuildMessageWithContext(text, selectedText, fileName, fullContent, activeProjectPath);
-
-            if (!string.IsNullOrEmpty(_readContext))
-            {
-                contextualMessage = _readContext + contextualMessage;
-                // _readContext intentionally kept alive — persists until /context clear or Restart clears it
-            }
-
-            if (!string.IsNullOrEmpty(_pendingShellContext))
-            {
-                contextualMessage = _pendingShellContext + "\n\n" + contextualMessage;
-                _pendingShellContext = null;
-            }
+            string contextualMessage = ContextEngine.BuildMessageWithContext(text, selectedText, fileName, fullContent, activeProjectPath);
 
             // Lazy-load project context once per session (DevMind.md / AGENTS.md / CLAUDE.md)
             if (_devMindContext == null)
@@ -811,30 +804,24 @@ namespace DevMind
             AppendOutput($"\n> {text}\n", OutputColor.Input);
             AppendNewLine();
 
-            StatusText.Text = _blockByBlockStep > 0
-                ? $"Thinking... (step {_blockByBlockStep}/{_blockByBlockTotal})"
-                : _agenticDepth > 0
-                    ? $"Thinking... (agentic {_agenticDepth}/{DevMindOptions.Instance.AgenticLoopMaxDepth})"
-                    : "Thinking...";
+            StatusText.Text = _loopState.AgenticDepth > 0
+                ? $"Thinking... (agentic {_loopState.AgenticDepth}/{DevMindOptions.Instance.AgenticLoopMaxDepth})"
+                : "Thinking...";
             _thinkingSeconds = 0;
             _thinkingTimer?.Stop();
             _thinkingTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
             _thinkingTimer.Tick += (s, e) =>
             {
                 _thinkingSeconds++;
-                string agenticSuffix = _blockByBlockStep > 0
-                    ? $" (step {_blockByBlockStep}/{_blockByBlockTotal})"
-                    : _agenticDepth > 0
-                        ? $" (agentic {_agenticDepth}/{DevMindOptions.Instance.AgenticLoopMaxDepth})"
-                        : "";
+                string agenticSuffix = _loopState.AgenticDepth > 0
+                    ? $" (agentic {_loopState.AgenticDepth}/{DevMindOptions.Instance.AgenticLoopMaxDepth})"
+                    : "";
                 StatusText.Text = $"Thinking{agenticSuffix} ({_thinkingSeconds}s)";
             };
             _thinkingTimer.Start();
+            _cts?.Dispose();
             _cts = new CancellationTokenSource();
             _streamingTokenCount = 0;
-
-            // Reset display-suppression state
-            _suppressDisplay = false;
 
             var streamPara = new Paragraph { Margin = new Thickness(0) };
             OutputBox.Document.Blocks.Add(streamPara);
@@ -844,20 +831,35 @@ namespace DevMind
             streamPara.Inlines.Add(streamRun);
             var responseBuffer = new StringBuilder();
 
-            // Temporarily inject the LLM directive and DevMind.md into the system prompt.
-            // UpdateSystemPrompt() in LlmClient runs synchronously at the start of
-            // SendMessageAsync, before the first await, so restoring immediately after
-            // RunAsync() returns is safe — no race condition.
-            //
-            // During agentic resubmits (_shellLoopPending), skip reconstruction entirely.
-            // The combined system prompt was built on the first iteration and is still set
-            // in DevMindOptions.Instance.SystemPrompt (restored by the finally block of the
-            // previous iteration, then unchanged). Rebuilding from DTE on subsequent
-            // iterations risks wobble (null active doc, changed tabs) that would alter the
-            // system prompt string and invalidate the server's entire KV cache from position 0.
-            string originalSystemPrompt = _shellLoopPending ? null : DevMindOptions.Instance.SystemPrompt;
+            // Build the combined system prompt on the first user-initiated turn and store it
+            // in _currentCombinedPrompt for the lifetime of this agentic task. Agentic
+            // resubmits reuse the stored value — no DTE re-fetch — so the KV cache prefix
+            // stays stable across iterations. The combined prompt is passed explicitly to
+            // SendMessageAsync; DevMindOptions.Instance.SystemPrompt is never overwritten.
 
-            if (!_shellLoopPending)
+            // Hoist buildCommand so it's accessible in the onComplete lambda for ToolCallMapper
+            // VSIX projects fail with dotnet build — detect via .vsixmanifest sibling and use MSBuild instead
+            string buildCommand;
+            if (activeProjectPath != null)
+            {
+                var projectDir = System.IO.Path.GetDirectoryName(activeProjectPath);
+                bool isVsix = projectDir != null &&
+                    (System.IO.File.Exists(System.IO.Path.Combine(projectDir, "source.extension.vsixmanifest")) ||
+                     System.IO.File.Exists(System.IO.Path.Combine(projectDir, "extension.vsixmanifest")));
+                var msbuildPath = LoopHelpers.FindMSBuildPath();
+                var msbuildInvoke = msbuildPath.Contains(" ") ? $"& \"{msbuildPath}\"" : msbuildPath;
+                buildCommand = isVsix
+                    ? $"{msbuildInvoke} \"{activeProjectPath}\" /p:DeployExtension=false /p:Configuration=Release /verbosity:minimal"
+                    : $"dotnet build \"{activeProjectPath}\" /p:Configuration=Release";
+            }
+            else
+            {
+                var msbuildPath = LoopHelpers.FindMSBuildPath();
+                var msbuildInvoke = msbuildPath.Contains(" ") ? $"& \"{msbuildPath}\"" : msbuildPath;
+                buildCommand = $"{msbuildInvoke} \"C:\\Users\\pkailas.KAILAS\\source\\repos\\DevMind\\DevMind.slnx\" /p:DeployExtension=false /p:Configuration=Release /verbosity:minimal";
+            }
+
+            if (!_loopState.ShellLoopPending)
             {
                 string projectNamespace = null;
                 try
@@ -873,116 +875,27 @@ namespace DevMind
                 }
                 catch { }
 
-                string buildCommand = activeProjectPath != null
-                    ? $"dotnet build \"{activeProjectPath}\""
-                    : "msbuild \"C:\\Users\\pkailas.KAILAS\\source\\repos\\DevMind\\DevMind.slnx\" /p:DeployExtension=false /verbosity:minimal";
+                string llmDirective = LoopHelpers.BuildToolUsePrompt(buildCommand, projectNamespace);
 
-                string llmDirective =
-                    "## Directives\n" +
-                    "FILE: <filename>\n<raw source>\nEND_FILE\n\n" +
-                    "PATCH <filename>\nFIND:\n<exact text>\nREPLACE:\n<replacement>\nEND_PATCH\n" +
-                    "Multiple FIND/REPLACE pairs are allowed before END_PATCH. END_PATCH is required and must appear on its own line after the last REPLACE block.\n\n" +
-                    "SHELL: <command>\n\n" +
-                    "READ <filename>  — full if <100 lines, outline otherwise\n" +
-                    "READ <filename>:<start>-<end>  — targeted line range (1-based)\n" +
-                    "READ! <filename>  — force full content (expensive)\n" +
-                    "READ git log [N]  — show recent commit history (default 10, max 50)\n" +
-                    "READ git diff [ref]  — show working changes, staged changes, or diff against a commit\n" +
-                    "  Examples: READ git diff, READ git diff --staged, READ git diff HEAD~1, READ git diff filename.cs\n\n" +
-                    "### GREP — Search File for Pattern\n" +
-                    "GREP: \"pattern\" filename\n" +
-                    "GREP: \"pattern\" filename:100-200\n\n" +
-                    "Searches for lines containing the pattern (case-insensitive substring match) in a single file.\n" +
-                    "Returns matching lines with line numbers. Use GREP to locate code before doing a targeted READ.\n\n" +
-                    "Example workflow:\n" +
-                    "1. GREP: \"SaveFileAsync\" AgenticExecutor.cs     → finds lines 42, 89, 155\n" +
-                    "2. READ AgenticExecutor.cs:85-100               → reads context around line 89\n" +
-                    "3. PATCH AgenticExecutor.cs                      → applies the change\n\n" +
-                    "Rules:\n" +
-                    "- Pattern must be in double quotes.\n" +
-                    "- Results are capped at 50 matches. If truncated, narrow your pattern or add a line range.\n" +
-                    "- GREP does not modify files. It is information-gathering only.\n" +
-                    "- Prefer GREP + targeted READ over sequential full-file READs.\n\n" +
-                    "### FIND — Cross-File Search\n" +
-                    "FIND: \"pattern\" *.cs\n" +
-                    "FIND: \"pattern\" Services/*.cs\n\n" +
-                    "Searches all files matching the glob for lines containing the pattern (case-insensitive substring match).\n" +
-                    "Returns filename:line: content for each match, capped at 100 results across all files.\n\n" +
-                    "Use FIND when you need to know where something is used across the project.\n" +
-                    "Use GREP when you already know which file to search.\n\n" +
-                    "### DELETE — Remove File\n" +
-                    "DELETE filename.cs\n\n" +
-                    "Deletes a file from disk. Use only when explicitly asked to remove a file.\n" +
-                    "Do not use DELETE speculatively — only when the task requires file removal.\n\n" +
-                    "### RENAME — Rename/Move File\n" +
-                    "RENAME OldFile.cs NewFile.cs\n\n" +
-                    "Renames a file on disk. The old file is closed in the editor and the new file is opened.\n" +
-                    "Does not update references in other files — use FIND + PATCH to update imports or usings if needed.\n\n" +
-                    "### DIFF — Show File Changes\n" +
-                    "DIFF filename.cs\n\n" +
-                    "Shows all changes made to a file during this conversation as a unified-style diff.\n" +
-                    "Use DIFF to review cumulative modifications before confirming task completion.\n" +
-                    "Use DIFF after multiple PATCHes to verify the overall result is correct.\n" +
-                    "DIFF is information-gathering only — it does not modify files.\n\n" +
-                    "### TEST — Run Tests\n" +
-                    "TEST ProjectName.csproj\n" +
-                    "TEST ProjectName.csproj ClassName.MethodName\n" +
-                    "TEST ProjectName.csproj --filter \"FullyQualifiedName~SomeTest\"\n\n" +
-                    "Runs dotnet test and returns structured pass/fail results.\n" +
-                    "Output is compact — only failed tests show details. Much cheaper than SHELL: dotnet test.\n" +
-                    "Use TEST after making changes to verify correctness.\n" +
-                    "If tests fail, fix the code with PATCH and TEST again.\n\n" +
-                    "## Build Verification\n" +
-                    $"After ANY code change emit: SHELL: {buildCommand}\n\n" +
-                    "## After PATCH\n" +
-                    "You receive [PATCH-RESULT:filename] with ±3 lines of context and >>> CHANGED:/>>> ADDED: markers.\n" +
-                    "Full file is cached — use READ filename:start-end for more context.\n\n" +
-                    "## Before PATCH\n" +
-                    "Never output raw code blocks. Use FILE: for new files, PATCH for edits.\n" +
-                    "READ the file first if you have not seen it. You may combine FILE, PATCH, SHELL in one response.\n" +
-                    "FIND text must be copied verbatim from READ output — never reconstructed from memory.\n" +
-                    "Do not read the same file multiple times. If you have an outline and a line range, that is sufficient context to write a PATCH. Act immediately.\n\n" +
-                    "## Large File Strategy\n" +
-                    "For files over 100 lines:\n" +
-                    "1. First READ gets an outline (types, methods, signatures with line numbers).\n" +
-                    "2. Use the outline to identify the exact line range you need.\n" +
-                    "3. READ filename:start-end for just that section.\n" +
-                    "4. PATCH using only the content from that range.\n" +
-                    "Never READ! an entire large file unless explicitly asked. Work from outline → range → patch.\n\n" +
-                    "## Core rules\n" +
-                    "After a READ is loaded, act on it immediately in the same response. Never emit only READ directives and stop. Every response must include at least one PATCH, FILE, or SHELL directive unless you are responding to a question.\n\n" +
-                    "## Task Completion\n" +
-                    "When all steps of the task are complete and nothing remains to do, emit:\nDONE\n" +
-                    "Only emit DONE when the task is truly finished. Do not emit DONE mid-task.\n\n" +
-                    "## Scratchpad\n" +
-                    "Emit a SCRATCHPAD: block (end with END_SCRATCHPAD on its own line) to track state across turns:\n" +
-                    "SCRATCHPAD:\nGoal: <task>\nFiles: <file> (lines N-M)\nStatus: <PLANNING|PATCHING|BUILDING|DONE>\nLast: <action>\nNext: <step>\nEND_SCRATCHPAD";
-                if (DevMindOptions.Instance.BlockByBlockMode != BlockByBlockModeType.Off)
-
-                    llmDirective +=
-                        "\n\n## Block-by-Block Mode (Active)\n" +
-                        "You are operating in block-by-block mode for memory-constrained environments.\n" +
-                        "Rules:\n" +
-                        "1. Start each task by READing the file outline only — do not request full content.\n" +
-                        "2. Each turn: READ one range, emit one PATCH, update SCRATCHPAD with remaining steps.\n" +
-                        "3. Do not attempt multiple file sections in a single response.\n" +
-                        "4. After each PATCH, mark that step done in SCRATCHPAD before continuing.\n" +
-                        "5. If more steps remain, state the next step clearly and wait for the next turn.\n" +
-                        "Work incrementally: outline → one range → one patch → repeat until done.";
-                if (!string.IsNullOrEmpty(projectNamespace))
-                    llmDirective += $"\n- When creating new files, use the namespace '{projectNamespace}'.";
-                string combined = $"{originalSystemPrompt}\n\n{llmDirective}";
+                string combined = $"{DevMindOptions.Instance.SystemPrompt}\n\n{llmDirective}";
                 if (!string.IsNullOrEmpty(_devMindContext))
                     combined += $"\n\n--- Project Context (DevMind.md) ---\n{_devMindContext}\n---";
-                DevMindOptions.Instance.SystemPrompt = combined;
+
+                // Load MEMORY.md cross-session memory index
+                try
+                {
+                    var memMgr = new MemoryManager(_shellRunner.WorkingDirectory);
+                    string memoryIndex = memMgr.LoadIndex();
+                    if (!string.IsNullOrWhiteSpace(memoryIndex))
+                        combined += $"\n\n--- Session Memory (MEMORY.md) ---\n{memoryIndex}\n---";
+                }
+                catch { /* Memory loading is best-effort */ }
+
+                _currentCombinedPrompt = combined;
             }
 
             System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] About to call SendMessageAsync — contextualMessage length={contextualMessage.Length}");
 
-            // Guard: always restore the original system prompt, even if RunAsync throws
-            // synchronously or an exception propagates before RunAsync returns.
-            try
-            {
 #pragma warning disable VSSDK007
 #pragma warning disable VSTHRD100
             _ = ThreadHelper.JoinableTaskFactory.RunAsync(async delegate
@@ -1000,7 +913,7 @@ namespace DevMind
                             {
 #pragma warning restore VSTHRD001, VSTHRD110
                                 if (_cts?.IsCancellationRequested == true) return;
-                                var visible = FilterChunk(token);
+                                var visible = _thinkFilter.Process(token, DevMindOptions.Instance.ShowLlmThinking, out _pendingThinkText);
 
                                 // Route thinking tokens to the dim think run
                                 if (_pendingThinkText != null)
@@ -1013,32 +926,7 @@ namespace DevMind
 
                                 responseBuffer.Append(visible);
 
-                                // Lightweight display-suppression for FILE: blocks.
-                                // Only inspect at newline boundaries — partial lines are never checked.
-                                // onComplete / ResponseParser.Parse() is the sole authority for all parsing;
-                                // _suppressDisplay only affects what the user sees in the OutputBox during streaming.
-                                if (visible.Contains('\n'))
-                                {
-                                    string buf = responseBuffer.ToString();
-                                    int lastNl = buf.LastIndexOf('\n');
-                                    int prevNl = lastNl > 0 ? buf.LastIndexOf('\n', lastNl - 1) : -1;
-                                    string completedLine = buf.Substring(prevNl + 1, lastNl - prevNl - 1).TrimEnd('\r');
-
-                                    if (!_suppressDisplay && Regex.IsMatch(completedLine, @"^FILE:\s*\S", RegexOptions.IgnoreCase))
-                                    {
-                                        _suppressDisplay = true;
-                                        StartGeneratingAnimation(completedLine.Substring("FILE:".Length).Trim());
-                                    }
-                                    else if (_suppressDisplay && string.Equals(completedLine, "END_FILE", StringComparison.OrdinalIgnoreCase))
-                                    {
-                                        _suppressDisplay = false;
-                                        StopGeneratingAnimation();
-                                    }
-                                }
-
                                 _streamingTokenCount++;
-
-                                if (_suppressDisplay) return;
 
                                 if (_thinkingTimer != null)
                                 {
@@ -1065,314 +953,58 @@ namespace DevMind
                                 {
                                 await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
 
-                                AppendNewLine();
-
-                                // ── Classify → Decide → Execute pipeline ──────────────────────
-
                                 string fullResponse = responseBuffer.ToString();
                                 System.Diagnostics.Debug.WriteLine($"[DEVMIND-DIAG] responseBuffer length={fullResponse.Length}");
-                                System.Diagnostics.Debug.WriteLine($"[DEVMIND-DIAG] responseBuffer first 500 chars: {(fullResponse.Length > 500 ? fullResponse.Substring(0, 500) : fullResponse)}");
 
-                                var outcome  = ResponseClassifier.Classify(fullResponse);
-                                var executor = new AgenticExecutor(this);
-                                executor.SetCancellationToken(_cts?.Token ?? CancellationToken.None);
-                                int maxDepth = DevMindOptions.Instance.AgenticLoopMaxDepth;
+                                var iter = await _loopDriver.ProcessIterationAsync(fullResponse, buildCommand, _cts?.Token ?? CancellationToken.None);
 
-                                System.Diagnostics.Debug.WriteLine($"[DEVMIND-DIAG] Outcome: HasPatches={outcome.HasPatches} HasShell={outcome.HasShellCommands} HasFile={outcome.HasFileCreation} HasDelete={outcome.HasDeleteRequests} IsDone={outcome.IsDone} IsReadOnly={outcome.IsReadOnly} IsEmptyOrBareCode={outcome.IsEmptyOrBareCode}");
+                                if (iter.ShouldLogTurn)
+                                    LogTrainingTurn(text, iter.AssistantResponse, iter.Outcome, iter.Result, iter.ToolCalls);
 
-                                // Initial resolve — no previousResult on the first call
-                                AgenticAction action = AgenticActionResolver.Resolve(outcome, null, _agenticDepth, maxDepth);
-
-                                if (action.Type != ActionType.Stop)
+                                switch (iter.Kind)
                                 {
-                                    ExecutionResult result = await executor.ExecuteAsync(action, outcome);
+                                    case LoopIterationKind.Terminal:
+                                        _thinkingTimer?.Stop();
+                                        _thinkingTimer = null;
+                                        StatusText.Text = "Ready";
+                                        ContextIndicator.Text = "";
+                                        SetInputEnabled(true);
+                                        InputTextBox.Focus();
+                                        break;
 
-                                    // ── Resubmit paths (return immediately; SendToLlm manages its own completion) ──
+                                    case LoopIterationKind.Cancelled:
+                                        StatusText.Text = "Stopped";
+                                        SetInputEnabled(true);
+                                        break;
 
-                                    if (action.Type == ActionType.LoadAndResubmit)
-                                    {
-                                        // DONE + info-gather: load files but then stop
-                                        if (outcome.IsDone)
+                                    case LoopIterationKind.ShouldReTrigger:
+                                        if (_cts?.IsCancellationRequested == true)
                                         {
-                                            AppendOutput("[AGENTIC] File(s) loaded. Task complete.\n", OutputColor.Success);
-                                            _agenticDepth = 0;
-                                            _pendingResubmitPrompt = null;
-                                            // fall through to completion
+                                            _loopState.ShellLoopPending    = false;
+                                            _loopState.AgenticDepth        = 0;
+                                            _loopState.PromptedForTaskDone = false;
+                                            StatusText.Text = "Stopped";
+                                            SetInputEnabled(true);
+                                            break;
                                         }
-                                        else if (_agenticDepth > 0)
+                                        InputTextBox.Text = iter.NextContextualMessage;
+                                        try { SendToLlm(); }
+                                        catch
                                         {
-                                            AppendOutput("[AUTO-READ] File(s) loaded during agentic iteration — continuing...\n", OutputColor.Dim);
-                                            InputTextBox.Text = "The requested file(s) have been loaded into context. Continue with the task using PATCH/SHELL/FILE directives.";
-                                            _shellLoopPending = true;
-                                            SendToLlm();
-                                            return;
+                                            _loopState.ShellLoopPending    = false;
+                                            _loopState.AgenticDepth        = 0;
+                                            _loopState.PromptedForTaskDone = false;
+                                            StatusText.Text = "Error";
+                                            SetInputEnabled(true);
+                                            throw;
                                         }
-                                        else if (!string.IsNullOrEmpty(_pendingResubmitPrompt))
-                                        {
-                                            string saved = _pendingResubmitPrompt;
-                                            _pendingResubmitPrompt = null;
-                                            AppendOutput("[AUTO-READ] File(s) loaded — resubmitting original prompt...\n", OutputColor.Dim);
-                                            InputTextBox.Text = saved;
-                                            _shellLoopPending = true;
-                                            SendToLlm();
-                                            return;
-                                        }
-                                        else
-                                        {
-                                            AppendOutput("[AUTO-READ] File(s) loaded — resubmitting...\n", OutputColor.Dim);
-                                            InputTextBox.Text = "The requested file(s) have been loaded. Continue with the task.";
-                                            _shellLoopPending = true;
-                                            SendToLlm();
-                                            return;
-                                        }
-                                    }
-
-                                    if (action.Type == ActionType.RetryWithCorrection)
-                                    {
-                                        AppendOutput("[FORMAT] Response was a code block instead of directives — retrying...\n", OutputColor.Dim);
-                                        _pendingShellContext =
-                                            "Your previous response contained a raw code block instead of PATCH/SHELL/FILE directives. " +
-                                            "You MUST use FILE: for new files, PATCH for edits, and SHELL: for commands. " +
-                                            "Re-attempt the task now using the correct format.";
-                                        string retryPrompt = _pendingResubmitPrompt ?? InputTextBox.Text;
-                                        _pendingResubmitPrompt = null;
-                                        InputTextBox.Text = retryPrompt;
-                                        _shellLoopPending = true;
-                                        _agenticDepth = 1;
-                                        SendToLlm();
                                         return;
-                                    }
-
-                                    // ── Actions that may loop ────────────────────────────────────
-
-                                    if (action.Type == ActionType.ApplyAndBuild
-                                        || action.Type == ActionType.CreateFile
-                                        || action.Type == ActionType.RunShell
-                                        || action.Type == ActionType.ContinueAgentic)
-                                    {
-                                        bool hasDone  = outcome.IsDone;
-                                        bool ranShell = result.ShellExitCode.HasValue;
-                                        bool isRunExec = ranShell && result.ShellExitCode == 0
-                                            && !string.IsNullOrEmpty(result.LastShellCommand)
-                                            && IsRunOrExecCommand(result.LastShellCommand);
-
-                                        if (hasDone)
-                                        {
-                                            AppendOutput("[AGENTIC] Task complete.\n", OutputColor.Success);
-                                            _agenticDepth = 0;
-                                            _pendingResubmitPrompt = null;
-                                            // fall through to completion
-                                        }
-                                        else if (isRunExec)
-                                        {
-                                            AppendOutput("[AGENTIC] Run/exec command succeeded — treating as task complete.\n", OutputColor.Success);
-                                            _agenticDepth = 0;
-                                            _pendingResubmitPrompt = null;
-                                            // fall through to completion
-                                        }
-                                        else if (maxDepth <= 0 || _agenticDepth >= maxDepth)
-                                        {
-                                            if (ranShell && result.ShellExitCode != 0)
-                                            {
-                                                int undoDepth = _patchBackupStack.Count;
-                                                AppendOutput($"[AGENTIC] Depth cap reached ({_agenticDepth}) — build still failing.\n", OutputColor.Error);
-                                                AppendOutput("Type UNDO to revert all changes, or continue editing manually.\n", OutputColor.Dim);
-                                                AppendOutput($"({undoDepth} change(s) can be undone)\n", OutputColor.Dim);
-                                            }
-                                            else
-                                            {
-                                                AppendOutput($"[AGENTIC] Depth cap reached ({_agenticDepth}). Stopping.\n", OutputColor.Dim);
-                                            }
-                                            _agenticDepth = 0;
-                                            // fall through to completion
-                                        }
-                                        else
-                                        {
-                                            // ── Re-trigger agentic loop ───────────────────────────
-
-                                            _agenticDepth++;
-                                            {
-                                                int agTokens  = _llmClient.EstimateHistoryTokens();
-                                                int agBudget  = _llmClient.MaxPromptTokens;
-                                                int agHeadroom = _llmClient.ResponseHeadroomTokens;
-                                                int agPct     = agBudget > 0 ? (int)((agTokens * 100.0) / agBudget) : 0;
-                                                AppendOutput($"[AGENTIC] Iteration {_agenticDepth}/{maxDepth} — Working: {agTokens:N0} / {agBudget:N0} ({agPct}%) | Response headroom: {agHeadroom:N0} reserved\n", OutputColor.Dim);
-                                                if (DevMindOptions.Instance.ShowContextBudget)
-                                                {
-                                                    int cbPct = _llmClient.ContextBudgetPercent;
-                                                    OutputColor cbColor = cbPct < 60 ? OutputColor.Dim
-                                                                        : cbPct < 80 ? OutputColor.Normal
-                                                                        : OutputColor.Error;
-                                                    AppendOutput($"[CONTEXT] Working: {agTokens:N0} / {agBudget:N0} ({cbPct}%) | Response headroom: {agHeadroom:N0} reserved\n", cbColor);
-                                                }
-                                            }
-
-                                            // Block-by-block mode (preserved)
-                                            bool blockByBlockAllDone = false;
-                                            if (result.BuildSucceeded && DevMindOptions.Instance.BlockByBlockMode != BlockByBlockModeType.Off)
-                                            {
-                                                var steps = ParseScratchpadSteps(_llmClient.TaskScratchpad);
-                                                var nextStep = steps.Find(s => !s.IsDone);
-                                                if (nextStep.StepNumber > 0)
-                                                {
-                                                    _blockByBlockStep  = nextStep.StepNumber;
-                                                    _blockByBlockTotal = steps.Count;
-                                                    AppendOutput($"[AGENTIC] Block-by-block: advancing to step {nextStep.StepNumber}/{steps.Count}\n", OutputColor.Dim);
-                                                    _llmClient.ClearHistory(preserveScratchpad: true);
-                                                    InputTextBox.Text = $"Continue with step {nextStep.StepNumber}: {nextStep.Description}. READ the relevant file range first, then PATCH. Build when done.";
-                                                    _pendingShellContext = null;
-                                                    _agenticDepth = 0;
-                                                    if (_cts.IsCancellationRequested)
-                                                    {
-                                                        _shellLoopPending = false;
-                                                        _blockByBlockStep = 0;
-                                                        AppendOutput("[AGENTIC] Cancelled.\n", OutputColor.Dim);
-                                                        StatusText.Text = "Stopped";
-                                                        SetInputEnabled(true);
-                                                        return;
-                                                    }
-                                                    _shellLoopPending = true;
-                                                    try { SendToLlm(); }
-                                                    catch
-                                                    {
-                                                        _shellLoopPending = false;
-                                                        _blockByBlockStep = 0;
-                                                        _agenticDepth = 0;
-                                                        StatusText.Text = "Error";
-                                                        SetInputEnabled(true);
-                                                        throw;
-                                                    }
-                                                    return;
-                                                }
-                                                else if (steps.Count > 0)
-                                                {
-                                                    // All numbered steps are DONE — task complete
-                                                    AppendOutput("[AGENTIC] Block-by-block: all steps complete.\n", OutputColor.Success);
-                                                    _blockByBlockStep = 0;
-                                                    blockByBlockAllDone = true;
-                                                }
-                                            }
-
-                                            if (!blockByBlockAllDone)
-                                            {
-                                                // Build continuation context from ExecutionResult
-                                                var agenticContext = new StringBuilder();
-                                                agenticContext.AppendLine($"[AGENTIC LOOP — iteration {_agenticDepth} of {maxDepth}]");
-
-                                                if (result.FilesCreated.Count > 0)
-                                                    agenticContext.AppendLine("[FILE CREATED] File was generated and added to the project.");
-
-                                                if (result.FilesDeleted.Count > 0)
-                                                    agenticContext.AppendLine($"[FILE DELETED] Deleted from disk: {string.Join(", ", result.FilesDeleted.ConvertAll(System.IO.Path.GetFileName))}.");
-
-                                                if (result.FilesRenamed.Count > 0)
-                                                    agenticContext.AppendLine($"[FILE RENAMED] {string.Join("; ", result.FilesRenamed)}.");
-
-                                                if (!string.IsNullOrEmpty(result.ShellOutput))
-                                                {
-                                                    string shellTag = result.LastShellCommand?.Length > 60
-                                                        ? result.LastShellCommand.Substring(0, 60) : result.LastShellCommand;
-                                                    agenticContext.AppendLine($"[SHELL-RESULT:{shellTag}]\nShell command: {result.LastShellCommand}\nOutput:\n{result.ShellOutput}\n---");
-                                                }
-
-                                                // Inject diff-only PATCH-RESULT (changed region ± context lines)
-                                                foreach (string pp in result.PatchedPaths)
-                                                {
-                                                    try
-                                                    {
-                                                        string fn = Path.GetFileName(pp);
-                                                        int undoDepth = _patchBackupStack.Count;
-                                                        string diffView = _patchDiffCache.TryGetValue(pp, out string dv) ? dv : null;
-                                                        if (diffView != null)
-                                                            agenticContext.AppendLine($"\n[PATCH-RESULT:{fn}] Applied successfully (undo depth: {undoDepth})\n{diffView}");
-                                                        else
-                                                            agenticContext.AppendLine($"\n[PATCH-RESULT:{fn}] Applied successfully (undo depth: {undoDepth})");
-                                                    }
-                                                    catch { }
-                                                }
-
-                                                // Per-block failure messages (includes PATCH-FAILED lines)
-                                                foreach (string err in result.Errors)
-                                                    agenticContext.AppendLine(err);
-
-                                                agenticContext.AppendLine("Continue with any remaining steps. When there is nothing left to do, emit DONE on a line by itself.");
-                                                _pendingShellContext = agenticContext.ToString().TrimEnd();
-
-                                                // Set continuation prompt
-                                                if (result.BuildSucceeded)
-                                                    InputTextBox.Text = "Build succeeded (exit code 0). Continue with any remaining steps from the original task, or emit DONE if the task is complete.";
-                                                else if (ranShell && result.ShellExitCode != 0)
-                                                    InputTextBox.Text = "The shell output above shows build errors. Analyze the specific error messages and apply targeted PATCH fixes. Do NOT re-add code that already exists in the file. Do NOT replace code with unrelated code.";
-                                                else
-                                                    InputTextBox.Text = "Continue with remaining steps (modify other files, run builds). When done, emit DONE.";
-
-                                                // Check cancellation before re-triggering
-                                                if (_cts.IsCancellationRequested)
-                                                {
-                                                    _shellLoopPending = false;
-                                                    _agenticDepth = 0;
-                                                    AppendOutput("[AGENTIC] Cancelled.\n", OutputColor.Dim);
-                                                    StatusText.Text = "Stopped";
-                                                    SetInputEnabled(true);
-                                                    return;
-                                                }
-                                                _shellLoopPending = true;
-                                                try { SendToLlm(); }
-                                                catch
-                                                {
-                                                    _shellLoopPending = false;
-                                                    _agenticDepth = 0;
-                                                    StatusText.Text = "Error";
-                                                    SetInputEnabled(true);
-                                                    throw;
-                                                }
-                                                return;
-                                            }
-                                            // blockByBlockAllDone == true → fall through to completion
-                                        }
-                                    }
                                 }
-                                else
-                                {
-                                    // Stop action — display reason if meaningful
-                                    if (!string.IsNullOrEmpty(action.StopReason) && action.StopReason != "Response complete.")
-                                    {
-                                        bool isSuccess = action.StopReason.Contains("complete") || action.StopReason.Contains("succeeded");
-                                        AppendOutput(action.StopReason + "\n", isSuccess ? OutputColor.Success : OutputColor.Dim);
-                                    }
-                                }
-
-                                // ── Completion ────────────────────────────────────────────────
-
-                                if (DevMindOptions.Instance.ShowContextBudget)
-                                {
-                                    int cbUsed     = _llmClient.EstimateHistoryTokens();
-                                    int cbBudget   = _llmClient.MaxPromptTokens;
-                                    int cbHeadroom = _llmClient.ResponseHeadroomTokens;
-                                    int cbPct      = _llmClient.ContextBudgetPercent;
-                                    OutputColor cbColor = cbPct < 60 ? OutputColor.Dim
-                                                        : cbPct < 80 ? OutputColor.Normal
-                                                        : OutputColor.Error;
-                                    AppendOutput($"[CONTEXT] Working: {cbUsed:N0} / {cbBudget:N0} ({cbPct}%) | Response headroom: {cbHeadroom:N0} reserved\n", cbColor);
-                                }
-
-                                _agenticDepth = 0;
-                                _blockByBlockStep = 0;
-                                _pendingResubmitPrompt = null;
-                                _thinkingTimer?.Stop();
-                                _thinkingTimer = null;
-                                StatusText.Text = "Ready";
-                                ContextIndicator.Text = "";
-                                SetInputEnabled(true);
-                                InputTextBox.Focus();
-                                _batchOnComplete?.Invoke();
-                                _batchOnComplete = null;
                                 }
                                 catch (Exception onCompleteEx) when (!(onCompleteEx is OperationCanceledException))
                                 {
-                                    _shellLoopPending = false;
-                                    _agenticDepth = 0;
-                                    _blockByBlockStep = 0;
+                                    _loopState.ShellLoopPending = false;
+                                    _loopState.AgenticDepth = 0;
                                     _thinkingTimer?.Stop();
                                     _thinkingTimer = null;
                                     AppendOutput($"\n[onComplete error: {onCompleteEx.Message}]\n", OutputColor.Error);
@@ -1391,22 +1023,18 @@ namespace DevMind
                             Dispatcher.BeginInvoke(new Action(() =>
                             {
 #pragma warning restore VSTHRD001, VSTHRD110
-                                _suppressDisplay = false;
                                 StopGeneratingAnimation();
                                 _thinkingTimer?.Stop();
                                 _thinkingTimer = null;
-                                _shellLoopPending = false;
-                                _agenticDepth = 0;
-                                _blockByBlockStep = 0;
-                                _pendingResubmitPrompt = null;
+                                _loopState.ShellLoopPending = false;
+                                _loopState.AgenticDepth = 0;
                                 AppendOutput($"\n[Error: {ex.Message}]\n", OutputColor.Error);
                                 StatusText.Text = "Error";
                                 SetInputEnabled(true);
-                                _batchOnComplete?.Invoke();
-                                _batchOnComplete = null;
                             }));
                         },
-                        deferCompression: _shellLoopPending,
+                        deferCompression: _loopState.ShellLoopPending,
+                        combinedSystemPrompt: _currentCombinedPrompt,
                         cancellationToken: _cts.Token);
                 }
                 finally
@@ -1414,41 +1042,31 @@ namespace DevMind
                     await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
                     if (_cts.IsCancellationRequested)
                     {
-                        _suppressDisplay = false;
+                        // When cancelled, LlmClient swallows the OCE and never calls onComplete.
+                        // Nobody else will re-enable input, so we must do it here.
                         StopGeneratingAnimation();
                         _thinkingTimer?.Stop();
                         _thinkingTimer = null;
                         AppendOutput("\n[Stopped]\n", OutputColor.Dim);
                         StatusText.Text = "Stopped";
-                        _shellLoopPending = false;
-                        _agenticDepth = 0;
-                        _blockByBlockStep = 0;
-                        _pendingResubmitPrompt = null;
-                    }
-                    // Skip re-enabling input when the agentic loop is still active.
-                    // The re-triggered SendToLlm() manages its own SetInputEnabled(false) call;
-                    // calling SetInputEnabled(true) here would disable Stop and re-enable input
-                    // between agentic iterations.
-                    if (!_shellLoopPending)
-                    {
-                        _agenticDepth = 0;
+                        _loopState.ShellLoopPending = false;
+                        _loopState.AgenticDepth = 0;
                         SetInputEnabled(true);
                     }
-                    _shellLoopPending = false;
+                    // Do NOT call SetInputEnabled(true) unconditionally here.
+                    // In the non-cancelled path the onComplete handler was dispatched via
+                    // Dispatcher.BeginInvoke and may not have executed yet — calling
+                    // SetInputEnabled here before it runs would race with its own call and
+                    // could reset state mid-iteration. All terminal paths in onComplete already
+                    // call SetInputEnabled(true). The cancellation branch above is exempt from
+                    // this constraint because onComplete is never dispatched when cancelled.
+                    // _loopState.ShellLoopPending is safe to clear unconditionally — it's a no-op
+                    // when onComplete hasn't run yet (still false), and a cleanup when it has.
+                    _loopState.ShellLoopPending = false;
                 }
             });
 #pragma warning restore VSTHRD100
 #pragma warning restore VSSDK007
-            }
-            finally
-            {
-                // Restore original system prompt now that RunAsync has started and
-                // UpdateSystemPrompt() has captured the combined value synchronously
-                // before the first await in SendMessageAsync.
-                // originalSystemPrompt is null during agentic resubmits — skip restore.
-                if (originalSystemPrompt != null)
-                    DevMindOptions.Instance.SystemPrompt = originalSystemPrompt;
-            }
         }
 
         // ── Terminal strip ────────────────────────────────────────────────────
@@ -1566,269 +1184,6 @@ namespace DevMind
             AppendOutput("─────────────────────────────────────────\n", OutputColor.Dim);
         }
 
-        /// <summary>
-        /// Returns true if the shell command is a run/exec invocation (not a build command).
-        /// These commands complete a task when they exit 0 and should not trigger agentic continuation.
-        /// </summary>
-        private static bool IsRunOrExecCommand(string command)
-        {
-            if (string.IsNullOrEmpty(command))
-                return false;
-            string cmd = command.Trim().ToLowerInvariant();
-            return cmd.Contains("dotnet run")
-                || cmd.Contains("dotnet exec")
-                || (cmd.EndsWith(".exe") && !cmd.Contains("msbuild") && !cmd.Contains("dotnet build"));
-        }
-
-        /// <summary>
-        /// Represents a single parsed step from the SCRATCHPAD block.
-        /// </summary>
-        private struct ScratchpadStep
-        {
-            public int    StepNumber;
-            public bool   IsDone;
-            public string Description;
-        }
-
-        /// <summary>
-        /// Parses numbered steps from a SCRATCHPAD block.
-        /// Recognises lines of the form: "N. [DONE] description" / "N. DONE: description" / "N. description"
-        /// A step is done when the text immediately after "N." contains "DONE" (case-insensitive).
-        /// Returns an empty list when the scratchpad is blank or contains no numbered steps.
-        /// </summary>
-        private static System.Collections.Generic.List<ScratchpadStep> ParseScratchpadSteps(string scratchpad)
-        {
-            var result = new System.Collections.Generic.List<ScratchpadStep>();
-            if (string.IsNullOrWhiteSpace(scratchpad))
-                return result;
-
-            var stepLine = new System.Text.RegularExpressions.Regex(
-                @"^\s*(\d+)\.\s+(.+)$",
-                System.Text.RegularExpressions.RegexOptions.Multiline);
-
-            foreach (System.Text.RegularExpressions.Match m in stepLine.Matches(scratchpad))
-            {
-                int  num  = int.Parse(m.Groups[1].Value);
-                string raw = m.Groups[2].Value.Trim();
-                // Strip leading "[DONE]" / "DONE:" markers to get clean description
-                bool done = System.Text.RegularExpressions.Regex.IsMatch(
-                    raw, @"^(\[DONE\]|DONE\s*:)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-                string desc = done
-                    ? System.Text.RegularExpressions.Regex.Replace(
-                        raw, @"^(\[DONE\]|DONE\s*:)\s*", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Trim()
-                    : raw;
-                result.Add(new ScratchpadStep { StepNumber = num, IsDone = done, Description = desc });
-            }
-            return result;
-        }
-
-        private static bool ContainsWaitSeparator(string text)
-        {
-            foreach (var line in text.Split('\n'))
-            {
-                if (line.Trim('\r').Trim().Equals("[WAIT]", StringComparison.OrdinalIgnoreCase))
-                    return true;
-            }
-            return false;
-        }
-
-#pragma warning disable VSSDK007 // async void UI event handler is intentional
-#pragma warning disable VSTHRD100
-        private async Task ProcessBatchInputAsync(string text)
-#pragma warning restore VSTHRD100
-#pragma warning restore VSSDK007
-        {
-            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
-
-            // Split on lines that are exactly "[WAIT]" (case-insensitive, trims CR)
-            var allLines = text.Split('\n');
-            var blocks = new List<string>();
-            var current = new StringBuilder();
-
-            foreach (var raw in allLines)
-            {
-                string line = raw.TrimEnd('\r');
-                if (line.Trim().Equals("[WAIT]", StringComparison.OrdinalIgnoreCase))
-                {
-                    string block = current.ToString().Trim();
-                    if (!string.IsNullOrEmpty(block))
-                        blocks.Add(block);
-                    current.Clear();
-                }
-                else
-                {
-                    current.AppendLine(line);
-                }
-            }
-            // Capture any trailing block after the last [WAIT]
-            {
-                string trailing = current.ToString().Trim();
-                if (!string.IsNullOrEmpty(trailing))
-                    blocks.Add(trailing);
-            }
-
-            if (blocks.Count == 0)
-            {
-                InputTextBox.Text = "";
-                return;
-            }
-
-            AppendOutput($"\n[BATCH] {blocks.Count} block(s) queued.\n", OutputColor.Dim);
-
-            for (int i = 0; i < blocks.Count; i++)
-            {
-                string block = blocks[i];
-                AppendOutput($"[BATCH] Block {i + 1}/{blocks.Count}\n", OutputColor.Dim);
-
-                // Direct commands bypass LLM — execute immediately
-                if (block.StartsWith("READ ", StringComparison.OrdinalIgnoreCase))
-                {
-                    AppendOutput($"[BATCH] Direct execute: {block.Split('\n')[0].Trim()}\n", OutputColor.Dim);
-                    string readArg = block.Substring("READ ".Length).Trim();
-                    await ApplyReadCommandAsync(readArg);
-                }
-                else if (block.StartsWith("SHELL:", StringComparison.OrdinalIgnoreCase))
-                {
-                    string cmd = block.Substring("SHELL:".Length).Trim();
-                    AppendOutput($"[BATCH] Direct execute: SHELL: {cmd}\n", OutputColor.Dim);
-                    var (output, exitCode) = await RunShellCommandCaptureAsync(cmd);
-                    if (!string.IsNullOrEmpty(output))
-                        AppendOutput(output, exitCode == 0 ? OutputColor.Normal : OutputColor.Error);
-                }
-                else if (block.StartsWith("PATCH ", StringComparison.OrdinalIgnoreCase) &&
-                         block.IndexOf("FIND:", StringComparison.OrdinalIgnoreCase) >= 0 &&
-                         block.IndexOf("REPLACE:", StringComparison.OrdinalIgnoreCase) >= 0)
-                {
-                    string patchFile = block.Split('\n')[0].Substring("PATCH ".Length).Trim();
-                    AppendOutput($"[BATCH] Direct execute: PATCH {patchFile}\n", OutputColor.Dim);
-                    await ApplyPatchAsync(block, clearInput: false);
-                }
-                else if (block.StartsWith("GREP:", StringComparison.OrdinalIgnoreCase))
-                {
-                    AppendOutput($"[BATCH] Direct execute: {block.Split('\n')[0].Trim()}\n", OutputColor.Dim);
-                    var grepMatch = System.Text.RegularExpressions.Regex.Match(
-                        block,
-                        @"^GREP:\s+""([^""]+)""\s+(\S+\.\S+?)(?::(\d+)(?:-(\d+))?)?\s*$",
-                        System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-                    if (grepMatch.Success)
-                    {
-                        string gPattern = grepMatch.Groups[1].Value;
-                        string gFile    = grepMatch.Groups[2].Value;
-                        int?   gStart   = grepMatch.Groups[3].Success ? (int?)int.Parse(grepMatch.Groups[3].Value) : null;
-                        int?   gEnd     = grepMatch.Groups[4].Success ? (int?)int.Parse(grepMatch.Groups[4].Value) : null;
-                        string gResult  = await ((IAgenticHost)this).GrepFileAsync(gPattern, gFile, gStart, gEnd);
-                        AppendOutput(gResult + "\n", OutputColor.Normal);
-                    }
-                    else
-                    {
-                        AppendOutput("GREP syntax: GREP: \"pattern\" filename[:start-end]\n", OutputColor.Error);
-                    }
-                }
-                else if (block.StartsWith("FIND:", StringComparison.OrdinalIgnoreCase))
-                {
-                    AppendOutput($"[BATCH] Direct execute: {block.Split('\n')[0].Trim()}\n", OutputColor.Dim);
-                    var findMatch = System.Text.RegularExpressions.Regex.Match(
-                        block,
-                        @"^FIND:\s+""([^""]+)""\s+(\S+)(?::(\d+)(?:-(\d+))?)?\s*$",
-                        System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-                    if (findMatch.Success)
-                    {
-                        string fPattern = findMatch.Groups[1].Value;
-                        string fGlob    = findMatch.Groups[2].Value;
-                        int?   fStart   = findMatch.Groups[3].Success ? (int?)int.Parse(findMatch.Groups[3].Value) : null;
-                        int?   fEnd     = findMatch.Groups[4].Success ? (int?)int.Parse(findMatch.Groups[4].Value) : null;
-                        string fResult  = await ((IAgenticHost)this).FindInFilesAsync(fPattern, fGlob, fStart, fEnd);
-                        AppendOutput(fResult + "\n", OutputColor.Normal);
-                    }
-                    else
-                    {
-                        AppendOutput("FIND syntax: FIND: \"pattern\" glob[:start-end]  (e.g. FIND: \"foo\" *.cs)\n", OutputColor.Error);
-                    }
-                }
-                else if (block.StartsWith("DELETE ", StringComparison.OrdinalIgnoreCase) && !block.Contains('\n'))
-                {
-                    AppendOutput($"[BATCH] Direct execute: {block.Trim()}\n", OutputColor.Dim);
-                    string batchDeleteFile = block.Substring("DELETE ".Length).Trim();
-                    if (!string.IsNullOrEmpty(batchDeleteFile))
-                    {
-                        string batchDelResult = await ((IAgenticHost)this).DeleteFileAsync(batchDeleteFile);
-                        bool batchOk = batchDelResult != null && batchDelResult.StartsWith("Deleted:");
-                        AppendOutput(batchDelResult + "\n", batchOk ? OutputColor.Success : OutputColor.Error);
-                    }
-                    else
-                    {
-                        AppendOutput("DELETE syntax: DELETE filename.cs\n", OutputColor.Error);
-                    }
-                }
-                else if (block.StartsWith("RENAME ", StringComparison.OrdinalIgnoreCase) && !block.Contains('\n'))
-                {
-                    AppendOutput($"[BATCH] Direct execute: {block.Trim()}\n", OutputColor.Dim);
-                    string[] batchRenameParts = block.Substring("RENAME ".Length).Trim().Split(new[] { ' ', '\t' }, 2, StringSplitOptions.RemoveEmptyEntries);
-                    if (batchRenameParts.Length == 2)
-                    {
-                        string batchRenResult = await ((IAgenticHost)this).RenameFileAsync(batchRenameParts[0], batchRenameParts[1]);
-                        bool batchRenOk = batchRenResult != null && batchRenResult.StartsWith("Renamed:");
-                        AppendOutput(batchRenResult + "\n", batchRenOk ? OutputColor.Success : OutputColor.Error);
-                    }
-                    else
-                    {
-                        AppendOutput("RENAME syntax: RENAME OldFile.cs NewFile.cs\n", OutputColor.Error);
-                    }
-                }
-                else if (block.StartsWith("DIFF ", StringComparison.OrdinalIgnoreCase) && !block.Contains('\n'))
-                {
-                    AppendOutput($"[BATCH] Direct execute: {block.Trim()}\n", OutputColor.Dim);
-                    string batchDiffFile = block.Substring("DIFF ".Length).Trim();
-                    if (!string.IsNullOrEmpty(batchDiffFile))
-                    {
-                        string batchDiffResult = await ((IAgenticHost)this).GetFileDiffAsync(batchDiffFile);
-                        AppendOutput(batchDiffResult + "\n", OutputColor.Dim);
-                    }
-                    else
-                    {
-                        AppendOutput("DIFF syntax: DIFF filename.cs\n", OutputColor.Error);
-                    }
-                }
-                else if (block.StartsWith("TEST ", StringComparison.OrdinalIgnoreCase) && !block.Contains('\n'))
-                {
-                    AppendOutput($"[BATCH] Direct execute: {block.Trim()}\n", OutputColor.Dim);
-                    string batchTestArgs = block.Substring("TEST ".Length).Trim();
-                    if (!string.IsNullOrEmpty(batchTestArgs))
-                    {
-                        string[] batchTestParts = batchTestArgs.Split(new[] { ' ', '\t' }, 2, StringSplitOptions.RemoveEmptyEntries);
-                        string batchTestProject = batchTestParts[0];
-                        string batchTestFilter  = batchTestParts.Length > 1 ? batchTestParts[1] : null;
-                        string batchTestResult  = await ((IAgenticHost)this).RunTestsAsync(batchTestProject, batchTestFilter);
-                        bool batchTestPassed    = batchTestResult != null && !batchTestResult.Contains("FAILED:") && !batchTestResult.Contains("failed,");
-                        AppendOutput(batchTestResult + "\n", batchTestPassed ? OutputColor.Success : OutputColor.Error);
-                    }
-                    else
-                    {
-                        AppendOutput("TEST syntax: TEST ProjectName.csproj [filter]\n", OutputColor.Error);
-                    }
-                }
-                else
-                {
-                    AppendOutput("[BATCH] Sending to LLM...\n", OutputColor.Dim);
-                    var tcs = new TaskCompletionSource<bool>();
-                    _batchOnComplete = () => tcs.TrySetResult(true);
-
-                    InputTextBox.Text = block;
-                    SendToLlm();
-
-                    // Wait for onComplete (or onError) to fire the callback
-                    await tcs.Task;
-                }
-
-                // Brief pause to let UI settle before next block
-                await System.Threading.Tasks.Task.Delay(300);
-                await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
-            }
-
-            AppendOutput("[BATCH] All blocks sent.\n", OutputColor.Dim);
-            InputTextBox.Text = "";
-        }
-
         private async Task SaveGeneratedFileAsync(string fileName, string code)
         {
             try
@@ -1849,7 +1204,7 @@ namespace DevMind
                     }
                 }
                 catch { }
-                string saveDir = projectDir ?? _terminalWorkingDir;
+                string saveDir = projectDir ?? _shellRunner.WorkingDirectory;
 
                 string fullPath = Path.Combine(saveDir, fileName);
 
@@ -1898,6 +1253,63 @@ namespace DevMind
                 AppendOutput($"✗ Failed to create {fileName}: {ex.Message}\n", OutputColor.Error);
             }
         }
+
+        #region ILoopCallbacks
+
+        void ILoopCallbacks.AppendNewLine() => AppendNewLine();
+
+        void ILoopCallbacks.SetStatus(string text) => StatusText.Text = text;
+
+        void ILoopCallbacks.SetContextIndicator(string text) => ContextIndicator.Text = text;
+
+        void ILoopCallbacks.SetInputText(string text) => InputTextBox.Text = text;
+
+        string ILoopCallbacks.GetInputText() => InputTextBox.Text;
+
+        void ILoopCallbacks.FocusInput() => InputTextBox.Focus();
+
+        void ILoopCallbacks.SetInputEnabled(bool enabled) => SetInputEnabled(enabled);
+
+        void ILoopCallbacks.StartThinkingTimer(int depth, int maxDepth)
+        {
+            _thinkingSeconds = 0;
+            _thinkingTimer?.Stop();
+            _thinkingTimer = new System.Windows.Threading.DispatcherTimer
+            {
+                Interval = TimeSpan.FromSeconds(1)
+            };
+            _thinkingTimer.Tick += (s, e) =>
+            {
+                _thinkingSeconds++;
+                string agenticSuffix = depth > 0
+                    ? $" (agentic {depth}/{maxDepth})"
+                    : "";
+                StatusText.Text = $"Thinking{agenticSuffix} ({_thinkingSeconds}s)";
+            };
+            StatusText.Text = depth > 0
+                ? $"Thinking... (agentic {depth}/{maxDepth})"
+                : "Thinking...";
+            _thinkingTimer.Start();
+        }
+
+        void ILoopCallbacks.StopThinkingTimer()
+        {
+            _thinkingTimer?.Stop();
+            _thinkingTimer = null;
+        }
+
+        (int used, int total) ILoopCallbacks.GetContextMetrics()
+        {
+            int used  = _llmClient.LastContextUsed > 0
+                ? _llmClient.LastContextUsed
+                : _llmClient.EstimateHistoryTokens();
+            int total = _llmClient.ServerContextSize > 0
+                ? _llmClient.ServerContextSize
+                : _llmClient.MaxPromptTokens;
+            return (used, total);
+        }
+
+        #endregion
 
     }
 }

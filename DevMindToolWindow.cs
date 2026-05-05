@@ -27,7 +27,7 @@ namespace DevMind
         public override async Task<FrameworkElement> CreateAsync(int toolWindowId, CancellationToken cancellationToken)
         {
             var settings = await DevMindOptions.GetLiveInstanceAsync();
-            var llmClient = new LlmClient();
+            var llmClient = new LlmClient(settings);
             llmClient.Configure(settings.EndpointUrl, settings.ApiKey);
 
             var control = new DevMindToolWindowControl(llmClient);

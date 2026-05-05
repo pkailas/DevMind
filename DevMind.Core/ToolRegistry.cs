@@ -1,0 +1,258 @@
+// File: ToolRegistry.cs  v7.9
+// Copyright (c) iOnline Consulting LLC. All rights reserved.
+
+using Newtonsoft.Json.Linq;
+
+namespace DevMind
+{
+    /// <summary>
+    /// Builds the OpenAI-compatible <c>tools</c> JArray for structured tool calling.
+    /// Each DevMind directive is represented as a function tool with JSON Schema parameters.
+    /// </summary>
+    public static class ToolRegistry
+    {
+        /// <summary>
+        /// Builds the complete tools array for inclusion in the chat completion request.
+        /// </summary>
+        public static JArray BuildToolsArray()
+        {
+            var tools = new JArray();
+
+            // ── read_file ────────────────────────────────────────────────────
+            tools.Add(MakeTool("read_file",
+                "Read a file from the project. Files under 100 lines return full content; " +
+                "larger files return an outline (class/method/property declarations with line numbers). " +
+                "Use start_line/end_line for targeted reads after reviewing the outline. " +
+                "Set force_full to true only when you need the entire file regardless of size. " +
+                "READ the file before PATCHing — never patch a file you have not seen. " +
+                "Git variants: set filename to 'git log' (recent commits) or 'git diff' (working changes). " +
+                "For git log, use start_line as the count (default 10, max 50). " +
+                "For git diff, append args to filename: 'git diff --staged', 'git diff HEAD~1', 'git diff filename.cs'.",
+                Required("filename", "string", "Absolute file path, or 'git log'/'git diff' for git operations — e.g., 'C:\\Projects\\MyApp\\Services\\UserService.cs'. Always pass the full absolute path that list_files or find_in_files returned; do not shorten to just the filename."),
+                Optional("start_line", "integer", "1-based start line for a targeted range read"),
+                Optional("end_line", "integer", "1-based end line for a targeted range read"),
+                Optional("force_full", "boolean", "When true, bypasses the outline threshold and returns the full file content")));
+
+            // ── create_file ──────────────────────────────────────────────────
+            tools.Add(MakeTool("create_file",
+                "Create a new file with the given content. Use for brand-new files only — " +
+                "use patch_file to edit existing files. Do not wrap content in code fences.",
+                Required("filename", "string", "Absolute file path — e.g., 'C:\\Projects\\MyApp\\Services\\UserService.cs'. Always pass the full absolute path that list_files or find_in_files returned; do not shorten to just the filename."),
+                Required("content", "string", "The complete source code for the new file")));
+
+            // ── append_file ──────────────────────────────────────────────────
+            tools.Add(MakeTool("append_file",
+                "Append content to the end of an existing file. Use this when you need to add content " +
+                "incrementally to a file without replacing existing content. If the file does not exist, it will be created.",
+                Required("filename", "string", "Absolute file path — e.g., 'C:\\Projects\\MyApp\\Services\\UserService.cs'. Always pass the full absolute path that list_files or find_in_files returned; do not shorten to just the filename."),
+                Required("content", "string", "Content to append to the end of the file")));
+
+            // ── patch_file ───────────────────────────────────────────────────
+            tools.Add(MakeTool("patch_file",
+                "Edit an existing file by replacing exact text. The find text must be copied " +
+                "verbatim from read_file output — never reconstructed from memory. " +
+                "Whitespace-normalized matching is applied (CRLF and indentation differences ignored). " +
+                "If find matches multiple locations, the patch is rejected — provide more context to disambiguate. " +
+                "Always read_file first if you have not seen the file. " +
+                "After any code change, call run_build to verify the build still passes.",
+                Required("filename", "string", "Absolute file path — e.g., 'C:\\Projects\\MyApp\\Services\\UserService.cs'. Always pass the full absolute path that list_files or find_in_files returned; do not shorten to just the filename."),
+                Required("find", "string", "Exact text to find in the file (verbatim from read_file output)"),
+                Required("replace", "string", "Replacement text")));
+
+            // ── run_shell ────────────────────────────────────────────────────
+            tools.Add(MakeTool("run_shell",
+                "Execute a shell command and return its output. " +
+                "Commands run via powershell.exe with a 120-second timeout. " +
+                "Use this for git commands, one-off scripts, and operations no other tool covers. " +
+                "Do NOT use run_shell to list, search, or find files — use list_files for enumeration, " +
+                "find_in_files for content search across files, or grep_file for content search in a known file. " +
+                "Use run_build for build commands and run_tests for tests.",
+                Required("command", "string", "The shell command to execute")));
+
+            // ── grep_file ────────────────────────────────────────────────────
+            tools.Add(MakeTool("grep_file",
+                "Search a single file for lines matching a pattern (case-insensitive substring match). " +
+                "Returns matching lines with 1-based line numbers. Capped at 50 matches. " +
+                "Use grep_file to locate code, then read_file with a targeted range, then patch_file. " +
+                "Prefer grep_file + targeted read_file over sequential full-file reads.",
+                Required("pattern", "string", "Search pattern (case-insensitive substring match, not regex)"),
+                Required("filename", "string", "Absolute file path — e.g., 'C:\\Projects\\MyApp\\Services\\UserService.cs'. Always pass the full absolute path that list_files or find_in_files returned; do not shorten to just the filename."),
+                Optional("start_line", "integer", "1-based start line to restrict the search window"),
+                Optional("end_line", "integer", "1-based end line to restrict the search window")));
+
+            // ── find_in_files ────────────────────────────────────────────────
+            tools.Add(MakeTool("find_in_files",
+                "Search across multiple files by glob pattern for lines matching a text pattern. " +
+                "Returns filename:line:content for each hit, capped at 100 results. " +
+                "Use find_in_files when you need to know where something is used across the project. " +
+                "Use grep_file when you already know which file to search. " +
+                "Requires a content search pattern — cannot be used for bare file enumeration; use list_files for that.",
+                Required("pattern", "string", "Search pattern (case-insensitive substring match)"),
+                Required("glob", "string", "Glob pattern to match files (e.g., '*.cs', 'Services/*.cs')"),
+                Optional("start_line", "integer", "1-based start line to restrict the search window within each file"),
+                Optional("end_line", "integer", "1-based end line to restrict the search window within each file")));
+
+            // ── delete_file ──────────────────────────────────────────────────
+            tools.Add(MakeTool("delete_file",
+                "Delete a file from disk. Use only when explicitly asked to remove a file. " +
+                "Do not use delete_file speculatively — only when the task requires file removal.",
+                Required("filename", "string", "Absolute file path — e.g., 'C:\\Projects\\MyApp\\Services\\UserService.cs'. Always pass the full absolute path that list_files or find_in_files returned; do not shorten to just the filename.")));
+
+            // ── rename_file ──────────────────────────────────────────────────
+            tools.Add(MakeTool("rename_file",
+                "Rename or move a file on disk. The old file is closed in the editor and the new file is opened. " +
+                "Does not update references in other files — use find_in_files + patch_file to update imports.",
+                Required("old_filename", "string", "Current absolute file path — e.g., 'C:\\Projects\\MyApp\\Services\\OldName.cs'. Always pass the full absolute path that list_files or find_in_files returned."),
+                Required("new_filename", "string", "New absolute file path — e.g., 'C:\\Projects\\MyApp\\Services\\NewName.cs'.")));
+
+            // ── diff_file ────────────────────────────────────────────────────
+            tools.Add(MakeTool("diff_file",
+                "Show all changes made to a file during this conversation as a unified-style diff. " +
+                "Use diff_file after multiple patches to verify cumulative changes before confirming task completion. " +
+                "Information-gathering only — does not modify files.",
+                Required("filename", "string", "Absolute file path — e.g., 'C:\\Projects\\MyApp\\Services\\UserService.cs'. Always pass the full absolute path that list_files or find_in_files returned; do not shorten to just the filename.")));
+
+            // ── run_tests ────────────────────────────────────────────────────
+            tools.Add(MakeTool("run_tests",
+                "Run dotnet test and return structured pass/fail results. " +
+                "Output is compact — only failed tests show details. " +
+                "Use run_tests after making changes to verify correctness. " +
+                "If tests fail, fix the code with patch_file and run_tests again.",
+                Optional("project", "string", "Project file name (e.g., 'MyProject.csproj'). Omit to run all tests."),
+                Optional("filter", "string", "Test filter expression (e.g., 'FullyQualifiedName~SomeTest' or 'ClassName.MethodName')")));
+
+            // ── scratchpad ───────────────────────────────────────────────────
+            tools.Add(MakeTool("scratchpad",
+                "Track your state across turns. Use to record your current goal, files being edited, " +
+                "status (PLANNING/PATCHING/BUILDING/DONE), last action, and next step. " +
+                "Format: Goal, Files, Status, Last, Next — one line each.",
+                Required("content", "string", "Scratchpad content for state tracking")));
+
+            // ── task_done ────────────────────────────────────────────────────
+            tools.Add(MakeTool("task_done",
+                "Signal that the current task is complete. " +
+                "EVERY task ends with task_done — this is the only valid way to finish. " +
+                "There is no exception for short tasks, simple questions, or single-file reads. " +
+                "After you have the answer, your final action MUST be task_done with the answer in the summary parameter. " +
+                "Do NOT type the final answer as prose and stop — that is not a completion, that is an abandoned task. " +
+                "For code-change tasks, emit task_done only when all steps are finished " +
+                "(code applied, build verified, tests passing) — do not emit mid-task. " +
+                "For read-only tasks (answering questions, searching, summarizing, looking up information), " +
+                "emit task_done as soon as you have the answer — " +
+                "do not continue probing, but also do not skip task_done.",
+                Optional("summary", "string",
+                    "Required for read-only tasks: place the actual answer to the user's question here. " +
+                    "For code-change tasks: brief summary of what was accomplished.")));
+
+            // ── recall_memory ─────────────────────────────────────────────────
+            tools.Add(MakeTool("recall_memory",
+                "Recall previously saved knowledge about a topic. Returns the content of a memory " +
+                "topic file. Use this when you need context about a project convention, debugging " +
+                "insight, or file purpose that was saved in a previous session. " +
+                "Call list_memory_topics first if you're not sure what topics are available.",
+                Required("topic", "string", "The topic slug to recall (e.g., 'auth-system', 'build-quirks')")));
+
+            // ── save_memory ──────────────────────────────────────────────────
+            tools.Add(MakeTool("save_memory",
+                "Save project knowledge that should persist across sessions. Use this when you " +
+                "discover a project convention, resolve a tricky bug, learn a file's purpose, or " +
+                "identify a pattern that would be useful to remember. Topics are overwritten if " +
+                "they already exist — include all relevant content, not just additions.",
+                Required("topic", "string", "Slug for the topic (e.g., 'auth-system', 'build-quirks')"),
+                Required("content", "string", "The knowledge to save — conventions, insights, patterns"),
+                Optional("description", "string", "Short one-line description for the memory index")));
+
+            // ── list_memory_topics ────────────────────────────────────────────
+            tools.Add(MakeTool("list_memory_topics",
+                "List all available memory topics with their descriptions from the memory index. " +
+                "Use this to see what knowledge has been saved in previous sessions before " +
+                "recalling a specific topic."));
+
+            // ── list_files ───────────────────────────────────────────────────
+            tools.Add(MakeTool("list_files",
+                "List files matching a glob pattern under the project root. Returns absolute paths, " +
+                "alphabetically sorted, capped at 200 results. " +
+                "Use this to enumerate files by name or extension when you need to know what files exist " +
+                "before reading them — for example, before read_file when you are unsure of the exact filename, " +
+                "or to survey all files of a given type. " +
+                "Skips build artifacts (bin, obj) and version control metadata (.vs, .git, node_modules, packages) automatically. " +
+                "Do NOT use run_shell with dir/ls/find just to enumerate files — use list_files instead.",
+                Required("glob", "string",
+                    "Glob pattern to match files (e.g., '*.cs' for all C# files, 'Services/*.cs' for files in Services/, " +
+                    "'Test*.cs' for files starting with Test). Required — always specify a pattern."),
+                Optional("recursive", "boolean",
+                    "If true (default), searches all subdirectories. If false, only the project root directory.")));
+
+            // ── run_build ────────────────────────────────────────────────────
+            tools.Add(MakeTool("run_build",
+                "Run the project build command. Call this after ANY code change (patch_file or create_file). " +
+                "The build command is auto-detected: VSIX projects (detected via .vsixmanifest) use " +
+                "MSBuild with /p:DeployExtension=false; other projects use dotnet build. " +
+                "No parameters needed — the system knows the correct build command."));
+
+            return tools;
+        }
+
+        // ── Helpers ──────────────────────────────────────────────────────────
+
+        private static JObject MakeTool(string name, string description, params JProperty[] properties)
+        {
+            var requiredArr = new JArray();
+            var propsObj = new JObject();
+
+            foreach (var prop in properties)
+            {
+                propsObj.Add(prop);
+                // Properties whose description does not start with "[optional]" are required
+                var propObj = (JObject)prop.Value;
+                if (propObj["description"]?.ToString().StartsWith("[optional]") != true)
+                {
+                    requiredArr.Add(prop.Name);
+                }
+            }
+
+            var parameters = new JObject
+            {
+                ["type"] = "object",
+                ["properties"] = propsObj
+            };
+
+            if (requiredArr.Count > 0)
+            {
+                parameters["required"] = requiredArr;
+            }
+
+            // additionalProperties = false for strict schema compliance
+            parameters["additionalProperties"] = false;
+
+            return new JObject
+            {
+                ["type"] = "function",
+                ["function"] = new JObject
+                {
+                    ["name"] = name,
+                    ["description"] = description,
+                    ["parameters"] = parameters
+                }
+            };
+        }
+
+        private static JProperty Required(string name, string type, string description)
+        {
+            return new JProperty(name, new JObject
+            {
+                ["type"] = type,
+                ["description"] = description
+            });
+        }
+
+        private static JProperty Optional(string name, string type, string description)
+        {
+            return new JProperty(name, new JObject
+            {
+                ["type"] = type,
+                ["description"] = "[optional] " + description
+            });
+        }
+    }
+}

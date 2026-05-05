@@ -6,7 +6,7 @@ using System.Collections.Generic;
 
 namespace DevMind
 {
-    internal class FileContentCache
+    public class FileContentCache
     {
         private readonly Dictionary<string, CachedFile> _cache = new Dictionary<string, CachedFile>(StringComparer.OrdinalIgnoreCase);
 

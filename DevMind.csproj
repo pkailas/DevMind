@@ -51,6 +51,11 @@
     <Reference Include="System.Net.Http" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="DevMind.Core\DevMind.Core.csproj" />
+    <Compile Remove="DevMind.Core\**;DevMind.Cli\**" />
+  </ItemGroup>
+
   <!-- Import SDK targets to set TargetName, OutDir, IntermediateOutputPath, etc. -->
   <Import Project="Sdk.targets" Sdk="Microsoft.NET.Sdk" />
 
@@ -70,7 +75,7 @@
       <CurrentCounter Condition="'$(CurrentCounter)' == ''">0</CurrentCounter>
       <NextCounter>$([MSBuild]::Add($(CurrentCounter), 1))</NextCounter>
       <NextCounter Condition="'$([System.Convert]::ToInt32($(NextCounter)))' &gt; '65535'">1</NextCounter>
-      <VsixVersion>6.0.$(NextCounter)</VsixVersion>
+      <VsixVersion>7.0.$(NextCounter)</VsixVersion>
     </PropertyGroup>
     <WriteLinesToFile File="$(BuildCounterFile)" Lines="$(NextCounter)" Overwrite="true" />
     <XmlPoke XmlInputPath="$(MSBuildProjectDirectory)\source.extension.vsixmanifest"
@@ -123,7 +128,7 @@
     <PropertyGroup>
       <ManifestCounter Condition="'@(ManifestCounterLines)' != ''">@(ManifestCounterLines)</ManifestCounter>
       <ManifestCounter Condition="'$(ManifestCounter)' == ''">0</ManifestCounter>
-      <VsixVersion Condition="'$(VsixVersion)' == ''">6.0.$(ManifestCounter)</VsixVersion>
+      <VsixVersion Condition="'$(VsixVersion)' == ''">7.0.$(ManifestCounter)</VsixVersion>
     </PropertyGroup>
     <XmlPoke XmlInputPath="$(MSBuildProjectDirectory)\source.extension.vsixmanifest"
              Namespaces="&lt;Namespace Prefix='vs' Uri='http://schemas.microsoft.com/developer/vsx-schema/2011'/&gt;"

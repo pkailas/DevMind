@@ -1,4 +1,4 @@
-// File: IAgenticHost.cs  v1.7.0
+// File: IAgenticHost.cs  v7.3
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System.Collections.Generic;
@@ -16,15 +16,6 @@ namespace DevMind
     public interface IAgenticHost
     {
         /// <summary>
-        /// Apply a PATCH block to a file. Returns the resolved file path on
-        /// success, or null if the patch failed (FIND text not found, fuzzy
-        /// match rejected, ambiguous match, file not found, etc.).
-        /// The patchContent parameter is the full PATCH block text including
-        /// the "PATCH filename" header line and all FIND:/REPLACE: pairs.
-        /// </summary>
-        Task<string> ApplyPatchAsync(string patchContent);
-
-        /// <summary>
         /// Run a shell command and capture its output.
         /// Returns the exit code and combined stdout+stderr output.
         /// Uses the current terminal working directory.
@@ -37,7 +28,13 @@ namespace DevMind
         /// in the VS editor after saving if OpenFileAfterGeneration is enabled.
         /// Returns the full path of the saved file.
         /// </summary>
-        Task<string> SaveFileAsync(string fileName, string content);
+        Task<string> SaveFileAsync(string fileName, string content, bool fromToolCall = false);
+
+        /// <summary>
+        /// Append content to the end of an existing file. If the file does not
+        /// exist, it will be created. Returns the full path on success, null on failure.
+        /// </summary>
+        Task<string> AppendFileAsync(string fileName, string content);
 
         /// <summary>
         /// Load the content of a file into context for the LLM.
@@ -54,20 +51,6 @@ namespace DevMind
         /// dispatcher marshalling).
         /// </summary>
         void AppendOutput(string text, OutputColor color = OutputColor.Normal);
-
-        /// <summary>
-        /// Resubmit a prompt to the LLM. Used for auto-READ resubmission
-        /// and retry-with-correction. Returns the raw response text.
-        /// The caller (executor) will classify the new response.
-        /// </summary>
-        Task<string> ResubmitPromptAsync(string prompt);
-
-        /// <summary>
-        /// Show a confirmation dialog to the user and return their choice.
-        /// Used for AskUser actions (e.g., fuzzy patch confirmation when
-        /// not in agentic mode).
-        /// </summary>
-        Task<bool> ShowConfirmationAsync(string message);
 
         /// <summary>
         /// Update the scratchpad content in LlmClient.
@@ -129,7 +112,7 @@ namespace DevMind
         /// <see cref="PatchResolveResult"/> with confidence and match data,
         /// or null if resolution failed.
         /// </summary>
-        Task<PatchResolveResult> ResolvePatchAsync(string patchContent);
+        Task<PatchResolveResult> ResolvePatchAsync(string patchContent, bool fromToolCall = false);
 
         /// <summary>
         /// Applies a previously resolved PATCH. Returns the full path on success, null on failure.
@@ -144,5 +127,37 @@ namespace DevMind
         Task<List<int>> ShowDiffPreviewAsync(
             List<PatchResolveResult> resolvedPatches,
             CancellationToken cancellationToken);
+
+        /// <summary>
+        /// Load a memory topic file and return its content.
+        /// Returns the topic content, or an error message if not found.
+        /// </summary>
+        Task<string> RecallMemoryAsync(string topic);
+
+        /// <summary>
+        /// Save content to a memory topic file for cross-session persistence.
+        /// Returns a confirmation message.
+        /// </summary>
+        Task<string> SaveMemoryAsync(string topic, string content, string description);
+
+        /// <summary>
+        /// List all available memory topics with their descriptions.
+        /// Returns a formatted list of topics.
+        /// </summary>
+        Task<string> ListMemoryTopicsAsync();
+
+        /// <summary>
+        /// Enumerates files matching a glob pattern under the project root.
+        /// Returns absolute paths, alphabetically sorted, capped at 200 results.
+        /// Skips bin/, obj/, .vs/, .git/, node_modules/, packages/ directories.
+        /// </summary>
+        /// <param name="glob">Glob pattern (e.g., "*.cs", "Services/*.cs"). Required.</param>
+        /// <param name="recursive">If true (default), descends into subdirectories.</param>
+        /// <param name="cancellationToken">Cancellation token.</param>
+        /// <returns>Newline-separated absolute paths, or "[no matches]" if none, with truncation marker if capped.</returns>
+        Task<string> ListFilesAsync(string glob, bool recursive, CancellationToken cancellationToken = default);
+
+        /// <summary>Returns the number of PATCH backups on the undo stack.</summary>
+        int GetPatchBackupCount();
     }
 }
