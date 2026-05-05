@@ -1,4 +1,4 @@
-// File: DevMindTools.cs  v2.0
+// File: DevMindTools.cs  v3.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Diagnostic policy: never write to Console.Out / Console.WriteLine in this file.
@@ -13,10 +13,11 @@
 //
 // Phase status:
 //   Phase A (complete): list_memory_topics implemented end-to-end.
-//   Phase B (this file): read_file, list_files, grep_file, find_in_files,
-//                        diff_file (session-baseline placeholder), recall_memory.
-//   Phase C: patch_file, create_file, append_file, delete_file, rename_file,
-//            save_memory (mutation tools).
+//   Phase B (complete): read_file, list_files, grep_file, find_in_files,
+//                       diff_file (now upgraded in Phase C), recall_memory.
+//   Phase C (this file): patch_file, create_file, append_file, delete_file,
+//                        rename_file, save_memory; diff_file upgraded to use
+//                        session-baseline _fileSnapshots in McpServices.
 //   Phase D: run_shell, run_build, run_tests (shell / streaming tools).
 
 using System;
@@ -356,10 +357,41 @@ internal sealed class DevMindTools
     public string DiffFile(
         [Description("Absolute file path.")] string filename)
     {
-        // Session-baseline snapshot tracking is established in Phase C when patch_file
-        // captures pre-patch content. Until then, no snapshots exist.
-        return $"diff_file: No session changes recorded for {Path.GetFileName(filename)} — " +
-               "patch tracking begins when patch_file is first used (Phase C).";
+        try
+        {
+            // Resolve the path — handle deleted files (they won't resolve via normal lookup)
+            string? fullPath = ResolveFilePath(filename);
+            if (fullPath == null)
+            {
+                // May be a deleted file — try constructing path directly
+                fullPath = Path.IsPathRooted(filename)
+                    ? filename
+                    : Path.Combine(_svc.WorkingDirectory, filename);
+            }
+
+            if (!_svc.TryGetSnapshot(fullPath, out string snapshot))
+                return $"diff_file: no session changes tracked for {Path.GetFileName(filename)} — " +
+                       "diff_file reflects changes since first read_file or patch_file call this session.";
+
+            // Current content: empty string if the file was deleted.
+            string current = File.Exists(fullPath)
+                ? File.ReadAllText(fullPath)
+                : string.Empty;
+
+            string normOld = snapshot.Replace("\r\n", "\n").Replace("\r", "\n");
+            string normNew = current.Replace("\r\n", "\n").Replace("\r", "\n");
+
+            if (string.Equals(normOld, normNew, StringComparison.Ordinal))
+                return $"diff_file: no changes detected in {Path.GetFileName(filename)}.";
+
+            string[] oldLines = normOld.Split('\n');
+            string[] newLines = normNew.Split('\n');
+            return DiffHelper.GenerateUnifiedDiff(Path.GetFileName(filename), oldLines, newLines);
+        }
+        catch (Exception ex)
+        {
+            return $"[diff_file error] {filename}: {ex.Message}";
+        }
     }
 
     [McpServerTool(Name = "recall_memory")]
@@ -381,7 +413,7 @@ internal sealed class DevMindTools
         return content;
     }
 
-    // ── Phase C stubs: mutation tools ────────────────────────────────────────
+    // ── Phase C: mutation tools ──────────────────────────────────────────────
 
     [McpServerTool(Name = "patch_file")]
     [Description(
@@ -393,7 +425,65 @@ internal sealed class DevMindTools
         [Description("Absolute file path.")] string filename,
         [Description("Exact text to find in the file (verbatim from read_file output).")] string find,
         [Description("Replacement text.")] string replace)
-        => throw new NotImplementedException("patch_file is implemented in Phase C.");
+    {
+        try
+        {
+            string? fullPath = ResolveFilePath(filename);
+            if (fullPath == null || !File.Exists(fullPath))
+                return BuildFileNotFoundMessage("patch_file", filename);
+
+            string fileNameOnly = Path.GetFileName(fullPath) ?? filename;
+
+            // Capture pre-patch baseline for diff_file.
+            _svc.TrySnapshot(fullPath);
+
+            // Read file content preserving encoding (matches what PatchEngine writes back).
+            var (content, encoding) = PatchEngine.ReadFilePreservingEncoding(fullPath);
+
+            // Build PATCH block. fromToolCall=true: PatchEngine skips fence stripping.
+            string patchInput = $"PATCH {fileNameOnly}\nFIND:\n{find}\nREPLACE:\n{replace}";
+
+            // Capture reporter output so we can return meaningful errors to the MCP client
+            // in addition to writing them to stderr.
+            var errorLog = new StringBuilder();
+            Action<string, OutputColor> reporter = (text, color) =>
+            {
+                Console.Error.Write(text);
+                if (color == OutputColor.Error || color == OutputColor.Warning)
+                    errorLog.Append(text);
+            };
+
+            var resolved = PatchEngine.ResolvePatch(
+                patchInput, fullPath, fileNameOnly, content, encoding,
+                fromToolCall: true, reporter: reporter);
+
+            if (resolved == null)
+            {
+                string detail = errorLog.Length > 0
+                    ? errorLog.ToString().Trim()
+                    : "find text not found or is ambiguous — read_file first and copy the text verbatim";
+                return $"patch_file: failed — {detail}";
+            }
+
+            string backupDir = Path.Combine(Path.GetTempPath(), "DevMind", "McpServer");
+            var applyResult  = PatchEngine.ApplyPatch(resolved, backupDir);
+            if (!applyResult.Success)
+                return $"patch_file: write failed — {applyResult.Error}";
+
+            // Update cache with post-patch content so subsequent read_file is consistent.
+            _svc.FileCache.Store(fileNameOnly, applyResult.UpdatedContent);
+            _svc.FilesRead.Add(fileNameOnly);
+
+            string badge = resolved.Confidence == PatchConfidence.Fuzzy
+                ? " (fuzzy match — verify with diff_file)"
+                : "";
+            return $"patch_file: applied to {fullPath}{badge}";
+        }
+        catch (Exception ex)
+        {
+            return $"[patch_file error] {filename}: {ex.Message}";
+        }
+    }
 
     [McpServerTool(Name = "create_file")]
     [Description(
@@ -402,7 +492,34 @@ internal sealed class DevMindTools
     public string CreateFile(
         [Description("Absolute file path.")] string filename,
         [Description("The complete content for the new file.")] string content)
-        => throw new NotImplementedException("create_file is implemented in Phase C.");
+    {
+        try
+        {
+            string fullPath = Path.IsPathRooted(filename)
+                ? filename
+                : Path.Combine(_svc.WorkingDirectory, filename);
+
+            if (File.Exists(fullPath))
+                return $"create_file: file already exists — {fullPath}. Use patch_file to edit it.";
+
+            string? dir = Path.GetDirectoryName(fullPath);
+            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                Directory.CreateDirectory(dir);
+
+            File.WriteAllText(fullPath, content, System.Text.Encoding.UTF8);
+
+            int lineCount = content.Split('\n').Length;
+            string fileNameOnly = Path.GetFileName(fullPath) ?? filename;
+            _svc.FileCache.Store(fileNameOnly, content);
+            _svc.FilesRead.Add(fileNameOnly);
+
+            return $"create_file: created {fullPath} ({lineCount} lines)";
+        }
+        catch (Exception ex)
+        {
+            return $"[create_file error] {filename}: {ex.Message}";
+        }
+    }
 
     [McpServerTool(Name = "append_file")]
     [Description(
@@ -410,14 +527,75 @@ internal sealed class DevMindTools
     public string AppendFile(
         [Description("Absolute file path.")] string filename,
         [Description("Content to append to the end of the file.")] string content)
-        => throw new NotImplementedException("append_file is implemented in Phase C.");
+    {
+        try
+        {
+            string fullPath = Path.IsPathRooted(filename)
+                ? filename
+                : Path.Combine(_svc.WorkingDirectory, filename);
+
+            // Snapshot the original content before first mutation (for diff_file).
+            if (File.Exists(fullPath))
+                _svc.TrySnapshot(fullPath);
+
+            bool existed = File.Exists(fullPath);
+
+            string? dir = Path.GetDirectoryName(fullPath);
+            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                Directory.CreateDirectory(dir);
+
+            // Ensure a newline separator between existing content and appended content.
+            if (existed)
+            {
+                string existing = File.ReadAllText(fullPath);
+                string separator = existing.Length > 0 && !existing.EndsWith("\n") ? "\n" : "";
+                File.WriteAllText(fullPath, existing + separator + content, System.Text.Encoding.UTF8);
+            }
+            else
+            {
+                File.WriteAllText(fullPath, content, System.Text.Encoding.UTF8);
+            }
+
+            string fileNameOnly = Path.GetFileName(fullPath) ?? filename;
+            _svc.FileCache.Invalidate(fileNameOnly);
+
+            return existed
+                ? $"append_file: appended to {fullPath}"
+                : $"append_file: created {fullPath}";
+        }
+        catch (Exception ex)
+        {
+            return $"[append_file error] {filename}: {ex.Message}";
+        }
+    }
 
     [McpServerTool(Name = "delete_file")]
     [Description(
         "Delete a file from disk. Use only when explicitly asked to remove a file.")]
     public string DeleteFile(
         [Description("Absolute file path.")] string filename)
-        => throw new NotImplementedException("delete_file is implemented in Phase C.");
+    {
+        try
+        {
+            string? fullPath = ResolveFilePath(filename);
+            if (fullPath == null || !File.Exists(fullPath))
+                return BuildFileNotFoundMessage("delete_file", filename);
+
+            // Snapshot before deleting so diff_file can show the removal.
+            _svc.TrySnapshot(fullPath);
+
+            File.Delete(fullPath);
+
+            string fileNameOnly = Path.GetFileName(fullPath) ?? filename;
+            _svc.FileCache.Invalidate(fileNameOnly);
+
+            return $"delete_file: deleted {fullPath}";
+        }
+        catch (Exception ex)
+        {
+            return $"[delete_file error] {filename}: {ex.Message}";
+        }
+    }
 
     [McpServerTool(Name = "rename_file")]
     [Description(
@@ -426,7 +604,44 @@ internal sealed class DevMindTools
     public string RenameFile(
         [Description("Current absolute file path.")] string old_filename,
         [Description("New absolute file path.")] string new_filename)
-        => throw new NotImplementedException("rename_file is implemented in Phase C.");
+    {
+        try
+        {
+            string? oldPath = ResolveFilePath(old_filename);
+            if (oldPath == null || !File.Exists(oldPath))
+                return BuildFileNotFoundMessage("rename_file", old_filename);
+
+            // Resolve new path: absolute → use as-is; relative → WorkingDirectory.
+            string newPath = Path.IsPathRooted(new_filename)
+                ? new_filename
+                : Path.Combine(_svc.WorkingDirectory, new_filename);
+
+            if (File.Exists(newPath))
+                return $"rename_file: destination already exists — {newPath}. Delete it first or choose a different name.";
+
+            // Snapshot the old file before the rename so diff history is preserved.
+            _svc.TrySnapshot(oldPath);
+
+            string? newDir = Path.GetDirectoryName(newPath);
+            if (!string.IsNullOrEmpty(newDir) && !Directory.Exists(newDir))
+                Directory.CreateDirectory(newDir);
+
+            File.Move(oldPath, newPath);
+
+            // Move snapshot from old path to new path.
+            _svc.MoveSnapshot(oldPath, newPath);
+
+            // Invalidate old cache entry; new entry will be populated on next read.
+            string oldFileNameOnly = Path.GetFileName(oldPath) ?? old_filename;
+            _svc.FileCache.Invalidate(oldFileNameOnly);
+
+            return $"rename_file: {oldPath} → {newPath}";
+        }
+        catch (Exception ex)
+        {
+            return $"[rename_file error] {old_filename}: {ex.Message}";
+        }
+    }
 
     [McpServerTool(Name = "save_memory")]
     [Description(
@@ -436,7 +651,19 @@ internal sealed class DevMindTools
         [Description("Slug for the topic (e.g., 'auth-system', 'build-quirks').")] string topic,
         [Description("The knowledge to save — conventions, insights, patterns.")] string content,
         [Description("Short one-line description for the memory index.")] string? description = null)
-        => throw new NotImplementedException("save_memory is implemented in Phase C.");
+    {
+        try
+        {
+            _svc.Memory.SaveTopic(topic, content, description);
+            string sanitized = MemoryManager.SanitizeSlug(topic);
+            string desc      = string.IsNullOrEmpty(description) ? sanitized : description;
+            return $"save_memory: saved topic [{sanitized}] — {desc}";
+        }
+        catch (Exception ex)
+        {
+            return $"[save_memory error] {topic}: {ex.Message}";
+        }
+    }
 
     // ── Phase D stubs: shell / streaming tools ───────────────────────────────
 
