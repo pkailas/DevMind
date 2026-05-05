@@ -1,4 +1,4 @@
-// File: Program.cs  v1.0
+// File: Program.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // DevMind.McpServer — MCP server exposing DevMind.Core capabilities as MCP tools.
@@ -24,7 +24,19 @@ for (int i = 0; i < args.Length - 1; i++)
 {
     if (string.Equals(args[i], "--dir", StringComparison.OrdinalIgnoreCase))
     {
-        workingDirectory = args[i + 1];
+        string rawValue = args[i + 1];
+
+        if (!string.IsNullOrWhiteSpace(rawValue) && !System.IO.Path.IsPathRooted(rawValue))
+        {
+            Console.Error.WriteLine(
+                $"[McpServer] Error: --dir must be an absolute path. Received: '{rawValue}'. " +
+                "Common cause: backslash escape issues in argument passing (e.g., MCP Inspector " +
+                "on Windows may strip 'C:\\' before \\t). Try forward slashes (C:/path), " +
+                "doubled backslashes (C:\\\\path), or wrapping the path in quotes.");
+            Environment.Exit(2);
+        }
+
+        workingDirectory = rawValue;
         break;
     }
 }
