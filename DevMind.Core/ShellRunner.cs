@@ -1,4 +1,4 @@
-// File: ShellRunner.cs  v1.3
+// File: ShellRunner.cs  v1.4
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -63,9 +63,15 @@ namespace DevMind
             int timeoutSeconds = 120,
             IProgress<ShellOutputLine> onLine = null)
         {
-            bool usePowerShell = IsPowerShellAvailable();
+            // npm/npx/yarn/pnpm/bun are .cmd shims on Windows. When PowerShell spawns them it
+            // creates a child cmd.exe WITHOUT CreateNoWindow, which causes a visible console window
+            // and routes stdio to that window instead of our redirected pipes. Invoking cmd.exe
+            // directly keeps CreateNoWindow on the right process and captures output correctly.
+            bool forceCmdExe  = IsCmdShimCommand(command);
+            bool usePowerShell = !forceCmdExe && IsPowerShellAvailable();
             string shell = usePowerShell ? "powershell.exe" : "cmd.exe";
 
+            // cmd.exe supports && natively; only rewrite for PowerShell.
             if (usePowerShell)
                 command = command.Replace(" && ", "; ");
 
@@ -188,6 +194,24 @@ namespace DevMind
                 return File.Exists(ps);
             }
             catch { return false; }
+        }
+
+        private static readonly HashSet<string> _cmdShims = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "npm", "npx", "yarn", "pnpm", "bun"
+        };
+
+        /// <summary>
+        /// Returns true when the command's first token is a known Windows .cmd shim.
+        /// These must be invoked via cmd.exe directly — not via PowerShell — to prevent
+        /// PowerShell from spawning an unconcealed child cmd.exe that captures stdio.
+        /// </summary>
+        private static bool IsCmdShimCommand(string command)
+        {
+            if (string.IsNullOrEmpty(command)) return false;
+            int space = command.IndexOf(' ');
+            string first = space < 0 ? command : command.Substring(0, space);
+            return _cmdShims.Contains(first);
         }
 
         /// <summary>
