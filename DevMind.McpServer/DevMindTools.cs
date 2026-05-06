@@ -1072,11 +1072,37 @@ internal sealed class DevMindTools
         }
         else
         {
-            // Non-VSIX — use dotnet build.
+            // Detect Node/TypeScript: search for package.json.
+            string packageJsonPath = Path.Combine(wd, "package.json");
+            if (File.Exists(packageJsonPath))
+            {
+                bool isBun = File.Exists(Path.Combine(wd, "bun.lockb")) || 
+                             File.Exists(Path.Combine(wd, "bunfig.toml"));
+                
+                if (!isBun)
+                {
+                    try
+                    {
+                        string content = File.ReadAllText(packageJsonPath);
+                        if (content.Contains("\"packageManager\": \"bun@"))
+                        {
+                            isBun = true;
+                        }
+                    }
+                    catch { }
+                }
+                
+                return isBun ? "bun run build" : "npm run build";
+            }
+
+            // .NET project — use dotnet build.
             string? solution = FindSolutionFile(wd);
-            return solution != null
-                ? $"dotnet build \"{solution}\""
-                : $"dotnet build \"{wd}\"";
+            if (solution != null)
+            {
+                return $"dotnet build \"{solution}\"";
+            }
+
+            throw new Exception("Could not auto-detect a build system. No .vsixmanifest, package.json, or .sln/.slnx file found.");
         }
     }
 
