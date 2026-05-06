@@ -6,7 +6,7 @@ title: Stage 11 Tech Reference
 # verified_date reflects the original research session (2026-05-05).
 # The Bun+Ink spike section was verified 2026-05-06 — see that section's annotation.
 verified_date: "2026-05-05"
-last_updated: "2026-05-06"
+last_updated: "2026-05-06"  # updated 2026-05-06 with Phase A reasoning_content + per-chunk-usage findings in §5
 revalidate_after: "2026-11-05"
 tech_versions:
   bun: "1.3.13"              # confirmed on Beast, spike 2026-05-06
@@ -244,7 +244,7 @@ _These are observations, not source-grounded claims. Marked LOW confidence unles
 
 ## 5. OpenAI-Compatible API Gotchas for Local llama-server
 
-*Last verified: 2026-05-05 (research) + prior Stage 10 work (date unknown) · Revalidate: 2026-11-05*
+*Last verified: 2026-05-05 (research) + 2026-05-06 (Phase A first contact: empirical findings on Gemma 4 reasoning_content and per-chunk usage) · Revalidate: 2026-11-05*
 
 ### The baseURL forwarding bug pattern
 
@@ -275,6 +275,8 @@ Endpoint: `http://10.0.0.15:8080/v1`
 **Active model**: Gemma 4 31B Dense Q8_0 at 131K context. Served by ik_llama.cpp's llama-server.  
 - Model uses OpenAI tool-call format when tools are registered.
 - Some models (Gemma 4) emit completion as a `task_done` tool call with a `summary` parameter rather than a text DONE directive — the DevMind WPF extension handles this via `ToolCallMapper`. The Ink shell will need the same mapping.
+- **Gemma 4 chain-of-thought lives in `delta.reasoning_content`, NOT `delta.content`.** Discovered Phase A 2026-05-06 (see DevMindShell `docs/Stage11-PhaseA-Summary.md`). Verbatim raw SSE confirms: while reasoning, the model emits `{"delta":{"reasoning_content":"..."}}` chunks; only after reasoning concludes does it emit `{"delta":{"content":"..."}}`. Clients must extract both fields. With small `max_tokens` (e.g. 10) the model can spend the entire budget reasoning and emit zero visible content — set generous max_tokens (default 512) for short responses, or expect empty content occasionally. **HIGH** confidence.
+- **Per-chunk usage info, not final-only.** Real OpenAI emits a single usage chunk at the end when `stream_options.include_usage: true`. ik_llama.cpp emits an updated usage object on every chunk during streaming. Use the last value seen, ignore intermediate ones. Discovered Phase A 2026-05-06. **HIGH** confidence.
 
 ### Streaming response format
 
