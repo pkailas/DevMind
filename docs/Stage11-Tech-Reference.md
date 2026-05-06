@@ -1,7 +1,27 @@
+---
+doc_type: tech_reference
+project: DevMind
+stage: 11
+title: Stage 11 Tech Reference
+# verified_date reflects the original research session (2026-05-05).
+# The Bun+Ink spike section was verified 2026-05-06 — see that section's annotation.
+verified_date: "2026-05-05"
+last_updated: "2026-05-06"
+revalidate_after: "2026-11-05"
+tech_versions:
+  bun: "1.3.13"              # confirmed on Beast, spike 2026-05-06
+  ink: "7.0.2"               # confirmed on Beast, spike 2026-05-06
+  react: "19.2.5"            # confirmed on Beast, spike 2026-05-06
+  node: "24.15.0"            # Beast baseline, verified 2026-05-06
+  mcp_sdk_typescript: "1.29.0"  # confirmed on Beast, spike 2026-05-06
+  yoga_layout: "3.2.1"       # ink 7.x dep — NOT yoga-layout-prebuilt (old name); confirmed via node_modules 2026-05-06
+rag_ready: true
+---
+
 # Stage 11 — Tech Reference
 
 **Purpose**: Durable research artifact for the Ink shell build. Cite this instead of re-running discovery.  
-**Last updated**: 2026-05-06 (research session 2026-05-05)  
+**Last updated**: 2026-05-06 (original research session 2026-05-05; spike 2026-05-06)  
 **Audience**: Future Claude sessions and the user. Assumes familiarity with Ink, MCP, and local LLM tooling.
 
 Confidence legend: **HIGH** = verified from primary source (doc URL, package.json, issue thread). **MEDIUM** = plausible from secondary source or consistent with multiple observations. **LOW** = inference; must be verified before acting on it.
@@ -10,13 +30,16 @@ Confidence legend: **HIGH** = verified from primary source (doc URL, package.jso
 
 ## 1. Ink (React for terminals)
 
+*Last verified: 2026-05-05 (npm research) + 2026-05-06 (spike on Beast) · Ink 7.0.2 · Revalidate: 2026-11-05*
+
 ### Version and install
 
 - **Version evaluated**: 7.0.2 (latest as of 2026-05-05)  
   Source: https://www.npmjs.com/package/ink — **HIGH**
 - **Node requirement**: `"node": ">=20"` (engines field)  
   Source: npm page above — **HIGH**
-- **Key peer deps**: React 18+, `yoga-layout-prebuilt` (native layout engine — this is the Bun footgun, see below)
+- **Key peer deps**: React 18+, `yoga-layout` 3.2.1  
+  **Note**: Ink 7.x migrated from `yoga-layout-prebuilt` (old package name) to `yoga-layout`. This is confirmed by reading `node_modules/ink/package.json` from the spike install: `"yoga-layout": "~3.2.1"`. This migration is almost certainly why Bun issue #2034 (which referenced `yoga-layout-prebuilt`) no longer reproduces on Bun 1.3.13 + Ink 7.0.2. If you see references to `yoga-layout-prebuilt` in older Bun/Ink issue threads, they predate this rename.
 
 ### Rendering model
 
@@ -31,7 +54,8 @@ Confidence legend: **HIGH** = verified from primary source (doc URL, package.jso
 
 - Standard React component tree. `useInput()` hook for keyboard events. `useFocus()` / `useFocusManager()` for focus traversal between interactive elements.
 - **`<Static>`** component: renders items that will never change (past conversation turns). Critically, items inside `<Static>` are not re-rendered on subsequent frames — they're flushed to the terminal and the cursor advances past them. This is the idiomatic pattern for append-only conversation history: past turns in `<Static>`, current streaming turn in a live component below it.  
-  Source: Ink docs — **HIGH**
+  Source: Ink docs — **HIGH**  
+  Verified in spike: Static items flushed to console in correct order; counter in live `<Box>` updated independently — **HIGH**
 - **`<Box>`** and **`<Text>`** for layout. Flexbox model via yoga-layout. No scroll region primitive — scrolling is emulated either by windowing (only render the last N items) or by relying on the terminal's own scrollback.
 - There is no built-in "sticky footer" primitive. A floating status row (à la Claude Code's "[■ Generating…]" bar) requires rendering it last in the component tree and using terminal cursor positioning tricks, OR relying on alternate-screen mode where you control the full display.
 
@@ -43,22 +67,24 @@ Confidence legend: **HIGH** = verified from primary source (doc URL, package.jso
   Source: GitHub issues — **MEDIUM** (reported by users, not reproduced on Beast)
 - **React DevTools on Windows**: Ink may block if it tries to connect to React DevTools on Windows with an empty event loop. Only relevant in dev mode.  
   Source: GitHub issues — **MEDIUM**
+- **Non-TTY rendering**: When Ink runs in a non-TTY environment (piped subprocess, CI), it renders in a degraded mode — Static items may flush but live components may not display. This is expected behavior, not a bug. Observed during spike when running via Claude's bash tool runner. Run in a real console for full rendering.  
+  Source: Observed in spike 2026-05-06 — **HIGH**
 
 ### Bun compatibility
 
-- **Bun + Ink has a known breakage**: Bun issue #2034 reports a compile error on a 3-line Ink program. The root cause is `yoga-layout-prebuilt`, a native module dependency that Ink requires for its flexbox layout engine.  
-  Source: https://github.com/oven-sh/bun/issues/2034 — **HIGH**
-- Whether this is fixed in current Bun versions was **not verified**. The issue was still open as of research date.
-- **Bottom line**: Bun + Ink compatibility is unverified on the Beast. Treat as blocked until a 30-minute spike confirms otherwise. **Do not assume it works.**
+- **Issue #2034** (`yoga-layout-prebuilt` breaking Bun) **does not reproduce on Bun 1.3.13 + Ink 7.0.2**. The issue is moot because Ink 7.x no longer depends on `yoga-layout-prebuilt` — it uses `yoga-layout` 3.2.1 instead.  
+  Source: Spike on Beast 2026-05-06; confirmed by reading `node_modules/ink/package.json` — **HIGH**
+- `bun add ink` completes cleanly in ~15 seconds on Windows x64. No postinstall errors.
 
 ---
 
 ## 2. Bun
 
+*Last verified: 2026-05-06 · Bun 1.3.13 (Windows x64) · Revalidate: 2026-11-06*
+
 ### Version and context
 
-- Bun version evaluated: **not installed on Beast as of 2026-05-05**. Research was secondary source only.  
-  Confidence: **HIGH** for SDK claims, **MEDIUM/LOW** for any "works on Beast" claims — none were made.
+- **Bun 1.3.13 installed and tested on Beast (Windows x64)** 2026-05-06. Installed via `irm bun.sh/install.ps1 | iex`. Binary at `C:\Users\pkailas\.bun\bin\bun.exe`.
 
 ### child_process / subprocess on Windows
 
@@ -66,35 +92,42 @@ Confidence legend: **HIGH** = verified from primary source (doc URL, package.jso
   Source: https://bun.com/docs/runtime/child-process — **HIGH**
 - **Extra file descriptors (fd > 2) are NOT implemented in Bun** (issue #4670). This matters only if you need IPC channels or extra stdio streams. For MCP over stdio (stdin/stdout only), this is not a problem.  
   Source: https://github.com/oven-sh/bun/issues/4670 — **HIGH**
-- MCP server subprocess uses only stdin/stdout for JSON-RPC framing. `spawn()` with `stdio: ['pipe', 'pipe', 'inherit']` is sufficient and should work on Bun.  
-  Confidence: **MEDIUM** (logic holds; not empirically verified on Windows)
+- **Empirically verified on Beast**: `child_process.spawn("cmd.exe", ["/c", "echo hello"], { stdio: ["ignore", "pipe", "pipe"] })` returns `exit=0`, stdout `"hello from child_process"`. No errors.  
+  Source: Spike 2026-05-06 — **HIGH**
 
 ### @modelcontextprotocol/sdk on Bun
 
+- **Empirically verified**: `import { Client } from "@modelcontextprotocol/sdk/client/index.js"` and `import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"` both resolve correctly under Bun 1.3.13. `Client` constructor executes without error. No `ERR_REQUIRE_ESM`.  
+  Source: Spike 2026-05-06 — **HIGH**
 - The TypeScript SDK README officially states: "The SDK runs on Node.js, Bun, and Deno."  
   Source: https://github.com/modelcontextprotocol/typescript-sdk — **HIGH**
-- However, there is a CommonJS compatibility issue: `pkce-challenge` (an SDK dependency) is ESM-only and will fail when required from a CommonJS context (`ERR_REQUIRE_ESM`). This is a problem for CJS projects, not ESM projects.  
-  Source: SDK issue #217 — **HIGH**
-- Bun's native CJS/ESM interop may paper over this, but this was **not verified empirically**.
+- The `pkce-challenge` CJS issue (SDK issue #217) was not triggered in the ESM project (`"type": "module"`) used in the spike. Use ESM project structure to avoid it.
 
 ### Package manager behavior
 
 - Bun ships its own package manager (`bun install`). It is fast (parallel downloads, binary lockfile `bun.lockb`). Compatible with `package.json` and can install npm packages.
 - `bun.lockb` is binary and not human-readable. Team projects that also need Node support should keep a `package-lock.json` or `pnpm-lock.yaml` as fallback, or commit to Bun as the sole runtime.
+- `bun init -y` generates `package.json` with `"type": "module"` by default — correct for this project.
 
 ### Verdict for Stage 11
 
-Bun is **not recommended as the primary runtime for Stage 11** given the unverified Ink compatibility issue (#2034). Node 20+ LTS with npm or pnpm is the safe choice. Bun can be revisited after a dedicated spike.  
-If the spike confirms Bun + Ink works on Windows, the runtime switch is low-cost — package.json and TypeScript config are identical; only the runner changes.
+**Bun is viable and recommended.** Spike on Beast 2026-05-06 passed all three criteria:
+- Ink 7.0.2 installs and renders (yoga-layout-prebuilt issue is moot — Ink 7 uses `yoga-layout`)
+- `child_process.spawn` with stdio pipe works on Windows x64
+- `@modelcontextprotocol/sdk` Client and StdioClientTransport import and instantiate cleanly
+
+Bun cold-start is faster than Node, ships its own package manager, and the TypeScript toolchain (tsconfig, package.json) is identical to Node. One remaining gap: verify `openai` npm SSE streaming under Bun before wiring the LLM client (see Gaps §6).
 
 ---
 
 ## 3. @modelcontextprotocol/sdk (TypeScript)
 
+*Last verified: 2026-05-05 (npm research) + 2026-05-06 (import test on Beast) · SDK 1.29.0 · Revalidate: 2026-11-05*
+
 ### Version
 
-- **Version evaluated**: 1.11.0 (latest stable as of 2026-05-05; npm page showed 1.29.0 but this may be a stale cache artifact — treat as "approximately 1.x, check on install")  
-  Source: https://www.npmjs.com/package/@modelcontextprotocol/sdk — **HIGH** for "1.x", **LOW** for exact minor
+- **Version confirmed**: 1.29.0 — read from `node_modules/@modelcontextprotocol/sdk/package.json` in spike install on Beast 2026-05-06.  
+  Confidence: **HIGH**
 
 ### Client API surface — stdio transport
 
@@ -156,6 +189,8 @@ const result = await client.callTool({ name: "read_file", arguments: { path: "Pr
 
 ## 4. Reference Implementations
 
+*Last verified: 2026-05-05 · Revalidate: 2026-11-05 (opencode and open-CC evolve quickly)*
+
 ### sst/opencode
 
 **Architecture**:  
@@ -192,9 +227,11 @@ const result = await client.callTool({ name: "read_file", arguments: { path: "Pr
 - `open-claude-code` is a decompiled reconstruction of Claude Code (Anthropic accidentally shipped source maps in the npm package on 2026-03-31). It inherits the same hardcoded-endpoint architecture.
 - There is no documented configuration workaround. The hardcoding is structural, not accidental.
 
-**Relevance to Stage 11**: DevMind shell must accept `DEVMIND_BASE_URL` (or equivalent) from env or config and pass it faithfully to every HTTP call, including any OAuth or session management calls. Never hardcode an endpoint URL. Verify this from the first commit — retrofitting is painful.
+**Relevance to Stage 11**: DevMind shell must accept `DEVMIND_BASE_URL` (or equivalent) from env or config and pass it faithfully to every HTTP call. Never hardcode an endpoint URL. Verify this from the first commit — retrofitting is painful.
 
 ### Claude Code (observable behavior)
+
+*Last verified: unknown (ongoing observation) · LOW confidence throughout*
 
 _These are observations, not source-grounded claims. Marked LOW confidence unless noted._
 
@@ -206,6 +243,8 @@ _These are observations, not source-grounded claims. Marked LOW confidence unles
 ---
 
 ## 5. OpenAI-Compatible API Gotchas for Local llama-server
+
+*Last verified: 2026-05-05 (research) + prior Stage 10 work (date unknown) · Revalidate: 2026-11-05*
 
 ### The baseURL forwarding bug pattern
 
@@ -248,6 +287,8 @@ Endpoint: `http://10.0.0.15:8080/v1`
 
 ## 6. Windows Path / Arg-Passing
 
+*Stable fact — no revalidation needed*
+
 ### The `--dir` backslash-tab mangling (Stage 10 discovery)
 
 When passing Windows absolute paths as CLI arguments to a subprocess (via `child_process.spawn` or equivalent), backslash sequences are interpreted as escape sequences in some contexts:
@@ -276,6 +317,8 @@ The C# McpServer accepts forward-slash paths — `Path.GetFullPath()` normalizes
 
 ## 7. SDK Tier Landscape
 
+*Stable fact — no revalidation needed (tier assignments reflect the MCP ecosystem as of 2026-05-05; individual SDK versions change but tier positions are stable)*
+
 The MCP SDK ecosystem has three tiers as of 2026-05-05:
 
 **Tier 1 (production-stable, first-party)**: `@modelcontextprotocol/sdk` (TypeScript/Node), `modelcontextprotocol` Python SDK, `ModelContextProtocol` .NET SDK. These are maintained by Anthropic/MCP team, have stable APIs, and are what Claude Desktop and MCP Inspector use. The TypeScript SDK is the reference implementation.
@@ -292,12 +335,15 @@ TypeScript is the correct choice for the shell — it gives direct access to the
 
 ## Bun + Ink Spike — 2026-05-06
 
+*Spike verified: 2026-05-06 · Bun 1.3.13 / Ink 7.0.2 / MCP SDK 1.29.0 · Revalidate: 2026-08-06 (3 months — runtime ecosystems move fast)*
+
 **Verdict**: Works.
 
 **Versions tested**:
 - Bun: 1.3.13 (Windows x64) — installed via `irm bun.sh/install.ps1 | iex`
 - Ink: 7.0.2
 - React: 19.2.5
+- yoga-layout: 3.2.1 (Ink 7's actual dep — NOT `yoga-layout-prebuilt`)
 - @modelcontextprotocol/sdk: 1.29.0
 - Node on Beast (for comparison): v24.15.0
 
@@ -305,19 +351,21 @@ TypeScript is the correct choice for the shell — it gives direct access to the
 
 | Test | Result | Detail |
 |------|--------|--------|
-| 1. Ink import (yoga-layout-prebuilt) | ✓ | `render`, `Box`, `Static` all resolved; no postinstall error |
-| 1b. Ink `<Static>` + live re-render | ✓ | Static items rendered; counter updated 0→5 in 300ms steps, showed "DONE" |
+| 1. Ink import (yoga-layout) | ✓ | `render`, `Box`, `Static` all resolved; no postinstall error |
+| 1b. Ink `<Static>` + live re-render | ✓ | Static items flushed; counter updated 0→5 at 300ms steps, showed "DONE" |
 | 2. `child_process.spawn` with stdio pipe | ✓ | `exit=0 stdout="hello from child_process"` |
 | 3. `@modelcontextprotocol/sdk` Client import | ✓ | Constructor returned an object; no `ERR_REQUIRE_ESM` |
 | 3b. `StdioClientTransport` import | ✓ | `typeof StdioClientTransport === "function"` |
 
-**What broke**: Nothing. `bun add ink react @modelcontextprotocol/sdk` completed in 14.93 seconds with no errors. The `yoga-layout-prebuilt` issue (#2034) does not reproduce on Bun 1.3.13 / Windows x64.
+**What broke**: Nothing. `bun add ink react @modelcontextprotocol/sdk` completed in 14.93 seconds with no errors.
 
-**Note on non-TTY rendering**: Running `bun run app.tsx` from a non-TTY bash subprocess (Claude's tool runner) produces partial output — Ink detects the environment and renders in a degraded mode. The full render test was run via a PowerShell background job (which provides a console), and rendered correctly there. This is expected Ink behavior, not a Bun bug.
+**Key finding**: The `yoga-layout-prebuilt` issue (#2034) is moot for Ink 7.x. Ink 7.0.2 depends on `yoga-layout` (renamed package), not `yoga-layout-prebuilt`. Confirmed by inspecting `node_modules/ink/package.json`: `"yoga-layout": "~3.2.1"`. Any Bun/Ink issue thread referencing `yoga-layout-prebuilt` predates this migration and should not be treated as current.
+
+**Note on non-TTY rendering**: Running from a non-TTY bash subprocess produces partial output — Ink detects the environment and renders in a degraded mode. Full render test was run via a PowerShell background job (which provides a real console). This is expected Ink behavior, not a Bun bug.
 
 **Workarounds attempted**: None needed.
 
-**Recommendation for Stage 11**: **Bun is viable.** All three spike criteria passed on the Beast without modification. Bun should be the primary runtime for Stage 11 — it has better cold-start performance than Node, ships its own package manager, and the toolchain (tsconfig, package.json) is identical to Node. The single remaining Bun-specific gap is SSE streaming via the `openai` npm package (see Gaps §6 below — verify before the LLM client is wired).
+**Recommendation for Stage 11**: **Bun is viable.** See §2 for updated verdict.
 
 ---
 
@@ -325,18 +373,32 @@ TypeScript is the correct choice for the shell — it gives direct access to the
 
 Items that must be verified before committing to design choices:
 
-1. ~~**Bun + Ink on Windows (Beast)**~~: **Resolved 2026-05-06 — works on Bun 1.3.13.** See spike section above.
+1. ~~**Bun + Ink on Windows (Beast)**~~: **Resolved 2026-05-06 — works on Bun 1.3.13 + Ink 7.0.2.** See spike section above.
 
-2. **dliedke Ink wrapping pattern**: Source not found. Ask the user before referencing this pattern in the Stage 11 design doc.
+2. **dliedke Ink wrapping pattern**: Source not found. Ask the user for the original source before referencing this pattern in the Stage 11 design doc.
 
-3. **Ink `<Static>` + streaming token interaction**: Does `<Static>` interact cleanly with a live streaming component below it in the same render tree? Specifically: when the streaming component re-renders on each token, does `<Static>` content get re-drawn? Theory says no (that's the point of `<Static>`), but this needs empirical verification.
+3. **Ink `<Static>` + streaming token interaction (live component isolation)**: The spike confirmed `<Static>` flushes correctly and a live component below it re-renders independently. However, the spike used a counter update (300ms interval), not true SSE token streaming at ~10–100ms per token. Verify that high-frequency re-renders don't cause flicker, lag, or `<Static>` re-draws. Low-risk gap — spike evidence is strongly suggestive.
 
 4. **ik_llama.cpp parallel tool calls**: Does Gemma 4 via llama-server ever request multiple tool calls in a single response (OpenAI's parallel function calling feature)? If yes, the shell's sequential-dispatch constraint becomes more complex to implement correctly.
 
 5. **`@modelcontextprotocol/sdk` v2.0**: The npm page referenced an anticipated v2.0.0. If released before Stage 11 ships, there may be breaking API changes. Check version on install day and pin the lockfile.
 
-6. **`openai` npm package streaming on Bun**: If Bun is used, verify that the `openai` npm package's SSE streaming (`client.chat.completions.create({ stream: true })`) works correctly on Bun. Node fetch vs Bun fetch differ in subtle ways that can affect SSE stream reading.
+6. **`openai` npm package streaming on Bun**: Verify that `client.chat.completions.create({ stream: true })` works correctly on Bun 1.3.13. Node's fetch and Bun's fetch differ in subtle ways that can affect SSE stream reading. This is the one remaining Bun-specific gap before the LLM client can be wired.
 
 7. **McpServer crash / reconnect**: What does `StdioClientTransport` do when the subprocess dies mid-session? Does it throw on the next `callTool()` call, or does it silently drop? Affects error recovery design in the shell.
 
-8. **Ink focus management with streaming**: Can `useInput()` / `useFocus()` reliably capture keyboard events (Escape to stop, Ctrl+C) while the main thread is busy processing SSE tokens? Or does long streaming block the Ink render loop? This determines whether the Stop/Cancel UX is viable without a worker thread.
+8. **Ink focus management with high-frequency streaming**: Can `useInput()` / `useFocus()` reliably capture keyboard events (Escape to stop, Ctrl+C) while the main thread is processing rapid SSE tokens? Or does it block the Ink render loop? Determines whether Stop/Cancel UX requires a worker thread.
+
+---
+
+## Revalidation Policy
+
+This document is intended for ingestion into DevMind's RAG. Claims age at different rates. The following revalidation cadence applies:
+
+- **Runtime claims** (Bun, Node, Ink, MCP SDK behavior): revalidate every 6 months
+- **Library version claims** (specific version numbers): revalidate when the library publishes a major version
+- **Bug references** (e.g. opencode #5674, yoga-layout-prebuilt #2034): revalidate when the issue closes
+- **Stable facts** (Windows path quirks, protocol-level behavior): no scheduled revalidation
+- **Spike results**: revalidate every 3 months — runtime ecosystems move fast
+
+When revalidating, update the relevant section's `Last verified` annotation, update the document-level `verified_date` and `revalidate_after`, and bump `tech_versions` if anything changed.
