@@ -290,11 +290,42 @@ TypeScript is the correct choice for the shell — it gives direct access to the
 
 ---
 
+## Bun + Ink Spike — 2026-05-06
+
+**Verdict**: Works.
+
+**Versions tested**:
+- Bun: 1.3.13 (Windows x64) — installed via `irm bun.sh/install.ps1 | iex`
+- Ink: 7.0.2
+- React: 19.2.5
+- @modelcontextprotocol/sdk: 1.29.0
+- Node on Beast (for comparison): v24.15.0
+
+**Test results**:
+
+| Test | Result | Detail |
+|------|--------|--------|
+| 1. Ink import (yoga-layout-prebuilt) | ✓ | `render`, `Box`, `Static` all resolved; no postinstall error |
+| 1b. Ink `<Static>` + live re-render | ✓ | Static items rendered; counter updated 0→5 in 300ms steps, showed "DONE" |
+| 2. `child_process.spawn` with stdio pipe | ✓ | `exit=0 stdout="hello from child_process"` |
+| 3. `@modelcontextprotocol/sdk` Client import | ✓ | Constructor returned an object; no `ERR_REQUIRE_ESM` |
+| 3b. `StdioClientTransport` import | ✓ | `typeof StdioClientTransport === "function"` |
+
+**What broke**: Nothing. `bun add ink react @modelcontextprotocol/sdk` completed in 14.93 seconds with no errors. The `yoga-layout-prebuilt` issue (#2034) does not reproduce on Bun 1.3.13 / Windows x64.
+
+**Note on non-TTY rendering**: Running `bun run app.tsx` from a non-TTY bash subprocess (Claude's tool runner) produces partial output — Ink detects the environment and renders in a degraded mode. The full render test was run via a PowerShell background job (which provides a console), and rendered correctly there. This is expected Ink behavior, not a Bun bug.
+
+**Workarounds attempted**: None needed.
+
+**Recommendation for Stage 11**: **Bun is viable.** All three spike criteria passed on the Beast without modification. Bun should be the primary runtime for Stage 11 — it has better cold-start performance than Node, ships its own package manager, and the toolchain (tsconfig, package.json) is identical to Node. The single remaining Bun-specific gap is SSE streaming via the `openai` npm package (see Gaps §6 below — verify before the LLM client is wired).
+
+---
+
 ## Gaps — Not Yet Investigated
 
 Items that must be verified before committing to design choices:
 
-1. **Bun + Ink on Windows (Beast)**: Issue #2034 may be fixed in current Bun. Needs a 30-minute spike: `bun add ink react`, write a 5-line Ink component, run it. If it works, Bun becomes viable. If it still breaks on `yoga-layout-prebuilt`, Node 20 it is.
+1. ~~**Bun + Ink on Windows (Beast)**~~: **Resolved 2026-05-06 — works on Bun 1.3.13.** See spike section above.
 
 2. **dliedke Ink wrapping pattern**: Source not found. Ask the user before referencing this pattern in the Stage 11 design doc.
 
