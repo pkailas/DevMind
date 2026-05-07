@@ -1,4 +1,4 @@
-// File: Program.cs  v1.0
+// File: Program.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // DevMind.ShellHarness — isolation harness for diagnosing silent output-loss bug.
@@ -18,22 +18,50 @@ namespace DevMind.ShellHarness
     {
         private static async Task<int> Main(string[] args)
         {
-            string command = ParseCommandArg(args)
+            // Child mode: stdin/stdout/stderr are pipes owned by the parent harness.
+            if (HasFlag(args, "--child"))
+            {
+                Console.Error.WriteLine("[child mode] PID: " + Process.GetCurrentProcess().Id);
+                Console.Error.WriteLine("[child mode] reading command from stdin...");
+                string command = Console.In.ReadLine();
+                Console.Error.WriteLine($"[child mode] command: {command}");
+
+                var runner = new ShellRunner(Environment.CurrentDirectory);
+                var (output, exitCode) = await runner.ExecuteAsync(command);
+
+                Console.WriteLine($"[child] exit_code: {exitCode}");
+                Console.WriteLine($"[child] output_length: {output?.Length ?? 0}");
+                Console.WriteLine("[child] output_begin:");
+                Console.WriteLine(output ?? "(null)");
+                Console.WriteLine("[child] output_end");
+                return 0;
+            }
+
+            string cmd = ParseCommandArg(args)
                 ?? "& \"C:\\Program Files\\dotnet\\dotnet.exe\" --version";
 
             Console.WriteLine("════════════════════════════════════════════");
             Console.WriteLine("DevMind.ShellHarness");
             Console.WriteLine("════════════════════════════════════════════");
-            Console.WriteLine($"Command: {command}");
+            Console.WriteLine($"Command: {cmd}");
             Console.WriteLine($"Working dir: {Environment.CurrentDirectory}");
             Console.WriteLine($"PID: {Process.GetCurrentProcess().Id}");
             Console.WriteLine();
 
-            await RunPath1_ShellRunner(command);
-            await RunPath2_BareRedirected(command);
-            RunPath3_BareInherited(command);
+            await RunPath1_ShellRunner(cmd);
+            await RunPath2_BareRedirected(cmd);
+            RunPath3_BareInherited(cmd);
+            await RunPath4_ChildProcess(cmd);
 
             return 0;
+        }
+
+        private static bool HasFlag(string[] args, string flag)
+        {
+            foreach (var a in args)
+                if (string.Equals(a, flag, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            return false;
         }
 
         private static string ParseCommandArg(string[] args)
@@ -152,6 +180,59 @@ namespace DevMind.ShellHarness
             catch (Exception ex)
             {
                 Console.WriteLine("  └─────");
+                Console.WriteLine($"  EXCEPTION: {ex.GetType().Name}: {ex.Message}");
+            }
+            Console.WriteLine();
+        }
+
+        // ── PATH 4: Self as child, piped stdio ───────────────────────────
+        private static async Task RunPath4_ChildProcess(string command)
+        {
+            Console.WriteLine("--- PATH 4: ShellRunner inside a piped-stdio child process ---");
+            Console.WriteLine("  (spawns this exe with --child; child's stdin/stdout/stderr are pipes)");
+            var sw = Stopwatch.StartNew();
+            try
+            {
+                string exe = Process.GetCurrentProcess().MainModule.FileName;
+
+                var psi = new ProcessStartInfo(exe, "--child")
+                {
+                    WorkingDirectory       = Environment.CurrentDirectory,
+                    UseShellExecute        = false,
+                    RedirectStandardInput  = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError  = true,
+                    CreateNoWindow         = true
+                };
+
+                var stdout = new System.Text.StringBuilder();
+                var stderr = new System.Text.StringBuilder();
+
+                using var proc = new Process { StartInfo = psi, EnableRaisingEvents = true };
+                proc.OutputDataReceived += (s, e) => { if (e.Data != null) stdout.AppendLine(e.Data); };
+                proc.ErrorDataReceived  += (s, e) => { if (e.Data != null) stderr.AppendLine(e.Data); };
+
+                proc.Start();
+                proc.BeginOutputReadLine();
+                proc.BeginErrorReadLine();
+
+                await proc.StandardInput.WriteLineAsync(command);
+                proc.StandardInput.Close();
+
+                await Task.Run(() => proc.WaitForExit(30_000));
+                sw.Stop();
+
+                Console.WriteLine($"  exit: {proc.ExitCode}");
+                Console.WriteLine($"  duration: {sw.ElapsedMilliseconds}ms");
+                Console.WriteLine($"  stdout length: {stdout.Length} chars");
+                Console.WriteLine($"  stderr length: {stderr.Length} chars");
+                Console.WriteLine($"  stdout:");
+                Console.WriteLine(IndentLines(stdout.ToString(), "    "));
+                Console.WriteLine($"  stderr:");
+                Console.WriteLine(IndentLines(stderr.ToString(), "    "));
+            }
+            catch (Exception ex)
+            {
                 Console.WriteLine($"  EXCEPTION: {ex.GetType().Name}: {ex.Message}");
             }
             Console.WriteLine();
