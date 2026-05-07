@@ -1,5 +1,6 @@
-// File: ShellRunner.cs  v1.4
+// File: ShellRunner.cs  v1.5
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
+// v1.5: trace mcp.shell.spawn / output_line / exit events via DevMind.Trace (alias DmTrace).
 
 using System;
 using System.Collections.Generic;
@@ -8,6 +9,7 @@ using System.IO;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using DmTrace = DevMind.Trace;
 
 namespace DevMind
 {
@@ -92,6 +94,12 @@ namespace DevMind
                     WindowStyle = ProcessWindowStyle.Hidden
                 };
 
+                long spawnStartTicks = Stopwatch.GetTimestamp();
+                long stdoutBytes = 0;
+                long stderrBytes = 0;
+                long stdoutLines = 0;
+                long stderrLines = 0;
+
                 var outputBuffer = new StringBuilder();
                 var exitTcs = new TaskCompletionSource<bool>();
 
@@ -101,12 +109,53 @@ namespace DevMind
                 proc.Exited             += (s, e) => exitTcs.TrySetResult(true);
                 proc.OutputDataReceived += (s, e) =>
                 {
-                    if (e.Data != null) { outputBuffer.AppendLine(e.Data); onLine?.Report(new ShellOutputLine(e.Data, isError: false)); }
+                    if (e.Data != null)
+                    {
+                        outputBuffer.AppendLine(e.Data);
+                        onLine?.Report(new ShellOutputLine(e.Data, isError: false));
+                        stdoutBytes += e.Data.Length;
+                        stdoutLines += 1;
+                        DmTrace.Event("debug", "mcp.shell.output_line",
+                            new Dictionary<string, object>
+                            {
+                                ["is_error"] = false,
+                                ["line"]     = e.Data
+                            });
+                    }
                 };
                 proc.ErrorDataReceived += (s, e) =>
                 {
-                    if (e.Data != null) { outputBuffer.AppendLine(e.Data); onLine?.Report(new ShellOutputLine(e.Data, isError: true)); }
+                    if (e.Data != null)
+                    {
+                        outputBuffer.AppendLine(e.Data);
+                        onLine?.Report(new ShellOutputLine(e.Data, isError: true));
+                        stderrBytes += e.Data.Length;
+                        stderrLines += 1;
+                        DmTrace.Event("debug", "mcp.shell.output_line",
+                            new Dictionary<string, object>
+                            {
+                                ["is_error"] = true,
+                                ["line"]     = e.Data
+                            });
+                    }
                 };
+
+                // Capture the exact spawn parameters BEFORE proc.Start() so the
+                // trace records what we asked the OS to launch, not what came back.
+                // The env captured here is what ProcessStartInfo will inherit (we
+                // don't set psi.Environment, so .NET passes through the McpServer
+                // process's current environment).
+                DmTrace.Event("info", "mcp.shell.spawn",
+                    new Dictionary<string, object>
+                    {
+                        ["shell"]           = shell,
+                        ["args"]            = args,
+                        ["working_dir"]     = WorkingDirectory,
+                        ["sanitized_input"] = sanitized,
+                        ["use_powershell"]  = usePowerShell,
+                        ["force_cmd_exe"]   = forceCmdExe,
+                        ["env"]             = RedactEnv()
+                    });
 
                 proc.Start();
                 proc.BeginOutputReadLine();
@@ -157,6 +206,25 @@ namespace DevMind
 
                 // WaitForExit() ensures all pending OutputDataReceived/ErrorDataReceived events drain.
                 await Task.Run(() => proc.WaitForExit(5_000));
+
+                long durationTicks = Stopwatch.GetTimestamp() - spawnStartTicks;
+                long durationMs    = durationTicks * 1000L / Stopwatch.Frequency;
+
+                int rawExitCode;
+                try { rawExitCode = proc.ExitCode; } catch { rawExitCode = -1; }
+
+                DmTrace.Event("info", "mcp.shell.exit",
+                    new Dictionary<string, object>
+                    {
+                        ["exit_code"]    = rawExitCode,
+                        ["duration_ms"]  = durationMs,
+                        ["timed_out"]    = timedOut,
+                        ["cancelled"]    = cancelled,
+                        ["stdout_lines"] = stdoutLines,
+                        ["stderr_lines"] = stderrLines,
+                        ["stdout_bytes"] = stdoutBytes,
+                        ["stderr_bytes"] = stderrBytes
+                    });
 
                 int exitCode;
                 try { exitCode = (timedOut || cancelled) ? -1 : proc.ExitCode; }
@@ -271,6 +339,41 @@ namespace DevMind
                     if (!string.IsNullOrEmpty(cmd) && (result.Count == 0 || result[result.Count - 1] != cmd))
                         result.Add(cmd);
                 }
+            }
+            return result;
+        }
+
+        private static IDictionary<string, object> RedactEnv()
+        {
+            var patterns = new[]
+            {
+                "_KEY", "_TOKEN", "_SECRET", "_PASSWORD",
+                "ANTHROPIC_", "OPENAI_", "OPENROUTER_"
+            };
+
+            var result = new Dictionary<string, object>();
+            var raw = Environment.GetEnvironmentVariables();
+            foreach (System.Collections.DictionaryEntry entry in raw)
+            {
+                string key = entry.Key != null  ? entry.Key.ToString()   : "";
+                string val = entry.Value != null ? entry.Value.ToString() : "";
+
+                bool redact = false;
+                foreach (var pat in patterns)
+                {
+                    if (pat.EndsWith("_"))
+                    {
+                        if (key.StartsWith(pat, StringComparison.OrdinalIgnoreCase))
+                        { redact = true; break; }
+                    }
+                    else
+                    {
+                        if (key.EndsWith(pat, StringComparison.OrdinalIgnoreCase))
+                        { redact = true; break; }
+                    }
+                }
+
+                result[key] = redact ? "[REDACTED]" : val;
             }
             return result;
         }
