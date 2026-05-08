@@ -53,7 +53,7 @@
 
   <ItemGroup>
     <ProjectReference Include="DevMind.Core\DevMind.Core.csproj" />
-    <Compile Remove="DevMind.Core\**;DevMind.Cli\**;DevMind.McpServer\**" />
+    <Compile Remove="DevMind.Core\**;DevMind.Cli\**;DevMind.McpServer\**;DevMind.ShellHarness\**;DevMind.ShellEncodingProbe\**" />
   </ItemGroup>
 
   <!-- Import SDK targets to set TargetName, OutDir, IntermediateOutputPath, etc. -->
