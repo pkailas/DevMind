@@ -1,5 +1,14 @@
-// File: Trace.cs  v1.0
+// File: Trace.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
+//
+// Schema: JSONL records with keys {ts, run_id, pid, role, level, event, data}.
+// Filename: <runId>.<role>.jsonl
+// I/O: Synchronous to ensure diagnostic records are flushed before crashes or next ops.
+// Role: "mcp" identifies the McpServer side.
+//
+// This is the C# counterpart to src/util/trace.ts in DevMindShell. Both write to the
+// same .dm-trace/ directory using a shared runId (via DEVMIND_TRACE_RUN_ID)
+// to allow correlation of traces across the shell and server.
 
 using System;
 using System.Collections.Generic;
@@ -13,6 +22,7 @@ namespace DevMind
     public static class Trace
     {
         private static bool   _initialized;
+        private static bool   _shutdownFired;
         private static bool   _enabled;
         private static string _level   = "info";
         private static string _runId   = "";
@@ -21,7 +31,7 @@ namespace DevMind
         private static bool   _dirEnsured;
         private static readonly object _initLock  = new object();
         private static readonly object _writeLock = new object();
-        private const  string  _role = "mcp";
+        private const  string  _role = "mcp"; // Distinguishes server side from shell side ("shell")
 
         private static void Init()
         {
@@ -47,6 +57,8 @@ namespace DevMind
 
                 _initTime    = Stopwatch.GetTimestamp();
                 _initialized = true;
+
+                AppDomain.CurrentDomain.ProcessExit += (s, e) => Shutdown();
             }
         }
 
@@ -130,6 +142,12 @@ namespace DevMind
         public static void Shutdown(int? exitCode = null)
         {
             if (!_initialized) return;
+
+            lock (_initLock)
+            {
+                if (_shutdownFired) return;
+                _shutdownFired = true;
+            }
 
             long elapsedTicks = Stopwatch.GetTimestamp() - _initTime;
             long elapsedMs    = elapsedTicks * 1000L / Stopwatch.Frequency;
