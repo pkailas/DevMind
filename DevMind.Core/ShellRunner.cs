@@ -1,6 +1,7 @@
-// File: ShellRunner.cs  v1.5
+// File: ShellRunner.cs  v1.6
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 // v1.5: trace mcp.shell.spawn / output_line / exit events via DevMind.Trace (alias DmTrace).
+// v1.6: fix git stdio hang by setting GIT_REDIRECT_STDIN/STDERR (Git for Windows handle-inheritance issue).
 
 using System;
 using System.Collections.Generic;
@@ -93,6 +94,12 @@ namespace DevMind
                     CreateNoWindow = true,
                     WindowStyle = ProcessWindowStyle.Hidden
                 };
+
+                // Git for Windows hangs when spawned through PowerShell because it inherits 
+                // redirected stdio handles it doesn't know to close. Setting these 
+                // variables enables git's own redirection mechanism (v2.11.0(2)).
+                psi.EnvironmentVariables["GIT_REDIRECT_STDIN"] = "off";
+                psi.EnvironmentVariables["GIT_REDIRECT_STDERR"] = "2>&1";
 
                 long spawnStartTicks = Stopwatch.GetTimestamp();
                 long stdoutBytes = 0;
