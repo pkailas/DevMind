@@ -24,3 +24,6 @@ DevMind_CodeReview.md
 DevMind_Template.md
 CodeReview.md
 CodeReviewBenchmarkWithBugs/
+
+# DevMind trace output
+.dm-trace/
