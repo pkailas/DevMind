@@ -1,4 +1,4 @@
-// File: McpServices.cs  v2.0
+// File: McpServices.cs  v2.4
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Diagnostic policy: all Console.Write / Console.WriteLine calls in this project
@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
@@ -29,6 +30,7 @@ namespace DevMind.McpServer
         public MemoryManager          Memory    { get; }
         public FileContentCache       FileCache { get; }
         public ShellRunner            Shell     { get; }
+        public LanguageServerRouter?  Lsp       { get; }
 
         /// <summary>
         /// Tracks filenames (basename only) read during this session.
@@ -65,7 +67,12 @@ namespace DevMind.McpServer
         // or first patch. Powers diff_file.
         private readonly Dictionary<string, string> _fileSnapshots =
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        private readonly object _snapshotLock = new object();
+       private readonly object _snapshotLock = new object();
+
+       public record SshHostConfig(string Host, string User, string Key);
+         public IReadOnlyDictionary<string, SshHostConfig> SshHosts { get; }
+         public IReadOnlyDictionary<string, string> HttpEndpoints { get; }
+         public IReadOnlyDictionary<string, string> DbConnections { get; }
 
         public McpServices(string workingDirectory)
         {
@@ -79,7 +86,102 @@ namespace DevMind.McpServer
 
             Memory    = new MemoryManager(WorkingDirectory);
             FileCache = new FileContentCache();
-            Shell     = new ShellRunner(WorkingDirectory);
+           Shell     = new ShellRunner(WorkingDirectory);
+
+            var sshHostsJson = Environment.GetEnvironmentVariable("DEVMIND_SSH_HOSTS");
+            if (!string.IsNullOrWhiteSpace(sshHostsJson))
+            {
+                try
+                {
+                    var raw = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(sshHostsJson);
+                    var hosts = new Dictionary<string, SshHostConfig>(StringComparer.OrdinalIgnoreCase);
+                    if (raw != null)
+                    {
+                        foreach (var (alias, el) in raw)
+                        {
+                            string host = el.GetProperty("host").GetString() ?? alias;
+                            string user = el.GetProperty("user").GetString() ?? "root";
+                            string key  = el.TryGetProperty("key", out var kp) ? kp.GetString() ?? "~/.ssh/id_rsa" : "~/.ssh/id_rsa";
+                            hosts[alias] = new SshHostConfig(host, user, key);
+                        }
+                    }
+                    SshHosts = hosts;
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"[McpServices] Warning: failed to parse DEVMIND_SSH_HOSTS: {ex.Message}");
+                    SshHosts = new Dictionary<string, SshHostConfig>();
+                }
+            }
+           else
+            {
+                SshHosts = new Dictionary<string, SshHostConfig>();
+            }
+
+            // ── DEVMIND_HTTP_ENDPOINTS ──────────────────────────────────────────
+            var httpEndpointsJson = Environment.GetEnvironmentVariable("DEVMIND_HTTP_ENDPOINTS");
+            if (!string.IsNullOrWhiteSpace(httpEndpointsJson))
+            {
+                try
+                {
+                    var raw = JsonSerializer.Deserialize<Dictionary<string, string>>(httpEndpointsJson);
+                    var endpoints = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    if (raw != null)
+                    {
+                        foreach (var (alias, url) in raw)
+                        {
+                            if (!string.IsNullOrWhiteSpace(url))
+                                endpoints[alias] = url;
+                        }
+                    }
+                    HttpEndpoints = endpoints;
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"[McpServices] Warning: failed to parse DEVMIND_HTTP_ENDPOINTS: {ex.Message}");
+                    HttpEndpoints = new Dictionary<string, string>();
+                }
+            }
+           else
+            {
+                HttpEndpoints = new Dictionary<string, string>();
+            }
+
+            // ── DEVMIND_DB_CONNECTIONS ──────────────────────────────────────────
+            var dbConnectionsJson = Environment.GetEnvironmentVariable("DEVMIND_DB_CONNECTIONS");
+            if (!string.IsNullOrWhiteSpace(dbConnectionsJson))
+            {
+                try
+                {
+                    var raw = JsonSerializer.Deserialize<Dictionary<string, string>>(dbConnectionsJson);
+                    var connections = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    if (raw != null)
+                    {
+                        foreach (var (alias, connStr) in raw)
+                        {
+                            if (!string.IsNullOrWhiteSpace(connStr))
+                                connections[alias] = connStr;
+                        }
+                    }
+                    DbConnections = connections;
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"[McpServices] Warning: failed to parse DEVMIND_DB_CONNECTIONS: {ex.Message}");
+                    DbConnections = new Dictionary<string, string>();
+                }
+            }
+            else
+            {
+                DbConnections = new Dictionary<string, string>();
+            }
+
+            Lsp       = LanguageServerRouter.IsEnabled()
+                ? new LanguageServerRouter(
+                    WorkingDirectory,
+                    Environment.GetEnvironmentVariable("DEVMIND_LSP_SERVER_PATH"),
+                    Environment.GetEnvironmentVariable("DEVMIND_LSP_TYPESCRIPT_PATH"))
+                : null;
 
             _consumerTask = DrainChannelAsync();
         }
@@ -88,6 +190,7 @@ namespace DevMind.McpServer
         {
             _dispatchChannel.Writer.TryComplete();
             _consumerTask.Wait(TimeSpan.FromSeconds(2));
+            Lsp?.Dispose();
         }
 
         // ── Dispatch helpers ─────────────────────────────────────────────────────

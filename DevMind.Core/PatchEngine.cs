@@ -252,13 +252,23 @@ namespace DevMind
         /// Reads a file detecting and preserving its BOM/encoding.
         /// Returns the text content and the encoding to use when writing back.
         /// </summary>
-        public static (string content, Encoding encoding) ReadFilePreservingEncoding(string path)
+       public static (string content, Encoding encoding) ReadFilePreservingEncoding(string path)
         {
             byte[] bytes = File.ReadAllBytes(path);
 
             if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
+            {
+                // UTF-8 with BOM detected.
+                // For script files (.cmd, .bat, .sh, .ps1), strip the BOM so the patched file
+                // is written back without one — prevents garbled output in shells that don't
+                // expect a BOM (cmd.exe, PowerShell, bash).
+                bool isScriptFile = IsScriptFileExtension(path);
+                if (isScriptFile)
+                    return (new UTF8Encoding(true).GetString(bytes, 3, bytes.Length - 3),
+                            new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
                 return (new UTF8Encoding(true).GetString(bytes, 3, bytes.Length - 3),
                         new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+            }
             if (bytes.Length >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE)
                 return (Encoding.Unicode.GetString(bytes, 2, bytes.Length - 2), Encoding.Unicode);
             if (bytes.Length >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF)
@@ -266,6 +276,16 @@ namespace DevMind
                         Encoding.BigEndianUnicode);
 
             return (Encoding.UTF8.GetString(bytes), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+        }
+
+        /// <summary>
+        /// Returns true for script file extensions where a UTF-8 BOM causes problems
+        /// (cmd.exe, PowerShell, bash interpret the BOM bytes as part of the shebang/command).
+        /// </summary>
+        private static bool IsScriptFileExtension(string path)
+        {
+           string ext = Path.GetExtension(path)?.ToLowerInvariant() ?? "";
+            return ext == ".cmd" || ext == ".bat" || ext == ".sh" || ext == ".ps1";
         }
 
         // ── Matching algorithms ───────────────────────────────────────────────

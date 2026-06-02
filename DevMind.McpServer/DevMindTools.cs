@@ -1,4 +1,4 @@
-// File: DevMindTools.cs  v4.2
+// File: DevMindTools.cs  v4.9
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Diagnostic policy: never write to Console.Out / Console.WriteLine in this file.
@@ -23,17 +23,29 @@
 //   Phase C (complete): patch_file, create_file, append_file, delete_file,
 //                       rename_file, save_memory; diff_file real unified diffs.
 //   Phase C fix v2: Channel<DispatchItem> FIFO dispatch via _svc.EnqueueAsync.
-//   Phase D (this): run_shell, run_build, run_tests with streaming progress.
+//   Phase D (complete): run_shell, run_build, run_tests with streaming progress.
+//   Phase D (web): web_search, web_fetch.
+//   Phase D (clip/open/http): clip_read, clip_write, open_file, http_request.
+//   Phase E (complete): LSP tools — get_diagnostics, go_to_definition, find_references, hover.
+//   Phase F (complete): git_commit.
 
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Data;
+using System.Data.Common;
 using System.IO;
 using System.Linq;
+using System.Net.Http;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using DevMind;
+using Microsoft.Data.SqlClient;
+using Microsoft.Data.Sqlite;
+using Npgsql;
+using Renci.SshNet;
 using DevMind.McpServer;
 using ModelContextProtocol;
 using ModelContextProtocol.Server;
@@ -436,7 +448,182 @@ internal sealed class DevMindTools
                 string list = string.Join(", ", available.Select(t => $"[{t}]"));
                 return $"recall_memory: topic \"{topic}\" not found. Available topics: {list}";
             }
-            return content;
+           return content;
+        }, cancellationToken);
+    }
+
+    [McpServerTool(Name = "search_memory")]
+    [Description(
+        "Search across all saved memory topics for a keyword or phrase. " +
+        "Returns matching topic names and the lines that matched, with context. " +
+        "Use when you know what you're looking for but not which topic it's in.")]
+    public async Task<string> SearchMemory(
+        [Description("Search pattern (case-insensitive substring match).")] string pattern,
+        CancellationToken cancellationToken = default)
+    {
+        return await _svc.EnqueueAsync(async () =>
+        {
+            try
+            {
+                var topics = _svc.Memory.ListTopics();
+                if (topics.Count == 0)
+                    return "search_memory: no memory topics found.";
+
+                var results = new List<(string topic, int lineNum, string lineText)>();
+
+                foreach (var topic in topics)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    string content = _svc.Memory.LoadTopic(topic);
+                    if (string.IsNullOrWhiteSpace(content)) continue;
+
+                    var lines = content.Split('\n');
+                    for (int i = 0; i < lines.Length; i++)
+                    {
+                        if (lines[i].IndexOf(pattern, StringComparison.OrdinalIgnoreCase) >= 0)
+                            results.Add((topic, i + 1, lines[i].TrimEnd()));
+                    }
+                }
+
+                if (results.Count == 0)
+                    return $"search_memory: no matches for \"{pattern}\" across {topics.Count} topic(s).";
+
+                var sb = new StringBuilder();
+                sb.AppendLine($"search_memory results for \"{pattern}\" ({results.Count} match(es) across {results.Select(r => r.topic).Distinct().Count()} topic(s)):");
+
+                foreach (var group in results.GroupBy(r => r.topic))
+                {
+                    sb.AppendLine($"\n[{group.Key}]");
+                    foreach (var (_, lineNum, lineText) in group)
+                        sb.AppendLine($"  {lineNum}: {lineText}");
+                }
+
+                return sb.ToString().TrimEnd();
+            }
+            catch (OperationCanceledException)
+            {
+                return "[search_memory] Cancelled.";
+            }
+            catch (Exception ex)
+            {
+                return $"[search_memory error] {ex.Message}";
+            }
+       }, cancellationToken);
+    }
+
+    [McpServerTool(Name = "query_db")]
+    [Description(
+        "Execute a read-only SQL query against a named database connection. " +
+        "Connections are defined in DEVMIND_DB_CONNECTIONS environment variable. " +
+        "Only SELECT statements and read-only stored proc calls are permitted. " +
+        "Supports SQL Server, PostgreSQL, and SQLite — auto-detected from connection string. " +
+        "Returns results as a formatted table, capped at 100 rows.")]
+    public async Task<string> QueryDb(
+        [Description("Connection alias from DEVMIND_DB_CONNECTIONS.")] string connection,
+        [Description("SQL query to execute (SELECT only).")] string query,
+        [Description("Query timeout in seconds (default 30).")] int? timeout_seconds = null,
+        CancellationToken cancellationToken = default)
+    {
+        return await _svc.EnqueueAsync(async () =>
+        {
+            const int MaxRows = 100;
+            try
+            {
+                // Resolve connection string.
+                if (!_svc.DbConnections.TryGetValue(connection, out string? connStr) || string.IsNullOrWhiteSpace(connStr))
+                    return $"[query_db] Unknown connection \"{connection}\". Define it in DEVMIND_DB_CONNECTIONS.";
+
+                // Safety check — read-only only.
+                string trimmed = query.TrimStart().ToUpperInvariant();
+                string[] blocked = { "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE", "CREATE", "EXEC ", "EXECUTE " };
+                foreach (var keyword in blocked)
+                {
+                    if (trimmed.StartsWith(keyword))
+                        return $"[query_db] Blocked: only SELECT queries are permitted. Got: {keyword}";
+                }
+
+                int timeoutSecs = timeout_seconds ?? 30;
+
+                // Auto-detect provider from connection string.
+                DbConnection dbConn;
+                string connUpper = connStr.ToUpperInvariant();
+                if (connStr.StartsWith("postgresql://", StringComparison.OrdinalIgnoreCase) ||
+                    connUpper.Contains("HOST="))
+                {
+                    dbConn = new NpgsqlConnection(connStr);
+                }
+                else if (connUpper.Contains(".DB") || connUpper.Contains("DATA SOURCE=") && (connUpper.Contains(".DB") || connUpper.Contains(".SQLITE")))
+                {
+                    dbConn = new SqliteConnection(connStr);
+                }
+                else
+                {
+                    dbConn = new SqlConnection(connStr);
+                }
+
+                await using (dbConn)
+                {
+                    await dbConn.OpenAsync(cancellationToken);
+
+                    using var cmd = dbConn.CreateCommand();
+                    cmd.CommandText    = query;
+                    cmd.CommandTimeout = timeoutSecs;
+
+                    using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+
+                    // Build column headers.
+                    var columns = new List<string>();
+                    for (int i = 0; i < reader.FieldCount; i++)
+                        columns.Add(reader.GetName(i));
+
+                    var rows = new List<string[]>();
+                    int rowCount = 0;
+                    bool capped  = false;
+
+                    while (await reader.ReadAsync(cancellationToken))
+                    {
+                        if (rowCount >= MaxRows) { capped = true; break; }
+                        var row = new string[reader.FieldCount];
+                        for (int i = 0; i < reader.FieldCount; i++)
+                            row[i] = reader.IsDBNull(i) ? "NULL" : reader.GetValue(i)?.ToString() ?? "";
+                        rows.Add(row);
+                        rowCount++;
+                    }
+
+                    if (rows.Count == 0)
+                        return $"[query_db] Query returned no rows.\nQuery: {query}";
+
+                    // Calculate column widths.
+                    var widths = columns.Select((c, i) =>
+                        Math.Max(c.Length, rows.Max(r => r[i].Length))).ToArray();
+
+                    // Render table.
+                    var sb = new StringBuilder();
+                    sb.AppendLine($"[query_db] {connection} → {rows.Count} row(s){(capped ? $" (capped at {MaxRows})" : "")}");
+                    sb.AppendLine();
+
+                    // Header.
+                    sb.AppendLine("| " + string.Join(" | ", columns.Select((c, i) => c.PadRight(widths[i]))) + " |");
+                    sb.AppendLine("|-" + string.Join("-|-", widths.Select(w => new string('-', w))) + "-|");
+
+                    // Rows.
+                    foreach (var row in rows)
+                        sb.AppendLine("| " + string.Join(" | ", row.Select((v, i) => v.PadRight(widths[i]))) + " |");
+
+                    if (capped)
+                        sb.AppendLine($"\n[truncated — showing first {MaxRows} rows]");
+
+                    return sb.ToString().TrimEnd();
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                return "[query_db] Cancelled.";
+            }
+            catch (Exception ex)
+            {
+                return $"[query_db error] {ex.Message}";
+            }
         }, cancellationToken);
     }
 
@@ -535,11 +722,16 @@ internal sealed class DevMindTools
                 if (File.Exists(fullPath))
                     return $"create_file: file already exists — {fullPath}. Use patch_file to edit it.";
 
-                string? dir = Path.GetDirectoryName(fullPath);
+               string? dir = Path.GetDirectoryName(fullPath);
                 if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                     Directory.CreateDirectory(dir);
 
-                File.WriteAllText(fullPath, content, System.Text.Encoding.UTF8);
+                // Script files (.cmd/.bat/.sh/.ps1) always get UTF-8 without BOM to prevent
+                // garbled output in shells that don't expect a BOM preamble.
+                var fileEncoding = IsScriptFileExtension(fullPath)
+                    ? new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)
+                    : System.Text.Encoding.UTF8;
+                File.WriteAllText(fullPath, content, fileEncoding);
 
                 int lineCount       = content.Split('\n').Length;
                 string fileNameOnly = Path.GetFileName(fullPath) ?? filename;
@@ -581,16 +773,21 @@ internal sealed class DevMindTools
                 if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                     Directory.CreateDirectory(dir);
 
+               // Script files (.cmd/.bat/.sh/.ps1) always get UTF-8 without BOM.
+                var appendEncoding = IsScriptFileExtension(fullPath)
+                    ? new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)
+                    : System.Text.Encoding.UTF8;
+
                 // Ensure a newline separator between existing content and appended content.
                 if (existed)
                 {
                     string existing  = File.ReadAllText(fullPath);
                     string separator = existing.Length > 0 && !existing.EndsWith("\n") ? "\n" : "";
-                    File.WriteAllText(fullPath, existing + separator + content, System.Text.Encoding.UTF8);
+                    File.WriteAllText(fullPath, existing + separator + content, appendEncoding);
                 }
                 else
                 {
-                    File.WriteAllText(fullPath, content, System.Text.Encoding.UTF8);
+                    File.WriteAllText(fullPath, content, appendEncoding);
                 }
 
                 string fileNameOnly = Path.GetFileName(fullPath) ?? filename;
@@ -811,7 +1008,612 @@ internal sealed class DevMindTools
             }
             catch (Exception ex)
             {
-                return $"[run_tests error] {ex.Message}";
+               return $"[run_tests error] {ex.Message}";
+            }
+        }, cancellationToken);
+    }
+
+    // ── Phase D: web_search, web_fetch ──────────────────────────────────────
+
+    [McpServerTool(Name = "web_search")]
+    [Description(
+        "Search the web via the local SearXNG instance. Returns a ranked list of results " +
+        "with title, URL, and snippet. Use for looking up documentation, APIs, error messages, " +
+        "or any information that requires current web content.")]
+    public async Task<string> WebSearch(
+        [Description("Search query string.")] string query,
+        [Description("Maximum number of results to return (default 10, max 20).")] int? max_results = null,
+        CancellationToken cancellationToken = default)
+    {
+        return await _svc.EnqueueAsync(async () =>
+        {
+            try
+            {
+                int limit = Math.Min(max_results ?? 10, 20);
+                string searxngUrl = Environment.GetEnvironmentVariable("DEVMIND_SEARCH_URL")
+                    ?? "http://vard-nas:8180";
+                string url = $"{searxngUrl.TrimEnd('/')}/search?q={Uri.EscapeDataString(query)}&format=json&language=en&safesearch=0";
+
+                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+                http.DefaultRequestHeaders.Add("User-Agent", "DevMind/1.0");
+                var response = await http.GetAsync(url, cancellationToken);
+                response.EnsureSuccessStatusCode();
+
+                string json = await response.Content.ReadAsStringAsync(cancellationToken);
+                using var doc = JsonDocument.Parse(json);
+                var results = doc.RootElement.GetProperty("results");
+
+                var sb = new StringBuilder();
+                sb.AppendLine($"web_search results for \"{query}\":");
+                int count = 0;
+                foreach (var result in results.EnumerateArray())
+                {
+                    if (count >= limit) break;
+                    string title   = result.TryGetProperty("title",   out var t) ? t.GetString() ?? "" : "";
+                    string resUrl  = result.TryGetProperty("url",     out var u) ? u.GetString() ?? "" : "";
+                    string snippet = result.TryGetProperty("content", out var c) ? c.GetString() ?? "" : "";
+                    sb.AppendLine($"\n[{count + 1}] {title}");
+                    sb.AppendLine($"    URL: {resUrl}");
+                    if (!string.IsNullOrWhiteSpace(snippet))
+                        sb.AppendLine($"    {snippet.Trim()}");
+                    count++;
+                }
+                if (count == 0)
+                    return $"web_search: no results for \"{query}\"";
+
+                return sb.ToString().TrimEnd();
+            }
+            catch (Exception ex)
+            {
+                return $"[web_search error] {ex.Message}";
+            }
+        }, cancellationToken);
+    }
+
+    [McpServerTool(Name = "web_fetch")]
+    [Description(
+        "Fetch a URL and return its content as clean text. HTML is stripped to readable text. " +
+        "Use for reading documentation pages, GitHub files, API references, or vendor support articles. " +
+        "Auth-required pages will return an error or redirect — add credentials to the fetcher config if needed.")]
+    public async Task<string> WebFetch(
+        [Description("URL to fetch.")] string url,
+        CancellationToken cancellationToken = default)
+    {
+        return await _svc.EnqueueAsync(async () =>
+        {
+            try
+            {
+                string fetcherUrl = Environment.GetEnvironmentVariable("DEVMIND_FETCH_URL")
+                    ?? "http://vard-nas:8181";
+                string endpoint = $"{fetcherUrl.TrimEnd('/')}/fetch";
+
+                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(45) };
+                var payload = new StringContent(
+                    $"{{\"url\":\"{url}\"}}",
+                    Encoding.UTF8,
+                    "application/json");
+
+                var response = await http.PostAsync(endpoint, payload, cancellationToken);
+                response.EnsureSuccessStatusCode();
+
+                string json = await response.Content.ReadAsStringAsync(cancellationToken);
+                using var doc = JsonDocument.Parse(json);
+                string content = doc.RootElement.GetProperty("content").GetString() ?? "";
+
+                if (string.IsNullOrWhiteSpace(content))
+                    return $"[web_fetch] No content extracted from {url}";
+
+                // Cap at 8000 chars to avoid flooding context.
+                const int Cap = 8000;
+                bool capped = content.Length > Cap;
+                string output = capped ? content.Substring(0, Cap) : content;
+                return capped
+                    ? $"{output}\n\n[web_fetch: content truncated at {Cap} chars]"
+                    : output;
+            }
+            catch (Exception ex)
+            {
+                return $"[web_fetch error] {ex.Message}";
+            }
+       }, cancellationToken);
+    }
+
+    // ── Phase D: ssh_exec ────────────────────────────────────────────────────
+
+    [McpServerTool(Name = "ssh_exec")]
+    [Description(
+        "Execute a command on a remote host via SSH. Hosts can be defined by alias in the " +
+        "DEVMIND_SSH_HOSTS environment variable, or specified directly as user@host. " +
+        "Returns stdout and stderr combined, capped at 4000 lines. " +
+        "Uses key-based authentication only — no passwords.")]
+    public async Task<string> SshExec(
+        [Description("Host alias from DEVMIND_SSH_HOSTS config, or user@host directly.")] string host,
+        [Description("Command to execute on the remote host.")] string command,
+        [Description("Timeout in seconds (default 60).")] int? timeout_seconds = null,
+        CancellationToken cancellationToken = default)
+    {
+        return await _svc.EnqueueAsync(async () =>
+        {
+            try
+            {
+                int timeoutSecs = timeout_seconds ?? 60;
+
+                // Resolve host config — alias lookup first, then parse user@host.
+                string remoteHost, remoteUser, keyPath;
+                if (_svc.SshHosts.TryGetValue(host, out var cfg))
+                {
+                    remoteHost = cfg.Host;
+                    remoteUser = cfg.User;
+                    keyPath    = cfg.Key;
+                }
+                else if (host.Contains('@'))
+                {
+                    var parts  = host.Split('@', 2);
+                    remoteUser = parts[0];
+                    remoteHost = parts[1];
+                    keyPath    = "~/.ssh/id_rsa";
+                }
+                else
+                {
+                    return $"[ssh_exec] Unknown host alias \"{host}\". " +
+                           "Define it in DEVMIND_SSH_HOSTS or use user@host format.";
+                }
+
+                // Expand ~ in key path.
+                string expandedKey = keyPath.StartsWith("~")
+                    ? Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                        keyPath.Substring(1).TrimStart('/', '\\'))
+                    : keyPath;
+
+                if (!File.Exists(expandedKey))
+                    return $"[ssh_exec] SSH key not found: {expandedKey}";
+
+                var keyFile        = new PrivateKeyFile(expandedKey);
+                var authMethod     = new PrivateKeyAuthenticationMethod(remoteUser, keyFile);
+                var connectionInfo = new ConnectionInfo(remoteHost, remoteUser, authMethod);
+                connectionInfo.Timeout = TimeSpan.FromSeconds(timeoutSecs);
+
+               using var client = new SshClient(connectionInfo);
+                await Task.Run(() => client.Connect(), cancellationToken);
+
+                using var cmd = client.CreateCommand(command);
+                cmd.CommandTimeout = TimeSpan.FromSeconds(timeoutSecs);
+
+                var result = await Task.Run(() =>
+                {
+                    string stdout = cmd.Execute();
+                    return (stdout, cmd.Error, cmd.ExitStatus);
+                }, cancellationToken);
+
+                client.Disconnect();
+
+                string combined = result.stdout;
+                if (!string.IsNullOrEmpty(result.Error))
+                    combined += (combined.Length > 0 ? "\n" : "") + result.Error;
+
+               // Cap output at 4000 lines / 50 KB.
+                const int MaxLines = 4_000;
+                const int MaxBytes = 50_000;
+                string prefix = $"[ssh_exec {remoteUser}@{remoteHost}] $ {command}\n";
+
+                if (string.IsNullOrWhiteSpace(combined))
+                    return $"[ssh_exec] Command completed with exit code {result.ExitStatus} (no output)";
+
+                string[] lines = combined.Split('\n');
+                bool linesCapped = lines.Length > MaxLines;
+                string working = linesCapped
+                    ? string.Join("\n", lines, 0, MaxLines)
+                    : combined;
+
+                byte[] bytes = Encoding.UTF8.GetBytes(working);
+                bool bytesCapped = bytes.Length > MaxBytes;
+                if (bytesCapped)
+                {
+                    int cutAt = MaxBytes;
+                    while (cutAt > 0 && bytes[cutAt] != (byte)'\n') cutAt--;
+                    working = Encoding.UTF8.GetString(bytes, 0, cutAt > 0 ? cutAt : MaxBytes);
+                }
+
+                var sb = new StringBuilder(prefix);
+                sb.Append(working);
+                if (linesCapped)
+                    sb.Append($"\n[output truncated — {lines.Length} lines total, showing first {MaxLines}]");
+                else if (bytesCapped)
+                    sb.Append($"\n[output truncated — {bytes.Length} bytes total, showing first {MaxBytes} bytes]");
+
+                return sb.ToString();
+            }
+            catch (OperationCanceledException)
+            {
+                return "[ssh_exec] Cancelled.";
+            }
+            catch (Exception ex)
+            {
+                return $"[ssh_exec error] {ex.Message}";
+            }
+        }, cancellationToken);
+   }
+
+    // ── Phase F: Git operations ──
+
+   [McpServerTool(Name = "git_commit")]
+    [Description(
+        "Stage files and create a git commit in the working directory. " +
+        "Stages all changes by default, or specific files if provided. " +
+        "Pass \"auto\" as the message to generate one from the staged diff. " +
+        "Optionally pushes to a named remote after committing. " +
+        "Uses conventional commit format: type(scope): description.")]
+    public async Task<string> GitCommit(
+        [Description("Commit message. Pass \"auto\" to generate from staged diff.")] string message,
+        [Description("Files to stage. If omitted, stages all changes (-A).")] string[]? files = null,
+        [Description("Remote name to push to after committing (e.g. \"origin\", \"nas\"). Omit to skip push.")] string? remote = null,
+        CancellationToken cancellationToken = default)
+    {
+        return await _svc.EnqueueAsync(async () =>
+        {
+            try
+            {
+                // Find git root and set shell working directory.
+                string gitRoot = ContextEngine.FindGitRoot(_svc.WorkingDirectory);
+                if (gitRoot == null)
+                    return "[git_commit] Not a git repository.";
+
+                string savedDir = _svc.Shell.WorkingDirectory;
+                _svc.Shell.ChangeDirectory(gitRoot);
+
+                try
+                {
+                    // Stage files.
+                    string stageArgs = (files != null && files.Length > 0)
+                        ? string.Join(" ", files.Select(f => $"\"{f}\""))
+                        : "-A";
+                    var (stageOutput, stageExitCode) = await _svc.Shell.ExecuteAsync($"git add {stageArgs}", cancellationToken);
+                    if (stageExitCode != 0)
+                        return $"[git_commit] git add failed:\n{stageOutput}";
+
+                    // Check what's staged.
+                    var (statusOutput, statusExitCode) = await _svc.Shell.ExecuteAsync("git status --short", cancellationToken);
+                    string status = statusOutput?.Trim() ?? "";
+                    if (string.IsNullOrWhiteSpace(status))
+                        return "[git_commit] Nothing to commit — working tree clean.";
+
+                    // Count staged vs unstaged.
+                    var lines = status.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+                    var staged   = lines.Where(l => l.Length >= 2 && l[0] != ' ' && l[0] != '?').ToList();
+                    var unstaged = lines.Where(l => l.Length >= 2 && (l[0] == ' ' || l[0] == '?')).ToList();
+
+                    if (staged.Count == 0)
+                        return $"[git_commit] Nothing staged to commit.\nUnstaged changes:\n{string.Join("\n", unstaged)}";
+
+                    // Auto-generate message if requested.
+                    string commitMessage = message;
+                    if (message.Equals("auto", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var changedFiles = staged.Select(l => l.Substring(2).Trim()).ToList();
+                        string scope = changedFiles.Count == 1
+                            ? Path.GetFileNameWithoutExtension(changedFiles[0])
+                            : "multiple";
+                        commitMessage = $"chore({scope}): update {string.Join(", ", changedFiles.Take(3))}{(changedFiles.Count > 3 ? $" and {changedFiles.Count - 3} more" : "")}";
+                    }
+
+                    // Commit.
+                    string safeMessage = commitMessage.Replace("\"", "\\\"");
+                    var (commitOutput, commitExitCode) = await _svc.Shell.ExecuteAsync($"git commit -m \"{safeMessage}\"", cancellationToken);
+                    if (commitExitCode != 0)
+                        return $"[git_commit] git commit failed:\n{commitOutput}";
+
+                    var sb = new StringBuilder();
+                    sb.AppendLine($"[git_commit] Committed {staged.Count} file(s): {commitMessage}");
+                    sb.AppendLine(commitOutput?.Trim());
+
+                    if (unstaged.Count > 0)
+                        sb.AppendLine($"\nNote: {unstaged.Count} unstaged change(s) not included:\n{string.Join("\n", unstaged.Take(5))}{(unstaged.Count > 5 ? $"\n...and {unstaged.Count - 5} more" : "")}");
+
+                    // Optional push.
+                    if (!string.IsNullOrWhiteSpace(remote))
+                    {
+                        sb.AppendLine($"\nPushing to {remote}...");
+                        var (pushOutput, pushExitCode) = await _svc.Shell.ExecuteAsync($"git push {remote}", cancellationToken);
+                        sb.AppendLine(pushExitCode == 0
+                            ? $"Pushed to {remote} successfully."
+                            : $"Push failed:\n{pushOutput}");
+                    }
+
+                    return sb.ToString().TrimEnd();
+                }
+                finally
+                {
+                    _svc.Shell.ChangeDirectory(savedDir);
+                }
+            }
+            catch (Exception ex)
+            {
+                return $"[git_commit error] {ex.Message}";
+            }
+       }, cancellationToken);
+    }
+
+    // ── Phase D: clip_read, clip_write, open_file, http_request ─────────────
+
+    [McpServerTool(Name = "clip_read")]
+    [Description(
+        "Read the current contents of the Windows clipboard. " +
+        "Useful for grabbing URLs, error messages, or code snippets the user has copied.")]
+    public async Task<string> ClipRead(
+        CancellationToken cancellationToken = default)
+    {
+        return await _svc.EnqueueAsync(async () =>
+        {
+            try
+            {
+               var (output, _) = await _svc.Shell.ExecuteAsync(
+                    "powershell -NoProfile -Command \"Get-Clipboard\"",
+                    cancellationToken);
+                string text = output?.Trim() ?? "";
+                return string.IsNullOrEmpty(text)
+                    ? "[clip_read] Clipboard is empty."
+                    : text;
+            }
+            catch (Exception ex)
+            {
+                return $"[clip_read error] {ex.Message}";
+            }
+        }, cancellationToken);
+    }
+
+    [McpServerTool(Name = "clip_write")]
+    [Description(
+        "Write text to the Windows clipboard. " +
+        "Useful for placing generated code, URLs, or other output where the user can paste it.")]
+    public async Task<string> ClipWrite(
+        [Description("Text to write to the clipboard.")] string text,
+        CancellationToken cancellationToken = default)
+    {
+        return await _svc.EnqueueAsync(async () =>
+        {
+            try
+            {
+               string escaped = text.Replace("\"", "`\"").Replace("'", "''");
+                var (writeOutput, exitCode) = await _svc.Shell.ExecuteAsync(
+                    $"powershell -NoProfile -Command \"Set-Clipboard -Value '{escaped}'\"",
+                    cancellationToken);
+                return exitCode == 0
+                    ? $"[clip_write] Copied {text.Length} characters to clipboard."
+                    : $"[clip_write] Failed: {writeOutput}";
+            }
+            catch (Exception ex)
+            {
+                return $"[clip_write error] {ex.Message}";
+            }
+        }, cancellationToken);
+    }
+
+    [McpServerTool(Name = "open_file")]
+    [Description(
+        "Open a file or URL in its default application (VS Code for code files, browser for URLs, etc). " +
+        "Useful for opening files for manual review after editing, or launching a browser to a local endpoint.")]
+    public async Task<string> OpenFile(
+        [Description("Absolute file path or URL to open.")] string path,
+        CancellationToken cancellationToken = default)
+    {
+        return await _svc.EnqueueAsync(async () =>
+        {
+            try
+            {
+               string target = path.StartsWith("http://") || path.StartsWith("https://")
+                    ? path
+                    : ResolveFilePath(path) ?? path;
+                var (openOutput, openExitCode) = await _svc.Shell.ExecuteAsync(
+                    $"powershell -NoProfile -Command \"Start-Process '{target}'\"",
+                    cancellationToken);
+                return openExitCode == 0
+                    ? $"[open_file] Opened: {target}"
+                    : $"[open_file] Failed: {openOutput}";
+            }
+            catch (Exception ex)
+            {
+                return $"[open_file error] {ex.Message}";
+            }
+        }, cancellationToken);
+    }
+
+    [McpServerTool(Name = "http_request")]
+    [Description(
+        "Make an HTTP request to a local or remote endpoint. " +
+        "Endpoints can be defined by alias in DEVMIND_HTTP_ENDPOINTS, or use a full URL. " +
+        "Useful for testing APIs, querying local services (Qwen, Parsely, TTA), or hitting the fetcher/SearXNG directly.")]
+    public async Task<string> HttpRequest(
+        [Description("Endpoint alias from DEVMIND_HTTP_ENDPOINTS, or full URL.")] string endpoint,
+        [Description("Path to append to the base URL (e.g. \"/v1/models\"). Ignored if endpoint is a full URL.")] string? path = null,
+        [Description("HTTP method: GET, POST, PUT, DELETE (default GET).")] string? method = null,
+        [Description("Request body as a JSON string (for POST/PUT).")] string? body = null,
+        [Description("Timeout in seconds (default 30).")] int? timeout_seconds = null,
+        CancellationToken cancellationToken = default)
+    {
+        return await _svc.EnqueueAsync(async () =>
+        {
+            try
+            {
+                string httpMethod = (method ?? "GET").ToUpperInvariant();
+                int timeoutSecs   = timeout_seconds ?? 30;
+
+                // Resolve endpoint alias or use as full URL.
+                string baseUrl;
+                if (_svc.HttpEndpoints.TryGetValue(endpoint, out var alias))
+                    baseUrl = alias;
+                else if (endpoint.StartsWith("http://") || endpoint.StartsWith("https://"))
+                    baseUrl = endpoint;
+                else
+                    return $"[http_request] Unknown endpoint alias \"{endpoint}\". " +
+                           "Define it in DEVMIND_HTTP_ENDPOINTS or use a full URL.";
+
+                string url = string.IsNullOrWhiteSpace(path)
+                    ? baseUrl.TrimEnd('/')
+                    : $"{baseUrl.TrimEnd('/')}/{path.TrimStart('/')}";
+
+                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(timeoutSecs) };
+                HttpResponseMessage response;
+
+                if (httpMethod == "GET" || httpMethod == "DELETE")
+                {
+                    var request = new HttpRequestMessage(
+                        httpMethod == "GET" ? HttpMethod.Get : HttpMethod.Delete, url);
+                    response = await http.SendAsync(request, cancellationToken);
+                }
+                else
+                {
+                    var content = new StringContent(
+                        body ?? "{}", Encoding.UTF8, "application/json");
+                    response = httpMethod == "POST"
+                        ? await http.PostAsync(url, content, cancellationToken)
+                        : await http.PutAsync(url, content, cancellationToken);
+                }
+
+                string responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
+
+                // Pretty-print JSON if possible.
+                try
+                {
+                    using var doc = JsonDocument.Parse(responseBody);
+                    responseBody = JsonSerializer.Serialize(doc.RootElement,
+                        new JsonSerializerOptions { WriteIndented = true });
+                }
+                catch { }
+
+                // Cap output.
+                const int Cap = 4000;
+                bool capped = responseBody.Length > Cap;
+                string output = capped ? responseBody.Substring(0, Cap) : responseBody;
+
+                return $"[http_request] {httpMethod} {url} → {(int)response.StatusCode} {response.StatusCode}\n\n{output}" +
+                       (capped ? $"\n\n[truncated at {Cap} chars]" : "");
+            }
+            catch (Exception ex)
+            {
+                return $"[http_request error] {ex.Message}";
+            }
+        }, cancellationToken);
+    }
+
+    // ── Phase E: LSP tools (C# via csharp-ls, TS/JS via typescript-language-server) ──
+
+    [McpServerTool(Name = "get_diagnostics")]
+    [Description(
+        "Return errors and warnings for a source file without a full build. " +
+        "Uses the language server for the file type (.cs → csharp-ls, .ts/.tsx/.js/.jsx → typescript-language-server). " +
+        "Prefer this over run_build when checking a single file.")]
+    public async Task<string> GetDiagnostics(
+        [Description("Absolute path to a .cs, .ts, .tsx, .js, or .jsx file.")] string filename,
+        CancellationToken cancellationToken = default)
+    {
+        return await _svc.EnqueueAsync(async () =>
+        {
+            if (_svc.Lsp == null)
+                return "[get_diagnostics] LSP is disabled (set DEVMIND_LSP_ENABLED=true to enable).";
+
+            try
+            {
+                string? fullPath = ResolveFilePath(filename);
+                if (fullPath == null || !File.Exists(fullPath))
+                    return BuildFileNotFoundMessage("get_diagnostics", filename);
+
+                return await _svc.Lsp.GetDiagnosticsAsync(fullPath, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                return $"[get_diagnostics error] {filename}: {ex.Message}";
+            }
+        }, cancellationToken);
+    }
+
+    [McpServerTool(Name = "go_to_definition")]
+    [Description(
+        "Navigate to the definition of the symbol at the given position. " +
+        "Returns file:line:column for each definition location. Line and character are 1-based.")]
+    public async Task<string> GoToDefinition(
+        [Description("Absolute path to a supported source file (.cs, .ts, .tsx, .js, .jsx).")] string filename,
+        [Description("1-based line number.")] int line,
+        [Description("1-based character (column) position.")] int character,
+        CancellationToken cancellationToken = default)
+    {
+        return await _svc.EnqueueAsync(async () =>
+        {
+            if (_svc.Lsp == null)
+                return "[go_to_definition] LSP is disabled (set DEVMIND_LSP_ENABLED=true to enable).";
+
+            try
+            {
+                string? fullPath = ResolveFilePath(filename);
+                if (fullPath == null || !File.Exists(fullPath))
+                    return BuildFileNotFoundMessage("go_to_definition", filename);
+
+                return await _svc.Lsp.GoToDefinitionAsync(fullPath, line, character, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                return $"[go_to_definition error] {filename}: {ex.Message}";
+            }
+        }, cancellationToken);
+    }
+
+    [McpServerTool(Name = "find_references")]
+    [Description(
+        "Find all references to the symbol at the given position. " +
+        "Semantic search — prefer over find_in_files when locating usages of a type or member. " +
+        "Line and character are 1-based.")]
+    public async Task<string> FindReferences(
+        [Description("Absolute path to a supported source file (.cs, .ts, .tsx, .js, .jsx).")] string filename,
+        [Description("1-based line number.")] int line,
+        [Description("1-based character (column) position.")] int character,
+        CancellationToken cancellationToken = default)
+    {
+        return await _svc.EnqueueAsync(async () =>
+        {
+            if (_svc.Lsp == null)
+                return "[find_references] LSP is disabled (set DEVMIND_LSP_ENABLED=true to enable).";
+
+            try
+            {
+                string? fullPath = ResolveFilePath(filename);
+                if (fullPath == null || !File.Exists(fullPath))
+                    return BuildFileNotFoundMessage("find_references", filename);
+
+                return await _svc.Lsp.FindReferencesAsync(fullPath, line, character, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                return $"[find_references error] {filename}: {ex.Message}";
+            }
+        }, cancellationToken);
+    }
+
+    [McpServerTool(Name = "hover")]
+    [Description(
+        "Return type signature and documentation for the symbol at the given position. " +
+        "Line and character are 1-based.")]
+    public async Task<string> Hover(
+        [Description("Absolute path to a supported source file (.cs, .ts, .tsx, .js, .jsx).")] string filename,
+        [Description("1-based line number.")] int line,
+        [Description("1-based character (column) position.")] int character,
+        CancellationToken cancellationToken = default)
+    {
+        return await _svc.EnqueueAsync(async () =>
+        {
+            if (_svc.Lsp == null)
+                return "[hover] LSP is disabled (set DEVMIND_LSP_ENABLED=true to enable).";
+
+            try
+            {
+                string? fullPath = ResolveFilePath(filename);
+                if (fullPath == null || !File.Exists(fullPath))
+                    return BuildFileNotFoundMessage("hover", filename);
+
+                return await _svc.Lsp.HoverAsync(fullPath, line, character, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                return $"[hover error] {filename}: {ex.Message}";
             }
         }, cancellationToken);
     }
@@ -1178,6 +1980,16 @@ internal sealed class DevMindTools
         if (!string.IsNullOrWhiteSpace(filter))
             sb.Append($" --filter \"{filter}\"");
 
-        return sb.ToString();
+       return sb.ToString();
+    }
+
+    /// <summary>
+    /// Returns true for script file extensions where a UTF-8 BOM causes problems
+    /// (cmd.exe, PowerShell, bash interpret the BOM bytes as part of the shebang/command).
+    /// </summary>
+    private static bool IsScriptFileExtension(string path)
+    {
+        string ext = Path.GetExtension(path)?.ToLowerInvariant() ?? "";
+       return ext == ".cmd" || ext == ".bat" || ext == ".sh" || ext == ".ps1";
     }
 }
