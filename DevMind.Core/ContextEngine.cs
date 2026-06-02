@@ -131,7 +131,7 @@ namespace DevMind
             if (injectOutline)
             {
                 string outlineText = LlmClient.GenerateOutline(fileNameOnly, content);
-                return $"[READ:{fileNameOnly}] ({lineCount} lines — outline only, use READ {fileNameOnly}:start-end for detail)\n{outlineText}\n\n";
+                return $"[READ:{fileNameOnly}] ({lineCount} lines — outline only; call read_file again with force_full:true for the whole file, or start_line/end_line for a range)\n{outlineText}\n\n";
             }
             return $"[READ:{fileNameOnly}]\nThe following files have been loaded for context:\n\n{fileNameOnly}\n```\n{content}\n```\n\n";
         }

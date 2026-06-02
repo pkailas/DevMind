@@ -1,4 +1,4 @@
-// File: Trace.cs  v1.1
+// File: Trace.cs  v1.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Schema: JSONL records with keys {ts, run_id, pid, role, level, event, data}.
@@ -31,7 +31,11 @@ namespace DevMind
         private static bool   _dirEnsured;
         private static readonly object _initLock  = new object();
         private static readonly object _writeLock = new object();
-        private const  string  _role = "mcp"; // Distinguishes server side from shell side ("shell")
+private const  string  _role = "mcp"; // Distinguishes server side from shell side ("shell")
+
+        // UTF-8 without BOM. Encoding.UTF8 emits a BOM (EF BB BF), which JSONL parsers
+        // do not expect and will treat as part of the first record.
+        private static readonly Encoding _utf8NoBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
 
         private static void Init()
         {
@@ -126,7 +130,7 @@ namespace DevMind
                 }
 
                 string json = JsonConvert.SerializeObject(record);
-                File.AppendAllText(_logPath, json + "\n", Encoding.UTF8);
+File.AppendAllText(_logPath, json + "\n", _utf8NoBom);
             }
         }
 

@@ -1,4 +1,4 @@
-// File: ToolRegistry.cs  v7.9
+// File: ToolRegistry.cs  v8.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json.Linq;
@@ -189,6 +189,33 @@ namespace DevMind
                 "The build command is auto-detected: VSIX projects (detected via .vsixmanifest) use " +
                 "MSBuild with /p:DeployExtension=false; other projects use dotnet build. " +
                 "No parameters needed — the system knows the correct build command."));
+
+            // ── LSP tools (per-extension language servers) ─────────────────
+            tools.Add(MakeTool("get_diagnostics",
+                "Return errors and warnings for a source file without a full build. " +
+                ".cs uses csharp-ls; .ts/.tsx/.js/.jsx uses typescript-language-server.",
+                Required("filename", "string",
+                    "Absolute path to a .cs, .ts, .tsx, .js, or .jsx file.")));
+
+            tools.Add(MakeTool("go_to_definition",
+                "Navigate to the definition of the symbol at the given position. " +
+                "Returns file:line:column. Line and character are 1-based.",
+                Required("filename", "string", "Absolute path to a supported source file."),
+                Required("line", "integer", "1-based line number."),
+                Required("character", "integer", "1-based character (column) position.")));
+
+            tools.Add(MakeTool("find_references",
+                "Find all references to the symbol at the given position. Line and character are 1-based.",
+                Required("filename", "string", "Absolute path to a supported source file."),
+                Required("line", "integer", "1-based line number."),
+                Required("character", "integer", "1-based character (column) position.")));
+
+            tools.Add(MakeTool("hover",
+                "Return type signature and documentation for the symbol at the given position. " +
+                "Line and character are 1-based.",
+                Required("filename", "string", "Absolute path to a supported source file."),
+                Required("line", "integer", "1-based line number."),
+                Required("character", "integer", "1-based character (column) position.")));
 
             return tools;
         }

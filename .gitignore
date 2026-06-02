@@ -27,3 +27,7 @@ CodeReviewBenchmarkWithBugs/
 
 # DevMind trace output
 .dm-trace/
+
+# Self-contained publish staging + any loose executables (never commit binaries)
+.publish-*/
+*.exe
