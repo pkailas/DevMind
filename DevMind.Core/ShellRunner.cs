@@ -1,7 +1,9 @@
-// File: ShellRunner.cs  v1.6
+// File: ShellRunner.cs  v1.7
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 // v1.5: trace mcp.shell.spawn / output_line / exit events via DevMind.Trace (alias DmTrace).
 // v1.6: fix git stdio hang by setting GIT_REDIRECT_STDIN/STDERR (Git for Windows handle-inheritance issue).
+// v1.7: add ExecuteArgvAsync (shell-free, ArgumentList-based) for data-driven callers; extract shared
+//       RunProcessAsync plumbing. String-path ExecuteAsync behavior unchanged. Resolves the quoting TODO.
 
 using System;
 using System.Collections.Generic;
@@ -52,12 +54,16 @@ namespace DevMind
         }
 
         /// <summary>
-        /// Execute a shell command and return buffered output and exit code.
-        /// Cancellation kills the process immediately; timeout (default 120s) also kills.
+        /// Execute a shell command (arbitrary PowerShell / cmd.exe) and return buffered
+        /// output and exit code. This is the general-purpose run-arbitrary-shell path used
+        /// by run_shell, run_build, and the CLI agentic host. Cancellation kills the process
+        /// tree immediately; timeout (default 120s) also kills.
         /// <para>
-        /// TODO: ArgumentList-based command building once target framework supports it
-        /// (.NET Core 2.1+ / netstandard2.1+). Current string-concat approach has a
-        /// quoting bug for PowerShell strings containing double quotes (Stage 7 Item 3).
+        /// Data-driven callers (git_commit, run_tests, clip_read/clip_write, git log/diff)
+        /// must NOT build command strings for this method. They use <see cref="ExecuteArgvAsync"/>,
+        /// which passes arguments via ProcessStartInfo.ArgumentList with no shell re-parsing —
+        /// no quoting, no SanitizeCommand — so a value can never break out into command syntax.
+        /// (Resolves the former Stage 7 Item 3 quoting TODO, now that DevMind.Core targets net10.0.)
         /// </para>
         /// </summary>
         public async Task<(string output, int exitCode)> ExecuteAsync(
@@ -83,21 +89,71 @@ namespace DevMind
                 ? $"-NoProfile -NonInteractive -Command \"{sanitized.Replace("\"", "\\\"")}\""
                 : $"/c \"{sanitized}\"";
 
+            var psi = new ProcessStartInfo(shell, args);
+            return await RunProcessAsync(
+                psi, shell, args, sanitized, usePowerShell, forceCmdExe,
+                cancellationToken, timeoutSeconds, onLine);
+        }
+
+        /// <summary>
+        /// Execute a program with an explicit argument list, bypassing the shell entirely.
+        /// Arguments go through ProcessStartInfo.ArgumentList — no PowerShell/cmd parsing,
+        /// no quoting, no SanitizeCommand — so values cannot break out into command syntax.
+        /// Use this for every data-driven invocation (git, dotnet, and Set-Clipboard with the
+        /// clipboard value supplied via <paramref name="extraEnv"/> rather than the command text).
+        /// </summary>
+        public async Task<(string output, int exitCode)> ExecuteArgvAsync(
+            string fileName,
+            IReadOnlyList<string> arguments,
+            CancellationToken cancellationToken = default,
+            int timeoutSeconds = 120,
+            IProgress<ShellOutputLine> onLine = null,
+            IReadOnlyDictionary<string, string> extraEnv = null)
+        {
+            var psi = new ProcessStartInfo(fileName);
+            if (arguments != null)
+                foreach (var a in arguments)
+                    psi.ArgumentList.Add(a);
+
+            if (extraEnv != null)
+                foreach (var kv in extraEnv)
+                    psi.EnvironmentVariables[kv.Key] = kv.Value;
+
+            string traceArgs = arguments != null ? string.Join(" ", arguments) : "";
+            return await RunProcessAsync(
+                psi, fileName, traceArgs, traceArgs, tracePowerShell: false, traceForceCmdExe: false,
+                cancellationToken, timeoutSeconds, onLine);
+        }
+
+        /// <summary>
+        /// Shared process plumbing for both <see cref="ExecuteAsync"/> and
+        /// <see cref="ExecuteArgvAsync"/>: applies the common ProcessStartInfo settings and the
+        /// GIT_REDIRECT_* fix, spawns the process, pumps stdout/stderr, enforces
+        /// timeout/cancellation via taskkill /F /T, traces, and collects buffered output.
+        /// </summary>
+        private async Task<(string output, int exitCode)> RunProcessAsync(
+            ProcessStartInfo psi,
+            string traceShell,
+            string traceArgs,
+            string traceSanitizedInput,
+            bool tracePowerShell,
+            bool traceForceCmdExe,
+            CancellationToken cancellationToken,
+            int timeoutSeconds,
+            IProgress<ShellOutputLine> onLine)
+        {
             try
             {
-                var psi = new ProcessStartInfo(shell, args)
-                {
-                    WorkingDirectory = WorkingDirectory,
-                    UseShellExecute = false,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    CreateNoWindow = true,
-                    WindowStyle = ProcessWindowStyle.Hidden
-                };
+                psi.WorkingDirectory       = WorkingDirectory;
+                psi.UseShellExecute        = false;
+                psi.RedirectStandardOutput = true;
+                psi.RedirectStandardError  = true;
+                psi.CreateNoWindow         = true;
+                psi.WindowStyle            = ProcessWindowStyle.Hidden;
 
-                // Git for Windows hangs when spawned through PowerShell because it inherits 
-                // redirected stdio handles it doesn't know to close. Setting these 
-                // variables enables git's own redirection mechanism (v2.11.0(2)).
+                // Git for Windows hangs when spawned with inherited redirected stdio handles
+                // it doesn't know to close. These enable git's own redirection (v2.11.0(2)).
+                // Kept in the shared core so BOTH the string and argv paths get the fix.
                 psi.EnvironmentVariables["GIT_REDIRECT_STDIN"] = "off";
                 psi.EnvironmentVariables["GIT_REDIRECT_STDERR"] = "2>&1";
 
@@ -155,12 +211,12 @@ namespace DevMind
                 DmTrace.Event("info", "mcp.shell.spawn",
                     new Dictionary<string, object>
                     {
-                        ["shell"]           = shell,
-                        ["args"]            = args,
+                        ["shell"]           = traceShell,
+                        ["args"]            = traceArgs,
                         ["working_dir"]     = WorkingDirectory,
-                        ["sanitized_input"] = sanitized,
-                        ["use_powershell"]  = usePowerShell,
-                        ["force_cmd_exe"]   = forceCmdExe,
+                        ["sanitized_input"] = traceSanitizedInput,
+                        ["use_powershell"]  = tracePowerShell,
+                        ["force_cmd_exe"]   = traceForceCmdExe,
                         ["env"]             = RedactEnv()
                     });
 
