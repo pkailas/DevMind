@@ -1,4 +1,6 @@
-// File: LanguageServerHost.cs  v2.1
+// File: LanguageServerHost.cs  v2.2
+// v2.2: advertise workspace/symbol + FindSymbolAsync (solution-wide semantic symbol
+//   search); empty results route through the same A11 readiness path (no false-empty).
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Session-scoped language server host for one profile (C# or TypeScript).
@@ -267,6 +269,30 @@ namespace DevMind
             return contents.ToString();
         }
 
+        /// <summary>
+        /// Solution-wide semantic symbol search (workspace/symbol). No file/position — takes a
+        /// name query and returns matching types/members across the loaded solution. Empty
+        /// results route through the same readiness path as the navigation tools, so a false
+        /// "no symbols" is impossible when the index is NotReady/Degraded.
+        /// </summary>
+        public async Task<string> FindSymbolAsync(
+            string query,
+            int maxResults,
+            CancellationToken cancellationToken = default)
+        {
+            await EnsureReadyAsync(cancellationToken).ConfigureAwait(false);
+
+            var result = await _client.RequestAsync(
+                "workspace/symbol",
+                new JObject { ["query"] = query ?? "" },
+                cancellationToken).ConfigureAwait(false);
+
+            string readyEmpty =
+                "find_symbol: ran the search but found no symbols matching \"" + query +
+                "\" in the loaded " + _profile.DisplayName + " solution.";
+            return FinishLocationResult("find_symbol", FormatSymbols(result, maxResults), readyEmpty);
+        }
+
         public void Dispose()
         {
             if (_disposed) return;
@@ -368,7 +394,7 @@ namespace DevMind
         /// always returned (with a degraded caveat appended when serving DEGRADED); an empty
         /// result yields a genuine "no results" ONLY when READY, otherwise the honest signal.
         /// </summary>
-        private string FinishLocationResult(string toolName, string formattedOrNull)
+        private string FinishLocationResult(string toolName, string formattedOrNull, string readyEmptyMessage = null)
         {
             RefreshReadiness();
             var state = SnapshotReadiness();
@@ -382,8 +408,10 @@ namespace DevMind
                 return formattedOrNull;
             }
 
+            // Empty result: a genuine empty ONLY when READY (caller may supply a tool-specific
+            // message, e.g. find_symbol echoes the query); otherwise the honest not-ready signal.
             if (state == LspReadiness.Ready)
-                return toolName + ": no results";
+                return readyEmptyMessage ?? (toolName + ": no results");
             return NavNotReadyMessage(toolName, state);
         }
 
@@ -457,6 +485,13 @@ namespace DevMind
                         ["diagnostics"] = new JObject
                         {
                             ["refreshSupport"] = true,
+                        },
+                        // Advertise solution-wide symbol search so Roslyn registers
+                        // workspaceSymbolProvider. Minimal cap — Roslyn returns full
+                        // Location, so no resolveSupport/symbolKind value-set needed.
+                        ["symbol"] = new JObject
+                        {
+                            ["dynamicRegistration"] = true,
                         },
                     },
                     ["window"] = new JObject
@@ -658,6 +693,96 @@ namespace DevMind
 
             return string.Join("\n", locations.Take(100)) +
                    (locations.Count > 100 ? $"\n... and {locations.Count - 100} more" : "");
+        }
+
+        /// <summary>
+        /// Format a workspace/symbol result (SymbolInformation[] / WorkspaceSymbol[]) as a
+        /// readable "Kind Name — path:line:col (container)" list, or null when empty (the
+        /// readiness wrapper decides the empty message). Capped at maxResults.
+        /// </summary>
+        private static string FormatSymbols(JToken result, int maxResults)
+        {
+            if (!(result is JArray arr) || arr.Count == 0) return null;
+
+            var lines = new List<string>();
+            foreach (var item in arr)
+            {
+                if (!(item is JObject sym)) continue;
+                string name = sym["name"]?.ToString();
+                if (string.IsNullOrEmpty(name)) continue;
+
+                string kind = SymbolKindName(sym["kind"]?.Value<int>() ?? 0);
+                string container = sym["containerName"]?.ToString();
+
+                string where = "";
+                if (sym["location"] is JObject loc)
+                {
+                    string uri = loc["uri"]?.ToString();
+                    if (uri != null)
+                    {
+                        string path = UriToPath(uri);
+                        if ((loc["range"] as JObject)?["start"] is JObject start)
+                        {
+                            int line = (start["line"]?.Value<int>() ?? 0) + 1;
+                            int col = (start["character"]?.Value<int>() ?? 0) + 1;
+                            where = " — " + path + ":" + line + ":" + col;
+                        }
+                        else
+                        {
+                            where = " — " + path;
+                        }
+                    }
+                }
+
+                string suffix = string.IsNullOrEmpty(container) ? "" : " (" + container + ")";
+                lines.Add(kind + " " + name + where + suffix);
+            }
+
+            if (lines.Count == 0) return null;
+
+            int cap = maxResults > 0 ? maxResults : 50;
+            if (lines.Count > cap)
+                return string.Join("\n", lines.GetRange(0, cap)) +
+                       "\n... and " + (lines.Count - cap) + " more";
+            return string.Join("\n", lines);
+        }
+
+        /// <summary>
+        /// LSP SymbolKind (1..26 per the spec) → readable name, with a safe fallback so an
+        /// unexpected/unmapped kind renders readably (never blank or throwing).
+        /// </summary>
+        private static string SymbolKindName(int kind)
+        {
+            switch (kind)
+            {
+                case 1:  return "File";
+                case 2:  return "Module";
+                case 3:  return "Namespace";
+                case 4:  return "Package";
+                case 5:  return "Class";
+                case 6:  return "Method";
+                case 7:  return "Property";
+                case 8:  return "Field";
+                case 9:  return "Constructor";
+                case 10: return "Enum";
+                case 11: return "Interface";
+                case 12: return "Function";
+                case 13: return "Variable";
+                case 14: return "Constant";
+                case 15: return "String";
+                case 16: return "Number";
+                case 17: return "Boolean";
+                case 18: return "Array";
+                case 19: return "Object";
+                case 20: return "Key";
+                case 21: return "Null";
+                case 22: return "EnumMember";
+                case 23: return "Struct";
+                case 24: return "Event";
+                case 25: return "Operator";
+                case 26: return "TypeParameter";
+                default: return kind > 0 ? "Symbol(" + kind + ")" : "Symbol";
+            }
         }
 
         private static string UriToPath(string uri)
