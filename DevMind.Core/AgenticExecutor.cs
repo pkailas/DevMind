@@ -300,7 +300,7 @@ namespace DevMind
                         try
                         {
                             string deleteResult = await _host.DeleteFileAsync(block.FileName);
-                            bool deleted = deleteResult != null && deleteResult.StartsWith("Deleted:");
+                            bool deleted = deleteResult != null && deleteResult.StartsWith("Deleted:", StringComparison.Ordinal);
                             _host.AppendOutput($"[DELETE] {deleteResult}\n",
                                 deleted ? OutputColor.Success : OutputColor.Error);
                             if (deleted)
@@ -326,7 +326,7 @@ namespace DevMind
                         try
                         {
                             string renameResult = await _host.RenameFileAsync(block.RenameFrom, block.RenameTo);
-                            bool renamed = renameResult != null && renameResult.StartsWith("Renamed:");
+                            bool renamed = renameResult != null && renameResult.StartsWith("Renamed:", StringComparison.Ordinal);
                             _host.AppendOutput($"[RENAME] {renameResult}\n",
                                 renamed ? OutputColor.Success : OutputColor.Error);
                             if (renamed)

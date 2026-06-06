@@ -1,4 +1,4 @@
-// File: DevMindTools.cs  v4.9
+// File: DevMindTools.cs  v5.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Diagnostic policy: never write to Console.Out / Console.WriteLine in this file.
@@ -107,6 +107,7 @@ internal sealed class DevMindTools
                     return BuildFileNotFoundMessage("read_file", filename);
 
                 string fileNameOnly = Path.GetFileName(fullPath) ?? Path.GetFileName(filename) ?? filename;
+                string cacheKey     = Path.GetFullPath(fullPath);
                 bool forceFullRead  = force_full == true;
 
                 // ── Line-range path ──────────────────────────────────────────
@@ -114,14 +115,14 @@ internal sealed class DevMindTools
                 {
                     EnsureCached(fileNameOnly, fullPath);
 
-                    int totalLines   = _svc.FileCache.GetLineCount(fileNameOnly);
+                    int totalLines   = _svc.FileCache.GetLineCount(cacheKey);
                     int rawStart     = start_line.Value;
                     int rawEnd       = end_line.HasValue ? end_line.Value : totalLines;
                     if (rawStart > rawEnd) { int t = rawStart; rawStart = rawEnd; rawEnd = t; }
                     int clampedStart = Math.Max(1, rawStart);
                     int clampedEnd   = Math.Min(totalLines, rawEnd);
 
-                    string rangeContent = _svc.FileCache.GetLineRange(fileNameOnly, clampedStart, clampedEnd);
+                    string rangeContent = _svc.FileCache.GetLineRange(cacheKey, clampedStart, clampedEnd);
                     if (rangeContent == null)
                         return $"[read_file] Range {rawStart}-{rawEnd} out of bounds for {fileNameOnly} ({totalLines} lines)";
 
@@ -137,10 +138,10 @@ internal sealed class DevMindTools
 
                 // ── Full / outline path ──────────────────────────────────────
                 string content   = File.ReadAllText(fullPath);
-                _svc.FileCache.Store(fileNameOnly, content);
+                _svc.FileCache.Store(cacheKey, content);
                 int lineCount    = content.Split('\n').Length;
-                bool alreadyRead = _svc.FilesRead.Contains(fileNameOnly);
-                _svc.FilesRead.Add(fileNameOnly);
+                bool alreadyRead = _svc.FilesRead.Contains(cacheKey);
+                _svc.FilesRead.Add(cacheKey);
 
                 return ContextEngine.RenderReadBlock(
                     fileNameOnly, content, lineCount, forceFullRead, alreadyRead, out _);
@@ -243,16 +244,17 @@ internal sealed class DevMindTools
                     return BuildFileNotFoundMessage("grep_file", filename);
 
                 string fileNameOnly = Path.GetFileName(fullPath) ?? Path.GetFileName(filename) ?? filename;
+                string cacheKey     = Path.GetFullPath(fullPath);
                 EnsureCached(fileNameOnly, fullPath);
 
-                int totalLines = _svc.FileCache.GetLineCount(fileNameOnly);
+                int totalLines = _svc.FileCache.GetLineCount(cacheKey);
                 int scanStart  = start_line.HasValue ? Math.Max(1, start_line.Value) : 1;
                 int scanEnd    = end_line.HasValue   ? Math.Min(totalLines, end_line.Value) : totalLines;
 
                 var matches = new List<(int lineNum, string lineText)>();
                 for (int lineNum = scanStart; lineNum <= scanEnd; lineNum++)
                 {
-                    string lineContent = _svc.FileCache.GetLineRange(fileNameOnly, lineNum, lineNum);
+                    string lineContent = _svc.FileCache.GetLineRange(cacheKey, lineNum, lineNum);
                     if (lineContent == null) continue;
                     if (lineContent.IndexOf(pattern, StringComparison.OrdinalIgnoreCase) >= 0)
                         matches.Add((lineNum, lineContent));
@@ -334,22 +336,23 @@ internal sealed class DevMindTools
                 {
                     if (hitCap) break;
                     string fileNameOnly = Path.GetFileName(filePath);
+                    string cacheKey     = Path.GetFullPath(filePath);
 
-                    if (!_svc.FileCache.Contains(fileNameOnly))
+                    if (!_svc.FileCache.Contains(cacheKey))
                     {
                         string diskContent;
                         try { diskContent = File.ReadAllText(filePath); }
                         catch { continue; }
-                        _svc.FileCache.Store(fileNameOnly, diskContent);
+                        _svc.FileCache.Store(cacheKey, diskContent);
                     }
 
-                    int totalLines = _svc.FileCache.GetLineCount(fileNameOnly);
+                    int totalLines = _svc.FileCache.GetLineCount(cacheKey);
                     int scanStart  = start_line.HasValue ? Math.Max(1, start_line.Value) : 1;
                     int scanEnd    = end_line.HasValue   ? Math.Min(totalLines, end_line.Value) : totalLines;
 
                     for (int lineNum = scanStart; lineNum <= scanEnd; lineNum++)
                     {
-                        string lineContent = _svc.FileCache.GetLineRange(fileNameOnly, lineNum, lineNum);
+                        string lineContent = _svc.FileCache.GetLineRange(cacheKey, lineNum, lineNum);
                         if (lineContent == null) continue;
                         if (lineContent.IndexOf(pattern, StringComparison.OrdinalIgnoreCase) >= 0)
                         {
@@ -538,7 +541,7 @@ internal sealed class DevMindTools
                 string[] blocked = { "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE", "CREATE", "EXEC ", "EXECUTE " };
                 foreach (var keyword in blocked)
                 {
-                    if (trimmed.StartsWith(keyword))
+                    if (trimmed.StartsWith(keyword, StringComparison.Ordinal))
                         return $"[query_db] Blocked: only SELECT queries are permitted. Got: {keyword}";
                 }
 
@@ -552,7 +555,16 @@ internal sealed class DevMindTools
                 {
                     dbConn = new NpgsqlConnection(connStr);
                 }
-                else if (connUpper.Contains(".DB") || connUpper.Contains("DATA SOURCE=") && (connUpper.Contains(".DB") || connUpper.Contains(".SQLITE")))
+                // SQLite only when the connection string names a .db/.sqlite FILE and is not
+                // a SQL Server string (whose host can contain ".db", e.g. prod.db.corp.local).
+                // Explicit parens fix a precedence bug: `Contains(".DB") || X && Y` bound as
+                // `Contains(".DB") || (X && Y)`, misrouting any ".db"-containing SQL Server host.
+                else if ((connUpper.Contains(".DB") || connUpper.Contains(".SQLITE"))
+                         && !(connUpper.Contains("SERVER=")
+                              || connUpper.Contains("INITIAL CATALOG=")
+                              || connUpper.Contains("INTEGRATED SECURITY=")
+                              || connUpper.Contains("TRUSTED_CONNECTION=")
+                              || connUpper.Contains("TRUSTSERVERCERTIFICATE=")))
                 {
                     dbConn = new SqliteConnection(connStr);
                 }
@@ -650,6 +662,7 @@ internal sealed class DevMindTools
                     return BuildFileNotFoundMessage("patch_file", filename);
 
                 string fileNameOnly = Path.GetFileName(fullPath) ?? filename;
+                string cacheKey     = Path.GetFullPath(fullPath);
 
                 // Capture pre-patch baseline for diff_file.
                 _svc.TrySnapshot(fullPath);
@@ -687,8 +700,8 @@ internal sealed class DevMindTools
                     return $"patch_file: write failed — {applyResult.Error}";
 
                 // Update cache with post-patch content so subsequent read_file is consistent.
-                _svc.FileCache.Store(fileNameOnly, applyResult.UpdatedContent);
-                _svc.FilesRead.Add(fileNameOnly);
+                _svc.FileCache.Store(cacheKey, applyResult.UpdatedContent);
+                _svc.FilesRead.Add(cacheKey);
 
                 string badge = resolved.Confidence == PatchConfidence.Fuzzy
                     ? " (fuzzy match — verify with diff_file)"
@@ -734,9 +747,9 @@ internal sealed class DevMindTools
                 File.WriteAllText(fullPath, content, fileEncoding);
 
                 int lineCount       = content.Split('\n').Length;
-                string fileNameOnly = Path.GetFileName(fullPath) ?? filename;
-                _svc.FileCache.Store(fileNameOnly, content);
-                _svc.FilesRead.Add(fileNameOnly);
+                string cacheKey     = Path.GetFullPath(fullPath);
+                _svc.FileCache.Store(cacheKey, content);
+                _svc.FilesRead.Add(cacheKey);
 
                 return $"create_file: created {fullPath} ({lineCount} lines)";
             }
@@ -782,7 +795,7 @@ internal sealed class DevMindTools
                 if (existed)
                 {
                     string existing  = File.ReadAllText(fullPath);
-                    string separator = existing.Length > 0 && !existing.EndsWith("\n") ? "\n" : "";
+                    string separator = existing.Length > 0 && !existing.EndsWith("\n", StringComparison.Ordinal) ? "\n" : "";
                     File.WriteAllText(fullPath, existing + separator + content, appendEncoding);
                 }
                 else
@@ -790,8 +803,8 @@ internal sealed class DevMindTools
                     File.WriteAllText(fullPath, content, appendEncoding);
                 }
 
-                string fileNameOnly = Path.GetFileName(fullPath) ?? filename;
-                _svc.FileCache.Invalidate(fileNameOnly);
+                string cacheKey = Path.GetFullPath(fullPath);
+                _svc.FileCache.Invalidate(cacheKey);
 
                 return existed
                     ? $"append_file: appended to {fullPath}"
@@ -824,8 +837,8 @@ internal sealed class DevMindTools
 
                 File.Delete(fullPath);
 
-                string fileNameOnly = Path.GetFileName(fullPath) ?? filename;
-                _svc.FileCache.Invalidate(fileNameOnly);
+                string cacheKey = Path.GetFullPath(fullPath);
+                _svc.FileCache.Invalidate(cacheKey);
 
                 return $"delete_file: deleted {fullPath}";
             }
@@ -874,8 +887,8 @@ internal sealed class DevMindTools
                 _svc.MoveSnapshot(oldPath, newPath);
 
                 // Invalidate old cache entry; new entry will be populated on next read.
-                string oldFileNameOnly = Path.GetFileName(oldPath) ?? old_filename;
-                _svc.FileCache.Invalidate(oldFileNameOnly);
+                string cacheKey = Path.GetFullPath(oldPath);
+                _svc.FileCache.Invalidate(cacheKey);
 
                 return $"rename_file: {oldPath} → {newPath}";
             }
@@ -1160,7 +1173,7 @@ internal sealed class DevMindTools
                 }
 
                 // Expand ~ in key path.
-                string expandedKey = keyPath.StartsWith("~")
+                string expandedKey = keyPath.StartsWith("~", StringComparison.Ordinal)
                     ? Path.Combine(
                         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
                         keyPath.Substring(1).TrimStart('/', '\\'))
@@ -1401,7 +1414,7 @@ internal sealed class DevMindTools
         {
             try
             {
-               string target = path.StartsWith("http://") || path.StartsWith("https://")
+               string target = path.StartsWith("http://", StringComparison.Ordinal) || path.StartsWith("https://", StringComparison.Ordinal)
                     ? path
                     : ResolveFilePath(path) ?? path;
                 var (openOutput, openExitCode) = await _svc.Shell.ExecuteAsync(
@@ -1442,7 +1455,7 @@ internal sealed class DevMindTools
                 string baseUrl;
                 if (_svc.HttpEndpoints.TryGetValue(endpoint, out var alias))
                     baseUrl = alias;
-                else if (endpoint.StartsWith("http://") || endpoint.StartsWith("https://"))
+                else if (endpoint.StartsWith("http://", StringComparison.Ordinal) || endpoint.StartsWith("https://", StringComparison.Ordinal))
                     baseUrl = endpoint;
                 else
                     return $"[http_request] Unknown endpoint alias \"{endpoint}\". " +
@@ -1668,11 +1681,15 @@ internal sealed class DevMindTools
     /// </summary>
     private void EnsureCached(string fileNameOnly, string fullPath)
     {
-        if (_svc.FileCache.Contains(fileNameOnly)) return;
+        // Key the cache by the full normalized path, not the basename, so same-named
+        // files in different directories don't collide. fileNameOnly is retained in the
+        // signature for call-site compatibility (display) but is not used as the key.
+        string cacheKey = Path.GetFullPath(fullPath);
+        if (_svc.FileCache.Contains(cacheKey)) return;
         try
         {
             string content = File.ReadAllText(fullPath);
-            _svc.FileCache.Store(fileNameOnly, content);
+            _svc.FileCache.Store(cacheKey, content);
         }
         catch { }
     }

@@ -100,7 +100,7 @@ namespace DevMind
         {
             if (content == null) return null;
             string trimmed = content.TrimStart();
-            if (!trimmed.StartsWith("---")) return content;
+            if (!trimmed.StartsWith("---", StringComparison.Ordinal)) return content;
 
             int firstNewline = trimmed.IndexOf('\n');
             if (firstNewline < 0) return content;
@@ -200,8 +200,8 @@ namespace DevMind
                     string name = propMatch.Groups[1].Value;
                     if (name == "get" || name == "set" || name == "new" || name == "return" || name == "var") continue;
                     string sig = propMatch.Value.Trim();
-                    if (sig.Contains("=>")) sig = sig.Substring(0, sig.IndexOf("=>")).Trim();
-                    if (sig.Contains("{")) sig = sig.Substring(0, sig.IndexOf("{")).Trim();
+                    if (sig.Contains("=>")) sig = sig.Substring(0, sig.IndexOf("=>", StringComparison.Ordinal)).Trim();
+                    if (sig.Contains("{")) sig = sig.Substring(0, sig.IndexOf("{", StringComparison.Ordinal)).Trim();
                     string indent = currentType != null ? "  " : "";
                     results.Add($"{lineNumber,6}: {indent}{sig}");
                 }

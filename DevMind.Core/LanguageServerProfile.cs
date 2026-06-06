@@ -5,7 +5,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
+using System.Text;
 namespace DevMind
 {
     public enum LanguageServerKind
@@ -13,6 +15,34 @@ namespace DevMind
         Unknown = 0,
         CSharp = 1,
         TypeScript = 2,
+    }
+
+    /// <summary>Which C# language-server implementation to launch.</summary>
+    public enum CSharpServerImpl
+    {
+        Roslyn = 0,
+        CSharpLs = 1,
+    }
+
+    /// <summary>
+    /// Fully-resolved launch + protocol descriptor for a language server.
+    /// Carries everything LanguageServerHost needs that differs between
+    /// csharp-ls (push diagnostics, --solution CLI arg) and Roslyn LS
+    /// (pull diagnostics, solution/open notification, project-init wait).
+    /// </summary>
+    public sealed class ResolvedLanguageServer
+    {
+        public string Command { get; set; }
+        public string Args { get; set; }
+
+        /// <summary>Roslyn: file URI to send via solution/open after initialize. Null = none.</summary>
+        public string SolutionOpenUri { get; set; }
+
+        /// <summary>Notification to await before serving the first request (roslyn). Null = none.</summary>
+        public string ReadyNotification { get; set; }
+
+        /// <summary>True for Roslyn LS (textDocument/diagnostic pull); false for push servers.</summary>
+        public bool UsesPullDiagnostics { get; set; }
     }
 
     public sealed class LanguageServerProfile
@@ -62,15 +92,49 @@ namespace DevMind
             return "csharp";
         }
 
-        public void ResolveServer(string workingDirectory, string serverPathOverride, out string command, out string args)
+        public ResolvedLanguageServer ResolveServer(string workingDirectory, string serverPathOverride)
         {
             if (Kind == LanguageServerKind.CSharp)
+                return ResolveCSharpServer(workingDirectory, serverPathOverride);
+
+            ResolveTypeScriptServer(serverPathOverride, out var command, out var args);
+            return new ResolvedLanguageServer
             {
-                ResolveCSharpServer(workingDirectory, serverPathOverride, out command, out args);
-                return;
+                Command = command,
+                Args = args,
+                UsesPullDiagnostics = false,
+            };
+        }
+
+        /// <summary>
+        /// Pick the C# server implementation. Explicit DEVMIND_LSP_SERVER
+        /// (roslyn|csharp-ls) wins; otherwise infer from the configured server
+        /// path's filename; otherwise default to Roslyn.
+        /// </summary>
+        public static CSharpServerImpl SelectCSharpImpl(string serverPathOverride)
+        {
+            var sel = Environment.GetEnvironmentVariable("DEVMIND_LSP_SERVER")?.Trim();
+            if (!string.IsNullOrEmpty(sel))
+            {
+                if (sel.Equals("csharp-ls", StringComparison.OrdinalIgnoreCase) ||
+                    sel.Equals("csharpls", StringComparison.OrdinalIgnoreCase))
+                    return CSharpServerImpl.CSharpLs;
+                if (sel.Equals("roslyn", StringComparison.OrdinalIgnoreCase) ||
+                    sel.Equals("roslyn-language-server", StringComparison.OrdinalIgnoreCase))
+                    return CSharpServerImpl.Roslyn;
             }
 
-            ResolveTypeScriptServer(serverPathOverride, out command, out args);
+            string probe = !string.IsNullOrWhiteSpace(serverPathOverride)
+                ? serverPathOverride
+                : Environment.GetEnvironmentVariable("DEVMIND_LSP_SERVER_PATH");
+            if (!string.IsNullOrWhiteSpace(probe))
+            {
+                var name = Path.GetFileName(probe);
+                if (name.IndexOf("csharp-ls", StringComparison.OrdinalIgnoreCase) >= 0)
+                    return CSharpServerImpl.CSharpLs;
+            }
+
+            return CSharpServerImpl.Roslyn;
         }
 
         public static LanguageServerKind KindForPath(string fullPath)
@@ -105,36 +169,136 @@ namespace DevMind
             "TS",
             new[] { ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs" });
 
-        private static void ResolveCSharpServer(string workingDirectory, string serverPathOverride, out string command, out string args)
+        private static ResolvedLanguageServer ResolveCSharpServer(string workingDirectory, string serverPathOverride)
         {
-            string solutionArg = "";
+            // Discover the nearest solution (walk up for *.slnx / *.sln).
             string solutionDir = WorkspaceRootResolver.FindSolutionDirectory(workingDirectory);
-            if (solutionDir != null)
+            string solutionFile = solutionDir != null ? FindSolutionFileInDir(solutionDir) : null;
+
+            var impl = SelectCSharpImpl(serverPathOverride);
+
+            if (impl == CSharpServerImpl.CSharpLs)
             {
-                string solution = FindSolutionFileInDir(solutionDir);
-                if (solution != null)
+                string solutionArg = solutionFile != null
+                    ? " --solution \"" + solutionFile.Replace("\"", "\\\"") + "\""
+                    : "";
+                return new ResolvedLanguageServer
                 {
-                    solutionArg = " --solution \"" + solution.Replace("\"", "\\\"") + "\"";
+                    Command = ResolveCSharpLsCommand(serverPathOverride),
+                    Args = "--loglevel warning" + solutionArg,
+                    UsesPullDiagnostics = false,
+                };
+            }
+
+            // Roslyn LS: stdio transport; solution is loaded via solution/open
+            // (not a CLI arg) and diagnostics are pull-model.
+            string exe = ResolveRoslynExe(serverPathOverride);
+            string logDir = Path.Combine(Path.GetTempPath(), "devmind-roslyn-ls");
+            var args = new StringBuilder("--stdio --logLevel Information");
+            args.Append(" --extensionLogDirectory \"").Append(logDir).Append("\"");
+            try { args.Append(" --clientProcessId ").Append(Environment.ProcessId); }
+            catch { /* clientProcessId is best-effort */ }
+
+            return new ResolvedLanguageServer
+            {
+                Command = exe,
+                Args = args.ToString(),
+                SolutionOpenUri = solutionFile != null
+                    ? LanguageServerHost.PathToFileUri(solutionFile)
+                    : null,
+                ReadyNotification = "workspace/projectInitializationComplete",
+                UsesPullDiagnostics = true,
+            };
+        }
+
+        private static string ResolveCSharpLsCommand(string serverPathOverride)
+        {
+            string candidate = !string.IsNullOrWhiteSpace(serverPathOverride)
+                ? serverPathOverride
+                : Environment.GetEnvironmentVariable("DEVMIND_LSP_SERVER_PATH");
+
+            // If the configured path is clearly the Roslyn server (e.g. shell.json
+            // still points at roslyn-language-server.cmd), ignore it so that
+            // DEVMIND_LSP_SERVER=csharp-ls alone is enough to fall back.
+            if (!string.IsNullOrWhiteSpace(candidate))
+            {
+                var name = Path.GetFileName(candidate);
+                bool looksRoslyn =
+                    name.IndexOf("roslyn", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    name.IndexOf("Microsoft.CodeAnalysis.LanguageServer", StringComparison.OrdinalIgnoreCase) >= 0;
+                if (!looksRoslyn) return candidate;
+            }
+
+            return "csharp-ls";
+        }
+
+        /// <summary>
+        /// Resolve the Roslyn LS executable. Accepts a direct .exe path, a
+        /// dotnet-tool .cmd shim (parsed to the underlying exe), or nothing
+        /// (defaults to the global roslyn-language-server.cmd shim). A path that
+        /// is clearly csharp-ls is ignored so an explicit DEVMIND_LSP_SERVER=roslyn
+        /// still launches Roslyn.
+        /// </summary>
+        private static string ResolveRoslynExe(string serverPathOverride)
+        {
+            string candidate = !string.IsNullOrWhiteSpace(serverPathOverride)
+                ? serverPathOverride
+                : Environment.GetEnvironmentVariable("DEVMIND_LSP_SERVER_PATH");
+
+            if (!string.IsNullOrWhiteSpace(candidate) &&
+                Path.GetFileName(candidate).IndexOf("csharp-ls", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                candidate = null; // wrong server for roslyn impl — fall back to default shim
+            }
+
+            if (string.IsNullOrWhiteSpace(candidate))
+            {
+                string toolsDir = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                    ".dotnet", "tools");
+                candidate = Path.Combine(toolsDir, "roslyn-language-server.cmd");
+            }
+
+            if (candidate.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase) && File.Exists(candidate))
+            {
+                var exe = ExtractExeFromCmdShim(candidate);
+                if (exe != null) return exe;
+            }
+
+            return candidate; // assume already an exe, or resolvable on PATH
+        }
+
+        /// <summary>
+        /// Read a dotnet-tool .cmd shim and return the absolute path of the
+        /// .exe it launches. The shim looks like:
+        ///   "%~dp0.store\...\Microsoft.CodeAnalysis.LanguageServer.exe" %*
+        /// Returns null if it cannot be parsed/resolved.
+        /// </summary>
+        private static string ExtractExeFromCmdShim(string cmdPath)
+        {
+            try
+            {
+                string dir = Path.GetDirectoryName(Path.GetFullPath(cmdPath)) + Path.DirectorySeparatorChar;
+                foreach (var raw in File.ReadAllLines(cmdPath))
+                {
+                    var line = raw.Trim();
+                    int q1 = line.IndexOf('"');
+                    if (q1 < 0) continue;
+                    int q2 = line.IndexOf('"', q1 + 1);
+                    if (q2 < 0) continue;
+
+                    string inner = line.Substring(q1 + 1, q2 - q1 - 1);
+                    if (inner.IndexOf(".exe", StringComparison.OrdinalIgnoreCase) < 0) continue;
+
+                    inner = inner.Replace("%~dp0", dir);
+                    inner = Environment.ExpandEnvironmentVariables(inner);
+                    string full = Path.GetFullPath(inner);
+                    if (File.Exists(full)) return full;
                 }
             }
+            catch { /* fall through to null */ }
 
-            if (!string.IsNullOrWhiteSpace(serverPathOverride))
-            {
-                command = serverPathOverride;
-                args = "--loglevel warning" + solutionArg;
-                return;
-            }
-
-            var envPath = Environment.GetEnvironmentVariable("DEVMIND_LSP_SERVER_PATH");
-            if (!string.IsNullOrWhiteSpace(envPath))
-            {
-                command = envPath;
-                args = "--loglevel warning" + solutionArg;
-                return;
-            }
-
-            command = "csharp-ls";
-            args = "--loglevel warning" + solutionArg;
+            return null;
         }
 
         private static void ResolveTypeScriptServer(string serverPathOverride, out string command, out string args)

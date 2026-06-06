@@ -243,11 +243,9 @@ namespace DevMind
         public LlmClient(ILlmOptions options)
         {
             _options = options;
-            // Keep idle TCP connections alive for 10 minutes — prevents the pool from
-            // killing connections mid-request when the server is processing a large prompt
-            // (net48 equivalent of SocketsHttpHandler.PooledConnectionIdleTimeout).
-            System.Net.ServicePointManager.MaxServicePointIdleTime = 600_000;
-            _httpClient = new HttpClient { Timeout = TimeSpan.FromMinutes(_options.RequestTimeoutMinutes) };
+            // Keep idle TCP connections alive for 10 minutes (see CreateHttpClient) so a long
+            // (60-170s) inference call does not lose its pooled connection mid-request.
+            _httpClient = CreateHttpClient();
             _conversationHistory = new List<ChatMessage>
             {
                 new ChatMessage("system", GetSystemPrompt())
@@ -300,9 +298,33 @@ namespace DevMind
         private void RecreateHttpClient()
         {
             var old = _httpClient;
-            _httpClient = new HttpClient();
+            _httpClient = CreateHttpClient();
             ApplyHttpClientSettings(_httpClient);
             old?.Dispose();
+        }
+
+        /// <summary>
+        /// Creates an <see cref="HttpClient"/> backed by a <see cref="SocketsHttpHandler"/>
+        /// tuned for long LLM inference. <see cref="SocketsHttpHandler.PooledConnectionIdleTimeout"/>
+        /// keeps an idle connection in the pool for 10 minutes so a long (60-170s) request does
+        /// not race the pool reclaiming its connection — the net10 replacement for the old net48
+        /// <c>ServicePointManager.MaxServicePointIdleTime = 600_000</c>, which no longer affects
+        /// HttpClient. <see cref="SocketsHttpHandler.PooledConnectionLifetime"/> caps total reuse
+        /// at 30 minutes (well beyond any single request, so it never interrupts one) to rotate
+        /// connections periodically. Endpoint-specific settings (timeout, headers, auth) are still
+        /// applied by <see cref="ApplyHttpClientSettings"/> after creation.
+        /// </summary>
+        private HttpClient CreateHttpClient()
+        {
+            var handler = new SocketsHttpHandler
+            {
+                PooledConnectionIdleTimeout = TimeSpan.FromMinutes(10),
+                PooledConnectionLifetime = TimeSpan.FromMinutes(30),
+            };
+            return new HttpClient(handler)
+            {
+                Timeout = TimeSpan.FromMinutes(_options.RequestTimeoutMinutes),
+            };
         }
 
         /// <summary>
@@ -394,7 +416,7 @@ namespace DevMind
                             ? serverRoot + "/props"
                             : (customPath.StartsWith("http", StringComparison.OrdinalIgnoreCase)
                                 ? customPath
-                                : serverRoot + (customPath.StartsWith("/") ? customPath : "/" + customPath));
+                                : serverRoot + (customPath.StartsWith("/", StringComparison.Ordinal) ? customPath : "/" + customPath));
                         Debug.WriteLine($"[DevMind] Context detection: server=Custom, endpoint={url}");
                         detected = await DetectFromCustomEndpointAsync(url).ConfigureAwait(false);
                         break;
@@ -2175,12 +2197,12 @@ namespace DevMind
         /// <summary>Returns true if the trimmed line starts with a C# access or member modifier.</summary>
         private static bool StartsWithAccessModifier(string t)
         {
-            return t.StartsWith("public ")    || t.StartsWith("private ")   ||
-                   t.StartsWith("protected ") || t.StartsWith("internal ")  ||
-                   t.StartsWith("static ")    || t.StartsWith("abstract ")  ||
-                   t.StartsWith("override ")  || t.StartsWith("virtual ")   ||
-                   t.StartsWith("sealed ")    || t.StartsWith("extern ")    ||
-                   t.StartsWith("new ")       || t.StartsWith("readonly ");
+            return t.StartsWith("public ", StringComparison.Ordinal)    || t.StartsWith("private ", StringComparison.Ordinal)   ||
+                   t.StartsWith("protected ", StringComparison.Ordinal) || t.StartsWith("internal ", StringComparison.Ordinal)  ||
+                   t.StartsWith("static ", StringComparison.Ordinal)    || t.StartsWith("abstract ", StringComparison.Ordinal)  ||
+                   t.StartsWith("override ", StringComparison.Ordinal)  || t.StartsWith("virtual ", StringComparison.Ordinal)   ||
+                   t.StartsWith("sealed ", StringComparison.Ordinal)    || t.StartsWith("extern ", StringComparison.Ordinal)    ||
+                   t.StartsWith("new ", StringComparison.Ordinal)       || t.StartsWith("readonly ", StringComparison.Ordinal);
         }
 
         /// <summary>
@@ -2208,7 +2230,7 @@ namespace DevMind
         private static bool IsCSharpDeclaration(string t)
         {
             // Namespace
-            if (t.StartsWith("namespace ")) return true;
+            if (t.StartsWith("namespace ", StringComparison.Ordinal)) return true;
 
             // Type declarations (keyword may be preceded by access modifiers)
             if (ContainsTypeKeyword(t, "class")     || ContainsTypeKeyword(t, "struct") ||
@@ -2258,7 +2280,7 @@ namespace DevMind
                     if (t.Length == 0) { pendingDoc = null; continue; }
 
                     // XML doc comment: capture first non-empty content line of <summary>
-                    if (t.StartsWith("///"))
+                    if (t.StartsWith("///", StringComparison.Ordinal))
                     {
                         if (pendingDoc == null)
                         {
@@ -2273,8 +2295,8 @@ namespace DevMind
                     }
 
                     // Other comments, preprocessor, using directives: skip and clear doc
-                    if (t.StartsWith("//") || t.StartsWith("#") || t.StartsWith("using ") ||
-                        t.StartsWith("[assembly"))
+                    if (t.StartsWith("//", StringComparison.Ordinal) || t.StartsWith("#", StringComparison.Ordinal) || t.StartsWith("using ", StringComparison.Ordinal) ||
+                        t.StartsWith("[assembly", StringComparison.Ordinal))
                     {
                         pendingDoc = null;
                         continue;
@@ -2282,7 +2304,7 @@ namespace DevMind
 
                     // Attribute lines (e.g., [Obsolete], [SuppressMessage]): skip but
                     // preserve pendingDoc so it applies to the following declaration.
-                    if (t.StartsWith("[") && !IsCSharpDeclaration(t))
+                    if (t.StartsWith("[", StringComparison.Ordinal) && !IsCSharpDeclaration(t))
                         continue;
 
                     // Count braces on this line once (used for both sig trimming and depth update).
@@ -2374,10 +2396,10 @@ namespace DevMind
                 while ((line = reader.ReadLine()) != null)
                 {
                     string t = line.Trim();
-                    if (!t.StartsWith("<") || t.StartsWith("<!--") || t.StartsWith("<?")) continue;
+                    if (!t.StartsWith("<", StringComparison.Ordinal) || t.StartsWith("<!--", StringComparison.Ordinal) || t.StartsWith("<?", StringComparison.Ordinal)) continue;
 
-                    bool closing     = t.StartsWith("</");
-                    bool selfClosing = t.EndsWith("/>") || (t.Contains("/>") && !closing);
+                    bool closing     = t.StartsWith("</", StringComparison.Ordinal);
+                    bool selfClosing = t.EndsWith("/>", StringComparison.Ordinal) || (t.Contains("/>") && !closing);
 
                     if (closing) { depth--; continue; }
                     if (depth <= 2)
@@ -2413,15 +2435,15 @@ namespace DevMind
                     if (depth != 1) continue;
 
                     // Match "key": value at top level (depth was 1 before this line's braces)
-                    if (!t.StartsWith("\"")) continue;
-                    int keyEnd = t.IndexOf("\":", 1);
+                    if (!t.StartsWith("\"", StringComparison.Ordinal)) continue;
+                    int keyEnd = t.IndexOf("\":", 1, StringComparison.Ordinal);
                     if (keyEnd < 0) continue;
 
                     string key  = t.Substring(0, keyEnd + 1);
                     string rest = t.Substring(keyEnd + 2).Trim();
-                    string valueType = rest.StartsWith("{")  ? "object" :
-                                       rest.StartsWith("[")  ? "array"  :
-                                       rest.StartsWith("\"") ? "string" :
+                    string valueType = rest.StartsWith("{", StringComparison.Ordinal)  ? "object" :
+                                       rest.StartsWith("[", StringComparison.Ordinal)  ? "array"  :
+                                       rest.StartsWith("\"", StringComparison.Ordinal) ? "string" :
                                        rest == "true" || rest == "false" ? "bool" :
                                        rest == "null" ? "null" : "number";
                     sb.AppendLine($"  {key}: {valueType}");
@@ -2445,18 +2467,18 @@ namespace DevMind
                 {
                     string t = line.Trim();
 
-                    if (t.StartsWith("<PropertyGroup") || t.StartsWith("<ItemGroup"))
+                    if (t.StartsWith("<PropertyGroup", StringComparison.Ordinal) || t.StartsWith("<ItemGroup", StringComparison.Ordinal))
                     {
                         sb.AppendLine(t.Replace(">", "").Replace("/", "").Trim() + ">");
                         inGroup = true;
                         continue;
                     }
-                    if (t.StartsWith("</PropertyGroup") || t.StartsWith("</ItemGroup"))
+                    if (t.StartsWith("</PropertyGroup", StringComparison.Ordinal) || t.StartsWith("</ItemGroup", StringComparison.Ordinal))
                     {
                         inGroup = false;
                         continue;
                     }
-                    if (!inGroup || !t.StartsWith("<") || t.StartsWith("<!--")) continue;
+                    if (!inGroup || !t.StartsWith("<", StringComparison.Ordinal) || t.StartsWith("<!--", StringComparison.Ordinal)) continue;
 
                     // Extract element name
                     int nameEnd = 1;

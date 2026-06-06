@@ -75,7 +75,7 @@ private const  string  _role = "mcp"; // Distinguishes server side from shell si
             // ISO-8601 UTC, colons stripped, milliseconds dropped.
             string stamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHHmmssZ",
                 System.Globalization.CultureInfo.InvariantCulture);
-            int pid = Process.GetCurrentProcess().Id;
+            int pid = Environment.ProcessId;
             return $"{stamp}-pid{pid}";
         }
 
@@ -107,7 +107,7 @@ private const  string  _role = "mcp"; // Distinguishes server side from shell si
                 ["ts"]     = DateTime.UtcNow.ToString("o",
                                  System.Globalization.CultureInfo.InvariantCulture),
                 ["run_id"] = _runId,
-                ["pid"]    = Process.GetCurrentProcess().Id,
+                ["pid"]    = Environment.ProcessId,
                 ["role"]   = _role,
                 ["level"]  = level,
                 ["event"]  = eventName,
