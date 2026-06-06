@@ -545,6 +545,26 @@ internal sealed class DevMindTools
                         return $"[query_db] Blocked: only SELECT queries are permitted. Got: {keyword}";
                 }
 
+                // Reject stacked statements: a ';' outside a single-quoted string literal can
+                // smuggle a COMMIT that escapes the rollback enforcement below. Scan for ';'
+                // outside single-quoted spans (treating '' as an escaped quote). Not a SQL
+                // parser — just a quote-aware scan so a ';' inside a string value is ignored.
+                bool inStringLiteral = false;
+                for (int i = 0; i < query.Length; i++)
+                {
+                    char ch = query[i];
+                    if (ch == '\'')
+                    {
+                        // Doubled '' inside a string is an escaped quote — stay in the string.
+                        if (inStringLiteral && i + 1 < query.Length && query[i + 1] == '\'') { i++; continue; }
+                        inStringLiteral = !inStringLiteral;
+                    }
+                    else if (ch == ';' && !inStringLiteral)
+                    {
+                        return "[query_db error] Stacked statements are not permitted.";
+                    }
+                }
+
                 int timeoutSecs = timeout_seconds ?? 30;
 
                 // Auto-detect provider from connection string.
@@ -577,55 +597,76 @@ internal sealed class DevMindTools
                 {
                     await dbConn.OpenAsync(cancellationToken);
 
-                    using var cmd = dbConn.CreateCommand();
-                    cmd.CommandText    = query;
-                    cmd.CommandTimeout = timeoutSecs;
-
-                    using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-
-                    // Build column headers.
-                    var columns = new List<string>();
-                    for (int i = 0; i < reader.FieldCount; i++)
-                        columns.Add(reader.GetName(i));
-
-                    var rows = new List<string[]>();
-                    int rowCount = 0;
-                    bool capped  = false;
-
-                    while (await reader.ReadAsync(cancellationToken))
+                    // ── REAL read-only enforcement ──────────────────────────────────────
+                    // The keyword blocklist above is only a first-pass fast-fail. The actual
+                    // guarantee that query_db cannot modify the database is this: run the query
+                    // inside a transaction that is ALWAYS rolled back and NEVER committed, so any
+                    // DML/DDL smuggled past the blocklist is undone. SQLite does not accept
+                    // ReadCommitted, so it uses its default isolation; the rollback enforces
+                    // read-only regardless of isolation level.
+                    DbTransaction tx = dbConn is SqliteConnection
+                        ? dbConn.BeginTransaction()
+                        : dbConn.BeginTransaction(IsolationLevel.ReadCommitted);
+                    try
                     {
-                        if (rowCount >= MaxRows) { capped = true; break; }
-                        var row = new string[reader.FieldCount];
+                        using var cmd = dbConn.CreateCommand();
+                        cmd.Transaction    = tx;
+                        cmd.CommandText    = query;
+                        cmd.CommandTimeout = timeoutSecs;
+
+                        using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+
+                        // Build column headers.
+                        var columns = new List<string>();
                         for (int i = 0; i < reader.FieldCount; i++)
-                            row[i] = reader.IsDBNull(i) ? "NULL" : reader.GetValue(i)?.ToString() ?? "";
-                        rows.Add(row);
-                        rowCount++;
+                            columns.Add(reader.GetName(i));
+
+                        var rows = new List<string[]>();
+                        int rowCount = 0;
+                        bool capped  = false;
+
+                        while (await reader.ReadAsync(cancellationToken))
+                        {
+                            if (rowCount >= MaxRows) { capped = true; break; }
+                            var row = new string[reader.FieldCount];
+                            for (int i = 0; i < reader.FieldCount; i++)
+                                row[i] = reader.IsDBNull(i) ? "NULL" : reader.GetValue(i)?.ToString() ?? "";
+                            rows.Add(row);
+                            rowCount++;
+                        }
+
+                        if (rows.Count == 0)
+                            return $"[query_db] Query returned no rows.\nQuery: {query}";
+
+                        // Calculate column widths.
+                        var widths = columns.Select((c, i) =>
+                            Math.Max(c.Length, rows.Max(r => r[i].Length))).ToArray();
+
+                        // Render table.
+                        var sb = new StringBuilder();
+                        sb.AppendLine($"[query_db] {connection} → {rows.Count} row(s){(capped ? $" (capped at {MaxRows})" : "")}");
+                        sb.AppendLine();
+
+                        // Header.
+                        sb.AppendLine("| " + string.Join(" | ", columns.Select((c, i) => c.PadRight(widths[i]))) + " |");
+                        sb.AppendLine("|-" + string.Join("-|-", widths.Select(w => new string('-', w))) + "-|");
+
+                        // Rows.
+                        foreach (var row in rows)
+                            sb.AppendLine("| " + string.Join(" | ", row.Select((v, i) => v.PadRight(widths[i]))) + " |");
+
+                        if (capped)
+                            sb.AppendLine($"\n[truncated — showing first {MaxRows} rows]");
+
+                        return sb.ToString().TrimEnd();
                     }
-
-                    if (rows.Count == 0)
-                        return $"[query_db] Query returned no rows.\nQuery: {query}";
-
-                    // Calculate column widths.
-                    var widths = columns.Select((c, i) =>
-                        Math.Max(c.Length, rows.Max(r => r[i].Length))).ToArray();
-
-                    // Render table.
-                    var sb = new StringBuilder();
-                    sb.AppendLine($"[query_db] {connection} → {rows.Count} row(s){(capped ? $" (capped at {MaxRows})" : "")}");
-                    sb.AppendLine();
-
-                    // Header.
-                    sb.AppendLine("| " + string.Join(" | ", columns.Select((c, i) => c.PadRight(widths[i]))) + " |");
-                    sb.AppendLine("|-" + string.Join("-|-", widths.Select(w => new string('-', w))) + "-|");
-
-                    // Rows.
-                    foreach (var row in rows)
-                        sb.AppendLine("| " + string.Join(" | ", row.Select((v, i) => v.PadRight(widths[i]))) + " |");
-
-                    if (capped)
-                        sb.AppendLine($"\n[truncated — showing first {MaxRows} rows]");
-
-                    return sb.ToString().TrimEnd();
+                    finally
+                    {
+                        // Never commit — roll back so the query cannot persist any change.
+                        // THIS is the read-only guarantee, not the keyword blocklist above.
+                        try { tx.Rollback(); } catch { /* connection may already be faulted/closing */ }
+                        tx.Dispose();
+                    }
                 }
             }
             catch (OperationCanceledException)
