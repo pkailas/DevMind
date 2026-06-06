@@ -1,6 +1,8 @@
-// File: LanguageServerHost.cs  v2.2
+// File: LanguageServerHost.cs  v2.3
 // v2.2: advertise workspace/symbol + FindSymbolAsync (solution-wide semantic symbol
 //   search); empty results route through the same A11 readiness path (no false-empty).
+// v2.3: annotate go_to_definition results that land in Roslyn's decompiled metadata-as-source
+//   (generated read-only .cs under %TEMP%\MetadataAsSource\...) so the model knows to read_file it.
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Session-scoped language server host for one profile (C# or TypeScript).
@@ -171,7 +173,7 @@ namespace DevMind
                 },
                 cancellationToken).ConfigureAwait(false);
 
-            return FinishLocationResult("go_to_definition", FormatLocations(result));
+            return FinishLocationResult("go_to_definition", AnnotateMetadataResult(FormatLocations(result)));
         }
 
         public async Task<string> FindReferencesAsync(
@@ -650,6 +652,21 @@ namespace DevMind
         /// result carries no locations — the caller (FinishLocationResult) decides whether
         /// an empty result is a genuine "no results" (READY) or an honest not-ready signal.
         /// </summary>
+        /// <summary>
+        /// If a go_to_definition result points into Roslyn's decompiled metadata-as-source
+        /// (a generated read-only .cs under %TEMP%\MetadataAsSource\...\DecompilationMetadata
+        /// AsSourceFileProvider\...), prepend a one-line tag so the model knows the path is
+        /// real decompiled source it can read_file (not an in-solution file). Non-metadata
+        /// results (and null/empty) pass through unchanged — this only enriches rendering.
+        /// </summary>
+        private static string AnnotateMetadataResult(string formatted)
+        {
+            if (formatted == null) return null;
+            if (formatted.IndexOf("DecompilationMetadataAsSourceFileProvider", StringComparison.OrdinalIgnoreCase) >= 0)
+                return "[decompiled metadata — generated read-only source; read_file this path]\n" + formatted;
+            return formatted;
+        }
+
         private static string FormatLocations(JToken result)
         {
             var locations = new List<string>();
