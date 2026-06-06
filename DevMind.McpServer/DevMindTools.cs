@@ -1,4 +1,4 @@
-// File: DevMindTools.cs  v5.0
+// File: DevMindTools.cs  v5.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Diagnostic policy: never write to Console.Out / Console.WriteLine in this file.
@@ -1179,12 +1179,13 @@ internal sealed class DevMindTools
 
     [McpServerTool(Name = "ssh_exec")]
     [Description(
-        "Execute a command on a remote host via SSH. Hosts can be defined by alias in the " +
-        "DEVMIND_SSH_HOSTS environment variable, or specified directly as user@host. " +
+        "Execute a command on a remote host via SSH. Hosts must be defined by alias in the " +
+        "DEVMIND_SSH_HOSTS environment variable, each with a pinned host-key fingerprint. " +
+        "Arbitrary user@host targets are not permitted. " +
         "Returns stdout and stderr combined, capped at 4000 lines. " +
         "Uses key-based authentication only — no passwords.")]
     public async Task<string> SshExec(
-        [Description("Host alias from DEVMIND_SSH_HOSTS config, or user@host directly.")] string host,
+        [Description("Host alias defined in DEVMIND_SSH_HOSTS config.")] string host,
         [Description("Command to execute on the remote host.")] string command,
         [Description("Timeout in seconds (default 60).")] int? timeout_seconds = null,
         CancellationToken cancellationToken = default)
@@ -1195,26 +1196,19 @@ internal sealed class DevMindTools
             {
                 int timeoutSecs = timeout_seconds ?? 60;
 
-                // Resolve host config — alias lookup first, then parse user@host.
-                string remoteHost, remoteUser, keyPath;
-                if (_svc.SshHosts.TryGetValue(host, out var cfg))
-                {
-                    remoteHost = cfg.Host;
-                    remoteUser = cfg.User;
-                    keyPath    = cfg.Key;
-                }
-                else if (host.Contains('@'))
-                {
-                    var parts  = host.Split('@', 2);
-                    remoteUser = parts[0];
-                    remoteHost = parts[1];
-                    keyPath    = "~/.ssh/id_rsa";
-                }
-                else
+                // Resolve host config — configured aliases only. Arbitrary user@host is
+                // rejected: every SSH target must be pre-declared in DEVMIND_SSH_HOSTS so
+                // its host-key fingerprint can be pinned (see HostKeyReceived below).
+                if (!_svc.SshHosts.TryGetValue(host, out var cfg))
                 {
                     return $"[ssh_exec] Unknown host alias \"{host}\". " +
-                           "Define it in DEVMIND_SSH_HOSTS or use user@host format.";
+                           "Define it in DEVMIND_SSH_HOSTS (with a \"fingerprint\"). " +
+                           "Arbitrary user@host targets are not permitted.";
                 }
+
+                string remoteHost = cfg.Host;
+                string remoteUser = cfg.User;
+                string keyPath    = cfg.Key;
 
                 // Expand ~ in key path.
                 string expandedKey = keyPath.StartsWith("~", StringComparison.Ordinal)
@@ -1232,7 +1226,46 @@ internal sealed class DevMindTools
                 connectionInfo.Timeout = TimeSpan.FromSeconds(timeoutSecs);
 
                using var client = new SshClient(connectionInfo);
-                await Task.Run(() => client.Connect(), cancellationToken);
+
+                // Host-key verification (MITM protection). SSH.NET trusts ANY key unless a
+                // HostKeyReceived handler sets CanTrust = false. Pin against the configured
+                // fingerprint; if none is configured, reject and surface the observed
+                // fingerprint so it can be verified out-of-band and added to config.
+                string? hostKeyError = null;
+                client.HostKeyReceived += (sender, e) =>
+                {
+                    // FingerPrintSHA256: base64, no padding, no "SHA256:" prefix.
+                    string observed = e.FingerPrintSHA256;
+                    if (string.IsNullOrEmpty(cfg.Fingerprint))
+                    {
+                        e.CanTrust = false;
+                        hostKeyError =
+                            $"[ssh_exec] No fingerprint configured for alias \"{host}\". Connection refused. " +
+                            $"Verify this host key out-of-band, then add " +
+                            $"\"fingerprint\": \"SHA256:{observed}\" to the \"{host}\" entry in DEVMIND_SSH_HOSTS. " +
+                            $"Observed key: SHA256:{observed}";
+                    }
+                    else if (!string.Equals(cfg.Fingerprint, observed, StringComparison.Ordinal))
+                    {
+                        e.CanTrust = false;
+                        hostKeyError =
+                            $"[ssh_exec] Host key verification FAILED for alias \"{host}\" — possible MITM. " +
+                            $"Expected SHA256:{cfg.Fingerprint} but server presented SHA256:{observed}. Connection refused.";
+                    }
+                    else
+                    {
+                        e.CanTrust = true;
+                    }
+                };
+
+                try
+                {
+                    await Task.Run(() => client.Connect(), cancellationToken);
+                }
+                catch (Exception) when (hostKeyError != null)
+                {
+                    return hostKeyError;
+                }
 
                 using var cmd = client.CreateCommand(command);
                 cmd.CommandTimeout = TimeSpan.FromSeconds(timeoutSecs);
