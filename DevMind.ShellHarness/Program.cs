@@ -21,7 +21,7 @@ namespace DevMind.ShellHarness
             // Child mode: stdin/stdout/stderr are pipes owned by the parent harness.
             if (HasFlag(args, "--child"))
             {
-                Console.Error.WriteLine("[child mode] PID: " + Process.GetCurrentProcess().Id);
+                Console.Error.WriteLine("[child mode] PID: " + Environment.ProcessId);
                 Console.Error.WriteLine("[child mode] reading command from stdin...");
                 string command = Console.In.ReadLine();
                 Console.Error.WriteLine($"[child mode] command: {command}");
@@ -45,7 +45,7 @@ namespace DevMind.ShellHarness
             Console.WriteLine("════════════════════════════════════════════");
             Console.WriteLine($"Command: {cmd}");
             Console.WriteLine($"Working dir: {Environment.CurrentDirectory}");
-            Console.WriteLine($"PID: {Process.GetCurrentProcess().Id}");
+            Console.WriteLine($"PID: {Environment.ProcessId}");
             Console.WriteLine();
 
             await RunPath1_ShellRunner(cmd);

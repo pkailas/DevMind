@@ -176,7 +176,7 @@ namespace DevMind
                 if (File.Exists(resolvedPath))
                 {
                     string existing = File.ReadAllText(resolvedPath);
-                    string separator = existing.Length > 0 && !existing.EndsWith("\n") ? "\n" : "";
+                    string separator = existing.Length > 0 && !existing.EndsWith("\n", StringComparison.Ordinal) ? "\n" : "";
                     File.WriteAllText(resolvedPath, existing + separator + content);
                     AppendOutput($"[APPEND] Appended to {fileNameOnly}\n", OutputColor.Success);
                 }

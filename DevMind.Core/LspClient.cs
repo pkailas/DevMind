@@ -53,6 +53,14 @@ namespace DevMind
             new Dictionary<string, List<LspDiagnostic>>(StringComparer.OrdinalIgnoreCase);
         private readonly object _diagLock = new object();
 
+        // Notification-arrival tracking, used to await one-shot server
+        // notifications such as workspace/projectInitializationComplete.
+        private readonly object _notifyLock = new object();
+        private readonly HashSet<string> _seenNotifications =
+            new HashSet<string>(StringComparer.Ordinal);
+        private readonly Dictionary<string, List<TaskCompletionSource<bool>>> _notifyWaiters =
+            new Dictionary<string, List<TaskCompletionSource<bool>>>(StringComparer.Ordinal);
+
         private int _nextId = 1;
         private readonly Task _readerTask;
         private bool _disposed;
@@ -110,6 +118,62 @@ namespace DevMind
             }
 
             return GetCachedDiagnostics(documentUri);
+        }
+
+        /// <summary>
+        /// Wait until the server sends a one-shot notification with the given
+        /// <paramref name="method"/> (e.g. workspace/projectInitializationComplete),
+        /// or the timeout elapses. Returns true if the notification arrived
+        /// (including if it arrived before this call), false on timeout.
+        /// </summary>
+        public async Task<bool> WaitForNotificationAsync(
+            string method,
+            TimeSpan timeout,
+            CancellationToken cancellationToken = default)
+        {
+            TaskCompletionSource<bool> tcs;
+            lock (_notifyLock)
+            {
+                if (_seenNotifications.Contains(method)) return true;
+                tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                if (!_notifyWaiters.TryGetValue(method, out var list))
+                {
+                    list = new List<TaskCompletionSource<bool>>();
+                    _notifyWaiters[method] = list;
+                }
+                list.Add(tcs);
+            }
+
+            using (var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                cts.CancelAfter(timeout);
+                using (cts.Token.Register(() => tcs.TrySetResult(false)))
+                {
+                    return await tcs.Task.ConfigureAwait(false);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Pull-model diagnostics (Roslyn LS): sends a textDocument/diagnostic
+        /// request and parses the returned report. The document must already be
+        /// open (didOpen) on the server.
+        /// </summary>
+        public async Task<IReadOnlyList<LspDiagnostic>> RequestPullDiagnosticsAsync(
+            string documentUri,
+            CancellationToken cancellationToken = default,
+            int timeoutMs = 30_000)
+        {
+            var result = await RequestAsync(
+                "textDocument/diagnostic",
+                new JObject { ["textDocument"] = new JObject { ["uri"] = documentUri } },
+                cancellationToken,
+                timeoutMs).ConfigureAwait(false);
+
+            // Report shape: { kind: "full"|"unchanged", items: [ ...diagnostics ] }.
+            // "unchanged" carries no items (nothing changed since last resultId).
+            var items = (result as JObject)?["items"] as JArray;
+            return ParseDiagnostics(items);
         }
 
         public async Task<JToken> RequestAsync(
@@ -232,39 +296,99 @@ namespace DevMind
 
         private void DispatchMessage(JObject message)
         {
-            if (message["method"] != null && message["id"] == null)
+            var method = message["method"]?.ToString();
+            var idToken = message["id"];
+            bool hasId = idToken != null && idToken.Type != JTokenType.Null;
+
+            if (method != null)
             {
-                HandleNotification(message);
+                // Server-initiated message. With an id it's a REQUEST we must
+                // answer — Roslyn LS crashes its read loop if workspace/configuration,
+                // client/registerCapability, workspace/diagnostic/refresh, etc.
+                // go unanswered. Without an id it's a notification.
+                if (hasId)
+                    HandleServerRequest(method, idToken, message["params"] as JObject);
+                else
+                    HandleNotification(message);
                 return;
             }
 
-            if (message["id"] != null)
+            // Otherwise it's a response to a request we issued.
+            if (!hasId || idToken.Type != JTokenType.Integer) return;
+            int id = idToken.Value<int>();
+
+            TaskCompletionSource<JToken> tcs = null;
+            lock (_pendingLock)
+                _pending.TryGetValue(id, out tcs);
+
+            if (tcs == null) return;
+
+            if (message["error"] != null)
             {
-                var idToken = message["id"];
-                if (idToken == null || idToken.Type != JTokenType.Integer) return;
-                int id = idToken.Value<int>();
-
-                TaskCompletionSource<JToken> tcs = null;
-                lock (_pendingLock)
-                    _pending.TryGetValue(id, out tcs);
-
-                if (tcs == null) return;
-
-                if (message["error"] != null)
-                {
-                    var err = message["error"];
-                    tcs.TrySetException(new InvalidOperationException(
-                        "LSP error " + err?["code"] + ": " + err?["message"]));
-                    return;
-                }
-
-                tcs.TrySetResult(message["result"] ?? JValue.CreateNull());
+                var err = message["error"];
+                tcs.TrySetException(new InvalidOperationException(
+                    "LSP error " + err?["code"] + ": " + err?["message"]));
+                return;
             }
+
+            tcs.TrySetResult(message["result"] ?? JValue.CreateNull());
+        }
+
+        /// <summary>
+        /// Answer a server→client request. We are a headless host with no user
+        /// settings, so the safe universal reply is "defaults": null for most
+        /// requests, and an array of nulls for workspace/configuration (one per
+        /// requested item). This keeps Roslyn LS's JSON-RPC loop alive.
+        /// </summary>
+        private void HandleServerRequest(string method, JToken id, JObject parameters)
+        {
+            JToken result;
+            if (string.Equals(method, "workspace/configuration", StringComparison.Ordinal))
+            {
+                var items = parameters?["items"] as JArray;
+                var arr = new JArray();
+                int n = items?.Count ?? 0;
+                for (int i = 0; i < n; i++) arr.Add(JValue.CreateNull());
+                result = arr;
+            }
+            else
+            {
+                // client/registerCapability, client/unregisterCapability,
+                // workspace/diagnostic/refresh, window/workDoneProgress/create,
+                // workspace/semanticTokens/refresh, ... — acknowledge with null.
+                result = JValue.CreateNull();
+            }
+
+            SendResponse(id, result);
+        }
+
+        private void SendResponse(JToken id, JToken result)
+        {
+            WriteMessage(new JObject
+            {
+                ["jsonrpc"] = "2.0",
+                ["id"] = id,
+                ["result"] = result ?? JValue.CreateNull(),
+            });
         }
 
         private void HandleNotification(JObject message)
         {
             var method = message["method"]?.ToString();
+            if (method == null) return;
+
+            // Record arrival + release any waiters (e.g. projectInitializationComplete).
+            lock (_notifyLock)
+            {
+                _seenNotifications.Add(method);
+                if (_notifyWaiters.TryGetValue(method, out var waiters))
+                {
+                    foreach (var w in waiters) w.TrySetResult(true);
+                    _notifyWaiters.Remove(method);
+                }
+            }
+
+            // Push-model diagnostics (csharp-ls). Roslyn uses pull instead.
             if (method != "textDocument/publishDiagnostics") return;
 
             var p = message["params"] as JObject;
@@ -273,27 +397,39 @@ namespace DevMind
             var uri = p["uri"]?.ToString();
             if (string.IsNullOrEmpty(uri)) return;
 
+            lock (_diagLock)
+                _diagnosticsByUri[uri] = ParseDiagnostics(p["diagnostics"] as JArray);
+        }
+
+        /// <summary>
+        /// Convert an LSP diagnostics JArray (from either a publishDiagnostics
+        /// notification or a textDocument/diagnostic pull report) into the
+        /// host's diagnostic model. Lines/characters are converted 0→1-based.
+        /// Roslyn diagnostics often omit "source" but carry a "code" (e.g.
+        /// IDE0090 / CS0168); fall back to that so the rule id is visible.
+        /// </summary>
+        public static List<LspDiagnostic> ParseDiagnostics(JArray diags)
+        {
             var list = new List<LspDiagnostic>();
-            var diags = p["diagnostics"] as JArray;
-            if (diags != null)
+            if (diags == null) return list;
+
+            foreach (var d in diags)
             {
-                foreach (var d in diags)
-                {
-                    if (!(d is JObject diag)) continue;
-                    var range = diag["range"] as JObject;
-                    var start = range?["start"] as JObject;
-                    int line = start?["line"]?.Value<int>() ?? 0;
-                    int character = start?["character"]?.Value<int>() ?? 0;
-                    int severity = diag["severity"]?.Value<int>() ?? 3;
-                    string sev = severity <= 1 ? "error" : severity == 2 ? "warning" : "info";
-                    string msg = diag["message"]?.ToString() ?? "";
-                    string src = diag["source"]?.ToString() ?? "";
-                    list.Add(new LspDiagnostic(line + 1, character + 1, sev, msg, src));
-                }
+                if (!(d is JObject diag)) continue;
+                var range = diag["range"] as JObject;
+                var start = range?["start"] as JObject;
+                int line = start?["line"]?.Value<int>() ?? 0;
+                int character = start?["character"]?.Value<int>() ?? 0;
+                int severity = diag["severity"]?.Value<int>() ?? 3;
+                string sev = severity <= 1 ? "error" : severity == 2 ? "warning" : "info";
+                string msg = diag["message"]?.ToString() ?? "";
+                string src = diag["source"]?.ToString();
+                if (string.IsNullOrEmpty(src))
+                    src = diag["code"]?.ToString() ?? "";
+                list.Add(new LspDiagnostic(line + 1, character + 1, sev, msg, src));
             }
 
-            lock (_diagLock)
-                _diagnosticsByUri[uri] = list;
+            return list;
         }
 
         private async Task<JObject> ReadMessageAsync()

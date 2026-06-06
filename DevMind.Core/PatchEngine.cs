@@ -148,8 +148,8 @@ namespace DevMind
                     }
                 }
                 string findText = input.Substring(findContentStart, replaceIdx - findContentStart);
-                if (findText.EndsWith("\r\n")) findText = findText.Substring(0, findText.Length - 2);
-                else if (findText.EndsWith("\n")) findText = findText.Substring(0, findText.Length - 1);
+                if (findText.EndsWith("\r\n", StringComparison.Ordinal)) findText = findText.Substring(0, findText.Length - 2);
+                else if (findText.EndsWith("\n", StringComparison.Ordinal)) findText = findText.Substring(0, findText.Length - 1);
 
                 int replaceContentStart = input.IndexOf('\n', replaceIdx) + 1;
 
@@ -159,8 +159,8 @@ namespace DevMind
                     ? input.Substring(replaceContentStart, nextFindIdx - replaceContentStart)
                     : input.Substring(replaceContentStart);
 
-                if (rawReplace.EndsWith("\r\n")) rawReplace = rawReplace.Substring(0, rawReplace.Length - 2);
-                else if (rawReplace.EndsWith("\n")) rawReplace = rawReplace.Substring(0, rawReplace.Length - 1);
+                if (rawReplace.EndsWith("\r\n", StringComparison.Ordinal)) rawReplace = rawReplace.Substring(0, rawReplace.Length - 2);
+                else if (rawReplace.EndsWith("\n", StringComparison.Ordinal)) rawReplace = rawReplace.Substring(0, rawReplace.Length - 1);
 
                 // Collect REPLACE lines, stopping at:
                 //   • a bare closing fence (```)
@@ -180,12 +180,12 @@ namespace DevMind
                         {
                             string rest = splitReplaceLines[rj].Trim();
                             if (rest.Length == 0) continue;
-                            if (rest.StartsWith("SHELL:")      ||
-                                rest.StartsWith("PATCH ")      ||
-                                rest.StartsWith("FILE:")       ||
-                                rest.StartsWith("READ! ")      ||
-                                rest.StartsWith("READ ")       ||
-                                rest.StartsWith("SCRATCHPAD:"))
+                            if (rest.StartsWith("SHELL:", StringComparison.Ordinal)      ||
+                                rest.StartsWith("PATCH ", StringComparison.Ordinal)      ||
+                                rest.StartsWith("FILE:", StringComparison.Ordinal)       ||
+                                rest.StartsWith("READ! ", StringComparison.Ordinal)      ||
+                                rest.StartsWith("READ ", StringComparison.Ordinal)       ||
+                                rest.StartsWith("SCRATCHPAD:", StringComparison.Ordinal))
                                 continue;
                             isTerminator = false;
                             break;
@@ -195,8 +195,8 @@ namespace DevMind
                     replaceLines.Add(rl);
                 }
                 string replaceText = string.Join("\n", replaceLines);
-                if (replaceText.EndsWith("\r\n")) replaceText = replaceText.Substring(0, replaceText.Length - 2);
-                else if (replaceText.EndsWith("\n")) replaceText = replaceText.Substring(0, replaceText.Length - 1);
+                if (replaceText.EndsWith("\r\n", StringComparison.Ordinal)) replaceText = replaceText.Substring(0, replaceText.Length - 2);
+                else if (replaceText.EndsWith("\n", StringComparison.Ordinal)) replaceText = replaceText.Substring(0, replaceText.Length - 1);
 
                 findText    = StripHallucinatedTerminators(findText);
                 replaceText = StripHallucinatedTerminators(replaceText);

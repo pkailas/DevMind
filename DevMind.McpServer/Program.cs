@@ -64,7 +64,7 @@ var startupData = new Dictionary<string, object>
     ["framework"]      = System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription,
     ["machine_name"]   = Environment.MachineName,
     ["user_name"]      = Environment.UserName,
-    ["process_id"]     = Process.GetCurrentProcess().Id,
+    ["process_id"]     = Environment.ProcessId,
     ["working_set_mb"] = Environment.WorkingSet / 1024 / 1024
 };
 DmTrace.Event("info", "mcp.startup", startupData);

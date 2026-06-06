@@ -1,13 +1,7 @@
 <Solution>
   <Configurations>
     <Platform Name="Any CPU" />
-    <Platform Name="arm64" />
-    <Platform Name="x86" />
   </Configurations>
-  <Project Path="DevMind.csproj">
-    <Platform Solution="*|arm64" Project="arm64" />
-    <Platform Solution="*|x86" Project="x86" />
-  </Project>
   <Project Path="DevMind.Core/DevMind.Core.csproj" />
   <Project Path="DevMind.Cli/DevMind.Cli.csproj" />
   <Project Path="DevMind.McpServer/DevMind.McpServer.csproj" />

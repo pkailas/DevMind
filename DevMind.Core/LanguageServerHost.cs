@@ -22,8 +22,7 @@ namespace DevMind
     {
         private readonly string _workingDirectory;
         private readonly LanguageServerProfile _profile;
-        private readonly string _serverCommand;
-        private readonly string _serverArgs;
+        private readonly ResolvedLanguageServer _server;
         private readonly object _gate = new object();
         private readonly HashSet<string> _openDocuments =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -41,7 +40,7 @@ namespace DevMind
                 ? Environment.CurrentDirectory
                 : Path.GetFullPath(workingDirectory);
             _profile = profile ?? throw new ArgumentNullException(nameof(profile));
-            _profile.ResolveServer(_workingDirectory, serverPathOverride, out _serverCommand, out _serverArgs);
+            _server = _profile.ResolveServer(_workingDirectory, serverPathOverride);
         }
 
         public static bool IsEnabled()
@@ -68,15 +67,28 @@ namespace DevMind
             await EnsureReadyAsync(cancellationToken).ConfigureAwait(false);
             string uri = PathToFileUri(fullPath);
 
-            lock (_gate)
+            IReadOnlyList<LspDiagnostic> diags;
+            if (_server.UsesPullDiagnostics)
             {
-                _client.ClearDiagnostics(uri);
+                // Roslyn LS: open the document, then pull diagnostics on demand.
+                await SyncDocumentAsync(fullPath, cancellationToken).ConfigureAwait(false);
+                diags = await _client
+                    .RequestPullDiagnosticsAsync(uri, cancellationToken, 30_000)
+                    .ConfigureAwait(false);
             }
+            else
+            {
+                // csharp-ls / TypeScript: push model — wait for publishDiagnostics.
+                lock (_gate)
+                {
+                    _client.ClearDiagnostics(uri);
+                }
 
-            await SyncDocumentAsync(fullPath, cancellationToken).ConfigureAwait(false);
+                await SyncDocumentAsync(fullPath, cancellationToken).ConfigureAwait(false);
 
-            var diags = await _client.WaitForDiagnosticsAsync(
-                uri, TimeSpan.FromSeconds(8), cancellationToken).ConfigureAwait(false);
+                diags = await _client.WaitForDiagnosticsAsync(
+                    uri, TimeSpan.FromSeconds(8), cancellationToken).ConfigureAwait(false);
+            }
 
             if (diags.Count == 0)
             {
@@ -224,7 +236,7 @@ namespace DevMind
                 _openDocuments.Clear();
             }
 
-            var psi = new ProcessStartInfo(_serverCommand, _serverArgs)
+            var psi = new ProcessStartInfo(_server.Command, _server.Args)
             {
                 WorkingDirectory = _workingDirectory,
                 UseShellExecute = false,
@@ -238,7 +250,7 @@ namespace DevMind
 
             var process = Process.Start(psi);
             if (process == null)
-                throw new InvalidOperationException("Failed to start language server: " + _serverCommand);
+                throw new InvalidOperationException("Failed to start language server: " + _server.Command);
 
             // Drain stderr so the pipe does not fill (diagnostics only).
             process.ErrorDataReceived += (_, e) =>
@@ -253,13 +265,19 @@ namespace DevMind
 
             var initParams = new JObject
             {
-                ["processId"] = Process.GetCurrentProcess().Id,
+                ["processId"] = Environment.ProcessId,
                 ["rootUri"] = rootUri,
                 ["capabilities"] = new JObject
                 {
                     ["textDocument"] = new JObject
                     {
                         ["publishDiagnostics"] = new JObject(),
+                        // Advertise pull diagnostics so Roslyn LS dynamically
+                        // registers textDocument/diagnostic. Harmless to csharp-ls.
+                        ["diagnostic"] = new JObject
+                        {
+                            ["dynamicRegistration"] = true,
+                        },
                         ["hover"] = new JObject
                         {
                             ["contentFormat"] = new JArray("markdown", "plaintext"),
@@ -270,6 +288,17 @@ namespace DevMind
                     ["workspace"] = new JObject
                     {
                         ["workspaceFolders"] = true,
+                        // Roslyn LS issues workspace/configuration requests on
+                        // startup; declare support (LspClient answers them).
+                        ["configuration"] = true,
+                        ["diagnostics"] = new JObject
+                        {
+                            ["refreshSupport"] = true,
+                        },
+                    },
+                    ["window"] = new JObject
+                    {
+                        ["workDoneProgress"] = true,
                     },
                 },
                 ["workspaceFolders"] = new JArray
@@ -285,6 +314,33 @@ namespace DevMind
             await client.RequestAsync("initialize", initParams, cancellationToken, 60_000)
                 .ConfigureAwait(false);
             client.Notify("initialized", new JObject());
+
+            // Roslyn LS: load the solution explicitly (no --solution CLI arg) and
+            // wait for the project graph to finish loading before serving requests,
+            // so the first get_diagnostics isn't racing an empty workspace.
+            if (!string.IsNullOrEmpty(_server.SolutionOpenUri))
+            {
+                client.Notify("solution/open", new JObject
+                {
+                    ["solution"] = _server.SolutionOpenUri,
+                });
+
+                if (!string.IsNullOrEmpty(_server.ReadyNotification))
+                {
+                    bool ready = await client
+                        .WaitForNotificationAsync(
+                            _server.ReadyNotification,
+                            TimeSpan.FromSeconds(120),
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    if (!ready)
+                    {
+                        Console.Error.WriteLine(
+                            "[LSP] Roslyn project load did not signal " +
+                            _server.ReadyNotification + " within 120s; serving anyway.");
+                    }
+                }
+            }
 
             lock (_gate)
             {
@@ -307,7 +363,7 @@ namespace DevMind
                     _openDocuments.Add(uri);
             }
 
-            if (needsOpen)
+            void DidOpen()
             {
                 _client.Notify("textDocument/didOpen", new JObject
                 {
@@ -319,6 +375,23 @@ namespace DevMind
                         ["text"] = text,
                     },
                 });
+            }
+
+            if (needsOpen)
+            {
+                DidOpen();
+            }
+            else if (_server.UsesPullDiagnostics)
+            {
+                // Roslyn LS throws a NullReferenceException on a full-document
+                // didChange (its handler expects ranged incremental edits). For
+                // our read-from-disk model, re-open the document instead: close
+                // then open with the current text. Robust and cheap.
+                _client.Notify("textDocument/didClose", new JObject
+                {
+                    ["textDocument"] = new JObject { ["uri"] = uri },
+                });
+                DidOpen();
             }
             else
             {
