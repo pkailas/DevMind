@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v7.26
+// File: LlmClient.cs  v7.27
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -2860,7 +2860,17 @@ namespace DevMind
             {
                 var obj = JObject.Parse(lastData);
                 var timings = obj?["timings"];
-                if (timings == null) return;
+                if (timings == null)
+                {
+                    // Observability only (no behavior change): a terminal chunk with no
+                    // timings means no n_past this round, so the hybrid leans harder on the
+                    // estimate tail. Surface it so a backend that stops emitting timings
+                    // shows up in traces instead of silently widening the estimate.
+                    if (_options.ShowDebugOutput)
+                        System.Diagnostics.Debug.WriteLine(
+                            "[DevMind TRACE] ParseTimings: terminal chunk had no timings — n_past unavailable this round.");
+                    return;
+                }
 
                 int promptN = timings["prompt_n"]?.Value<int>() ?? 0;
                 double promptMs = timings["prompt_ms"]?.Value<double>() ?? 0;
@@ -2887,6 +2897,15 @@ namespace DevMind
                         if (_contextDeltas.Count > 5) _contextDeltas.RemoveAt(0);
                     }
                     _previousContextUsed = nPast;
+                }
+                else if (_options.ShowDebugOutput)
+                {
+                    // Observability only: timings present but n_past missing/0. This is always
+                    // a "no measurement" signal — a real generation never reports n_past 0.
+                    // The paired anchor (LastContextUsed / _lastServerCountIndex) stays frozen
+                    // by design; flag the widening estimate tail for trace visibility.
+                    System.Diagnostics.Debug.WriteLine(
+                        "[DevMind TRACE] ParseTimings: timings present but n_past absent/0 — estimate tail widens (anchor frozen).");
                 }
             }
             catch
