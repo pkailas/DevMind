@@ -1,4 +1,4 @@
-// File: LspClient.cs  v1.1
+// File: LspClient.cs  v1.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Low-level LSP JSON-RPC over stdio with Content-Length framing.
@@ -6,6 +6,8 @@
 // server-initiated notifications (e.g. textDocument/publishDiagnostics).
 // v1.1: HasSeenNotification — lets the host poll for a late projectInitializationComplete
 //       (DEGRADED→READY upgrade) without a cross-thread writer.
+// v1.2: workspace/configuration pins navigation.dotnet_navigate_to_decompiled_sources=true
+//       (decompiled go_to_definition); all other sections stay null as before.
 
 using System;
 using System.Collections.Generic;
@@ -360,10 +362,23 @@ namespace DevMind
             JToken result;
             if (string.Equals(method, "workspace/configuration", StringComparison.Ordinal))
             {
+                // Reply "use server defaults" = null for every requested section, EXCEPT we
+                // explicitly pin navigation.dotnet_navigate_to_decompiled_sources = true.
+                // Decompiled go_to_definition on BCL/framework symbols currently works only
+                // because Roslyn's DEFAULT for that option is on — explicit because we depend
+                // on this being on; don't rely on the server default. Pinning it means a
+                // future Roslyn default-flip can't silently kill decompiled-metadata
+                // navigation. Every OTHER section stays null (byte-identical to prior behavior).
                 var items = parameters?["items"] as JArray;
                 var arr = new JArray();
-                int n = items?.Count ?? 0;
-                for (int i = 0; i < n; i++) arr.Add(JValue.CreateNull());
+                foreach (var it in items ?? new JArray())
+                {
+                    string section = it?["section"]?.ToString() ?? "";
+                    if (section.Equals("navigation.dotnet_navigate_to_decompiled_sources", StringComparison.OrdinalIgnoreCase))
+                        arr.Add(true);
+                    else
+                        arr.Add(JValue.CreateNull());
+                }
                 result = arr;
             }
             else
