@@ -4,6 +4,9 @@
 // v1.6: fix git stdio hang by setting GIT_REDIRECT_STDIN/STDERR (Git for Windows handle-inheritance issue).
 // v1.7: add ExecuteArgvAsync (shell-free, ArgumentList-based) for data-driven callers; extract shared
 //       RunProcessAsync plumbing. String-path ExecuteAsync behavior unchanged. Resolves the quoting TODO.
+// v1.8: redirect + immediately close every spawned child's stdin so it gets an instant EOF instead of
+//       inheriting the McpServer's open stdio pipe. Without this any tool that reads stdin (npx, vite,
+//       npm) blocks to the 120s timeout. Generalizes the git-specific GIT_REDIRECT_STDIN workaround.
 
 using System;
 using System.Collections.Generic;
@@ -146,6 +149,7 @@ namespace DevMind
             {
                 psi.WorkingDirectory       = WorkingDirectory;
                 psi.UseShellExecute        = false;
+                psi.RedirectStandardInput  = true;   // so we can close it → instant EOF for the child
                 psi.RedirectStandardOutput = true;
                 psi.RedirectStandardError  = true;
                 psi.CreateNoWindow         = true;
@@ -221,6 +225,13 @@ namespace DevMind
                     });
 
                 proc.Start();
+
+                // Give every spawned child an immediate stdin EOF. We never feed stdin to
+                // children; without this the child inherits the McpServer's stdio pipe (open,
+                // never EOF) and any tool that reads stdin (npx, vite, npm) blocks until the
+                // timeout. Closing it here generalizes the git-specific GIT_REDIRECT_STDIN fix.
+                try { proc.StandardInput.Close(); } catch { /* best effort */ }
+
                 proc.BeginOutputReadLine();
                 proc.BeginErrorReadLine();
 
