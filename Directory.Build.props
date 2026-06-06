@@ -1,0 +1,60 @@
+<Project>
+
+  <!-- Git-driven versioning, shared by every project under the repo root.
+       Version / FileVersion / AssemblyVersion = 1.0.<git-commit-count>[.0]
+       InformationalVersion                    = 1.0.<git-commit-count>+<short-hash>
+       Git is read once per build with a safe fallback: if git is missing or
+       fails, the build still succeeds at 1.0.0 with no hash.
+
+       Excluded: _archive/vsix/DevMind.csproj (the archived net48 VSIX) has its own
+       version-stamping target, so the git-version target below is skipped for it. -->
+  <PropertyGroup>
+    <VersionMajorMinor>1.0</VersionMajorMinor>
+
+    <!-- We append our own short hash below; stop the SDK from ALSO appending the
+         full SourceRevisionId (which would yield a doubled "+sha+sha"). -->
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+
+    <!-- Fallbacks used when git is unavailable. -->
+    <GitCommitCount>0</GitCommitCount>
+    <GitShortHash></GitShortHash>
+  </PropertyGroup>
+
+  <Target Name="SetGitVersion"
+          BeforeTargets="GetAssemblyVersion;GenerateAssemblyInfo;CoreCompile"
+          Condition="'$(_DevMindGitVersionSet)' != 'true' and !$(MSBuildProjectDirectory.Contains('_archive'))">
+
+    <!-- ContinueOnError => a missing/failing git never breaks the build. -->
+    <Exec Command="git rev-list --count HEAD"
+          WorkingDirectory="$(MSBuildThisFileDirectory)"
+          ConsoleToMSBuild="true" ContinueOnError="true"
+          StandardOutputImportance="low" StandardErrorImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_GitCountRaw" />
+      <Output TaskParameter="ExitCode"      PropertyName="_GitCountExit" />
+    </Exec>
+
+    <Exec Command="git rev-parse --short=8 HEAD"
+          WorkingDirectory="$(MSBuildThisFileDirectory)"
+          ConsoleToMSBuild="true" ContinueOnError="true"
+          StandardOutputImportance="low" StandardErrorImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_GitHashRaw" />
+      <Output TaskParameter="ExitCode"      PropertyName="_GitHashExit" />
+    </Exec>
+
+    <PropertyGroup>
+      <GitCommitCount Condition="'$(_GitCountExit)' == '0' and '$(_GitCountRaw)' != ''">$(_GitCountRaw.Trim())</GitCommitCount>
+      <GitShortHash   Condition="'$(_GitHashExit)'  == '0' and '$(_GitHashRaw)'  != ''">$(_GitHashRaw.Trim())</GitShortHash>
+
+      <Version>$(VersionMajorMinor).$(GitCommitCount)</Version>
+      <AssemblyVersion>$(VersionMajorMinor).$(GitCommitCount).0</AssemblyVersion>
+      <FileVersion>$(VersionMajorMinor).$(GitCommitCount).0</FileVersion>
+      <InformationalVersion Condition="'$(GitShortHash)' != ''">$(VersionMajorMinor).$(GitCommitCount)+$(GitShortHash)</InformationalVersion>
+      <InformationalVersion Condition="'$(GitShortHash)' == ''">$(VersionMajorMinor).$(GitCommitCount)</InformationalVersion>
+
+      <_DevMindGitVersionSet>true</_DevMindGitVersionSet>
+    </PropertyGroup>
+
+    <Message Importance="high" Text="DevMind version: $(InformationalVersion) (FileVersion $(FileVersion))" />
+  </Target>
+
+</Project>
