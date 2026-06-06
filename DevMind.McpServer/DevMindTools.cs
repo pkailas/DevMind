@@ -1680,8 +1680,9 @@ internal sealed class DevMindTools
     /// <summary>
     /// Resolves a filename to a full absolute path.
     /// Priority: (1) already absolute and exists; (2) hint-relative to WorkingDirectory;
-    /// (3) basename recursive search under WorkingDirectory (noise paths excluded).
-    /// Returns null if the file cannot be located.
+    /// (3) recursive basename search under WorkingDirectory (noise paths excluded), using any
+    ///     directory portion of the hint to disambiguate same-named files. Returns null rather
+    ///     than guessing an arbitrary same-named file when the hint does not uniquely identify one.
     /// </summary>
     private string? ResolveFilePath(string filename)
     {
@@ -1697,23 +1698,42 @@ internal sealed class DevMindTools
         string byHint = Path.Combine(wd, filename.Replace('/', Path.DirectorySeparatorChar));
         if (File.Exists(byHint)) return byHint;
 
-        // Basename-only fallback: recursive search.
-        string fileNameOnly = Path.GetFileName(filename.Replace('\\', '/'));
+        // Directory-aware fallback: recursive search by basename, then use any directory
+        // information in the hint to disambiguate. We never return an arbitrary same-named
+        // file — a silently wrong file is worse than "not found" (the caller can recover via
+        // run_shell). Normalize: forward slashes, strip leading "./", strip leading "/".
+        string normalizedHint = filename.Replace('\\', '/');
+        while (normalizedHint.StartsWith("./", StringComparison.Ordinal))
+            normalizedHint = normalizedHint.Substring(2);
+        normalizedHint = normalizedHint.TrimStart('/');
+
+        string fileNameOnly = Path.GetFileName(normalizedHint);
         if (string.IsNullOrEmpty(fileNameOnly)) return null;
+        bool hintHasDirectory = normalizedHint.Contains('/');
 
         try
         {
             string[] found = Directory.GetFiles(wd, fileNameOnly, SearchOption.AllDirectories);
             string[] clean = found.Where(f => !ContextEngine.IsNoisePath(f)).ToArray();
-            if (clean.Length == 1) return clean[0];
-            if (clean.Length > 1)
+            if (clean.Length == 0) return null;
+
+            if (hintHasDirectory)
             {
-                // Prefer the path whose suffix most closely matches the hint.
-                string normalized = filename.Replace('\\', '/');
-                return clean.FirstOrDefault(f =>
-                    f.Replace('\\', '/').EndsWith(normalized, StringComparison.OrdinalIgnoreCase))
-                    ?? clean[0];
+                // Match candidates whose path ENDS WITH the hint's directory+name suffix.
+                // Plain (substring) EndsWith so a partial/abbreviated directory in the hint
+                // still matches — e.g. "TestHarness/Program.cs" matches a real directory named
+                // ".../VLink.PSCPConnector.TestHarness/Program.cs".
+                string[] suffixMatches = clean
+                    .Where(f => f.Replace('\\', '/')
+                        .EndsWith(normalizedHint, StringComparison.OrdinalIgnoreCase))
+                    .ToArray();
+                // Exactly one → use it. Zero (directory portion matched nothing) or more than
+                // one (still ambiguous) → not found; never guess an arbitrary same-named file.
+                return suffixMatches.Length == 1 ? suffixMatches[0] : null;
             }
+
+            // Bare basename with no directory to disambiguate: resolve only a unique match.
+            return clean.Length == 1 ? clean[0] : null;
         }
         catch { }
 
