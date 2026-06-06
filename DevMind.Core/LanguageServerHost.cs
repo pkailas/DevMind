@@ -1,7 +1,11 @@
-// File: LanguageServerHost.cs  v2.0
+// File: LanguageServerHost.cs  v2.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Session-scoped language server host for one profile (C# or TypeScript).
+// v2.1 (A11): three-state readiness (NotReady/Ready/Degraded) replaces the silent
+//   "serve anyway" path. Tool results report not-ready/degraded honestly instead of
+//   collapsing into a false "no issues"/"no results". Late projectInitializationComplete
+//   upgrades DEGRADED→READY via a pull-based poll on the dispatch thread.
 
 using System;
 using System.Collections.Generic;
@@ -15,6 +19,15 @@ using Newtonsoft.Json.Linq;
 
 namespace DevMind
 {
+    /// <summary>
+    /// Readiness of the underlying language server's workspace/index.
+    /// NotReady = initializing / projectInitializationComplete not yet received;
+    /// Ready = index confirmed loaded (notification received, or a push server that
+    /// needs no project-init gate); Degraded = the 120s wait elapsed and we are serving
+    /// anyway without confirmation (results may be empty-because-unindexed, not absent).
+    /// </summary>
+    public enum LspReadiness { NotReady, Ready, Degraded }
+
     /// <summary>
     /// Manages a long-lived language-server child process and document sync for one workspace.
     /// </summary>
@@ -30,6 +43,13 @@ namespace DevMind
         private LspClient _client;
         private bool _initialized;
         private bool _disposed;
+
+        // Readiness state. All reads/writes are under _gate. Writes happen only on the
+        // dispatch (consumer) thread: at init, and via the pull-based RefreshReadiness()
+        // upgrade — never from the LspClient reader thread, so there is no second writer.
+        private LspReadiness _readiness = LspReadiness.NotReady;
+        // One-shot guard so the "serving DEGRADED" stderr line is emitted at most once.
+        private bool _degradedServeLogged;
 
         public LanguageServerHost(
             string workingDirectory,
@@ -65,6 +85,7 @@ namespace DevMind
         {
             EnsureSupportedFile(fullPath);
             await EnsureReadyAsync(cancellationToken).ConfigureAwait(false);
+            RefreshReadiness();
             string uri = PathToFileUri(fullPath);
 
             IReadOnlyList<LspDiagnostic> diags;
@@ -90,10 +111,26 @@ namespace DevMind
                     uri, TimeSpan.FromSeconds(8), cancellationToken).ConfigureAwait(false);
             }
 
+            var state = SnapshotReadiness();
+
             if (diags.Count == 0)
             {
-                return "get_diagnostics: no issues reported for " + Path.GetFileName(fullPath) +
-                       " (" + _profile.DisplayName + ")";
+                // A genuine clean is reported ONLY when the index is confirmed READY and the
+                // pull actually returned zero. NotReady/Degraded never yields "no issues".
+                if (state == LspReadiness.Ready)
+                    return "get_diagnostics: no issues reported for " + Path.GetFileName(fullPath) +
+                           " (" + _profile.DisplayName + ")";
+
+                if (state == LspReadiness.Degraded)
+                {
+                    MaybeLogDegradedServe("get_diagnostics");
+                    return "get_diagnostics: project indexing did not complete within the timeout " +
+                           "(degraded) — diagnostics are not reliable and may be incomplete. Do NOT " +
+                           "treat this as clean; retry shortly, or use run_build to confirm.";
+                }
+
+                return "get_diagnostics: project is still indexing (language server not ready) — " +
+                       "diagnostics are not yet available. This is NOT a clean result; retry in a few seconds.";
             }
 
             var lines = diags.Take(50).Select(d =>
@@ -101,7 +138,16 @@ namespace DevMind
                 (string.IsNullOrEmpty(d.Source) ? "" : $" ({d.Source})") +
                 $": {d.Message}");
             var suffix = diags.Count > 50 ? $"\n... and {diags.Count - 50} more" : "";
-            return string.Join("\n", lines) + suffix;
+            var body = string.Join("\n", lines) + suffix;
+
+            // Real diagnostics are always surfaced; flag when the index is degraded so the
+            // model knows the list may be partial.
+            if (state == LspReadiness.Degraded)
+            {
+                MaybeLogDegradedServe("get_diagnostics");
+                body += "\n(note: project indexing is degraded — this list may be incomplete)";
+            }
+            return body;
         }
 
         public async Task<string> GoToDefinitionAsync(
@@ -123,7 +169,7 @@ namespace DevMind
                 },
                 cancellationToken).ConfigureAwait(false);
 
-            return FormatLocations("go_to_definition", result);
+            return FinishLocationResult("go_to_definition", FormatLocations(result));
         }
 
         public async Task<string> FindReferencesAsync(
@@ -146,7 +192,7 @@ namespace DevMind
                 },
                 cancellationToken).ConfigureAwait(false);
 
-            return FormatLocations("find_references", result);
+            return FinishLocationResult("find_references", FormatLocations(result));
         }
 
         public async Task<string> HoverAsync(
@@ -168,21 +214,42 @@ namespace DevMind
                 },
                 cancellationToken).ConfigureAwait(false);
 
-            if (result == null || result.Type == JTokenType.Null)
+            RefreshReadiness();
+            string hover = ExtractHoverText(result);
+            var state = SnapshotReadiness();
+
+            if (!string.IsNullOrWhiteSpace(hover))
+            {
+                if (state == LspReadiness.Degraded)
+                {
+                    MaybeLogDegradedServe("hover");
+                    return hover + "\n(note: project indexing is degraded — information may be incomplete)";
+                }
+                return hover;
+            }
+
+            // No hover info: a genuine "no information" only when READY; otherwise honest.
+            if (state == LspReadiness.Ready)
                 return "hover: (no information at this position)";
+            return NavNotReadyMessage("hover", state);
+        }
+
+        /// <summary>
+        /// Extract hover text from an LSP hover result, or null/empty when the result
+        /// carries no information. Empties are reinterpreted by readiness in the caller.
+        /// </summary>
+        private static string ExtractHoverText(JToken result)
+        {
+            if (result == null || result.Type == JTokenType.Null) return null;
 
             var contents = result["contents"];
-            if (contents == null)
-                return "hover: (empty)";
+            if (contents == null) return null;
 
             if (contents.Type == JTokenType.String)
                 return contents.ToString();
 
             if (contents is JObject marked)
-            {
-                var value = marked["value"]?.ToString() ?? "";
-                return string.IsNullOrWhiteSpace(value) ? "hover: (empty)" : value;
-            }
+                return marked["value"]?.ToString();
 
             if (contents is JArray arr)
             {
@@ -194,7 +261,7 @@ namespace DevMind
                     else if (item is JObject m)
                         parts.Add(m["value"]?.ToString() ?? "");
                 }
-                return parts.Count == 0 ? "hover: (empty)" : string.Join("\n\n", parts);
+                return parts.Count == 0 ? null : string.Join("\n\n", parts);
             }
 
             return contents.ToString();
@@ -217,6 +284,15 @@ namespace DevMind
         {
             if (_disposed) throw new ObjectDisposedException(nameof(LanguageServerHost));
 
+            // CONCURRENCY INVARIANT: every entry to this host (model tool calls AND the
+            // detached startup pre-warm) is funnelled through McpServices.EnqueueAsync,
+            // whose single-reader channel runs work items strictly one at a time. That
+            // serialization — not this method — is what prevents two callers from both
+            // observing not-initialized and both running StartAndInitializeAsync (the A3
+            // double-init race). The await below is intentionally OUTSIDE _gate, so this
+            // host is NOT self-safe under concurrent entry: if a future refactor lets two
+            // callers reach here concurrently (bypassing the channel), single-flight must
+            // be added here (e.g. an init Task latch) or the race returns.
             lock (_gate)
             {
                 if (_initialized && _client != null && !_client.HasExited)
@@ -226,6 +302,91 @@ namespace DevMind
             await StartAndInitializeAsync(cancellationToken).ConfigureAwait(false);
         }
 
+        /// <summary>Current readiness snapshot (lock-guarded).</summary>
+        private LspReadiness SnapshotReadiness()
+        {
+            lock (_gate) return _readiness;
+        }
+
+        /// <summary>
+        /// Pull-based late upgrade: if we are serving DEGRADED and the server has since
+        /// emitted projectInitializationComplete, flip to READY. Runs on the dispatch
+        /// (consumer) thread at each tool entry — the only writer besides init — so no
+        /// cross-thread write race with the LspClient reader thread.
+        /// </summary>
+        private void RefreshReadiness()
+        {
+            lock (_gate)
+            {
+                if (_readiness == LspReadiness.Degraded &&
+                    _client != null &&
+                    !string.IsNullOrEmpty(_server.ReadyNotification) &&
+                    _client.HasSeenNotification(_server.ReadyNotification))
+                {
+                    _readiness = LspReadiness.Ready;
+                }
+            }
+        }
+
+        /// <summary>Emit the "serving DEGRADED" stderr line at most once per init.</summary>
+        private void MaybeLogDegradedServe(string toolName)
+        {
+            bool log;
+            lock (_gate)
+            {
+                log = !_degradedServeLogged;
+                _degradedServeLogged = true;
+            }
+            if (log)
+                Console.Error.WriteLine(
+                    "[LSP] Serving in DEGRADED state (" + _server.ReadyNotification +
+                    " not received within 120s) — " + toolName + " and other LSP results are " +
+                    "reported as not-yet-reliable until indexing completes.");
+        }
+
+        /// <summary>
+        /// Honest not-ready/degraded message for the navigation tools (definition /
+        /// references / hover). Includes the framework-symbol fallback pointer, since
+        /// docs/web ARE legitimate alternatives for framework/library symbol questions.
+        /// </summary>
+        private string NavNotReadyMessage(string toolName, LspReadiness state)
+        {
+            if (state == LspReadiness.Degraded)
+            {
+                MaybeLogDegradedServe(toolName);
+                return toolName + ": language server indexing did not complete (degraded) — " +
+                       "results may be incomplete, not necessarily absent. Retry, or for framework/BCL/" +
+                       "library symbols use microsoft.docs.mcp (API docs) or web_search / web_fetch.";
+            }
+            return toolName + ": language server is still indexing (not ready) — results are not yet " +
+                   "available, not necessarily absent. Retry shortly. For framework/BCL or third-party " +
+                   "library symbols, you can also consult microsoft.docs.mcp (API docs) or web_search / web_fetch.";
+        }
+
+        /// <summary>
+        /// Finalize a location-list tool result (definition / references). Real results are
+        /// always returned (with a degraded caveat appended when serving DEGRADED); an empty
+        /// result yields a genuine "no results" ONLY when READY, otherwise the honest signal.
+        /// </summary>
+        private string FinishLocationResult(string toolName, string formattedOrNull)
+        {
+            RefreshReadiness();
+            var state = SnapshotReadiness();
+            if (formattedOrNull != null)
+            {
+                if (state == LspReadiness.Degraded)
+                {
+                    MaybeLogDegradedServe(toolName);
+                    return formattedOrNull + "\n(note: project indexing is degraded — results may be incomplete)";
+                }
+                return formattedOrNull;
+            }
+
+            if (state == LspReadiness.Ready)
+                return toolName + ": no results";
+            return NavNotReadyMessage(toolName, state);
+        }
+
         private async Task StartAndInitializeAsync(CancellationToken cancellationToken)
         {
             lock (_gate)
@@ -233,6 +394,8 @@ namespace DevMind
                 _client?.Dispose();
                 _client = null;
                 _initialized = false;
+                _readiness = LspReadiness.NotReady;
+                _degradedServeLogged = false;
                 _openDocuments.Clear();
             }
 
@@ -318,6 +481,12 @@ namespace DevMind
             // Roslyn LS: load the solution explicitly (no --solution CLI arg) and
             // wait for the project graph to finish loading before serving requests,
             // so the first get_diagnostics isn't racing an empty workspace.
+            //
+            // Push servers (csharp-ls / TypeScript: no SolutionOpenUri, no
+            // ReadyNotification) have no project-init gate and are READY on init — the
+            // three-state honesty is a Roslyn-pull concern only.
+            LspReadiness initialReadiness = LspReadiness.Ready;
+
             if (!string.IsNullOrEmpty(_server.SolutionOpenUri))
             {
                 client.Notify("solution/open", new JObject
@@ -327,17 +496,27 @@ namespace DevMind
 
                 if (!string.IsNullOrEmpty(_server.ReadyNotification))
                 {
+                    int initTimeoutMs = ResolveProjectInitTimeoutMs();
                     bool ready = await client
                         .WaitForNotificationAsync(
                             _server.ReadyNotification,
-                            TimeSpan.FromSeconds(120),
+                            TimeSpan.FromMilliseconds(initTimeoutMs),
                             cancellationToken)
                         .ConfigureAwait(false);
-                    if (!ready)
+                    if (ready)
                     {
+                        initialReadiness = LspReadiness.Ready;
+                    }
+                    else
+                    {
+                        // Serve anyway, but track DEGRADED so empty results are reported
+                        // honestly rather than as a false clean. A late notification can
+                        // still upgrade this to READY via RefreshReadiness().
+                        initialReadiness = LspReadiness.Degraded;
                         Console.Error.WriteLine(
                             "[LSP] Roslyn project load did not signal " +
-                            _server.ReadyNotification + " within 120s; serving anyway.");
+                            _server.ReadyNotification + " within " + initTimeoutMs +
+                            "ms; serving anyway (DEGRADED).");
                     }
                 }
             }
@@ -346,7 +525,21 @@ namespace DevMind
             {
                 _client = client;
                 _initialized = true;
+                _readiness = initialReadiness;
             }
+        }
+
+        /// <summary>
+        /// Timeout (ms) to await projectInitializationComplete before serving DEGRADED.
+        /// Default 120000. Overridable via DEVMIND_LSP_PROJECT_INIT_TIMEOUT_MS (large
+        /// solutions may need longer; tests use a short value to force DEGRADED).
+        /// </summary>
+        private static int ResolveProjectInitTimeoutMs()
+        {
+            var v = Environment.GetEnvironmentVariable("DEVMIND_LSP_PROJECT_INIT_TIMEOUT_MS");
+            if (!string.IsNullOrEmpty(v) && int.TryParse(v, out var ms) && ms > 0)
+                return ms;
+            return 120_000;
         }
 
         private async Task SyncDocumentAsync(string fullPath, CancellationToken cancellationToken)
@@ -417,7 +610,12 @@ namespace DevMind
             };
         }
 
-        private static string FormatLocations(string toolName, JToken result)
+        /// <summary>
+        /// Format an LSP location result as path:line:col lines, or return null when the
+        /// result carries no locations — the caller (FinishLocationResult) decides whether
+        /// an empty result is a genuine "no results" (READY) or an honest not-ready signal.
+        /// </summary>
+        private static string FormatLocations(JToken result)
         {
             var locations = new List<string>();
 
@@ -456,7 +654,7 @@ namespace DevMind
             }
 
             if (locations.Count == 0)
-                return toolName + ": no results";
+                return null;
 
             return string.Join("\n", locations.Take(100)) +
                    (locations.Count > 100 ? $"\n... and {locations.Count - 100} more" : "");

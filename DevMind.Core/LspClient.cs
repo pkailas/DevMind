@@ -1,9 +1,11 @@
-// File: LspClient.cs  v1.0
+// File: LspClient.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Low-level LSP JSON-RPC over stdio with Content-Length framing.
 // One reader task dispatches responses to pending requests and handles
 // server-initiated notifications (e.g. textDocument/publishDiagnostics).
+// v1.1: HasSeenNotification — lets the host poll for a late projectInitializationComplete
+//       (DEGRADED→READY upgrade) without a cross-thread writer.
 
 using System;
 using System.Collections.Generic;
@@ -152,6 +154,19 @@ namespace DevMind
                     return await tcs.Task.ConfigureAwait(false);
                 }
             }
+        }
+
+        /// <summary>
+        /// True if the given one-shot notification has arrived at any point (including
+        /// after a WaitForNotificationAsync timeout). Lets the host upgrade a DEGRADED
+        /// readiness state to READY when a slow projectInitializationComplete lands late.
+        /// Read-only and lock-guarded — safe to poll from the dispatch (consumer) thread.
+        /// </summary>
+        public bool HasSeenNotification(string method)
+        {
+            if (string.IsNullOrEmpty(method)) return false;
+            lock (_notifyLock)
+                return _seenNotifications.Contains(method);
         }
 
         /// <summary>
