@@ -38,7 +38,7 @@
 | `StringValidator.cs` | Trivial utility: `StringValidator.IsValid(string)` — checks `!IsNullOrWhiteSpace` |
 | `TrainingLogger.cs` | Captures fine-tuning training data as append-only JSONL — one file per session, gated behind `TrainingLogEnabled` setting |
 
-**DevMind.Core** (netstandard2.0 — no VS/WPF dependencies):
+**DevMind.Core** (net10.0 — no VS/WPF dependencies):
 
 | File | Purpose |
 |------|---------|

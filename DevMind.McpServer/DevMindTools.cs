@@ -1,4 +1,4 @@
-// File: DevMindTools.cs  v5.1
+// File: DevMindTools.cs  v5.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Diagnostic policy: never write to Console.Out / Console.WriteLine in this file.
@@ -34,6 +34,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Data;
 using System.Data.Common;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
@@ -1051,15 +1052,15 @@ internal sealed class DevMindTools
         {
             try
             {
-                string testCommand = BuildTestCommand(project, filter);
+                var testArgs = BuildTestArgs(project, filter);
 
                 IProgress<ShellOutputLine>? bridgedProgress = progress != null
                     ? new Progress<ShellOutputLine>(line =>
                         progress.Report(new ProgressNotificationValue { Progress = 0, Message = line.Line }))
                     : null;
 
-                var (output, exitCode) = await _svc.Shell.ExecuteAsync(
-                    testCommand, cancellationToken, onLine: bridgedProgress);
+                var (output, exitCode) = await _svc.Shell.ExecuteArgvAsync(
+                    "dotnet", testArgs, cancellationToken, onLine: bridgedProgress);
 
                 return CapShellOutput(output, exitCode);
             }
@@ -1354,16 +1355,18 @@ internal sealed class DevMindTools
 
                 try
                 {
-                    // Stage files.
-                    string stageArgs = (files != null && files.Length > 0)
-                        ? string.Join(" ", files.Select(f => $"\"{f}\""))
-                        : "-A";
-                    var (stageOutput, stageExitCode) = await _svc.Shell.ExecuteAsync($"git add {stageArgs}", cancellationToken);
+                    // Stage files. Each file is its own argv element — no shell quoting.
+                    var addArgs = new List<string> { "add" };
+                    if (files != null && files.Length > 0)
+                        addArgs.AddRange(files);
+                    else
+                        addArgs.Add("-A");
+                    var (stageOutput, stageExitCode) = await _svc.Shell.ExecuteArgvAsync("git", addArgs, cancellationToken);
                     if (stageExitCode != 0)
                         return $"[git_commit] git add failed:\n{stageOutput}";
 
                     // Check what's staged.
-                    var (statusOutput, statusExitCode) = await _svc.Shell.ExecuteAsync("git status --short", cancellationToken);
+                    var (statusOutput, statusExitCode) = await _svc.Shell.ExecuteArgvAsync("git", new[] { "status", "--short" }, cancellationToken);
                     string status = statusOutput?.Trim() ?? "";
                     if (string.IsNullOrWhiteSpace(status))
                         return "[git_commit] Nothing to commit — working tree clean.";
@@ -1387,9 +1390,8 @@ internal sealed class DevMindTools
                         commitMessage = $"chore({scope}): update {string.Join(", ", changedFiles.Take(3))}{(changedFiles.Count > 3 ? $" and {changedFiles.Count - 3} more" : "")}";
                     }
 
-                    // Commit.
-                    string safeMessage = commitMessage.Replace("\"", "\\\"");
-                    var (commitOutput, commitExitCode) = await _svc.Shell.ExecuteAsync($"git commit -m \"{safeMessage}\"", cancellationToken);
+                    // Commit. Message is one argv element — no escaping, no shell parse.
+                    var (commitOutput, commitExitCode) = await _svc.Shell.ExecuteArgvAsync("git", new[] { "commit", "-m", commitMessage }, cancellationToken);
                     if (commitExitCode != 0)
                         return $"[git_commit] git commit failed:\n{commitOutput}";
 
@@ -1404,7 +1406,9 @@ internal sealed class DevMindTools
                     if (!string.IsNullOrWhiteSpace(remote))
                     {
                         sb.AppendLine($"\nPushing to {remote}...");
-                        var (pushOutput, pushExitCode) = await _svc.Shell.ExecuteAsync($"git push {remote}", cancellationToken);
+                        var pushArgs = new List<string> { "push" };
+                        pushArgs.AddRange(TokenizeArgs(remote));
+                        var (pushOutput, pushExitCode) = await _svc.Shell.ExecuteArgvAsync("git", pushArgs, cancellationToken);
                         sb.AppendLine(pushExitCode == 0
                             ? $"Pushed to {remote} successfully."
                             : $"Push failed:\n{pushOutput}");
@@ -1437,8 +1441,9 @@ internal sealed class DevMindTools
         {
             try
             {
-               var (output, _) = await _svc.Shell.ExecuteAsync(
-                    "powershell -NoProfile -Command \"Get-Clipboard\"",
+               var (output, _) = await _svc.Shell.ExecuteArgvAsync(
+                    "powershell.exe",
+                    new[] { "-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard" },
                     cancellationToken);
                 string text = output?.Trim() ?? "";
                 return string.IsNullOrEmpty(text)
@@ -1464,12 +1469,16 @@ internal sealed class DevMindTools
         {
             try
             {
-               string escaped = text.Replace("\"", "`\"").Replace("'", "''");
-                var (writeOutput, exitCode) = await _svc.Shell.ExecuteAsync(
-                    $"powershell -NoProfile -Command \"Set-Clipboard -Value '{escaped}'\"",
-                    cancellationToken);
+               // The text travels via an environment variable, never the command text, so it
+                // is bound at runtime as a literal string and can never be parsed as PowerShell.
+                var clipEnv = new Dictionary<string, string> { ["DEVMIND_CLIP_VALUE"] = text ?? "" };
+                var (writeOutput, exitCode) = await _svc.Shell.ExecuteArgvAsync(
+                    "powershell.exe",
+                    new[] { "-NoProfile", "-NonInteractive", "-Command", "Set-Clipboard -Value $env:DEVMIND_CLIP_VALUE" },
+                    cancellationToken,
+                    extraEnv: clipEnv);
                 return exitCode == 0
-                    ? $"[clip_write] Copied {text.Length} characters to clipboard."
+                    ? $"[clip_write] Copied {text?.Length ?? 0} characters to clipboard."
                     : $"[clip_write] Failed: {writeOutput}";
             }
             catch (Exception ex)
@@ -1494,12 +1503,13 @@ internal sealed class DevMindTools
                string target = path.StartsWith("http://", StringComparison.Ordinal) || path.StartsWith("https://", StringComparison.Ordinal)
                     ? path
                     : ResolveFilePath(path) ?? path;
-                var (openOutput, openExitCode) = await _svc.Shell.ExecuteAsync(
-                    $"powershell -NoProfile -Command \"Start-Process '{target}'\"",
+                // Launch via the OS shell-execute handler directly (the Start-Process equivalent).
+                // target is a single ProcessStartInfo.FileName — never parsed as a command, so no
+                // quoting/injection surface. UseShellExecute=true picks the default app for the type.
+                await Task.Run(
+                    () => Process.Start(new ProcessStartInfo { FileName = target, UseShellExecute = true }),
                     cancellationToken);
-                return openExitCode == 0
-                    ? $"[open_file] Opened: {target}"
-                    : $"[open_file] Failed: {openOutput}";
+                return $"[open_file] Opened: {target}";
             }
             catch (Exception ex)
             {
@@ -1832,7 +1842,7 @@ internal sealed class DevMindTools
         if (gitRoot == null)
             return "[read_file] git: not a git repository";
 
-        string command, header;
+        List<string> gitArgs; string header;
 
         if (filename.StartsWith("git log", StringComparison.OrdinalIgnoreCase))
         {
@@ -1848,13 +1858,14 @@ internal sealed class DevMindTools
                 if (!string.IsNullOrEmpty(countPart)) int.TryParse(countPart, out count);
             }
             count   = Math.Max(1, Math.Min(count, 50));
-            command = $"git log --oneline --no-decorate -{count}";
+            gitArgs = new List<string> { "log", "--oneline", "--no-decorate", $"-{count}" };
             header  = $"[read_file] git log (last {count} commits)";
         }
         else if (filename.StartsWith("git diff", StringComparison.OrdinalIgnoreCase))
         {
             string diffArgs = filename.Substring("git diff".Length).Trim();
-            command = string.IsNullOrEmpty(diffArgs) ? "git diff" : $"git diff {diffArgs}";
+            gitArgs = new List<string> { "diff" };
+            gitArgs.AddRange(TokenizeArgs(diffArgs));
             header  = string.IsNullOrEmpty(diffArgs)
                 ? "[read_file] git diff (working changes)"
                 : $"[read_file] git diff {diffArgs}";
@@ -1871,7 +1882,7 @@ internal sealed class DevMindTools
         int exitCode;
         try
         {
-            (output, exitCode) = await _svc.Shell.ExecuteAsync(command, cancellationToken);
+            (output, exitCode) = await _svc.Shell.ExecuteArgvAsync("git", gitArgs, cancellationToken);
         }
         finally
         {
@@ -2087,10 +2098,10 @@ internal sealed class DevMindTools
     /// <summary>
     /// Builds the dotnet test command string from optional project and filter arguments.
     /// </summary>
-    private string BuildTestCommand(string? project, string? filter)
+    private List<string> BuildTestArgs(string? project, string? filter)
     {
         string wd = _svc.WorkingDirectory;
-        var sb = new StringBuilder("dotnet test --no-build --verbosity normal");
+        var args = new List<string> { "test", "--no-build", "--verbosity", "normal" };
 
         if (!string.IsNullOrWhiteSpace(project))
         {
@@ -2118,13 +2129,71 @@ internal sealed class DevMindTools
                     projectPath = found.Length > 0 ? found[0] : candidate;
                 }
             }
-            sb.Append($" \"{projectPath}\"");
+            args.Add(projectPath);
         }
 
         if (!string.IsNullOrWhiteSpace(filter))
-            sb.Append($" --filter \"{filter}\"");
+        {
+            args.Add("--filter");
+            args.Add(filter);
+        }
 
-       return sb.ToString();
+       return args;
+    }
+
+    /// <summary>
+    /// Splits a free-form argument string into argv tokens the way a shell would: whitespace
+    /// separates tokens, but text inside matching single/double quotes stays one token (quotes
+    /// stripped). Used to turn a model-supplied "git diff ..." argument tail or a "push" remote
+    /// into argv elements for ExecuteArgvAsync — shell metacharacters become literal arguments,
+    /// not executable syntax. Returns an empty list for null/whitespace input.
+    ///
+    /// LOSSY BY DESIGN — this is a minimal splitter for git diff/log args and remote names,
+    /// NOT a general-purpose shell-word parser. Known, accepted limitations:
+    ///   • Quote characters are removed, so an argument that must literally contain a quote
+    ///     cannot be represented (no escape syntax — '\' is not special).
+    ///   • An unterminated quote does not error: the remainder is swallowed into a single
+    ///     token (e.g. input <c>"HEAD~5</c> yields the one token <c>HEAD~5</c>).
+    ///   • No support for adjacent quoted/unquoted concatenation beyond what the char loop
+    ///     happens to produce.
+    /// These are safe trade-offs: every token is passed verbatim as one argv element, so the
+    /// worst case for a malformed input is git/dotnet rejecting an odd pathspec — never code
+    /// execution. Do not reuse this as a shell parser where fidelity matters.
+    /// </summary>
+    private static List<string> TokenizeArgs(string input)
+    {
+        var tokens = new List<string>();
+        if (string.IsNullOrWhiteSpace(input)) return tokens;
+
+        var  sb     = new StringBuilder();
+        char quote  = '\0';
+        bool inTok  = false;
+
+        foreach (char c in input)
+        {
+            if (quote != '\0')
+            {
+                if (c == quote) quote = '\0';
+                else            sb.Append(c);
+            }
+            else if (c == '"' || c == '\'')
+            {
+                quote = c;
+                inTok = true;
+            }
+            else if (c == ' ' || c == '\t')
+            {
+                if (inTok) { tokens.Add(sb.ToString()); sb.Clear(); inTok = false; }
+            }
+            else
+            {
+                sb.Append(c);
+                inTok = true;
+            }
+        }
+
+        if (inTok) tokens.Add(sb.ToString());
+        return tokens;
     }
 
     /// <summary>
