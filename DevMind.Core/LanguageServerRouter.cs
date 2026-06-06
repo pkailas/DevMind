@@ -1,7 +1,9 @@
-// File: LanguageServerRouter.cs  v1.0
+// File: LanguageServerRouter.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Routes LSP tool calls to the correct language server (C# vs TypeScript) per file extension.
+// v1.1: FindSymbolAsync — solution-wide workspace/symbol search, routed by language (no file
+//   path); reuses the same per-(kind|root) host instance as the position-based tools.
 
 using System;
 using System.Collections.Generic;
@@ -81,6 +83,28 @@ namespace DevMind
                 .ConfigureAwait(false);
         }
 
+        /// <summary>
+        /// Solution-wide symbol search (workspace/symbol). Has no file to derive the language
+        /// from, so it routes by <paramref name="language"/> ("csharp" default, "typescript").
+        /// The host is resolved per (kind|solution-root) exactly like the position-based tools,
+        /// so it reuses the already-warm server rather than spawning a second one.
+        /// </summary>
+        public async Task<string> FindSymbolAsync(
+            string query,
+            int maxResults,
+            string language,
+            CancellationToken cancellationToken = default)
+        {
+            var kind = ResolveLanguageKind(language);
+            string root = kind == LanguageServerKind.CSharp
+                ? (WorkspaceRootResolver.FindSolutionDirectory(_workingDirectory) ?? _workingDirectory)
+                : (WorkspaceRootResolver.FindTypeScriptProjectDirectory(_workingDirectory) ?? _workingDirectory);
+
+            return await GetOrCreateHost(kind, root)
+                .FindSymbolAsync(query, maxResults, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
         public void Dispose()
         {
             if (_disposed) return;
@@ -94,6 +118,20 @@ namespace DevMind
 
                 _hosts.Clear();
             }
+        }
+
+        private static LanguageServerKind ResolveLanguageKind(string language)
+        {
+            if (!string.IsNullOrWhiteSpace(language))
+            {
+                var l = language.Trim();
+                if (l.Equals("typescript", StringComparison.OrdinalIgnoreCase) ||
+                    l.Equals("ts", StringComparison.OrdinalIgnoreCase) ||
+                    l.Equals("javascript", StringComparison.OrdinalIgnoreCase) ||
+                    l.Equals("js", StringComparison.OrdinalIgnoreCase))
+                    return LanguageServerKind.TypeScript;
+            }
+            return LanguageServerKind.CSharp;
         }
 
         private LanguageServerHost GetHostForPath(string fullPath)
@@ -111,6 +149,14 @@ namespace DevMind
             }
 
             string projectRoot = WorkspaceRootResolver.Resolve(kind, fullPath, _workingDirectory);
+            return GetOrCreateHost(kind, projectRoot);
+        }
+
+        /// <summary>Get-or-create the single host instance for a (kind|projectRoot) pair.</summary>
+        private LanguageServerHost GetOrCreateHost(LanguageServerKind kind, string projectRoot)
+        {
+            if (_disposed) throw new ObjectDisposedException(nameof(LanguageServerRouter));
+
             string hostKey = kind + "|" + projectRoot;
 
             lock (_gate)

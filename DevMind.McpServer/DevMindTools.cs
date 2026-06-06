@@ -1,4 +1,4 @@
-// File: DevMindTools.cs  v5.2
+// File: DevMindTools.cs  v5.3
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Diagnostic policy: never write to Console.Out / Console.WriteLine in this file.
@@ -1601,7 +1601,7 @@ internal sealed class DevMindTools
     [McpServerTool(Name = "get_diagnostics")]
     [Description(
         "Return errors and warnings for a source file without a full build. " +
-        "Uses the language server for the file type (.cs → csharp-ls, .ts/.tsx/.js/.jsx → typescript-language-server). " +
+        "Uses the language server for the file type (.cs → Roslyn, .ts/.tsx/.js/.jsx → typescript-language-server). " +
         "Prefer this over run_build when checking a single file.")]
     public async Task<string> GetDiagnostics(
         [Description("Absolute path to a .cs, .ts, .tsx, .js, or .jsx file.")] string filename,
@@ -1714,6 +1714,37 @@ internal sealed class DevMindTools
             catch (Exception ex)
             {
                 return $"[hover error] {filename}: {ex.Message}";
+            }
+        }, cancellationToken);
+    }
+
+    [McpServerTool(Name = "find_symbol")]
+    [Description(
+        "Find a type or member across the whole solution by name (semantic, solution-wide). " +
+        "Use this to answer \"where is X defined?\" when you do NOT already have a file+position — " +
+        "prefer it over find_in_files text search for locating a type or member. " +
+        "Returns kind, name, file:line:col, and containing type, capped at 50.")]
+    public async Task<string> FindSymbol(
+        [Description("Symbol name or substring to search for (e.g. \"LanguageServerHost\", \"GetDiagnostics\").")] string query,
+        [Description("Max results (default 50, capped at 100).")] int? max_results = null,
+        [Description("Language to search: \"csharp\" (default) or \"typescript\".")] string language = "csharp",
+        CancellationToken cancellationToken = default)
+    {
+        return await _svc.EnqueueAsync(async () =>
+        {
+            if (_svc.Lsp == null)
+                return "[find_symbol] LSP is disabled (set DEVMIND_LSP_ENABLED=true to enable).";
+            if (string.IsNullOrWhiteSpace(query))
+                return "[find_symbol] Provide a non-empty symbol name to search for.";
+
+            try
+            {
+                int cap = Math.Min(max_results ?? 50, 100);
+                return await _svc.Lsp.FindSymbolAsync(query, cap, language ?? "csharp", cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                return $"[find_symbol error] {ex.Message}";
             }
         }, cancellationToken);
     }
