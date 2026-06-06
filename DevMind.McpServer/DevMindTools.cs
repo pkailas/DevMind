@@ -660,6 +660,7 @@ internal sealed class DevMindTools
                 string? fullPath = ResolveFilePath(filename);
                 if (fullPath == null || !File.Exists(fullPath))
                     return BuildFileNotFoundMessage("patch_file", filename);
+                fullPath = PathContainmentCheck(fullPath);
 
                 string fileNameOnly = Path.GetFileName(fullPath) ?? filename;
                 string cacheKey     = Path.GetFullPath(fullPath);
@@ -728,9 +729,9 @@ internal sealed class DevMindTools
         {
             try
             {
-                string fullPath = Path.IsPathRooted(filename)
+                string fullPath = PathContainmentCheck(Path.IsPathRooted(filename)
                     ? filename
-                    : Path.Combine(_svc.WorkingDirectory, filename);
+                    : Path.Combine(_svc.WorkingDirectory, filename));
 
                 if (File.Exists(fullPath))
                     return $"create_file: file already exists — {fullPath}. Use patch_file to edit it.";
@@ -772,9 +773,9 @@ internal sealed class DevMindTools
         {
             try
             {
-                string fullPath = Path.IsPathRooted(filename)
+                string fullPath = PathContainmentCheck(Path.IsPathRooted(filename)
                     ? filename
-                    : Path.Combine(_svc.WorkingDirectory, filename);
+                    : Path.Combine(_svc.WorkingDirectory, filename));
 
                 // Snapshot the original content before first mutation (for diff_file).
                 if (File.Exists(fullPath))
@@ -831,6 +832,7 @@ internal sealed class DevMindTools
                 string? fullPath = ResolveFilePath(filename);
                 if (fullPath == null || !File.Exists(fullPath))
                     return BuildFileNotFoundMessage("delete_file", filename);
+                fullPath = PathContainmentCheck(fullPath);
 
                 // Snapshot before deleting so diff_file can show the removal.
                 _svc.TrySnapshot(fullPath);
@@ -865,11 +867,12 @@ internal sealed class DevMindTools
                 string? oldPath = ResolveFilePath(old_filename);
                 if (oldPath == null || !File.Exists(oldPath))
                     return BuildFileNotFoundMessage("rename_file", old_filename);
+                oldPath = PathContainmentCheck(oldPath);
 
                 // Resolve new path: absolute → use as-is; relative → WorkingDirectory.
-                string newPath = Path.IsPathRooted(new_filename)
+                string newPath = PathContainmentCheck(Path.IsPathRooted(new_filename)
                     ? new_filename
-                    : Path.Combine(_svc.WorkingDirectory, new_filename);
+                    : Path.Combine(_svc.WorkingDirectory, new_filename));
 
                 if (File.Exists(newPath))
                     return $"rename_file: destination already exists — {newPath}. Delete it first or choose a different name.";
@@ -1674,6 +1677,36 @@ internal sealed class DevMindTools
         catch { }
 
         return null;
+    }
+
+    /// <summary>
+    /// Ensures a resolved path stays within the session WorkingDirectory before any
+    /// file-mutating operation. Normalizes traversals (..\) and absolute paths via
+    /// Path.GetFullPath, then verifies the result is under WorkingDirectory; throws
+    /// InvalidOperationException if it escapes. Returns the normalized full path.
+    /// Applied only to write/delete/rename tools — read-only tools stay unrestricted.
+    /// </summary>
+    private string PathContainmentCheck(string resolvedFullPath)
+    {
+        string fullPath = Path.GetFullPath(resolvedFullPath);
+        string root     = Path.GetFullPath(_svc.WorkingDirectory);
+
+        // Append a trailing separator so "C:\WorkDir" does not match "C:\WorkDir2".
+        if (root.Length > 0
+            && root[root.Length - 1] != Path.DirectorySeparatorChar
+            && root[root.Length - 1] != Path.AltDirectorySeparatorChar)
+        {
+            root += Path.DirectorySeparatorChar;
+        }
+
+        if (!fullPath.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"Path containment violation: '{fullPath}' is outside the working directory " +
+                $"'{root}'. File create/modify/delete/rename is restricted to the working directory.");
+        }
+
+        return fullPath;
     }
 
     /// <summary>
