@@ -1,4 +1,4 @@
-// File: McpServices.cs  v2.4
+// File: McpServices.cs  v2.5
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Diagnostic policy: all Console.Write / Console.WriteLine calls in this project
@@ -69,10 +69,27 @@ namespace DevMind.McpServer
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
        private readonly object _snapshotLock = new object();
 
-       public record SshHostConfig(string Host, string User, string Key);
+       public record SshHostConfig(string Host, string User, string Key, string? Fingerprint);
          public IReadOnlyDictionary<string, SshHostConfig> SshHosts { get; }
          public IReadOnlyDictionary<string, string> HttpEndpoints { get; }
          public IReadOnlyDictionary<string, string> DbConnections { get; }
+
+        // Normalize a configured SSH host-key fingerprint for comparison against
+        // SSH.NET's HostKeyEventArgs.FingerPrintSHA256, which is base64 with no padding
+        // and no "SHA256:" prefix. Accepts the OpenSSH display form ("SHA256:<base64>")
+        // or bare base64, with or without '=' padding.
+        private static string? NormalizeFingerprint(string? raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+                return null;
+
+            string s = raw.Trim();
+            if (s.StartsWith("SHA256:", StringComparison.OrdinalIgnoreCase))
+                s = s.Substring("SHA256:".Length).Trim();
+
+            s = s.TrimEnd('=');
+            return s.Length == 0 ? null : s;
+        }
 
         public McpServices(string workingDirectory)
         {
@@ -102,7 +119,10 @@ namespace DevMind.McpServer
                             string host = el.GetProperty("host").GetString() ?? alias;
                             string user = el.GetProperty("user").GetString() ?? "root";
                             string key  = el.TryGetProperty("key", out var kp) ? kp.GetString() ?? "~/.ssh/id_rsa" : "~/.ssh/id_rsa";
-                            hosts[alias] = new SshHostConfig(host, user, key);
+                            string? fingerprint = el.TryGetProperty("fingerprint", out var fp)
+                                ? NormalizeFingerprint(fp.GetString())
+                                : null;
+                            hosts[alias] = new SshHostConfig(host, user, key, fingerprint);
                         }
                     }
                     SshHosts = hosts;
