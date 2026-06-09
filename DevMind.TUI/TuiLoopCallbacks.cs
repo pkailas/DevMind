@@ -1,4 +1,4 @@
-﻿// File: TuiLoopCallbacks.cs  v1.0 (SPIKE)
+﻿// File: TuiLoopCallbacks.cs  v1.1 (SPIKE)
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 implementation of ILoopCallbacks.
@@ -9,7 +9,6 @@
 
 using System;
 using System.Threading;
-using Terminal.Gui.App;
 using Terminal.Gui.Views;
 
 namespace DevMind
@@ -21,7 +20,7 @@ namespace DevMind
     {
         private readonly ILlmClient _llmClient;
         private readonly Label _statusLabel;
-        private readonly TextView _outputView;
+        private readonly TuiAgenticHost _host;
         private readonly TextField _inputField;
 
         private string _pendingInput = string.Empty;
@@ -32,11 +31,11 @@ namespace DevMind
         private int   _thinkingMaxDepth;
         private readonly object _timerLock = new object();
 
-        public TuiLoopCallbacks(ILlmClient llmClient, Label statusLabel, TextView outputView, TextField inputField)
+        public TuiLoopCallbacks(ILlmClient llmClient, Label statusLabel, TuiAgenticHost host, TextField inputField)
         {
             _llmClient   = llmClient;
             _statusLabel = statusLabel;
-            _outputView  = outputView;
+            _host        = host;
             _inputField  = inputField;
         }
 
@@ -44,10 +43,9 @@ namespace DevMind
 
       public void AppendNewLine()
         {
-            _outputView.App.Invoke(() =>
-            {
-                _outputView.InsertText("\n");
-            });
+            // Through the host — TuiAgenticHost tracks the logical append position for
+            // color stamping; a direct outputView.InsertText would desync it.
+            _host.AppendOutputLocal("\n", OutputColor.Normal);
         }
 
         public void SetStatus(string text)

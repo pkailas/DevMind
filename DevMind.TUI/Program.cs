@@ -1,4 +1,4 @@
-﻿// File: Program.cs  v1.2 (SPIKE)
+﻿// File: Program.cs  v1.4 (SPIKE)
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 TUI for DevMind — Phase 1 SPIKE.
@@ -21,7 +21,6 @@
 #pragma warning disable CS0618
 
 using System;
-using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using System.Threading;
@@ -79,6 +78,22 @@ namespace DevMind
                 Height = Dim.Fill() - 2, // leave room for input + status rows
             };
 
+            // Black background. A non-ReadOnly TextView paints unstamped cells and fill via
+            // the Editable visual role (Normal is redirected to Editable in
+            // TextView.OnGettingAttributeForRole), and the default Scheme DERIVES Editable
+            // from Normal by dimming the FOREGROUND into the background — that derivation is
+            // where the gray pane came from. Pin both roles to light-gray-on-black; per-Cell
+            // Attributes stamped by TuiAgenticHost override the foreground per span and take
+            // their black background from this scheme (see ResolveAttribute).
+            var outputFg = new Terminal.Gui.Drawing.Color(0xCC, 0xCC, 0xCC);
+            var outputBg = new Terminal.Gui.Drawing.Color(0x00, 0x00, 0x00);
+            outputView.SetScheme(new Terminal.Gui.Drawing.Scheme(outputView.GetScheme())
+            {
+                Normal   = new Terminal.Gui.Drawing.Attribute(outputFg, outputBg),
+                Editable = new Terminal.Gui.Drawing.Attribute(outputFg, outputBg),
+            });
+
+
             // Input TextField.
             TextField inputField = new()
             {
@@ -108,19 +123,98 @@ namespace DevMind
 
             // Construct host and callbacks with references to TUI views.
             var host = new TuiAgenticHost(options.WorkingDirectory, outputView, () => cts.Cancel());
-            var callbacks = new TuiLoopCallbacks(llmClient, statusLabel, outputView, inputField);
+            var callbacks = new TuiLoopCallbacks(llmClient, statusLabel, host, inputField);
             var state = new LoopState();
             var driver = new LoopDriver(llmClient, host, callbacks, options, state);
+
+            // Word wrap — enable only once the view has a real width. Enabling at width 0
+            // (before the first layout) is destructive in 2.4.4: TextFormatter.Format(width:0)
+            // returns a single empty line per logical line, so the wrap mapping degenerates
+            // (every wrapped→model column maps to 0) and subsequent appends would insert at
+            // column 0, reversing the text. The WordWrap setter also calls ResetPosition()
+            // (cursor to 0,0), so the insertion point is restored to the document end —
+            // appends must continue at the end. The InsertionPoint setter clamps to the last
+            // line/column and calls AdjustViewport(), preserving auto-scroll.
+            //
+            // SubViewsLaidOut also fires after every layout re-wrap (window resize), which
+            // rebuilds the wrapped model with Terminal.Gui's flawed attribute copy — re-fix
+            // the colors from the unwrapped model each time (no-op until word wrap is on).
+            bool wordWrapPending = true;
+            outputView.SubViewsLaidOut += (s, e) =>
+            {
+                if (wordWrapPending && outputView.Viewport.Width > 0)
+                {
+                    wordWrapPending = false;
+                    outputView.WordWrap = true;
+                    outputView.InsertionPoint =
+                        new System.Drawing.Point(int.MaxValue, int.MaxValue);
+                    TuiAgenticHost.Diag($"[WRAP-ENABLE] viewport={outputView.Viewport} " +
+                        $"wordWrap={outputView.WordWrap} insertionPoint={outputView.InsertionPoint}");
+                }
+                host.RefreshWrappedColors();
+            };
+
+            // Diagnostic self-test (active only when DEVMIND_TUI_DIAG is set): append colored
+            // sample lines through the exact streaming path (background thread → App.Invoke)
+            // shortly after startup, so the color pipeline can be verified end to end in the
+            // real app without an LLM turn.
+            if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DEVMIND_TUI_DIAG")))
+            {
+                _ = Task.Run(async () =>
+                {
+                    await Task.Delay(1500);
+                    host.AppendOutputLocal("[DIAG] success green\n", OutputColor.Success);
+                    host.AppendOutputLocal("[DIAG] error red\n", OutputColor.Error);
+                    host.AppendOutputLocal("[DIAG] input blue\n", OutputColor.Input);
+                    host.AppendOutputLocal(
+                        "[DIAG] warning amber, long line to test wrapping: " + new string('x', 200) + "\n",
+                        OutputColor.Warning);
+
+                    // After the next draw, dump the DRIVER's screen buffer — ground truth of
+                    // what was actually painted, including per-cell foreground colors.
+                    await Task.Delay(1500);
+                    app.Invoke(() =>
+                    {
+                        var contents = app.Driver?.Contents;
+                        if (contents == null)
+                        {
+                            TuiAgenticHost.Diag("[SCREEN] driver Contents is null");
+                            return;
+                        }
+                        int rows = contents.GetLength(0);
+                        int cols = contents.GetLength(1);
+                        for (int r = 0; r < Math.Min(rows, 18); r++)
+                        {
+                            var rowText = new StringBuilder();
+                            var fgs = new System.Collections.Generic.HashSet<string>();
+                            for (int c = 0; c < cols; c++)
+                            {
+                                var cell = contents[r, c];
+                                rowText.Append(cell.Grapheme);
+                                if (cell.Attribute.HasValue)
+                                    fgs.Add(cell.Attribute.Value.Foreground.ToString());
+                            }
+                            string txt = rowText.ToString().TrimEnd();
+                            if (txt.Length > 60) txt = txt.Substring(0, 60);
+                            TuiAgenticHost.Diag($"[SCREEN] row={r} fgs=[{string.Join(",", fgs)}] \"{txt}\"");
+                        }
+                    });
+                });
+            }
 
             // Build combined system prompt.
             string combinedSystemPrompt = BuildCombinedSystemPrompt(options, devMindContext);
 
-            // Banner.
-            outputView.InsertText("╔══════════════════════════════════════════════════════════╗\n");
-            outputView.InsertText("║  DevMind TUI — Phase 1 SPIKE                           ║\n");
-            outputView.InsertText($"║  Endpoint: {options.EndpointUrl,-47}║\n");
-            outputView.InsertText($"║  Working dir: {options.WorkingDirectory,-43}║\n");
-            outputView.InsertText("╚══════════════════════════════════════════════════════════╝\n\n");
+            // Banner. All output MUST go through the host (never outputView.InsertText
+            // directly) — TuiAgenticHost tracks the logical append position for color
+            // stamping, and a bypassing insert would desync it.
+            host.AppendOutputLocal(
+                "╔══════════════════════════════════════════════════════════╗\n" +
+                "║  DevMind TUI — Phase 1 SPIKE                           ║\n" +
+                $"║  Endpoint: {options.EndpointUrl,-47}║\n" +
+                $"║  Working dir: {options.WorkingDirectory,-43}║\n" +
+                "╚══════════════════════════════════════════════════════════╝\n\n",
+                OutputColor.Dim);
 
             // Focus the input field. Setting focus before the loop runs is unreliable in
             // Terminal.Gui v2 (layout/focus is resolved during app.Run), so also re-assert it
@@ -145,8 +239,8 @@ namespace DevMind
                 // Clear input.
                 inputField.Text = "";
 
-                // Echo user input.
-                outputView.InsertText($"\n> {input}\n");
+                // Echo user input (through the host — keeps the stamping tracker in sync).
+                host.AppendOutputLocal($"\n> {input}\n", OutputColor.Input);
 
                 // Disable input during processing.
                 inputField.CanFocus = false;
@@ -169,7 +263,7 @@ namespace DevMind
                     var old = cts;
                     cts = new CancellationTokenSource();
                     old.Dispose();
-                    outputView.InsertText("[REPL] Session restarted.\n");
+                    host.AppendOutputLocal("[REPL] Session restarted.\n", OutputColor.Dim);
                     inputField.CanFocus = true;
                     inputField.SetFocus();
                     statusLabel.Text = "Ready";
