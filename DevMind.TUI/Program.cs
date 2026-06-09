@@ -224,7 +224,7 @@ namespace DevMind
             inputField.SetFocus();
             window.Initialized += (s, e) => inputField.SetFocus();
 
-            // Handle Enter in input field — submit to LLM.
+           // Handle Enter in input field — submit to LLM.
             inputField.Accepting += async (s, e) =>
             {
                 // Mark the Accept command handled so it does not bubble to the SuperView.
@@ -242,10 +242,6 @@ namespace DevMind
                 // Echo user input (through the host — keeps the stamping tracker in sync).
                 host.AppendOutputLocal($"\n> {input}\n", OutputColor.Input);
 
-                // Disable input during processing.
-                inputField.CanFocus = false;
-                statusLabel.Text = "Processing...";
-
                 // Refresh CTS after a cancelled turn.
                 if (cts.IsCancellationRequested)
                 {
@@ -254,23 +250,51 @@ namespace DevMind
                     old.Dispose();
                 }
 
-                // Handle /restart command.
-                if (input.Equals("/restart", StringComparison.OrdinalIgnoreCase))
+                // ── Slash-command dispatch ──────────────────────────────────────
+                // Intercept slash commands at the input boundary so they never
+                // burn model tokens. The dispatcher routes to registered handlers.
+                if (SlashCommand.IsSlashCommand(input))
                 {
-                    state.ResetForUserTurn();
-                    llmClient.ClearHistory();
-                    host.ResetSession();
-                    var old = cts;
-                    cts = new CancellationTokenSource();
-                    old.Dispose();
-                    host.AppendOutputLocal("[REPL] Session restarted.\n", OutputColor.Dim);
+                    // Build the command context with callbacks into TUI state.
+                    var cmdCtx = new CommandContext
+                    {
+                        DepthCap = options.AgenticLoopMaxDepth,
+                        ThinkingEnabled = options.ShowLlmThinking,
+                        SystemPrompt = llmClient.SystemPromptContent ?? combinedSystemPrompt,
+                        ResetConversation = () =>
+                        {
+                            state.ResetForUserTurn();
+                            llmClient.ClearHistory();
+                            host.ResetSession();
+                            var oldCts = cts;
+                            cts = new CancellationTokenSource();
+                            oldCts.Dispose();
+                        },
+                        SetDepthCap = (n) => { options.AgenticLoopMaxDepth = n; },
+                        SetThinking = (on) => { options.ShowLlmThinking = on; },
+                    };
+
+                    CommandResult result = SlashCommand.Dispatch(input, cmdCtx);
+
+                    // Render the result.
+                    OutputColor resultColor = result.IsError ? OutputColor.Error : OutputColor.Dim;
+                    host.AppendOutputLocal($"{result.Message}\n", resultColor);
+
+                    // /restart is an alias handled by the /new handler internally,
+                    // but keep backward compatibility by registering it explicitly.
+                    // (The /new handler already does the full reset.)
+
                     inputField.CanFocus = true;
                     inputField.SetFocus();
                     statusLabel.Text = "Ready";
                     return;
                 }
 
-          // Run the agentic turn.
+                // Disable input during agentic processing.
+                inputField.CanFocus = false;
+                statusLabel.Text = "Processing...";
+
+                // Run the agentic turn.
                 await RunTurnAsync(input, options, llmClient, host, driver, state,
                     callbacks, combinedSystemPrompt, cts, app);
 
