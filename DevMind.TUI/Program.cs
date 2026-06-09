@@ -1,4 +1,4 @@
-﻿// File: Program.cs  v1.4 (SPIKE)
+﻿// File: Program.cs  v1.5 (SPIKE)
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 TUI for DevMind — Phase 1 SPIKE.
@@ -51,6 +51,26 @@ namespace DevMind
 
             IApplication app = Application.Create();
             app.Init();
+
+            // Input responsiveness. Terminal.Gui 2.4.4 throttles the main loop — which both
+            // drains queued input (InputProcessor.ProcessQueue) and redraws — to
+            // Application.MaximumIterationsPerSecond (default 25). ApplicationMainLoop.Iteration
+            // enforces that cap with an UNCONDITIONAL Task.Delay(1000/IPS - iterationTime).Wait(),
+            // so at 25/s a keystroke sits in the input queue up to ~40 ms before it is processed
+            // and the field repaints — perceptible per-character lag, present on a fresh session.
+            //
+            // Verified against the decompiled 2.4.4 assembly (not guessed): a TextField keystroke
+            // routes OnKeyDownNotHandled → InsertText(Key) → Text setter → Adjust(), which calls
+            // only SetNeedsDraw() — never SetNeedsLayout(). So View.Layout returns false and
+            // LayoutAndDraw issues a non-forced View.Draw that repaints ONLY the dirty input field;
+            // the WordWrap output TextView is a clean sibling and is skipped (no per-key re-wrap).
+            // The lag is therefore the iteration throttle, not a full-screen redraw.
+            //
+            // Raise the cap so input is serviced within a few ms. 200/s ⇒ a ~5 ms floor:
+            // imperceptible, negligible idle CPU (an idle iteration draws nothing), and well clear
+            // of the sub-millisecond range where the loop's `delay.Milliseconds > 0` guard would
+            // collapse into a CPU-pinning busy spin.
+            Application.MaximumIterationsPerSecond = 200;
 
             // Main window.
             using Window window = new() { Title = "DevMind TUI (SPIKE) — Esc to quit" };
