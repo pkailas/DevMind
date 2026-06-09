@@ -1,4 +1,4 @@
-﻿// File: TuiAgenticHost.cs  v1.0 (SPIKE)
+﻿// File: TuiAgenticHost.cs  v1.1 (SPIKE)
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 implementation of IAgenticHost.
@@ -83,14 +83,22 @@ namespace DevMind
 
             // Terminal.Gui v2: all view mutations must be on the main UI thread.
             // Use the instance-based IApplication.Invoke (not the deprecated static).
+            // Invoke marshals to the UI thread via TimedEvents (zero-delay timeouts keyed by
+            // a monotonically-increasing unique tick), so callbacks drain strictly FIFO —
+            // streamed tokens stay in arrival order.
             _outputView.App.Invoke(() =>
             {
-                // TextView is read-only for display; append text directly.
-                // We don't do color coding in the spike — TextView doesn't support
-                // per-run colors easily without loading Cell arrays.
+                // Append at the cursor. TextView.InsertText advances the insertion point to
+                // the END of the inserted text and calls AdjustViewport()/PositionCursor()
+                // per grapheme, so the view auto-scrolls to the newest line on its own.
+                //
+                // Do NOT reset InsertionPoint afterward. The prior code set it to
+                // Point(0, Lines): the setter clamps X=0 to column 0 of the last line, so the
+                // NEXT token was inserted at the START of that line — prepending instead of
+                // appending. That reversed adjacent fragments during fast streaming
+                // ("The" + " project" rendered as " projectThe"). InsertText already leaves
+                // the cursor exactly where the next append belongs.
                 _outputView.InsertText(text);
-                // Auto-scroll to bottom — set cursor to last line.
-                _outputView.InsertionPoint = new System.Drawing.Point(0, _outputView.Lines);
             });
         }
 
