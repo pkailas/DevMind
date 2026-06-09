@@ -1,4 +1,4 @@
-﻿// File: Program.cs  v1.1 (SPIKE)
+﻿// File: Program.cs  v1.2 (SPIKE)
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 TUI for DevMind — Phase 1 SPIKE.
@@ -56,15 +56,23 @@ namespace DevMind
             // Main window.
             using Window window = new() { Title = "DevMind TUI (SPIKE) — Esc to quit" };
 
-           // Output TextView (read-only, scrollable).
+           // Output pane — programmatically-written, non-interactive log.
+            //
+            // ReadOnly MUST be false. In Terminal.Gui v2 (2.4.4) TextView.InsertText(Key)
+            // short-circuits with `if (_isReadOnly) return;` BEFORE mutating the model — so
+            // ReadOnly blocks not just user typing but every PROGRAMMATIC InsertText too. With
+            // ReadOnly=true the entire output-rendering path (banner, user echo, streamed
+            // tokens — all routed through InsertText) was a silent no-op and the pane stayed
+            // blank. InsertText also calls SetNeedsDraw() internally, so the marshaled
+            // UI-thread mutation repaints on the next run-loop iteration without extra work.
+            //
+            // CanFocus MUST be false. It keeps the pane out of the tab order (so it can't
+            // steal focus from the input field on startup) AND makes it non-interactive: with
+            // no focus the user can never send edit commands, so a writable TextView behaves
+            // as a read-only log in practice without ReadOnly's InsertText block.
             TextView outputView = new()
             {
-                ReadOnly = true,
-                // CanFocus MUST be false: a ReadOnly TextView still defaults to CanFocus=true
-                // in Terminal.Gui v2, and as the first subview added it would auto-grab focus
-                // when app.Run() starts — stealing keystrokes from the input field so a typed
-                // prompt never reaches inputField (and never echoes). Display-only panes must
-                // not be tab stops.
+                ReadOnly = false,
                 CanFocus = false,
                 X = 0, Y = 0,
                 Width = Dim.Fill(),
