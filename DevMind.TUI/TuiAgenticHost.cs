@@ -23,7 +23,7 @@ namespace DevMind
     /// <summary>
     /// Terminal.Gui v2 implementation of IAgenticHost for the DevMind TUI spike.
     /// All file/shell/patch/memory logic cribbed verbatim from ConsoleAgenticHost.
-    /// AppendOutput routes to a Terminal.Gui TextView via Application.Invoke.
+   /// AppendOutput routes to a Terminal.Gui TextView via IApplication.Invoke.
     /// </summary>
     public sealed class TuiAgenticHost : IAgenticHost
     {
@@ -77,17 +77,18 @@ namespace DevMind
 
         // ── IAgenticHost.AppendOutput ─────────────────────────────────────────────
 
-        void IAgenticHost.AppendOutput(string text, OutputColor color)
+       void IAgenticHost.AppendOutput(string text, OutputColor color)
         {
             if (string.IsNullOrEmpty(text)) return;
 
             // Terminal.Gui v2: all view mutations must be on the main UI thread.
-            Application.Invoke(() =>
+            // Use the instance-based IApplication.Invoke (not the deprecated static).
+            _outputView.App.Invoke(() =>
             {
                 // TextView is read-only for display; append text directly.
                 // We don't do color coding in the spike — TextView doesn't support
                 // per-run colors easily without loading Cell arrays.
-               _outputView.InsertText(text);
+                _outputView.InsertText(text);
                 // Auto-scroll to bottom — set cursor to last line.
                 _outputView.InsertionPoint = new System.Drawing.Point(0, _outputView.Lines);
             });

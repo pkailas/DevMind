@@ -42,9 +42,9 @@ namespace DevMind
 
         // ── ILoopCallbacks ────────────────────────────────────────────────────────
 
-        public void AppendNewLine()
+      public void AppendNewLine()
         {
-            Application.Invoke(() =>
+            _outputView.App.Invoke(() =>
             {
                 _outputView.InsertText("\n");
             });
@@ -52,7 +52,7 @@ namespace DevMind
 
         public void SetStatus(string text)
         {
-            Application.Invoke(() =>
+            _statusLabel.App.Invoke(() =>
             {
                 _statusLabel.Text = text ?? string.Empty;
             });
@@ -69,9 +69,9 @@ namespace DevMind
             return value;
         }
 
-        public void FocusInput()
+      public void FocusInput()
         {
-            Application.Invoke(() =>
+            _inputField.App.Invoke(() =>
             {
                 _inputField.SetFocus();
             });
@@ -79,7 +79,7 @@ namespace DevMind
 
         public void SetInputEnabled(bool enabled)
         {
-            Application.Invoke(() =>
+            _inputField.App.Invoke(() =>
             {
                 _inputField.CanFocus = enabled;
                 if (enabled)

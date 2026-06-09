@@ -151,9 +151,9 @@ namespace DevMind
                     return;
                 }
 
-                // Run the agentic turn.
+          // Run the agentic turn.
                 await RunTurnAsync(input, options, llmClient, host, driver, state,
-                    callbacks, combinedSystemPrompt, cts);
+                    callbacks, combinedSystemPrompt, cts, app);
 
                 // Re-enable input.
                 inputField.CanFocus = true;
@@ -169,7 +169,7 @@ namespace DevMind
 
         // ── Agentic turn loop ─────────────────────────────────────────────────────
 
-       static async Task RunTurnAsync(
+      static async Task RunTurnAsync(
             string userInput,
             TuiOptions options,
             LlmClient llmClient,
@@ -178,7 +178,8 @@ namespace DevMind
             LoopState state,
             TuiLoopCallbacks callbacks,
             string combinedSystemPrompt,
-            CancellationTokenSource cts)
+            CancellationTokenSource cts,
+            IApplication app)
         {
             state.ResetForUserTurn();
             host.ResetTaskContext();
@@ -214,11 +215,11 @@ namespace DevMind
                         string visible = thinkFilter.Process(token, options.ShowLlmThinking,
                             out string thinkText);
 
-                        if (!string.IsNullOrEmpty(thinkText))
+                       if (!string.IsNullOrEmpty(thinkText))
                         {
                             if (!timerStopped) { callbacks.StopThinkingTimer(); timerStopped = true; }
                             // Thinking text — append to output.
-                            Application.Invoke(() =>
+                            app.Invoke(() =>
                             {
                                 // We can't do color in TextView easily; just append.
                                 ((TuiAgenticHost)host).AppendOutputLocal(thinkText, OutputColor.Thinking);
@@ -245,9 +246,9 @@ namespace DevMind
                                 suppressDisplay = false;
                         }
 
-                        if (!suppressDisplay)
+                      if (!suppressDisplay)
                         {
-                            Application.Invoke(() =>
+                            app.Invoke(() =>
                             {
                                 ((TuiAgenticHost)host).AppendOutputLocal(visible, OutputColor.Normal);
                             });
@@ -263,10 +264,10 @@ namespace DevMind
                 {
                     await tcs.Task;
                 }
-                catch (OperationCanceledException)
+              catch (OperationCanceledException)
                 {
                     if (!timerStopped) callbacks.StopThinkingTimer();
-                    Application.Invoke(() =>
+                    app.Invoke(() =>
                     {
                         ((TuiAgenticHost)host).AppendOutputLocal("\n[Stopped]\n", OutputColor.Dim);
                     });
@@ -275,7 +276,7 @@ namespace DevMind
                 catch (Exception ex)
                 {
                     if (!timerStopped) callbacks.StopThinkingTimer();
-                    Application.Invoke(() =>
+                    app.Invoke(() =>
                     {
                         ((TuiAgenticHost)host).AppendOutputLocal($"\n[ERROR] {ex.Message}\n", OutputColor.Error);
                     });
@@ -292,9 +293,9 @@ namespace DevMind
                     iter = await driver.ProcessIterationAsync(responseBuffer.ToString(), null,
                         cts.Token);
                 }
-                catch (OperationCanceledException)
+              catch (OperationCanceledException)
                 {
-                    Application.Invoke(() =>
+                    app.Invoke(() =>
                     {
                         ((TuiAgenticHost)host).AppendOutputLocal("[Stopped]\n", OutputColor.Dim);
                     });
