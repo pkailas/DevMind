@@ -1,4 +1,4 @@
-﻿// File: TuiAgenticHost.cs  v1.1 (SPIKE)
+﻿// File: TuiAgenticHost.cs  v1.2 (SPIKE)
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 implementation of IAgenticHost.
@@ -98,7 +98,19 @@ namespace DevMind
                 // appending. That reversed adjacent fragments during fast streaming
                 // ("The" + " project" rendered as " projectThe"). InsertText already leaves
                 // the cursor exactly where the next append belongs.
+                //
+                // Color (Terminal.Gui 2.4.4): TextView has no public attribute-aware InsertText
+                // overload, but its renderer honors a per-Cell Attribute — OnDrawNormalColor
+                // does `if (cell.Attribute.HasValue) SetAttribute(cell.Attribute.Value)`. So we
+                // append uncolored, then stamp the just-inserted cell span: GetLine(row) returns
+                // the LIVE model List<Cell>, and Cell is a record struct, so reassigning an
+                // element with `with { Attribute = … }` persists the color into the model. This
+                // does not touch the insertion point, so in-order streaming is preserved.
+                System.Drawing.Point start = _outputView.InsertionPoint;
                 _outputView.InsertText(text);
+                System.Drawing.Point end = _outputView.InsertionPoint;
+
+                StampSpanAttribute(start, end, ResolveAttribute(color));
             });
         }
 
@@ -764,6 +776,55 @@ namespace DevMind
        internal void AppendOutputLocal(string text, OutputColor color)
         {
             ((IAgenticHost)this).AppendOutput(text, color);
+        }
+
+        // ── Color mapping (Terminal.Gui 2.4.4) ────────────────────────────────────
+        // Foreground RGB per OutputColor, matching the hex values documented on the
+        // OutputColor enum. Background is taken from the view's own Scheme so only the
+        // foreground is overridden (seamless on whatever theme the terminal uses).
+        private Terminal.Gui.Drawing.Attribute ResolveAttribute(OutputColor color)
+        {
+            Terminal.Gui.Drawing.Color fg;
+            switch (color)
+            {
+                case OutputColor.Dim:      fg = new Terminal.Gui.Drawing.Color(0x88, 0x88, 0x88); break; // #888888
+                case OutputColor.Input:    fg = new Terminal.Gui.Drawing.Color(0x56, 0x9C, 0xD6); break; // #569CD6
+                case OutputColor.Error:    fg = new Terminal.Gui.Drawing.Color(0xF4, 0x47, 0x47); break; // #F44747
+                case OutputColor.Success:  fg = new Terminal.Gui.Drawing.Color(0x4E, 0xC9, 0x4E); break; // #4EC94E
+                case OutputColor.Thinking: fg = new Terminal.Gui.Drawing.Color(0x6A, 0x6A, 0x8A); break; // #6A6A8A
+                case OutputColor.Warning:  fg = new Terminal.Gui.Drawing.Color(0xFF, 0xB9, 0x00); break; // #FFB900
+                case OutputColor.Normal:
+                default:                   fg = new Terminal.Gui.Drawing.Color(0xCC, 0xCC, 0xCC); break; // #CCCCCC
+            }
+
+            Terminal.Gui.Drawing.Color bg = _outputView.GetScheme().Normal.Background;
+            return new Terminal.Gui.Drawing.Attribute(fg, bg);
+        }
+
+        // Stamps the per-Cell Attribute across the inserted span [start, end) in document
+        // coordinates. WordWrap is off on the output view, so model rows == logical lines and
+        // newlines do not occupy a cell. GetLine returns the live model list; reassigning a
+        // record-struct Cell element with `with { … }` persists the color. The insertion point
+        // is never moved, so in-order streaming append is preserved.
+        private void StampSpanAttribute(System.Drawing.Point start, System.Drawing.Point end,
+            Terminal.Gui.Drawing.Attribute attr)
+        {
+            int firstRow = Math.Max(0, start.Y);
+            int lastRow  = Math.Min(end.Y, _outputView.Lines - 1);
+
+            for (int row = firstRow; row <= lastRow; row++)
+            {
+                System.Collections.Generic.List<Terminal.Gui.Drawing.Cell> line = _outputView.GetLine(row);
+                if (line == null || line.Count == 0) continue;
+
+                int from = (row == start.Y) ? start.X : 0;
+                int to   = (row == end.Y)   ? end.X   : line.Count;
+                if (from < 0) from = 0;
+                if (to > line.Count) to = line.Count;
+
+                for (int col = from; col < to; col++)
+                    line[col] = line[col] with { Attribute = attr };
+            }
         }
 
         private bool IsFileKnownToTask(string fileNameOnly)
