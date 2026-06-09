@@ -1,4 +1,4 @@
-﻿// File: Program.cs  v1.0 (SPIKE)
+﻿// File: Program.cs  v1.1 (SPIKE)
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 TUI for DevMind — Phase 1 SPIKE.
@@ -60,6 +60,12 @@ namespace DevMind
             TextView outputView = new()
             {
                 ReadOnly = true,
+                // CanFocus MUST be false: a ReadOnly TextView still defaults to CanFocus=true
+                // in Terminal.Gui v2, and as the first subview added it would auto-grab focus
+                // when app.Run() starts — stealing keystrokes from the input field so a typed
+                // prompt never reaches inputField (and never echoes). Display-only panes must
+                // not be tab stops.
+                CanFocus = false,
                 X = 0, Y = 0,
                 Width = Dim.Fill(),
                 Height = Dim.Fill() - 2, // leave room for input + status rows
@@ -108,12 +114,23 @@ namespace DevMind
             outputView.InsertText($"║  Working dir: {options.WorkingDirectory,-43}║\n");
             outputView.InsertText("╚══════════════════════════════════════════════════════════╝\n\n");
 
-            // Focus input field.
+            // Focus the input field. Setting focus before the loop runs is unreliable in
+            // Terminal.Gui v2 (layout/focus is resolved during app.Run), so also re-assert it
+            // once the window is initialized. With outputView non-focusable and the Labels
+            // non-focusable by default, inputField is the only tab stop — but this guarantees
+            // the cursor lands there on startup.
             inputField.SetFocus();
+            window.Initialized += (s, e) => inputField.SetFocus();
 
             // Handle Enter in input field — submit to LLM.
             inputField.Accepting += async (s, e) =>
             {
+                // Mark the Accept command handled so it does not bubble to the SuperView.
+                // In Terminal.Gui v2, an unhandled Accepting raises Command.Accept on the
+                // SuperView (per View.RaiseAccepting), which can trigger a default-button /
+                // toplevel Accept we don't want. We own Enter on this field.
+                e.Handled = true;
+
                 string input = inputField.Text?.Trim() ?? "";
                 if (string.IsNullOrEmpty(input)) return;
 
