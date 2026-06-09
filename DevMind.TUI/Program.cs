@@ -70,7 +70,7 @@ namespace DevMind
             // imperceptible, negligible idle CPU (an idle iteration draws nothing), and well clear
             // of the sub-millisecond range where the loop's `delay.Milliseconds > 0` guard would
             // collapse into a CPU-pinning busy spin.
-            Application.MaximumIterationsPerSecond = 200;
+Application.MaximumIterationsPerSecond = 750;
 
             // Main window.
             using Window window = new() { Title = "DevMind TUI (SPIKE) — Esc to quit" };
