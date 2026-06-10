@@ -796,7 +796,25 @@ namespace DevMind
                     HttpCompletionOption.ResponseHeadersRead,
                     cancellationToken).ConfigureAwait(false);
 
-                response.EnsureSuccessStatusCode();
+                // Surface the request URL and the server's error body instead of a bare status
+                // code. EnsureSuccessStatusCode() throws "Response status code does not indicate
+                // success: 404 (Not Found)." with no clue WHICH url was hit or WHY the server
+                // rejected it — useless for diagnosing endpoint/path/model mismatches. Read the
+                // body (OpenAI-compatible servers return a JSON error explaining the 404, e.g. an
+                // unknown model or route) and include both in the exception.
+                if (!response.IsSuccessStatusCode)
+                {
+                    string errorBody = string.Empty;
+                    try { errorBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false); }
+                    catch { /* body may be empty or unreadable — fall back to status only */ }
+
+                    string detail = string.IsNullOrWhiteSpace(errorBody)
+                        ? "(empty response body)"
+                        : errorBody.Trim();
+                    throw new HttpRequestException(
+                        $"LLM request failed: {(int)response.StatusCode} {response.ReasonPhrase} " +
+                        $"— POST {url} — server said: {detail}");
+                }
 
                 using var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
                 using var reader = new StreamReader(stream, Encoding.UTF8);
