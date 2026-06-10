@@ -545,7 +545,7 @@ namespace DevMind
             if (args.Length == 0)
                 return new CommandResult { Message = "Usage: /title <text>", IsError = true };
 
-            string text = args[0];
+           string text = string.Join(" ", args);
             if (string.IsNullOrWhiteSpace(text))
                 return new CommandResult { Message = "Title cannot be empty.", IsError = true };
 
