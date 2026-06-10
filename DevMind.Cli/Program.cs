@@ -276,7 +276,7 @@ namespace DevMind
             string combined = $"{options.SystemPrompt}\n\n{llmDirective}";
 
             if (!string.IsNullOrEmpty(devMindContext))
-                combined += $"\n\n--- Project Context (DevMind.md) ---\n{devMindContext}\n---";
+               combined += $"\n\n--- Project Context (AGENTS.md) ---\n{devMindContext}\n---";
 
             // Best-effort memory index injection (same as extension)
             try
@@ -302,40 +302,18 @@ namespace DevMind
                 !string.Equals(gitRoot, workingDir, StringComparison.OrdinalIgnoreCase))
                 searchDirs.Add(gitRoot);
 
-            string[] priority    = { "DevMind.md", "AGENTS.md", "CLAUDE.md" };
-            string[] supplemental = { "AGENTS.md", "CLAUDE.md" };
-
-            foreach (string dir in searchDirs)
+           foreach (string dir in searchDirs)
             {
-                foreach (string candidate in priority)
+                string path = Path.Combine(dir, "AGENTS.md");
+                if (!File.Exists(path)) continue;
+
+                try
                 {
-                    string path = Path.Combine(dir, candidate);
-                    if (!File.Exists(path)) continue;
-
-                    string primaryContent;
-                    try { primaryContent = File.ReadAllText(path); }
-                    catch { continue; }
-
-                    // Append supplemental files when DevMind.md is primary — same as extension.
-                    if (string.Equals(candidate, "DevMind.md", StringComparison.OrdinalIgnoreCase))
-                    {
-                        foreach (string suppName in supplemental)
-                        {
-                            string suppPath = Path.Combine(dir, suppName);
-                            if (!File.Exists(suppPath)) continue;
-                            try
-                            {
-                                string suppContent = File.ReadAllText(suppPath);
-                                if (!string.IsNullOrWhiteSpace(suppContent))
-                                    primaryContent += $"\n\n[SUPPLEMENTAL: {suppName}]\n{suppContent}";
-                            }
-                            catch { }
-                        }
-                    }
-
-                    Console.Error.WriteLine($"[CONTEXT] Loaded {candidate} from {dir}");
-                    return primaryContent;
+                    string content = File.ReadAllText(path);
+                    Console.Error.WriteLine($"[CONTEXT] Loaded AGENTS.md from {dir}");
+                    return content;
                 }
+                catch { }
             }
 
             return null;
@@ -366,7 +344,7 @@ namespace DevMind
             Console.WriteLine($"Directory: {options.WorkingDirectory}");
             Console.WriteLine($"MaxDepth : {options.AgenticLoopMaxDepth}  |  Eviction: {options.ContextEviction}");
             if (!contextLoaded)
-                Console.Error.WriteLine("[CONTEXT] No DevMind.md / AGENTS.md / CLAUDE.md found.");
+               Console.Error.WriteLine("[CONTEXT] No AGENTS.md found.");
             Console.WriteLine("Commands: /restart  exit  quit  |  Ctrl+C cancels current turn");
         }
 
