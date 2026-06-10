@@ -5,7 +5,7 @@
 // Proves DevMind.Core's engine can drive a TUI through IAgenticHost + ILoopCallbacks.
 //
 // Layout:
-//   Row 0: Output area (TextView, fills remaining space)
+//   Row 0: Output area (gui-cs/Editor, fills remaining space)
 //   Row 1: Input line (TextField with "> " prompt)
 //   Row 2: Status bar (Label)
 //
@@ -28,6 +28,8 @@ using System.Threading.Tasks;
 using Terminal.Gui.App;
 using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
+using Terminal.Gui.Editor.Document;
+using GuiEditor = Terminal.Gui.Editor.Editor;
 
 namespace DevMind
 {
@@ -80,36 +82,37 @@ Application.MaximumIterationsPerSecond = 750;
             // Main window.
             using Window window = new() { Title = "DevMind TUI (SPIKE) — Esc to quit" };
 
-           // Output pane — programmatically-written, non-interactive log.
+           // Output pane — programmatically-written, non-interactive log (gui-cs/Editor).
             //
-            // ReadOnly MUST be false. In Terminal.Gui v2 (2.4.4) TextView.InsertText(Key)
-            // short-circuits with `if (_isReadOnly) return;` BEFORE mutating the model — so
-            // ReadOnly blocks not just user typing but every PROGRAMMATIC InsertText too. With
-            // ReadOnly=true the entire output-rendering path (banner, user echo, streamed
-            // tokens — all routed through InsertText) was a silent no-op and the pane stayed
-            // blank. InsertText also calls SetNeedsDraw() internally, so the marshaled
-            // UI-thread mutation repaints on the next run-loop iteration without extra work.
+            // ReadOnly = true. Editor's ReadOnly is a COMMAND guard only — it blocks user
+            // edit commands but NOT direct document mutation, so TuiAgenticHost appends via
+            // Document.Insert(Document.TextLength, …) and the pane behaves as a true read-only
+            // log. (This is the opposite of TextView 2.4.4, whose ReadOnly short-circuited
+            // InsertText and forced the old ReadOnly=false hack.)
             //
-            // CanFocus MUST be false. It keeps the pane out of the tab order (so it can't
-            // steal focus from the input field on startup) AND makes it non-interactive: with
-            // no focus the user can never send edit commands, so a writable TextView behaves
-            // as a read-only log in practice without ReadOnly's InsertText block.
-            TextView outputView = new()
+            // CanFocus = false keeps the pane out of the tab order (input field is the only
+            // tab stop) and non-interactive. WordWrap = true soft-wraps long lines; Editor
+            // wraps per-viewport lazily (rope + incremental visual lines), so appends do not
+            // re-wrap the whole transcript the way TextView did.
+            //
+            // Document MUST be assigned — Editor's backing TextDocument is null by default and
+            // every append/CaretOffset call guards on it.
+            GuiEditor outputView = new()
             {
-                ReadOnly = false,
+                ReadOnly = true,
                 CanFocus = false,
+                Document = new TextDocument(), // assign before WordWrap so the wrap map builds against a real doc
+                WordWrap = true,
                 X = 0, Y = 0,
                 Width = Dim.Fill(),
                 Height = Dim.Fill() - 2, // leave room for input + status rows
             };
 
-            // Black background. A non-ReadOnly TextView paints unstamped cells and fill via
-            // the Editable visual role (Normal is redirected to Editable in
-            // TextView.OnGettingAttributeForRole), and the default Scheme DERIVES Editable
-            // from Normal by dimming the FOREGROUND into the background — that derivation is
-            // where the gray pane came from. Pin both roles to light-gray-on-black; per-Cell
-            // Attributes stamped by TuiAgenticHost override the foreground per span and take
-            // their black background from this scheme (see ResolveAttribute).
+            // Black background. Editor's draw resolves the base/fill attribute from
+            // GetAttributeForRole(Normal) (its Scheme.Normal); unstyled cells and the fill use
+            // it. Pin Normal/Editable to light-gray-on-black so the pane is black; the per-span
+            // colors set by OffsetColorTransformer take their black background from this same
+            // scheme (TuiAgenticHost.ResolveAttribute reads Scheme.Normal.Background).
             var outputFg = new Terminal.Gui.Drawing.Color(0xCC, 0xCC, 0xCC);
             var outputBg = new Terminal.Gui.Drawing.Color(0x00, 0x00, 0x00);
             outputView.SetScheme(new Terminal.Gui.Drawing.Scheme(outputView.GetScheme())
@@ -152,32 +155,14 @@ Application.MaximumIterationsPerSecond = 750;
             var state = new LoopState();
             var driver = new LoopDriver(llmClient, host, callbacks, options, state);
 
-            // Word wrap — enable only once the view has a real width. Enabling at width 0
-            // (before the first layout) is destructive in 2.4.4: TextFormatter.Format(width:0)
-            // returns a single empty line per logical line, so the wrap mapping degenerates
-            // (every wrapped→model column maps to 0) and subsequent appends would insert at
-            // column 0, reversing the text. The WordWrap setter also calls ResetPosition()
-            // (cursor to 0,0), so the insertion point is restored to the document end —
-            // appends must continue at the end. The InsertionPoint setter clamps to the last
-            // line/column and calls AdjustViewport(), preserving auto-scroll.
-            //
-            // SubViewsLaidOut also fires after every layout re-wrap (window resize), which
-            // rebuilds the wrapped model with Terminal.Gui's flawed attribute copy — re-fix
-            // the colors from the unwrapped model each time (no-op until word wrap is on).
-            bool wordWrapPending = true;
-            outputView.SubViewsLaidOut += (s, e) =>
-            {
-                if (wordWrapPending && outputView.Viewport.Width > 0)
-                {
-                    wordWrapPending = false;
-                    outputView.WordWrap = true;
-                    outputView.InsertionPoint =
-                        new System.Drawing.Point(int.MaxValue, int.MaxValue);
-                    TuiAgenticHost.Diag($"[WRAP-ENABLE] viewport={outputView.Viewport} " +
-                        $"wordWrap={outputView.WordWrap} insertionPoint={outputView.InsertionPoint}");
-                }
-                host.RefreshWrappedColors();
-            };
+            // Word wrap is set directly at construction (WordWrap = true). Unlike TextView
+            // 2.4.4 — whose wrap setter at viewport width 0 degenerated the wrap map and forced
+            // a deferred SubViewsLaidOut enable plus an InsertionPoint reset — Editor computes
+            // its wrap map lazily per draw against the live viewport, so enabling it before the
+            // first layout is harmless. The SubViewsLaidOut re-fix handler is gone with the
+            // reflection-based color stamping: OffsetColorTransformer re-applies colors during
+            // every visual-line build, so wrap re-layouts (including window resize) recolor
+            // automatically with no extra wiring.
 
             // Diagnostic self-test (active only when DEVMIND_TUI_DIAG is set): append colored
             // sample lines through the exact streaming path (background thread → App.Invoke)
@@ -399,7 +384,7 @@ Application.MaximumIterationsPerSecond = 750;
                             // Thinking text — append to output.
                             app.Invoke(() =>
                             {
-                                // We can't do color in TextView easily; just append.
+                                // Thinking tokens render in the muted Thinking color.
                                 ((TuiAgenticHost)host).AppendOutputLocal(thinkText, OutputColor.Thinking);
                             });
                         }
