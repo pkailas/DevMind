@@ -93,6 +93,10 @@ namespace DevMind
 
         /// <summary>Called to change the working directory and reload context.</summary>
         public Action<string> SetWorkingDirectory { get; set; }
+
+        /// <summary>Opens an interactive directory-only picker starting at the given path and
+        /// returns the chosen directory, or null if the user cancelled (or no picker is wired).</summary>
+        public Func<string, string> BrowseForDirectory { get; set; }
     }
 
    /// <summary>
@@ -322,7 +326,7 @@ namespace DevMind
 
            RegisterCommand("/dir",
                 "Change working directory",
-                "/dir [path]",
+                "/dir [path|-b]",
                 DirHandler);
 
             RegisterCommand("/output-lines",
@@ -448,6 +452,20 @@ namespace DevMind
             if (args.Length == 0)
             {
                 return Task.FromResult(new CommandResult { Message = $"Working directory: {ctx.WorkingDirectory}" });
+            }
+
+            // -b: pick the directory interactively instead of typing it. The chosen path is
+            // routed through the exact same change logic as "/dir <path>" below (no duplication).
+            if (args.Length == 1 && string.Equals(args[0], "-b", StringComparison.OrdinalIgnoreCase))
+            {
+                if (ctx.BrowseForDirectory == null)
+                    return Task.FromResult(new CommandResult { Message = "Directory picker is not available.", IsError = true });
+
+                string picked = ctx.BrowseForDirectory(ctx.WorkingDirectory);
+                if (string.IsNullOrEmpty(picked))
+                    return Task.FromResult(new CommandResult { Message = "Directory pick cancelled — working directory unchanged." });
+
+                return DirHandler(new[] { picked }, ctx);
             }
 
             string path = Path.GetFullPath(string.Join(" ", args));
