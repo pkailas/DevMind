@@ -1,9 +1,24 @@
-﻿// File: TuiAgenticHost.cs  v1.4 (SPIKE)
+﻿// File: TuiAgenticHost.cs  v2.0 (SPIKE — Editor migration)
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 implementation of IAgenticHost.
 // Cribbed from ConsoleAgenticHost — file/shell/patch/memory logic is identical;
-// only AppendOutput routes to a Terminal.Gui TextView instead of Console.Write.
+// only AppendOutput routes to a Terminal.Gui.Editor.Editor instead of Console.Write.
+//
+// SPIKE (output-view migration): the output transcript was a [Obsolete] TextView
+// whose WordWrap rebuilds the ENTIRE wrapped model on every grapheme insert (O(n)
+// per token — sluggish on long transcripts) and whose per-cell color required
+// reflection into _wrapManager/WrapTextModel plus a hand-written fix for an upstream
+// wrap-attribute-copy bug. This version drives gui-cs/Editor's Editor instead:
+//   * append  → Document.Insert(Document.TextLength, text) on a rope-backed model
+//               (O(log n)); CaretOffset = TextLength auto-scrolls to the newest line.
+//   * color   → one IVisualLineTransformer on Editor.LineTransformers that sets
+//               element.Attribute by document offset (offset space, no reflection,
+//               survives wrap/resize). VisualLineBuilder emits one element per
+//               grapheme, so color boundaries are exact with zero bleed.
+//   * readonly→ ReadOnly = true; Document.Insert bypasses the command guard, so the
+//               view is a non-editable programmatic log (no ReadOnly=false hack).
+// ResolveAttribute (OutputColor→RGB) is the only piece of the old color path kept.
 
 // SPIKE: suppress obsolete warnings for Terminal.Gui v2 legacy APIs.
 #pragma warning disable CS0618
@@ -12,19 +27,20 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Reflection;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Terminal.Gui.App;
-using Terminal.Gui.Views;
+using Terminal.Gui.Editor.Document;
+using Terminal.Gui.Editor.Rendering;
+using GuiEditor = Terminal.Gui.Editor.Editor;
 
 namespace DevMind
 {
     /// <summary>
     /// Terminal.Gui v2 implementation of IAgenticHost for the DevMind TUI spike.
     /// All file/shell/patch/memory logic cribbed verbatim from ConsoleAgenticHost.
-   /// AppendOutput routes to a Terminal.Gui TextView via IApplication.Invoke.
+    /// AppendOutput routes to a Terminal.Gui.Editor.Editor via IApplication.Invoke.
     /// </summary>
     public sealed class TuiAgenticHost : IAgenticHost
     {
@@ -47,25 +63,18 @@ namespace DevMind
 
        private readonly Action _cancelTurn;
 
-        // The Terminal.Gui TextView that receives all output.
-        private readonly TextView _outputView;
+        // The Editor that receives all output. Rope-backed document, append-only.
+        private readonly GuiEditor _outputView;
 
-        // Logical (unwrapped) document position where the next append begins. Valid because
-        // the output view is append-only and ALL inserts flow through AppendCore.
-        private int _appendRow;
-        private int _appendCol;
-
-        // Reflection handles into Terminal.Gui 2.4.4 internals, needed because the wrapped
-        // model exposed by the public TextView API is rebuilt (attributes discarded) on every
-        // insert — see AppendCore. WordWrapManager and TextModel are internal types, so the
-        // member infos are resolved lazily from runtime instances and cached.
-        private static readonly FieldInfo WrapManagerField =
-            typeof(TextView).GetField("_wrapManager", BindingFlags.NonPublic | BindingFlags.Instance);
-        private static readonly MethodInfo WrapTextModelMethod =
-            typeof(TextView).GetMethod("WrapTextModel", BindingFlags.NonPublic | BindingFlags.Instance);
-        private static PropertyInfo _wrapModelProperty;      // WordWrapManager.Model
-        private static PropertyInfo _textModelCountProperty; // TextModel.Count
-        private static MethodInfo _textModelGetLineMethod;   // TextModel.GetLine(int)
+        // Color is decoupled from the document: each AppendCore call records the
+        // [start, start+len) document offset range it inserted plus the resolved
+        // Attribute. OffsetColorTransformer (registered on _outputView.LineTransformers)
+        // reads this list during visual-line construction and stamps element.Attribute
+        // by offset. Append-only and strictly increasing in Start, so lookups binary-
+        // search. Mutated by AppendCore and read by the transformer — both run on the
+        // Terminal.Gui UI thread (append marshals via App.Invoke; Transform runs in Draw),
+        // so no locking is required.
+        private readonly List<ColorSpan> _colorSpans = new List<ColorSpan>();
 
         // ── Diagnostics ──────────────────────────────────────────────────────────
         // Set DEVMIND_TUI_DIAG to a file path to trace the color-stamping pipeline
@@ -74,7 +83,6 @@ namespace DevMind
 
         private static readonly string DiagPath =
             Environment.GetEnvironmentVariable("DEVMIND_TUI_DIAG");
-        private static bool _diagHandlesLogged;
 
         internal static void Diag(string message)
         {
@@ -87,28 +95,22 @@ namespace DevMind
             catch { }
         }
 
-        private static void DiagHandlesOnce()
-        {
-            if (_diagHandlesLogged || string.IsNullOrEmpty(DiagPath)) return;
-            _diagHandlesLogged = true;
-            Diag($"[HANDLES] Terminal.Gui={typeof(TextView).Assembly.GetName().Version} " +
-                 $"location={typeof(TextView).Assembly.Location}");
-            Diag($"[HANDLES] _wrapManager field: {(WrapManagerField != null ? "OK" : "MISSING")}; " +
-                 $"WrapTextModel method: {(WrapTextModelMethod != null ? "OK" : "MISSING")}");
-        }
-
         // Set by the REPL loop before each agentic turn.
         public CancellationToken CancellationToken { get; set; } = CancellationToken.None;
 
         // ── Construction ─────────────────────────────────────────────────────────
 
-        public TuiAgenticHost(string workingDirectory, TextView outputView, Action cancelTurn = null)
+        public TuiAgenticHost(string workingDirectory, GuiEditor outputView, Action cancelTurn = null)
         {
             _shellRunner  = new ShellRunner(workingDirectory);
             _outputView   = outputView;
             _cancelTurn   = cancelTurn ?? (() => { });
             if (!string.IsNullOrEmpty(workingDirectory))
                 _memoryManager = new MemoryManager(workingDirectory);
+
+            // Register the color transformer. It reads _colorSpans (populated by AppendCore)
+            // and stamps element.Attribute by document offset during visual-line construction.
+            _outputView.LineTransformers.Add(new OffsetColorTransformer(_colorSpans));
         }
 
         // ── Context lifecycle helpers ────────────────────────────────────────────
@@ -144,147 +146,49 @@ namespace DevMind
                 app.Invoke(() => AppendCore(text, color));
         }
 
-        // Appends text at the insertion point and stamps the inserted span with the color's
-        // per-Cell Attribute. MUST run on the UI thread. All output MUST flow through here
-        // (banner, echo, stream tokens, status lines) — _appendRow/_appendCol track the
-        // logical (unwrapped) document position of the next append, and any InsertText that
-        // bypasses this method desyncs the tracker.
+        // Appends text to the end of the Editor's rope-backed document and records the color
+        // span for OffsetColorTransformer. MUST run on the UI thread. ALL output flows through
+        // here (banner, echo, stream tokens, status lines).
+        //
+        // Versus the old TextView path this is dramatically simpler and cheaper:
+        //   * Document.Insert at TextLength is an O(log n) rope splice — no whole-document
+        //     re-wrap per token (the TextView cost that hurt long, fast-streaming transcripts).
+        //   * Color is NOT stamped into the model. We record (start, len, attr); the registered
+        //     IVisualLineTransformer applies it per visible element at draw time, in document-
+        //     offset space — so colors survive wrap and resize with no reflection and no
+        //     hand-patched wrap-attribute-copy bug.
+        //   * CaretOffset = TextLength scrolls to the newest line (auto-scroll). The caret is
+        //     navigation, not an edit, so it works under ReadOnly and CanFocus=false.
         private void AppendCore(string text, OutputColor color)
         {
-            // Normalize line endings. The per-grapheme insert path maps a bare '\r' to
-            // Key.Enter, whose handler resets CurrentColumn to 0 WITHOUT adding a line —
-            // subsequent cells would be inserted mid-line, garbling the transcript.
+            // Normalize line endings — the document is '\n'-based; a stray '\r' would render
+            // as a visible glyph and skew offsets.
             text = text.Replace("\r\n", "\n").Replace("\r", "\n");
             if (text.Length == 0) return;
 
-            // Append at the cursor. TextView.InsertText advances the insertion point to
-            // the END of the inserted text and calls AdjustViewport()/PositionCursor()
-            // per grapheme, so the view auto-scrolls to the newest line on its own.
-            //
-            // Do NOT reset InsertionPoint afterward. The prior code set it to
-            // Point(0, Lines): the setter clamps X=0 to column 0 of the last line, so the
-            // NEXT token was inserted at the START of that line — prepending instead of
-            // appending. That reversed adjacent fragments during fast streaming
-            // ("The" + " project" rendered as " projectThe"). InsertText already leaves
-            // the cursor exactly where the next append belongs.
-            int startRow = _appendRow;
-            int startCol = _appendCol;
-            _outputView.InsertText(text);
+            TextDocument doc = _outputView.Document;
+            if (doc == null)
+            {
+                // Document is assigned in Program.cs before the window runs; guard anyway so a
+                // stray pre-init append can never NRE the UI loop.
+                Diag($"[APPEND] SKIP (no document) color={color} len={text.Length}");
+                return;
+            }
 
-            // Color (Terminal.Gui 2.4.4): TextView has no public attribute-aware InsertText
-            // overload, but its renderer honors a per-Cell Attribute — OnDrawNormalColor
-            // does `if (cell.Attribute.HasValue) SetAttribute(cell.Attribute.Value)`. Cell is
-            // a record struct in a live List<Cell>, so reassigning an element with
-            // `with { Attribute = … }` persists the color into the model.
-            //
-            // WordWrap (verified against the decompiled 2.4.4 assembly, not from memory):
-            // with WordWrap on, TextView maintains TWO models. `_model` (what GetLine/Lines/
-            // InsertionPoint expose) is a WRAPPED model that WordWrapManager.WrapModel()
-            // REBUILDS FROM SCRATCH after every grapheme insert (InsertText → AdjustViewport →
-            // WrapTextModel, taken unconditionally because `flag` starts as NeedsDraw ||
-            // _wrapNeeded). Attributes stamped into wrapped cells are therefore discarded on
-            // the next insert/resize. The durable store is the UNWRAPPED model
-            // (_wrapManager.Model): WrapModel copies each unwrapped cell's Attribute into the
-            // rebuilt wrapped rows. So:
-            //   1. Stamp the unwrapped model, in logical coordinates tracked by
-            //      _appendRow/_appendCol (the wrapped InsertionPoint is useless here).
-            //      The span end is read straight off the unwrapped model — insertion is
-            //      always at the document end, so end = (Count-1, lastLine.Count). Exact,
-            //      no grapheme counting.
-            //   2. Force one WrapTextModel() rebuild so the visible wrapped model picks up
-            //      the new attributes now — the rebuild that ran inside InsertText happened
-            //      BEFORE the stamp, so without this the newest span would render uncolored
-            //      until the next append.
-            // Neither step touches the insertion point, so in-order streaming is preserved.
-            //
-            // Known upstream cosmetic quirk (WordWrapManager.WrapModel): when re-applying
-            // attributes to wrapped segment j of a logical line it iterates `for (k = j; ...)`
-            // and indexes the unwrapped line by k instead of by cumulative segment offset —
-            // leaving the first j cells of each continuation row unattributed and shifting
-            // colors on mixed-color lines. FixWrappedAttributes() (step 2½ below) re-copies
-            // the attributes exactly after each rebuild we control. Rebuilds we cannot hook
-            // (window resize) re-introduce the quirk until the next append.
+            int start = doc.TextLength;
             Terminal.Gui.Drawing.Attribute attr = ResolveAttribute(color);
-            DiagHandlesOnce();
 
             try
             {
-                if (_outputView.WordWrap)
-                {
-                    object model = GetUnwrappedTextModel();
-                    if (model == null)
-                    {
-                        // reflection drift — degrade to monochrome, never mis-stamp
-                        Diag($"[APPEND] PATH=wrap-FALLBACK-MONOCHROME color={color} len={text.Length}");
-                        return;
-                    }
-
-                    int lineCount = (int)_textModelCountProperty.GetValue(model);
-                    int endRow = lineCount - 1;
-                    var lastLine = (List<Terminal.Gui.Drawing.Cell>)_textModelGetLineMethod
-                        .Invoke(model, new object[] { endRow });
-                    int endCol = lastLine?.Count ?? 0;
-
-                    StampSpan(
-                        row => (List<Terminal.Gui.Drawing.Cell>)_textModelGetLineMethod
-                            .Invoke(model, new object[] { row }),
-                        lineCount, startRow, startCol, endRow, endCol, attr);
-
-                    WrapTextModelMethod?.Invoke(_outputView, null);
-                    FixWrappedAttributes(model);
-
-                    Diag($"[APPEND] PATH=wrap-stamp color={color} len={text.Length} " +
-                         $"span=({startRow},{startCol})->({endRow},{endCol}) logicalLines={lineCount}");
-                    DiagSampleWrappedTail("POST-STAMP");
-
-                    _appendRow = endRow;
-                    _appendCol = endCol;
-                }
-                else
-                {
-                    // WordWrap off (e.g. startup banner before the first layout enables it):
-                    // _model IS the logical model, so the view's own GetLine/Lines are exact.
-                    int lineCount = _outputView.Lines;
-                    int endRow = lineCount - 1;
-                    int endCol = _outputView.GetLine(endRow)?.Count ?? 0;
-
-                    StampSpan(row => _outputView.GetLine(row),
-                        lineCount, startRow, startCol, endRow, endCol, attr);
-
-                    Diag($"[APPEND] PATH=plain-stamp color={color} len={text.Length} " +
-                         $"span=({startRow},{startCol})->({endRow},{endCol}) lines={lineCount}");
-
-                    _appendRow = endRow;
-                    _appendCol = endCol;
-                }
+                doc.Insert(start, text);
+                _colorSpans.Add(new ColorSpan(start, text.Length, attr));
+                _outputView.CaretOffset = doc.TextLength; // auto-scroll to newest line
+                Diag($"[APPEND] color={color} len={text.Length} start={start} total={doc.TextLength} spans={_colorSpans.Count}");
             }
             catch (Exception ex)
             {
-                // Keep the app alive — a stamping failure must never take down the UI loop.
-                // Text is already inserted; only the color is lost for this span.
+                // Keep the app alive — an append failure must never take down the UI loop.
                 Diag($"[APPEND] EXCEPTION color={color} len={text.Length} ex={ex}");
-            }
-        }
-
-        // Logs cell/attribute counts for the last few rows of the DISPLAYED (wrapped) model —
-        // distinguishes "attributes never landed" from "attributes present but not drawn".
-        private void DiagSampleWrappedTail(string tag)
-        {
-            if (string.IsNullOrEmpty(DiagPath)) return;
-            int lines = _outputView.Lines;
-            for (int r = Math.Max(0, lines - 3); r < lines; r++)
-            {
-                List<Terminal.Gui.Drawing.Cell> line = _outputView.GetLine(r);
-                if (line == null) continue;
-                int attributed = 0;
-                string firstAttr = null;
-                foreach (Terminal.Gui.Drawing.Cell c in line)
-                {
-                    if (!c.Attribute.HasValue) continue;
-                    attributed++;
-                    firstAttr ??= c.Attribute.Value.Foreground.ToString();
-                }
-                Diag($"[{tag}] viewRow={r} cells={line.Count} attributed={attributed} firstFg={firstAttr ?? "none"}");
             }
         }
 
@@ -976,134 +880,74 @@ namespace DevMind
             return new Terminal.Gui.Drawing.Attribute(fg, bg);
         }
 
-        // Stamps the per-Cell Attribute across the span [start, end) in LOGICAL (unwrapped)
-        // line coordinates; newlines do not occupy a cell. getLine returns the live model
-        // List<Cell> for a row; reassigning a record-struct Cell element with `with { … }`
-        // persists the color. The insertion point is never moved, so in-order streaming
-        // append is preserved.
-        private static void StampSpan(Func<int, List<Terminal.Gui.Drawing.Cell>> getLine,
-            int lineCount, int startRow, int startCol, int endRow, int endCol,
-            Terminal.Gui.Drawing.Attribute attr)
+        // ── Color model ───────────────────────────────────────────────────────────
+
+        // One recorded append: the document offset range it occupies and the Attribute to
+        // paint it with. Spans are append-only and strictly increasing in Start (every insert
+        // lands at the document end), so they form a sorted, contiguous cover of [0, TextLength).
+        private readonly struct ColorSpan
         {
-            int firstRow = Math.Max(0, startRow);
-            int lastRow  = Math.Min(endRow, lineCount - 1);
+            public readonly int Start;
+            public readonly int Length;
+            public readonly Terminal.Gui.Drawing.Attribute Attr;
 
-            for (int row = firstRow; row <= lastRow; row++)
+            public ColorSpan(int start, int length, Terminal.Gui.Drawing.Attribute attr)
             {
-                List<Terminal.Gui.Drawing.Cell> line = getLine(row);
-                if (line == null || line.Count == 0) continue;
-
-                int from = (row == startRow) ? startCol : 0;
-                int to   = (row == endRow)   ? endCol   : line.Count;
-                if (from < 0) from = 0;
-                if (to > line.Count) to = line.Count;
-
-                for (int col = from; col < to; col++)
-                    line[col] = line[col] with { Attribute = attr };
+                Start  = start;
+                Length = length;
+                Attr   = attr;
             }
         }
 
-        // Re-copies span colors into the wrapped model after an externally triggered rebuild
-        // (window resize re-wraps via TextView.OnSubViewsLaidOut, re-introducing the upstream
-        // attribute-copy quirk). Called from the output view's SubViewsLaidOut handler, which
-        // runs after the re-wrap. No-op when WordWrap is off. UI thread only.
-        internal void RefreshWrappedColors()
+        // Applies recorded color spans to visual-line elements at draw time. Registered on
+        // Editor.LineTransformers; Editor calls Transform(line) for each DocumentLine as it
+        // builds the line's elements (VisualLineBuilder emits one element per grapheme, so a
+        // color boundary can fall between any two characters with zero bleed). For each element
+        // we look up the span covering its DocumentOffset and set element.Attribute.
+        //
+        // Spans are sorted by Start, so we binary-search the span covering the line's first
+        // element, then advance a cursor as element offsets increase — O(elements + spans-in-
+        // line) per line, only for VISIBLE lines. Runs on the UI thread (Draw), same thread as
+        // AppendCore's writes, so reading the shared list needs no lock.
+        private sealed class OffsetColorTransformer : IVisualLineTransformer
         {
-            if (!_outputView.WordWrap) return;
-            object model = GetUnwrappedTextModel();
-            Diag($"[REFRESH] wordWrap=true model={(model != null ? "OK" : "NULL")} viewLines={_outputView.Lines}");
-            if (model != null) FixWrappedAttributes(model);
-        }
+            private readonly List<ColorSpan> _spans;
 
-        // Corrects WordWrapManager.WrapModel's attribute copy (see the "known upstream
-        // cosmetic quirk" note in AppendCore) by re-copying attributes from the unwrapped
-        // model into the freshly rebuilt wrapped model, exactly. Wrapped rows hold the same
-        // cells in the same order as their logical line (one logical line → 1..n contiguous
-        // wrapped segments; wrapping never reorders, drops, or merges cells with
-        // preserveTrailingSpaces:true), so segments are consumed sequentially per logical
-        // line and each wrapped cell takes the attribute of its cumulative-offset source
-        // cell. MUST be called immediately after a WrapTextModel rebuild, while
-        // _outputView.GetLine still addresses the wrapped model. If the 1:1 correspondence
-        // ever breaks (segment longer than the remaining logical cells), the pass aborts
-        // rather than smearing colors across wrong cells.
-        private void FixWrappedAttributes(object unwrappedModel)
-        {
-            int logicalCount = (int)_textModelCountProperty.GetValue(unwrappedModel);
-            int wrappedCount = _outputView.Lines;
-            int wrappedRow = 0;
+            public OffsetColorTransformer(List<ColorSpan> spans) => _spans = spans;
 
-            for (int li = 0; li < logicalCount && wrappedRow < wrappedCount; li++)
+            public void Transform(CellVisualLine line)
             {
-                var logical = (List<Terminal.Gui.Drawing.Cell>)_textModelGetLineMethod
-                    .Invoke(unwrappedModel, new object[] { li });
-                if (logical == null) return;
+                IReadOnlyList<CellVisualLineElement> elements = line.Elements;
+                int count = elements.Count;
+                int spanCount = _spans.Count;
+                if (count == 0 || spanCount == 0) return;
 
-                int consumed = 0;
-                do
+                int idx = FindSpanIndex(elements[0].DocumentOffset);
+                for (int e = 0; e < count; e++)
                 {
-                    List<Terminal.Gui.Drawing.Cell> segment = _outputView.GetLine(wrappedRow);
-                    if (segment == null) return;
-                    if (consumed + segment.Count > logical.Count)
-                    {
-                        // mapping skew — abort rather than smear
-                        Diag($"[FIX] ABORT skew at logicalLine={li} wrappedRow={wrappedRow} " +
-                             $"consumed={consumed} segLen={segment.Count} logicalLen={logical.Count}");
-                        return;
-                    }
-
-                    for (int k = 0; k < segment.Count; k++)
-                        segment[k] = segment[k] with { Attribute = logical[consumed + k].Attribute };
-
-                    consumed += segment.Count;
-                    wrappedRow++;
-                } while (consumed < logical.Count && wrappedRow < wrappedCount);
+                    CellVisualLineElement el = elements[e];
+                    int off = el.DocumentOffset;
+                    // Advance past spans that end at/before this offset.
+                    while (idx < spanCount && off >= _spans[idx].Start + _spans[idx].Length)
+                        idx++;
+                    if (idx >= spanCount) break;
+                    if (off >= _spans[idx].Start)
+                        el.Attribute = _spans[idx].Attr;
+                }
             }
-        }
 
-        // Resolves the UNWRAPPED TextModel (_wrapManager.Model) via reflection, caching the
-        // internal-type member infos on first use. Returns null if WordWrap is not active or
-        // any handle cannot be resolved (degrade to monochrome rather than mis-stamp).
-        private object GetUnwrappedTextModel()
-        {
-            if (WrapManagerField == null)
+            // First span whose end (Start+Length) is strictly greater than offset.
+            private int FindSpanIndex(int offset)
             {
-                Diag("[RESOLVE] _wrapManager FieldInfo is null");
-                return null;
+                int lo = 0, hi = _spans.Count;
+                while (lo < hi)
+                {
+                    int mid = (lo + hi) >> 1;
+                    if (_spans[mid].Start + _spans[mid].Length <= offset) lo = mid + 1;
+                    else hi = mid;
+                }
+                return lo;
             }
-
-            object wrapManager = WrapManagerField.GetValue(_outputView);
-            if (wrapManager == null)
-            {
-                Diag("[RESOLVE] _wrapManager instance is null (WordWrap on but no manager?)");
-                return null;
-            }
-
-            if (_wrapModelProperty == null)
-                _wrapModelProperty = wrapManager.GetType()
-                    .GetProperty("Model", BindingFlags.Public | BindingFlags.Instance);
-
-            object model = _wrapModelProperty?.GetValue(wrapManager);
-            if (model == null)
-            {
-                Diag($"[RESOLVE] Model property {(_wrapModelProperty == null ? "MISSING on " + wrapManager.GetType().FullName : "returned null")}");
-                return null;
-            }
-
-            if (_textModelCountProperty == null || _textModelGetLineMethod == null)
-            {
-                _textModelCountProperty = model.GetType()
-                    .GetProperty("Count", BindingFlags.Public | BindingFlags.Instance);
-                _textModelGetLineMethod = model.GetType()
-                    .GetMethod("GetLine", BindingFlags.Public | BindingFlags.Instance);
-            }
-
-            if (_textModelCountProperty == null || _textModelGetLineMethod == null)
-            {
-                Diag($"[RESOLVE] TextModel members missing on {model.GetType().FullName}: " +
-                     $"Count={(_textModelCountProperty != null ? "OK" : "MISSING")} GetLine={(_textModelGetLineMethod != null ? "OK" : "MISSING")}");
-                return null;
-            }
-            return model;
         }
 
         private bool IsFileKnownToTask(string fileNameOnly)
