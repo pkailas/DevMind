@@ -20,6 +20,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
 
 namespace DevMind
 {
@@ -32,7 +33,7 @@ namespace DevMind
         public bool IsError { get; set; }
     }
 
-    /// <summary>
+   /// <summary>
     /// Context passed to command handlers. Provides callbacks into the
     /// TUI's runtime state without exposing internal types directly.
     /// </summary>
@@ -55,15 +56,29 @@ namespace DevMind
 
         /// <summary>Called to toggle thinking mode.</summary>
         public Action<bool> SetThinking { get; set; }
+
+        // ── History (session persistence) ──────────────────────────────────────
+
+        /// <summary>History store for session management commands. Null when history is disabled.</summary>
+        public IHistoryStore HistoryStore { get; set; }
+
+        /// <summary>Current session ID (for /title, /resume).</summary>
+        public string SessionId { get; set; } = "";
+
+        /// <summary>Machine name for history queries.</summary>
+        public string MachineName { get; set; } = "";
+
+        /// <summary>Prepend messages into the conversation history (for /resume).</summary>
+        public Action<string[], string[]> PrependMessages { get; set; }
     }
 
-    /// <summary>
+   /// <summary>
     /// Signature for a command handler.
     /// </summary>
     /// <param name="args">Parsed arguments (space-separated tokens after the command name).</param>
     /// <param name="ctx">Runtime context with callbacks.</param>
     /// <returns>Result with message and error flag.</returns>
-    public delegate CommandResult CommandHandler(string[] args, CommandContext ctx);
+    public delegate Task<CommandResult> CommandHandler(string[] args, CommandContext ctx);
 
    /// <summary>
     /// A registered slash command with metadata.
@@ -73,7 +88,7 @@ namespace DevMind
         public string Name { get; set; } = string.Empty;
         public string Description { get; set; } = string.Empty;
         public string Usage { get; set; } = string.Empty;
-        public CommandHandler Handler { get; set; } = (args, ctx) => new CommandResult { Message = "not implemented" };
+       public CommandHandler Handler { get; set; } = (args, ctx) => Task.FromResult(new CommandResult { Message = "not implemented" });
     }
 
     /// <summary>
@@ -153,13 +168,13 @@ namespace DevMind
             return (name, args);
         }
 
-        /// <summary>
+       /// <summary>
         /// Dispatch a slash command. Caller has already determined the input
         /// starts with '/'. Returns a CommandResult; the TUI renders it.
         /// Unknown commands produce an error result suggesting /help.
         /// Handler exceptions are caught and converted to error results.
         /// </summary>
-        public static CommandResult Dispatch(string input, CommandContext context)
+        public static async Task<CommandResult> Dispatch(string input, CommandContext context)
         {
             var parsed = ParseInput(input);
             if (parsed == null)
@@ -180,7 +195,7 @@ namespace DevMind
 
             try
             {
-                return cmd.Handler(args, context);
+                return await cmd.Handler(args, context);
             }
             catch (Exception ex)
             {
@@ -232,52 +247,40 @@ namespace DevMind
                 "/restart",
                 NewHandler);
 
-            // ── Stubs (not yet implemented in TUI) ──────────────────────────────
+           // ── History commands ─────────────────────────────────────────────────
 
             RegisterCommand("/history",
                 "List past sessions from history",
                 "/history",
-                (args, ctx) => new CommandResult
-                {
-                    Message = "/history: not yet implemented in TUI — requires SQL history backend.",
-                    IsError = false,
-                });
+                HistoryHandler);
 
             RegisterCommand("/resume",
                 "Resume a past session by number (from /history listing)",
                 "/resume <n>",
-                (args, ctx) => new CommandResult
-                {
-                    Message = "/resume: not yet implemented in TUI — requires SQL history backend.",
-                    IsError = false,
-                });
+                ResumeHandler);
 
             RegisterCommand("/title",
                 "Set the current session's title",
                 "/title <text>",
-                (args, ctx) => new CommandResult
-                {
-                    Message = "/title: not yet implemented in TUI — requires SQL history backend.",
-                    IsError = false,
-                });
+                TitleHandler);
 
-            RegisterCommand("/compact",
+           RegisterCommand("/compact",
                 "Force a context compaction pass now",
                 "/compact",
-                (args, ctx) => new CommandResult
+                (args, ctx) => Task.FromResult(new CommandResult
                 {
                     Message = "/compact: not yet implemented in TUI — requires context summarizer.",
                     IsError = false,
-                });
+                }));
 
             RegisterCommand("/t",
                 "One-shot: send a message with thinking ON (does not change the /think default)",
                 "/t <message>",
-                (args, ctx) => new CommandResult
+                (args, ctx) => Task.FromResult(new CommandResult
                 {
                     Message = "/t: not yet implemented in TUI — requires one-shot thinking integration with agentic turn.",
                     IsError = false,
-                });
+                }));
 
             RegisterCommand("/reasoning",
                 "Toggle reasoning display (alias for /think)",
@@ -287,94 +290,94 @@ namespace DevMind
             RegisterCommand("/rules",
                 "Show, set, or clear behavioral rules",
                 "/rules [text|clear]",
-                (args, ctx) => new CommandResult
+                (args, ctx) => Task.FromResult(new CommandResult
                 {
                     Message = "/rules: not yet implemented in TUI — requires behavioral rules persistence.",
                     IsError = false,
-                });
+                }));
 
             RegisterCommand("/lsp",
                 "Show or enable/disable language server tools",
                 "/lsp on|off",
-                (args, ctx) => new CommandResult
+                (args, ctx) => Task.FromResult(new CommandResult
                 {
                     Message = "/lsp: not yet implemented in TUI — LSP not wired in TUI.",
                     IsError = false,
-                });
+                }));
 
             RegisterCommand("/dir",
                 "Change working directory",
                 "/dir [path]",
-                (args, ctx) => new CommandResult
+                (args, ctx) => Task.FromResult(new CommandResult
                 {
                     Message = "/dir: not yet implemented in TUI — would need MCP reconnect.",
                     IsError = false,
-                });
+                }));
 
             RegisterCommand("/output-lines",
                 "Show or set tool-call output line limit",
                 "/output-lines [N]",
-                (args, ctx) => new CommandResult
+                (args, ctx) => Task.FromResult(new CommandResult
                 {
                     Message = "/output-lines: not yet implemented in TUI.",
                     IsError = false,
-                });
+                }));
 
             RegisterCommand("/training-delete-last",
                 "Delete the training log for the current session",
                 "/training-delete-last",
-                (args, ctx) => new CommandResult
+                (args, ctx) => Task.FromResult(new CommandResult
                 {
                     Message = "/training-delete-last: not yet implemented in TUI.",
                     IsError = false,
-                });
+                }));
         }
 
         // ── /new ──────────────────────────────────────────────────────────────────
 
-        static CommandResult NewHandler(string[] args, CommandContext ctx)
+       static Task<CommandResult> NewHandler(string[] args, CommandContext ctx)
         {
             ctx.ResetConversation();
-            return new CommandResult { Message = "New session started." };
+            return Task.FromResult(new CommandResult { Message = "New session started." });
         }
 
         // ── /clear ────────────────────────────────────────────────────────────────
 
-        static CommandResult ClearHandler(string[] args, CommandContext ctx)
+       static Task<CommandResult> ClearHandler(string[] args, CommandContext ctx)
         {
             ctx.ResetConversation();
-            return new CommandResult { Message = "Conversation cleared." };
+            return Task.FromResult(new CommandResult { Message = "Conversation cleared." });
         }
 
         // ── /think on|off ─────────────────────────────────────────────────────────
 
-        static CommandResult ThinkHandler(string[] args, CommandContext ctx)
+       static Task<CommandResult> ThinkHandler(string[] args, CommandContext ctx)
         {
             if (args.Length == 0)
             {
-                return new CommandResult
+                return Task.FromResult(new CommandResult
                 {
                     Message = $"Thinking mode: {(ctx.ThinkingEnabled ? "on" : "off")} (session). Usage: /think on|off",
-                };
+                });
             }
 
             string arg = args[0]?.Trim().ToLowerInvariant() ?? "";
             if (arg != "on" && arg != "off")
-                return new CommandResult
+                return Task.FromResult(new CommandResult
                 {
                     Message = "Usage: /think on|off",
                     IsError = true,
-                };
+                });
 
             bool next = arg == "on";
             ctx.SetThinking(next);
 
-            return new CommandResult
+            return Task.FromResult(new CommandResult
             {
                 Message = next
                     ? "Thinking mode ON for this session — reasoning renders in output. Use /think off to disable."
                     : "Thinking mode OFF for this session.",
-            };
+            });
         }
 
         // ── /depth-cap [N] ────────────────────────────────────────────────────────
@@ -382,44 +385,44 @@ namespace DevMind
         const int DepthCapMin = 1;
         const int DepthCapMax = 10;
 
-        static CommandResult DepthCapHandler(string[] args, CommandContext ctx)
+       static Task<CommandResult> DepthCapHandler(string[] args, CommandContext ctx)
         {
             if (args.Length == 0)
             {
-                return new CommandResult { Message = $"Current depth cap: {ctx.DepthCap}" };
+                return Task.FromResult(new CommandResult { Message = $"Current depth cap: {ctx.DepthCap}" });
             }
 
             if (!int.TryParse(args[0], out int n))
-                return new CommandResult
+                return Task.FromResult(new CommandResult
                 {
                     Message = $"Usage: /depth-cap [{DepthCapMin}-{DepthCapMax}]",
                     IsError = true,
-                };
+                });
 
             if (n < DepthCapMin || n > DepthCapMax)
-                return new CommandResult
+                return Task.FromResult(new CommandResult
                 {
                     Message = $"Usage: /depth-cap [{DepthCapMin}-{DepthCapMax}]",
                     IsError = true,
-                };
+                });
 
             ctx.SetDepthCap(n);
-            return new CommandResult { Message = $"Depth cap set to {n}" };
+            return Task.FromResult(new CommandResult { Message = $"Depth cap set to {n}" });
         }
 
         // ── /system_prompt ────────────────────────────────────────────────────────
 
-        static CommandResult SystemPromptHandler(string[] args, CommandContext ctx)
+       static Task<CommandResult> SystemPromptHandler(string[] args, CommandContext ctx)
         {
             string prompt = ctx.SystemPrompt ?? "(not available)";
             string top = "─── Current System Prompt ───";
             string bot = "─────────────────────────────";
-            return new CommandResult { Message = $"{top}\n{prompt}\n{bot}" };
+            return Task.FromResult(new CommandResult { Message = $"{top}\n{prompt}\n{bot}" });
         }
 
         // ── /help ─────────────────────────────────────────────────────────────────
 
-        static CommandResult HelpHandler(string[] args, CommandContext ctx)
+       static Task<CommandResult> HelpHandler(string[] args, CommandContext ctx)
         {
             var all = ListCommands();
             var lines = new System.Text.StringBuilder();
@@ -435,7 +438,126 @@ namespace DevMind
                 lines.AppendLine($"  {usage}  {c.Description}");
             }
 
-            return new CommandResult { Message = lines.ToString().TrimEnd() };
+           return Task.FromResult(new CommandResult { Message = lines.ToString().TrimEnd() });
+        }
+
+        // ── /history ──────────────────────────────────────────────────────────────
+
+        static async Task<CommandResult> HistoryHandler(string[] args, CommandContext ctx)
+        {
+            if (ctx.HistoryStore == null)
+                return new CommandResult { Message = "History is not enabled.", IsError = true };
+
+            try
+            {
+                var sessions = await ctx.HistoryStore.ListSessionsAsync(ctx.MachineName);
+                // Cap at 20 most recent.
+                int count = Math.Min(sessions.Length, 20);
+                if (count == 0)
+                    return new CommandResult { Message = "No past sessions found." };
+
+                var sb = new System.Text.StringBuilder();
+                sb.AppendLine("Past sessions (most recent first):");
+                for (int i = 0; i < count; i++)
+                {
+                    var s = sessions[i];
+                    string title = string.IsNullOrEmpty(s.Title) ? "(untitled)" : s.Title;
+                    string date = s.LastActiveAt.ToString("MMM dd yyyy HH:mm");
+                    sb.AppendLine($"  [{i + 1}] {title}  |  {date}  |  {s.MessageCount} messages");
+                }
+                if (sessions.Length > 20)
+                    sb.AppendLine($"  ... and {sessions.Length - 20} more (showing 20 most recent)");
+                return new CommandResult { Message = sb.ToString().TrimEnd() };
+            }
+            catch (Exception ex)
+            {
+                return new CommandResult { Message = $"Failed to list sessions: {ex.Message}", IsError = true };
+            }
+        }
+
+        // ── /resume <n> ───────────────────────────────────────────────────────────
+
+        static async Task<CommandResult> ResumeHandler(string[] args, CommandContext ctx)
+        {
+            if (ctx.HistoryStore == null)
+                return new CommandResult { Message = "History is not enabled.", IsError = true };
+
+            if (args.Length == 0)
+                return new CommandResult
+                {
+                    Message = "Usage: /resume <n>  (run /history first to see session numbers)",
+                    IsError = true,
+                };
+
+            if (!int.TryParse(args[0], out int n) || n < 1)
+                return new CommandResult
+                {
+                    Message = "Usage: /resume <n>  (n must be a positive integer from /history listing)",
+                    IsError = true,
+                };
+
+            try
+            {
+                var sessions = await ctx.HistoryStore.ListSessionsAsync(ctx.MachineName);
+                int count = Math.Min(sessions.Length, 20);
+                if (n > count)
+                    return new CommandResult
+                    {
+                        Message = $"Session #{n} not found. Valid range: 1-{count} (run /history to refresh).",
+                        IsError = true,
+                    };
+
+                var session = sessions[n - 1];
+                var messages = await ctx.HistoryStore.LoadSessionMessagesAsync(session.SessionId);
+               if (messages.Length == 0)
+                {
+                    string sessionTitle = string.IsNullOrEmpty(session.Title) ? "(untitled)" : session.Title;
+                    return new CommandResult { Message = $"Session \"{sessionTitle}\" has no messages to load." };
+                }
+
+                // Convert to role/content arrays for PrependMessages.
+                string[] roles = new string[messages.Length];
+                string[] contents = new string[messages.Length];
+                for (int i = 0; i < messages.Length; i++)
+                {
+                    roles[i] = messages[i].Role;
+                    contents[i] = messages[i].Content;
+                }
+
+                ctx.PrependMessages(roles, contents);
+
+                string title = string.IsNullOrEmpty(session.Title) ? "(untitled)" : session.Title;
+                return new CommandResult { Message = $"Resumed session: {title} ({messages.Length} messages loaded)." };
+            }
+            catch (Exception ex)
+            {
+                return new CommandResult { Message = $"Failed to resume session: {ex.Message}", IsError = true };
+            }
+        }
+
+        // ── /title <text> ─────────────────────────────────────────────────────────
+
+        static async Task<CommandResult> TitleHandler(string[] args, CommandContext ctx)
+        {
+            if (ctx.HistoryStore == null)
+                return new CommandResult { Message = "History is not enabled.", IsError = true };
+
+            if (args.Length == 0)
+                return new CommandResult { Message = "Usage: /title <text>", IsError = true };
+
+            string text = args[0];
+            if (string.IsNullOrWhiteSpace(text))
+                return new CommandResult { Message = "Title cannot be empty.", IsError = true };
+
+            try
+            {
+                await ctx.HistoryStore.SetSessionTitleAsync(ctx.SessionId, text.Trim());
+                return new CommandResult { Message = $"Session title set: {text.Trim()}" };
+            }
+            catch (Exception ex)
+            {
+                return new CommandResult { Message = $"Failed to set title: {ex.Message}", IsError = true };
+            }
         }
     }
 }

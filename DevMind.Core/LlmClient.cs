@@ -999,6 +999,22 @@ namespace DevMind
             }
         }
 
+       /// <summary>
+        /// Prepends messages into the conversation history (after the system prompt).
+        /// Used by /resume to load prior session messages into context.
+        /// </summary>
+        public void PrependMessages(string[] roles, string[] contents)
+        {
+            if (roles == null || contents == null || roles.Length != contents.Length) return;
+            // Insert after the system prompt (index 0) at the current position 1.
+            int insertAt = 1;
+            for (int i = 0; i < roles.Length; i++)
+            {
+                _conversationHistory.Insert(insertAt, new ChatMessage(roles[i], contents[i], _currentTurn));
+                insertAt++;
+            }
+        }
+
         /// <summary>Read-only access to the file content cache for host-layer operations.</summary>
         public FileContentCache FileCache => _fileCache;
 
