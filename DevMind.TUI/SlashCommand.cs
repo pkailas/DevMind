@@ -19,6 +19,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 
@@ -68,8 +69,30 @@ namespace DevMind
         /// <summary>Machine name for history queries.</summary>
         public string MachineName { get; set; } = "";
 
-        /// <summary>Prepend messages into the conversation history (for /resume).</summary>
+       /// <summary>Prepend messages into the conversation history (for /resume).</summary>
         public Action<string[], string[]> PrependMessages { get; set; }
+
+       /// <summary>Set to true by /t to enable one-shot thinking for the next turn only.</summary>
+        public bool OneShotThinking { get; set; }
+
+        // ── Behavioral rules ─────────────────────────────────────────────────────
+
+        /// <summary>Current behavioral rules text (from TuiConfig).</summary>
+        public string BehavioralRules { get; set; } = "";
+
+        /// <summary>Called to set behavioral rules and persist them.</summary>
+        public Action<string> SetBehavioralRules { get; set; }
+
+       /// <summary>Called to rebuild the system prompt after rules change.</summary>
+        public Func<string> RebuildSystemPrompt { get; set; }
+
+        // ── Working directory ────────────────────────────────────────────────────
+
+        /// <summary>Current working directory.</summary>
+        public string WorkingDirectory { get; set; } = "";
+
+        /// <summary>Called to change the working directory and reload context.</summary>
+        public Action<string> SetWorkingDirectory { get; set; }
     }
 
    /// <summary>
@@ -273,28 +296,20 @@ namespace DevMind
                     IsError = false,
                 }));
 
-            RegisterCommand("/t",
+           RegisterCommand("/t",
                 "One-shot: send a message with thinking ON (does not change the /think default)",
                 "/t <message>",
-                (args, ctx) => Task.FromResult(new CommandResult
-                {
-                    Message = "/t: not yet implemented in TUI — requires one-shot thinking integration with agentic turn.",
-                    IsError = false,
-                }));
+                OneShotThinkHandler);
 
             RegisterCommand("/reasoning",
                 "Toggle reasoning display (alias for /think)",
                 "/reasoning on|off",
                 ThinkHandler);
 
-            RegisterCommand("/rules",
+           RegisterCommand("/rules",
                 "Show, set, or clear behavioral rules",
                 "/rules [text|clear]",
-                (args, ctx) => Task.FromResult(new CommandResult
-                {
-                    Message = "/rules: not yet implemented in TUI — requires behavioral rules persistence.",
-                    IsError = false,
-                }));
+                RulesHandler);
 
             RegisterCommand("/lsp",
                 "Show or enable/disable language server tools",
@@ -305,14 +320,10 @@ namespace DevMind
                     IsError = false,
                 }));
 
-            RegisterCommand("/dir",
+           RegisterCommand("/dir",
                 "Change working directory",
                 "/dir [path]",
-                (args, ctx) => Task.FromResult(new CommandResult
-                {
-                    Message = "/dir: not yet implemented in TUI — would need MCP reconnect.",
-                    IsError = false,
-                }));
+                DirHandler);
 
             RegisterCommand("/output-lines",
                 "Show or set tool-call output line limit",
@@ -380,11 +391,82 @@ namespace DevMind
             });
         }
 
-        // ── /depth-cap [N] ────────────────────────────────────────────────────────
+       // ── /t <message> ──────────────────────────────────────────────────────────
+
+        static Task<CommandResult> OneShotThinkHandler(string[] args, CommandContext ctx)
+        {
+            if (args.Length == 0)
+                return Task.FromResult(new CommandResult
+                {
+                    Message = "Usage: /t <message> — send with thinking ON for this turn only.",
+                    IsError = true,
+                });
+
+            ctx.OneShotThinking = true;
+            return Task.FromResult(new CommandResult
+            {
+                Message = "Thinking enabled for this turn only.",
+            });
+        }
+
+       // ── /rules [text|clear] ───────────────────────────────────────────────────
+
+        static Task<CommandResult> RulesHandler(string[] args, CommandContext ctx)
+        {
+            if (args.Length == 0)
+            {
+                // Show current rules.
+                if (string.IsNullOrEmpty(ctx.BehavioralRules))
+                    return Task.FromResult(new CommandResult { Message = "No rules set." });
+                string top = "─── Behavioral Rules ───";
+                string bot = "────────────────────────";
+                return Task.FromResult(new CommandResult
+                {
+                    Message = $"{top}\n{ctx.BehavioralRules}\n{bot}",
+                });
+            }
+
+            // Reconstruct the full text from args (preserves spaces within the rule text).
+            string text = string.Join(" ", args);
+
+            if (text.Equals("clear", StringComparison.OrdinalIgnoreCase))
+            {
+                ctx.SetBehavioralRules("");
+                ctx.RebuildSystemPrompt();
+                return Task.FromResult(new CommandResult { Message = "Behavioral rules cleared." });
+            }
+
+            ctx.SetBehavioralRules(text);
+            ctx.RebuildSystemPrompt();
+            return Task.FromResult(new CommandResult { Message = $"Behavioral rules set ({text.Length} chars)." });
+        }
+
+       // ── /dir [path] ────────────────────────────────────────────────────────────
+
+        static Task<CommandResult> DirHandler(string[] args, CommandContext ctx)
+        {
+            if (args.Length == 0)
+            {
+                return Task.FromResult(new CommandResult { Message = $"Working directory: {ctx.WorkingDirectory}" });
+            }
+
+            string path = Path.GetFullPath(string.Join(" ", args));
+
+            if (!Directory.Exists(path))
+                return Task.FromResult(new CommandResult
+                {
+                    Message = $"Directory not found: {path}",
+                    IsError = true,
+                });
+
+            ctx.SetWorkingDirectory(path);
+            return Task.FromResult(new CommandResult { Message = $"Working directory changed to: {path}" });
+        }
+
+        // ── /depth-cap [N] ────────────────────────────────────────────────
 
         const int DepthCapMin = 1;
         const int DepthCapMax = 10;
-
        static Task<CommandResult> DepthCapHandler(string[] args, CommandContext ctx)
         {
             if (args.Length == 0)
