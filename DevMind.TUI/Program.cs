@@ -21,11 +21,14 @@
 #pragma warning disable CS0618
 
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Terminal.Gui.App;
+using Terminal.Gui.Input;
 using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
 using Terminal.Gui.Editor.Document;
@@ -233,6 +236,20 @@ Application.MaximumIterationsPerSecond = 750;
             // the cursor lands there on startup.
             inputField.SetFocus();
             window.Initialized += (s, e) => inputField.SetFocus();
+
+            // Ctrl+C → copy the output pane's current mouse selection to the Windows clipboard.
+            // Bound app-wide via the instance model's Keyboard (this process uses Application.Create,
+            // so the static Application.KeyDown would throw a mixed-model error). It fires regardless
+            // of focus (the output Editor is non-focusable, so the input TextField holds focus);
+            // marking the key Handled keeps it from reaching the input field. Esc remains the quit
+            // key, so Ctrl+C is free here, and the driver delivers it as a normal keystroke
+            // (TreatControlCAsInput), not a SIGINT.
+            app.Keyboard.KeyDown += (s, key) =>
+            {
+                if (key.KeyCode != Key.C.WithCtrl.KeyCode) return;
+                key.Handled = true;
+                CopySelectionToClipboard(outputView, host);
+            };
 
            // Handle Enter in input field — submit to LLM.
             inputField.Accepting += async (s, e) =>
@@ -518,65 +535,118 @@ Application.MaximumIterationsPerSecond = 750;
             }
         }
 
+       // ── Copy selection to the Windows clipboard ───────────────────────────────
+        //
+        // The output Editor's in-process clipboard needs an STA thread and its context-menu Copy
+        // is gated on ReadOnly, so we shell out instead. The mouse-drag SelectedText keeps working
+        // under ReadOnly = true (selection commands are exempt from the ReadOnly guard), so we read
+        // it and pipe it as UTF-8 into a one-shot STA PowerShell that calls Set-Clipboard. That
+        // process reads the RAW stdin byte stream and decodes it as UTF-8 itself, so box-drawing
+        // glyphs and code survive (plain clip.exe in the console codepage mangles them), and
+        // streaming via stdin handles arbitrary length. ShellRunner is not used here: it closes the
+        // child's stdin immediately for EOF, and its env-var clipboard path caps at the ~32 KB
+        // per-variable limit.
+        static void CopySelectionToClipboard(GuiEditor outputView, TuiAgenticHost host)
+        {
+            string text = outputView.SelectedText;
+            if (string.IsNullOrEmpty(text))
+            {
+                host.AppendOutputLocal("Nothing selected to copy.\n", OutputColor.Dim);
+                return;
+            }
+
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "powershell",
+                    Arguments = "-NoProfile -NonInteractive -STA -Command " +
+                                "\"$ms = New-Object System.IO.MemoryStream; " +
+                                "[Console]::OpenStandardInput().CopyTo($ms); " +
+                                "Set-Clipboard -Value ([System.Text.Encoding]::UTF8.GetString($ms.ToArray()))\"",
+                    RedirectStandardInput = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    StandardInputEncoding = new UTF8Encoding(false),
+                };
+
+                using var proc = Process.Start(psi);
+                proc.StandardInput.Write(text);
+                proc.StandardInput.Close();
+                proc.WaitForExit(5000);
+
+                host.AppendOutputLocal($"Copied {text.Length} chars to clipboard.\n", OutputColor.Dim);
+            }
+            catch (Exception ex)
+            {
+                host.AppendOutputLocal($"[ERROR] Clipboard copy failed: {ex.Message}\n", OutputColor.Error);
+            }
+        }
+
        // ── Context file loading ──────────────────────────────────────────────────
 
-        static string LoadContextFile(string workingDirectory)
-        {
-            if (string.IsNullOrEmpty(workingDirectory)) return null;
+static string LoadContextFile(string workingDirectory)
+{
+    if (string.IsNullOrEmpty(workingDirectory)) return null;
 
-            // Check for DevMind.md or .agent.md in working directory, then walk up.
-            string dir = workingDirectory;
-            while (!string.IsNullOrEmpty(dir))
-            {
-                foreach (string name in new[] { "DevMind.md", ".agent.md" })
-                {
-                    string path = Path.Combine(dir, name);
-                    if (File.Exists(path))
-                    {
-                        try { return File.ReadAllText(path); }
-                        catch { }
-                    }
-                }
-                string parent = Path.GetDirectoryName(dir);
-                if (parent == dir) break;
-                dir = parent;
-            }
-            return null;
+    // Search working dir + git root (if different)
+    var searchDirs = new List<string> { workingDirectory };
+    string gitRoot = ContextEngine.FindGitRoot(workingDirectory);
+    if (!string.IsNullOrEmpty(gitRoot) &&
+        !string.Equals(gitRoot, workingDirectory, StringComparison.OrdinalIgnoreCase))
+        searchDirs.Add(gitRoot);
+
+    foreach (string dir in searchDirs)
+    {
+        string path = Path.Combine(dir, "AGENTS.md");
+        if (!File.Exists(path)) continue;
+        try
+        {
+            string content = File.ReadAllText(path);
+            return content;
         }
+        catch { }
+    }
+
+    return null;
+}
 
         // ── System prompt builder ─────────────────────────────────────────────────
 
-        static string BuildCombinedSystemPrompt(TuiOptions options, string devMindContext)
+static string BuildCombinedSystemPrompt(TuiOptions options, string devMindContext)
+{
+    string llmDirective = LoopHelpers.BuildToolUsePrompt(
+        buildCommand: null,
+        projectNamespace: null);
+
+    var sb = new StringBuilder();
+    sb.Append(options.SystemPrompt);
+    sb.Append("\n\n");
+    sb.Append(llmDirective);
+
+    if (!string.IsNullOrEmpty(devMindContext))
+    {
+        sb.Append("\n\n--- PROJECT CONTEXT ---\n");
+        sb.Append(devMindContext);
+        sb.Append("\n---");
+    }
+
+    try
+    {
+        var memMgr = new MemoryManager(options.WorkingDirectory);
+        string memoryIndex = memMgr.LoadIndex();
+        if (!string.IsNullOrWhiteSpace(memoryIndex))
         {
-            var sb = new StringBuilder();
-            sb.AppendLine(options.SystemPrompt);
-
-            if (!string.IsNullOrEmpty(devMindContext))
-            {
-                sb.AppendLine("\n--- PROJECT CONTEXT ---");
-                sb.AppendLine(devMindContext);
-            }
-
-            // Tool catalog (same as CLI).
-            sb.AppendLine("\n--- TOOLS ---");
-            sb.AppendLine("You have access to the following tools. Use them by emitting the corresponding directives:");
-            sb.AppendLine("- READ filename — read a file into context");
-            sb.AppendLine("- PATCH filename — edit an existing file (FIND/REPLACE pairs)");
-            sb.AppendLine("- FILE: filename — create a new file");
-            sb.AppendLine("- SHELL: command — run a shell command");
-            sb.AppendLine("- GREP: \"pattern\" filename — search a file for a pattern");
-            sb.AppendLine("- FIND: \"pattern\" *.cs — search across files");
-            sb.AppendLine("- DELETE filename — delete a file");
-            sb.AppendLine("- RENAME old new — rename a file");
-            sb.AppendLine("- DIFF filename — show file changes");
-            sb.AppendLine("- TEST project — run tests");
-            sb.AppendLine("- RECALL_MEMORY topic — recall saved memory");
-            sb.AppendLine("- SAVE_MEMORY topic content — save memory");
-            sb.AppendLine("- LIST_MEMORY — list memory topics");
-            sb.AppendLine("- DONE — signal task completion");
-            sb.AppendLine("- SCRATCHPAD — track multi-step task state");
-
-            return sb.ToString();
+            sb.Append("\n\n--- Session Memory (MEMORY.md) ---\n");
+            sb.Append(memoryIndex);
+            sb.Append("\n---");
         }
+    }
+    catch { }
+
+    return sb.ToString();
+}
     }
 }
