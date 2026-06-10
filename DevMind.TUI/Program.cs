@@ -349,6 +349,22 @@ Application.MaximumIterationsPerSecond = 750;
                             // Rebuild system prompt with new context.
                             combinedSystemPrompt = BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules);
                         },
+                        // /dir -b: interactive directory-only picker, run modally on the UI thread.
+                        // Returns the chosen directory, or null on cancel/Esc (handler no-ops).
+                        BrowseForDirectory = (startDir) =>
+                        {
+                            string start = !string.IsNullOrEmpty(startDir) && Directory.Exists(startDir)
+                                ? startDir : Directory.GetCurrentDirectory();
+                            using var dlg = new OpenDialog
+                            {
+                                Title = "Select working directory",
+                                OpenMode = OpenMode.Directory,
+                                AllowsMultipleSelection = false,
+                                Path = start,
+                            };
+                            app.Run(dlg);
+                            return dlg.Canceled || string.IsNullOrEmpty(dlg.Path) ? null : dlg.Path;
+                        },
                     };
 
                    CommandResult result = await SlashCommand.Dispatch(input, cmdCtx);
