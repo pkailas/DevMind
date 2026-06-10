@@ -40,6 +40,9 @@ namespace DevMind
     {
        static async Task<int> Main(string[] args)
         {
+            // Load ~/.devmind.env before any env var reads.
+            EnvFileLoader.Load();
+
             // Parse args — same pattern as CLI.
             var options = TuiOptions.FromArgs(args);
 

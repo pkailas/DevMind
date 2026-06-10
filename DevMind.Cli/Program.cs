@@ -20,6 +20,8 @@ namespace DevMind
                 return 0;
             }
 
+            // Load ~/.devmind.env before any env var reads.
+            EnvFileLoader.Load();
             var options = CliOptions.FromArgs(args);
 
             // Context file discovery: check working dir then git root.
