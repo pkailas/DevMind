@@ -55,7 +55,7 @@ namespace DevMind
         private readonly Dictionary<string, string> _fileSnapshots =
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-        private readonly MemoryManager _memoryManager;
+       private MemoryManager _memoryManager;
 
         private const int PatchBackupStackLimit = 10;
         private readonly Stack<(string filePath, string backupPath)> _patchBackupStack =
@@ -290,7 +290,18 @@ namespace DevMind
 
         // ── IAgenticHost.GetWorkingDirectory ──────────────────────────────────────
 
-        string IAgenticHost.GetWorkingDirectory() => _shellRunner.WorkingDirectory;
+       string IAgenticHost.GetWorkingDirectory() => _shellRunner.WorkingDirectory;
+
+        /// <summary>Change the working directory (used by /dir slash command).</summary>
+        public void SetWorkingDirectory(string dir)
+        {
+            if (_shellRunner.ChangeDirectory(dir))
+            {
+                // Also update the memory manager for the new directory.
+                if (!string.IsNullOrEmpty(dir))
+                    _memoryManager = new MemoryManager(dir);
+            }
+        }
 
         // ── IAgenticHost.UpdateScratchpad ─────────────────────────────────────────
 
