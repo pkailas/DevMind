@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v7.27
+// File: LlmClient.cs  v7.28
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -260,7 +260,7 @@ namespace DevMind
         /// <param name="apiKey">The API key for authentication.</param>
         public void Configure(string endpointUrl, string apiKey)
         {
-            _baseUrl = endpointUrl?.TrimEnd('/') ?? "http://127.0.0.1:1234/v1";
+            _baseUrl = NormalizeEndpointUrl(endpointUrl);
             _apiKey  = apiKey;
             string apiKeyState = _apiKey == null ? "null" : _apiKey.Length == 0 ? "empty" : $"set (length={_apiKey.Length})";
             Debug.WriteLine($"[DevMind TRACE] Configure() called — _apiKey is {apiKeyState}, endpoint={_baseUrl}");
@@ -268,6 +268,39 @@ namespace DevMind
                 _pendingDebugLog.Add($"\n[DEBUG] Configure() — API key: {apiKeyState}, endpoint: {_baseUrl}\n");
             RecreateHttpClient();
             _contextDetectionTask = DetectContextSizeAsync();
+        }
+
+        /// <summary>
+        /// Normalizes a configured endpoint URL so the OpenAI-compatible API prefix is always
+        /// exactly one trailing <c>/v1</c>. The chat request URL is built as
+        /// <c>_baseUrl + "/chat/completions"</c>, so <c>_baseUrl</c> must resolve to
+        /// <c>&lt;root&gt;/v1</c> for the POST to land on <c>&lt;root&gt;/v1/chat/completions</c>.
+        /// <para>
+        /// Without normalization the final URL depends on the exact endpoint string the user
+        /// supplies, which is the source of the "404 (Not Found) on every LLM call" bug:
+        /// </para>
+        /// <list type="bullet">
+        ///   <item>endpoint ending in <c>/v1/v1</c> (accidental duplication) →
+        ///         POST <c>/v1/v1/chat/completions</c> → server 404.</item>
+        ///   <item>endpoint with no <c>/v1</c> at all → POST <c>/chat/completions</c>, which some
+        ///         OpenAI-compatible servers also reject with 404.</item>
+        /// </list>
+        /// We collapse any number of trailing <c>/v1</c> segments to one (handles duplication) and
+        /// append a single <c>/v1</c> when none is present (handles omission), so the final POST is
+        /// always <c>&lt;root&gt;/v1/chat/completions</c> — matching the path the working TS client
+        /// (OpenAI SDK with <c>baseURL=&lt;root&gt;/v1</c>) hits. Downstream probes that strip a
+        /// single trailing <c>/v1</c> (health/context detection) continue to work unchanged.
+        /// </summary>
+        internal static string NormalizeEndpointUrl(string endpointUrl)
+        {
+            string baseUrl = (string.IsNullOrWhiteSpace(endpointUrl)
+                ? "http://127.0.0.1:1234/v1"
+                : endpointUrl.Trim()).TrimEnd('/');
+
+            while (baseUrl.EndsWith("/v1", StringComparison.OrdinalIgnoreCase))
+                baseUrl = baseUrl.Substring(0, baseUrl.Length - 3).TrimEnd('/');
+
+            return baseUrl + "/v1";
         }
 
         /// <summary>
