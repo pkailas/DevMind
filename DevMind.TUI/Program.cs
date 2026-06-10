@@ -36,15 +36,30 @@ using GuiEditor = Terminal.Gui.Editor.Editor;
 
 namespace DevMind
 {
-    internal static class Program
+   internal static class Program
     {
+        // Global TUI config — loaded at startup, persisted by slash commands.
+        static TuiConfig _config;
+
        static async Task<int> Main(string[] args)
         {
             // Load ~/.devmind.env before any env var reads.
             EnvFileLoader.Load();
 
+            // Load global TUI config from %APPDATA%\devmind\devmind.json.
+            _config = TuiConfig.Load();
+
             // Parse args — same pattern as CLI.
             var options = TuiOptions.FromArgs(args);
+
+            // Apply config working directory (lower priority than CLI --dir).
+            if (!string.IsNullOrEmpty(_config.WorkingDirectory) &&
+                Directory.Exists(_config.WorkingDirectory))
+            {
+                // Only apply if --dir was not passed on the command line.
+                if (Array.IndexOf(args, "--dir") < 0)
+                    options.WorkingDirectory = _config.WorkingDirectory;
+            }
 
             // Context file discovery.
             string devMindContext = LoadContextFile(options.WorkingDirectory);
@@ -218,8 +233,8 @@ Application.MaximumIterationsPerSecond = 750;
                 });
             }
 
-            // Build combined system prompt.
-            string combinedSystemPrompt = BuildCombinedSystemPrompt(options, devMindContext);
+           // Build combined system prompt.
+            string combinedSystemPrompt = BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules);
 
             // Banner. All output MUST go through the host (never outputView.InsertText
             // directly) — TuiAgenticHost tracks the logical append position for color
@@ -307,14 +322,71 @@ Application.MaximumIterationsPerSecond = 750;
                         HistoryStore = historyStore,
                         SessionId = SessionId.Get(),
                         MachineName = SessionId.GetMachineName(),
-                        PrependMessages = (roles, contents) => llmClient.PrependMessages(roles, contents),
+                       PrependMessages = (roles, contents) => llmClient.PrependMessages(roles, contents),
+                        // Behavioral rules.
+                        BehavioralRules = _config.BehavioralRules,
+                        SetBehavioralRules = (rules) =>
+                        {
+                            _config.BehavioralRules = rules;
+                            _config.Save();
+                        },
+                       RebuildSystemPrompt = () =>
+                        {
+                            combinedSystemPrompt = BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules);
+                            return combinedSystemPrompt;
+                        },
+                        // Working directory.
+                        WorkingDirectory = options.WorkingDirectory,
+                       SetWorkingDirectory = (dir) =>
+                        {
+                            options.WorkingDirectory = dir;
+                            _config.WorkingDirectory = dir;
+                            _config.Save();
+                            // Reload AGENTS.md from new directory.
+                            devMindContext = LoadContextFile(dir);
+                            // Update the host's shell runner working directory.
+                            host.SetWorkingDirectory(dir);
+                            // Rebuild system prompt with new context.
+                            combinedSystemPrompt = BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules);
+                        },
                     };
 
-                    CommandResult result = await SlashCommand.Dispatch(input, cmdCtx);
+                   CommandResult result = await SlashCommand.Dispatch(input, cmdCtx);
 
                     // Render the result.
                     OutputColor resultColor = result.IsError ? OutputColor.Error : OutputColor.Dim;
                     host.AppendOutputLocal($"{result.Message}\n", resultColor);
+
+                    // /t: one-shot thinking — run the agentic turn with thinking ON, then revert.
+                    if (cmdCtx.OneShotThinking)
+                    {
+                        // Extract the message from "/t <message>".
+                        string message = input.Substring(2).Trim();
+                        if (!string.IsNullOrEmpty(message))
+                        {
+                            // Echo the actual message.
+                            host.AppendOutputLocal($"\n> {message}\n", OutputColor.Input);
+
+                            // Enable thinking for this turn.
+                            bool previousThinking = options.ShowLlmThinking;
+                            options.ShowLlmThinking = true;
+
+                            inputField.CanFocus = false;
+                            statusLabel.Text = "Processing...";
+
+                            await RunTurnAsync(message, options, llmClient, host, driver, state,
+                                callbacks, combinedSystemPrompt, cts, app,
+                                historyStore, SessionId.Get(), SessionId.GetMachineName());
+
+                            // Revert thinking.
+                            options.ShowLlmThinking = previousThinking;
+
+                            inputField.CanFocus = true;
+                            inputField.SetFocus();
+                            statusLabel.Text = "Ready";
+                            return;
+                        }
+                    }
 
                     // /restart is an alias handled by the /new handler internally,
                     // but keep backward compatibility by registering it explicitly.
@@ -619,37 +691,48 @@ static string LoadContextFile(string workingDirectory)
         // ── System prompt builder ─────────────────────────────────────────────────
 
 static string BuildCombinedSystemPrompt(TuiOptions options, string devMindContext)
-{
-    string llmDirective = LoopHelpers.BuildToolUsePrompt(
-        buildCommand: null,
-        projectNamespace: null);
+        => BuildCombinedSystemPrompt(options, devMindContext, "");
 
-    var sb = new StringBuilder();
-    sb.Append(options.SystemPrompt);
-    sb.Append("\n\n");
-    sb.Append(llmDirective);
-
-    if (!string.IsNullOrEmpty(devMindContext))
+    static string BuildCombinedSystemPrompt(TuiOptions options, string devMindContext, string behavioralRules)
     {
-        sb.Append("\n\n--- PROJECT CONTEXT ---\n");
-        sb.Append(devMindContext);
-        sb.Append("\n---");
-    }
+        string llmDirective = LoopHelpers.BuildToolUsePrompt(
+            buildCommand: null,
+            projectNamespace: null);
 
-    try
-    {
-        var memMgr = new MemoryManager(options.WorkingDirectory);
-        string memoryIndex = memMgr.LoadIndex();
-        if (!string.IsNullOrWhiteSpace(memoryIndex))
+        var sb = new StringBuilder();
+        sb.Append(options.SystemPrompt);
+        sb.Append("\n\n");
+        sb.Append(llmDirective);
+
+        // Behavioral rules — after base prompt, before project context.
+        if (!string.IsNullOrEmpty(behavioralRules))
         {
-            sb.Append("\n\n--- Session Memory (MEMORY.md) ---\n");
-            sb.Append(memoryIndex);
+            sb.Append("\n\n--- BEHAVIORAL RULES ---\n");
+            sb.Append(behavioralRules);
             sb.Append("\n---");
         }
-    }
-    catch { }
 
-    return sb.ToString();
-}
+        if (!string.IsNullOrEmpty(devMindContext))
+        {
+            sb.Append("\n\n--- PROJECT CONTEXT ---\n");
+            sb.Append(devMindContext);
+            sb.Append("\n---");
+        }
+
+        try
+        {
+            var memMgr = new MemoryManager(options.WorkingDirectory);
+            string memoryIndex = memMgr.LoadIndex();
+            if (!string.IsNullOrWhiteSpace(memoryIndex))
+            {
+                sb.Append("\n\n--- Session Memory (MEMORY.md) ---\n");
+                sb.Append(memoryIndex);
+                sb.Append("\n---");
+            }
+        }
+        catch { }
+
+        return sb.ToString();
+    }
     }
 }
