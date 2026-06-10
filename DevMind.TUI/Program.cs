@@ -41,9 +41,14 @@ namespace DevMind
             // Context file discovery.
             string devMindContext = LoadContextFile(options.WorkingDirectory);
 
-            // Construct core objects.
+           // Construct core objects.
             var llmClient = new LlmClient(options);
             llmClient.Configure(options.EndpointUrl, options.ApiKey);
+
+            // History store — created from DEVMIND_HISTORY_* env vars.
+            // Falls back to NullHistoryStore when history is disabled.
+            var historyStore = HistoryStoreFactory.Create();
+            try { historyStore.InitAsync().Wait(); } catch { /* non-fatal — NullHistoryStore fallback */ }
 
             var cts = new CancellationTokenSource();
 
@@ -275,26 +280,32 @@ Application.MaximumIterationsPerSecond = 750;
                 // burn model tokens. The dispatcher routes to registered handlers.
                 if (SlashCommand.IsSlashCommand(input))
                 {
-                    // Build the command context with callbacks into TUI state.
+                   // Build the command context with callbacks into TUI state.
                     var cmdCtx = new CommandContext
                     {
                         DepthCap = options.AgenticLoopMaxDepth,
                         ThinkingEnabled = options.ShowLlmThinking,
                         SystemPrompt = llmClient.SystemPromptContent ?? combinedSystemPrompt,
-                        ResetConversation = () =>
+                       ResetConversation = () =>
                         {
                             state.ResetForUserTurn();
                             llmClient.ClearHistory();
                             host.ResetSession();
+                            SessionId.Reset(); // new session ID for next turn
                             var oldCts = cts;
                             cts = new CancellationTokenSource();
                             oldCts.Dispose();
                         },
                         SetDepthCap = (n) => { options.AgenticLoopMaxDepth = n; },
                         SetThinking = (on) => { options.ShowLlmThinking = on; },
+                        // History fields.
+                        HistoryStore = historyStore,
+                        SessionId = SessionId.Get(),
+                        MachineName = SessionId.GetMachineName(),
+                        PrependMessages = (roles, contents) => llmClient.PrependMessages(roles, contents),
                     };
 
-                    CommandResult result = SlashCommand.Dispatch(input, cmdCtx);
+                    CommandResult result = await SlashCommand.Dispatch(input, cmdCtx);
 
                     // Render the result.
                     OutputColor resultColor = result.IsError ? OutputColor.Error : OutputColor.Dim;
@@ -314,9 +325,10 @@ Application.MaximumIterationsPerSecond = 750;
                 inputField.CanFocus = false;
                 statusLabel.Text = "Processing...";
 
-                // Run the agentic turn.
+               // Run the agentic turn.
                 await RunTurnAsync(input, options, llmClient, host, driver, state,
-                    callbacks, combinedSystemPrompt, cts, app);
+                    callbacks, combinedSystemPrompt, cts, app,
+                    historyStore, SessionId.Get(), SessionId.GetMachineName());
 
                 // Re-enable input.
                 inputField.CanFocus = true;
@@ -332,7 +344,7 @@ Application.MaximumIterationsPerSecond = 750;
 
         // ── Agentic turn loop ─────────────────────────────────────────────────────
 
-      static async Task RunTurnAsync(
+     static async Task RunTurnAsync(
             string userInput,
             TuiOptions options,
             LlmClient llmClient,
@@ -342,7 +354,10 @@ Application.MaximumIterationsPerSecond = 750;
             TuiLoopCallbacks callbacks,
             string combinedSystemPrompt,
             CancellationTokenSource cts,
-            IApplication app)
+            IApplication app,
+            IHistoryStore historyStore,
+            string sessionId,
+            string machineName)
         {
             state.ResetForUserTurn();
             host.ResetTaskContext();
@@ -445,9 +460,47 @@ Application.MaximumIterationsPerSecond = 750;
                     });
                     return;
                 }
-                finally
+               finally
                 {
                     if (!timerStopped) callbacks.StopThinkingTimer();
+                }
+
+                // Save this turn to history (user message + assistant response).
+                if (historyStore != null && !cts.Token.IsCancellationRequested)
+                {
+                    try
+                    {
+                        string userMsg = currentPrompt;
+                        string assistantMsg = responseBuffer.ToString();
+                        var messages = new[]
+                        {
+                            new HistoryMessage
+                            {
+                                SessionId = sessionId,
+                                MachineName = machineName,
+                                TurnIndex = llmClient.CurrentTurn,
+                                Role = "user",
+                                Content = userMsg,
+                                CreatedAt = DateTime.UtcNow,
+                            },
+                            new HistoryMessage
+                            {
+                                SessionId = sessionId,
+                                MachineName = machineName,
+                                TurnIndex = llmClient.CurrentTurn,
+                                Role = "assistant",
+                                Content = assistantMsg,
+                                CreatedAt = DateTime.UtcNow,
+                            },
+                        };
+                        await historyStore.SaveMessagesAsync(messages);
+                        // Upsert the session record.
+                        await historyStore.UpsertSessionAsync(sessionId, machineName);
+                    }
+                    catch
+                    {
+                        // Non-fatal — history save failures should not break the turn.
+                    }
                 }
 
                 LoopIterationResult iter;

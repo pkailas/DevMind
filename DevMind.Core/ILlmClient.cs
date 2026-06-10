@@ -44,7 +44,13 @@ namespace DevMind
             string combinedSystemPrompt = null,
             CancellationToken cancellationToken = default);
 
-        /// <summary>Resets conversation history to the system prompt only.</summary>
+       /// <summary>Resets conversation history to the system prompt only.</summary>
         void ClearHistory(bool preserveScratchpad = false);
+
+        /// <summary>
+        /// Prepends messages into the conversation history (after the system prompt).
+        /// Used by /resume to load prior session messages into context.
+        /// </summary>
+        void PrependMessages(string[] roles, string[] contents);
     }
 }
