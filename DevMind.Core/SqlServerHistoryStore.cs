@@ -72,6 +72,21 @@ namespace DevMind
                 await cmd.ExecuteNonQueryAsync();
             }
 
+           // Create index for session + turn lookups
+            using (var cmd = new SqlCommand(@"
+                IF NOT EXISTS (
+                    SELECT 1 FROM sys.indexes
+                    WHERE name = N'IX_DevMindHistory_Session_Turn'
+                      AND object_id = OBJECT_ID(N'dbo.DevMindHistory')
+                )
+                BEGIN
+                    CREATE INDEX IX_DevMindHistory_Session_Turn
+                      ON dbo.DevMindHistory(SessionId, TurnIndex);
+                END", _connection))
+            {
+                await cmd.ExecuteNonQueryAsync();
+            }
+
             // Create DevMindSessions table
             using (var cmd = new SqlCommand(@"
                 IF OBJECT_ID(N'dbo.DevMindSessions', N'U') IS NULL
