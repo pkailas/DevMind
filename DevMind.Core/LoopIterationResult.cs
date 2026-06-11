@@ -26,19 +26,25 @@ namespace DevMind
         public ExecutionResult Result { get; }
         /// <summary>Tool calls from the LLM; null when none were made.</summary>
         public List<ToolCallResult> ToolCalls { get; }
-        /// <summary>Non-null for ShouldReTrigger — extension assigns this to InputTextBox.Text before re-triggering.</summary>
+       /// <summary>Non-null for ShouldReTrigger — extension assigns this to InputTextBox.Text before re-triggering.</summary>
         public string NextContextualMessage { get; }
         /// <summary>True when the extension should call LogTrainingTurn after processing Kind.</summary>
         public bool ShouldLogTurn { get; }
+        /// <summary>
+        /// True when the caller should pass forceToolChoiceRequired=true to the next
+        /// SendMessageAsync call. Used by the Layer 2 narration-retry guard.
+        /// </summary>
+        public bool ForceToolChoiceRequired { get; }
 
-        private LoopIterationResult(
+       private LoopIterationResult(
             LoopIterationKind kind,
             string assistantResponse,
             ResponseOutcome outcome,
             ExecutionResult result,
             List<ToolCallResult> toolCalls,
             string nextContextualMessage,
-            bool shouldLogTurn)
+            bool shouldLogTurn,
+            bool forceToolChoiceRequired = false)
         {
             Kind = kind;
             AssistantResponse = assistantResponse;
@@ -47,16 +53,17 @@ namespace DevMind
             ToolCalls = toolCalls;
             NextContextualMessage = nextContextualMessage;
             ShouldLogTurn = shouldLogTurn;
+            ForceToolChoiceRequired = forceToolChoiceRequired;
         }
 
         internal static LoopIterationResult MakeTerminal(
             string assistantResponse, ResponseOutcome outcome, ExecutionResult result, List<ToolCallResult> toolCalls)
             => new LoopIterationResult(LoopIterationKind.Terminal, assistantResponse, outcome, result, toolCalls, null, true);
 
-        internal static LoopIterationResult MakeShouldReTrigger(
+       internal static LoopIterationResult MakeShouldReTrigger(
             string assistantResponse, ResponseOutcome outcome, ExecutionResult result, List<ToolCallResult> toolCalls,
-            string nextMessage, bool shouldLog)
-            => new LoopIterationResult(LoopIterationKind.ShouldReTrigger, assistantResponse, outcome, result, toolCalls, nextMessage, shouldLog);
+            string nextMessage, bool shouldLog, bool forceToolChoiceRequired = false)
+            => new LoopIterationResult(LoopIterationKind.ShouldReTrigger, assistantResponse, outcome, result, toolCalls, nextMessage, shouldLog, forceToolChoiceRequired);
 
         internal static LoopIterationResult MakeCancelled(
             string assistantResponse, ResponseOutcome outcome, ExecutionResult result, List<ToolCallResult> toolCalls)

@@ -34,7 +34,7 @@ namespace DevMind
         /// <summary>Injects a tool result message into conversation history.</summary>
         void AddToolResultMessage(string toolCallId, string content);
 
-        /// <summary>Streams a message to the LLM endpoint, invoking callbacks as tokens arrive.</summary>
+       /// <summary>Streams a message to the LLM endpoint, invoking callbacks as tokens arrive.</summary>
         Task SendMessageAsync(
             string userMessage,
             Action<string> onToken,
@@ -42,7 +42,8 @@ namespace DevMind
             Action<Exception> onError,
             bool deferCompression = false,
             string combinedSystemPrompt = null,
-            CancellationToken cancellationToken = default);
+            CancellationToken cancellationToken = default,
+            bool forceToolChoiceRequired = false);
 
        /// <summary>Resets conversation history to the system prompt only.</summary>
         void ClearHistory(bool preserveScratchpad = false);

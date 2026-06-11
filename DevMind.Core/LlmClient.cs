@@ -537,14 +537,15 @@ namespace DevMind
         /// tool catalog + DevMind.md context). When non-null, preferred over
         /// DevMindOptions.Instance.SystemPrompt. Pass null to use the options value (legacy path).</param>
         /// <param name="cancellationToken">Cancellation token to abort the request.</param>
-        public async Task SendMessageAsync(
+       public async Task SendMessageAsync(
             string userMessage,
             Action<string> onToken,
             Action onComplete,
             Action<Exception> onError,
             bool deferCompression = false,
             string combinedSystemPrompt = null,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default,
+            bool forceToolChoiceRequired = false)
         {
             System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] SendMessageAsync ENTER — userMessage length={userMessage?.Length ?? 0}, deferCompression={deferCompression}");
 
@@ -777,8 +778,8 @@ namespace DevMind
             // swaps in a fresh connection pool so the chat request goes over a live TCP connection.
             await EnsureConnectionHealthAsync(cancellationToken).ConfigureAwait(false);
 
-            string modelName = _options.ModelName;
-            string requestJson = BuildRequestJson(modelName);
+           string modelName = _options.ModelName;
+            string requestJson = BuildRequestJson(modelName, forceToolChoiceRequired);
 
             string url = _baseUrl + "/chat/completions";
 
@@ -2865,7 +2866,7 @@ namespace DevMind
             return null;
         }
 
-        private string BuildRequestJson(string modelName)
+       private string BuildRequestJson(string modelName, bool forceToolChoiceRequired = false)
         {
             // Append-only: serialize _conversationHistory exactly as-is.
             // No phantom injections — the JSON payload is a 1:1 mirror of the list.
@@ -2911,7 +2912,44 @@ namespace DevMind
                 request["model"] = modelName;
             }
 
-            request["tools"] = ToolRegistry.BuildToolsArray();
+           request["tools"] = ToolRegistry.BuildToolsArray();
+
+           // Layer 1 (cold-start): force the model to make a tool call on the
+            // opening turn. Without this, the model often writes prose like "let me check X,
+            // now let me check Y" with no tool_calls and then stops — wasting a turn.
+            //
+            // Detection: count messages with Role == "tool" in the conversation history.
+            // Zero tool-result messages → this is still the cold start → force "required".
+            // >= 1 tool result → the rhythm is established → use "auto".
+            //
+            // Layer 2 (mid-session retry): when the LoopDriver detects a narration stall
+            // (prose with no tool_calls but with a claim signal), it forces a single retry
+            // with tool_choice="required" regardless of the cold-start count. This catches
+            // stalls that happen after tool results already exist in context.
+            //
+            // Trade-off: a genuinely tool-free opening question (e.g. "what is 17×23") would
+            // be forced into a spurious tool call. Rare in real coding use.
+            const bool ForceToolChoiceOnColdStart = true;
+            if (ForceToolChoiceOnColdStart)
+            {
+                // Layer 2 override: explicit force from the retry path always wins.
+                if (forceToolChoiceRequired)
+                {
+                    request["tool_choice"] = "required";
+                }
+                else
+                {
+                    int toolResultCount = 0;
+                    for (int ti = 0; ti < _conversationHistory.Count; ti++)
+                    {
+                        if (_conversationHistory[ti].Role == "tool")
+                        {
+                            toolResultCount++;
+                        }
+                    }
+                    request["tool_choice"] = toolResultCount == 0 ? "required" : "auto";
+                }
+            }
 
             return request.ToString(Formatting.None);
         }

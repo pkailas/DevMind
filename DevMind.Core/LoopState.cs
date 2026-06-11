@@ -8,7 +8,7 @@ namespace DevMind
     /// the agentic pipeline in SendToLlm(). Owned by DevMindToolWindowControl;
     /// shared with partials via the single <c>_loopState</c> instance.
     /// </summary>
-    public sealed class LoopState
+   public sealed class LoopState
     {
         public int    AgenticDepth             { get; set; }
         public bool   ShellLoopPending         { get; set; }
@@ -17,16 +17,23 @@ namespace DevMind
         public int    ConsecutiveErrorCount    { get; set; }
 
         /// <summary>
+        /// True when a narration-retry has already been consumed for the current
+        /// user turn. Prevents infinite retry loops — only one forced retry per turn.
+        /// </summary>
+        public bool   NarrationRetryUsed       { get; set; }
+
+        /// <summary>
         /// Resets all fields to initial values for a new user-initiated turn.
         /// Does NOT clear _taskReadFiles — the caller handles that separately.
         /// </summary>
-        public void ResetForUserTurn()
+       public void ResetForUserTurn()
         {
             AgenticDepth             = 0;
             ShellLoopPending         = false;
             PromptedForTaskDone      = false;
             ConsecutiveErrorToolName = null;
             ConsecutiveErrorCount    = 0;
+            NarrationRetryUsed       = false;
         }
     }
 }
