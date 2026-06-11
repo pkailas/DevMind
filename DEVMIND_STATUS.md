@@ -1,6 +1,6 @@
 # DevMind — Status & Architecture
 
-_Last updated: 2026-06-09_
+_Last updated: 2026-06-14_
 
 This is the living "where am I and why" reference for the DevMind rebuild. It captures current
 state, the architectural decisions behind it, the phase roadmap, hard-won Terminal.Gui v2 facts,
@@ -44,14 +44,30 @@ Go stays as the unused fallback.
 ## 2. Repositories & Layout
 
 - **C# solution (the future):** `C:\Users\pkailas\source\repos\DevMind`
-  - `DevMind.Core` — the engine. UI-agnostic. Agentic loop (`LoopDriver`, `AgenticExecutor`),
-    `LlmClient`, context management, PatchEngine, LSP router, ShellRunner, MemoryManager.
+ - `DevMind.Core` — the engine. UI-agnostic. Agentic loop (`LoopDriver`, `AgenticExecutor`),
+    `LlmClient`, context management, PatchEngine, LSP router, ShellRunner, MemoryManager,
+    WebTools (SearXNG + fetcher), LspToolService (host-side LSP facade), BuildCommandResolver
+    (auto-detect build: .vsixmanifest→MSBuild, package.json→npm/bun, .slnx/.sln/.csproj→dotnet).
     Boundary interfaces: `IAgenticHost` (side effects) + `ILoopCallbacks` (UI-state hooks).
     History store added 2026-06-09 (`IHistoryStore` + SqlServer/Sqlite/Null implementations).
+    Scratchpad: real persistence via `LlmClient._taskScratchpad` + `Func<string>` delegate in
+    `BuildCombinedSystemPrompt` (rebuilt every iteration, cleared on `ResetSession()`).
+    **Added 2026-06-13:** `CommandRegistry` (tool registration system), `ToolResult`/`ToolError`
+    types, `IFileSystem` abstraction for testable file operations.
+    **Added 2026-06-14:** ShellRunner timeout (3-layer precedence: per-call > DEVMIND_SHELL_TIMEOUT env > 120s fallback).
+    Web error mapping: surfaces real HTTP status + detail (removed EnsureSuccessStatusCode).
+    Depth cap ceiling raised from 10 to 200 (`DepthCapMax` constant).
   - `DevMind.McpServer` — the existing C# MCP server (~27 tools). References Core one-way.
   - `DevMind.Cli` — console skin; reference implementation of the interfaces
     (`ConsoleAgenticHost`).
-  - `DevMind.TUI` — **NEW** Terminal.Gui v2 skin (the rebuild target).
+ - `DevMind.TUI` — Terminal.Gui v2 skin (the rebuild target). Dressed Phase 1-5: status bar
+    (TuiStatusBar.cs), live token meter + tok/s, multi-line input (TuiInputBox.cs, Editor-as-input),
+    polish. Published as self-contained exe. **2026-06-13:** Added TuiOptions.cs (CLI argument
+    parsing), TuiLoopCallbacks.cs (loop state callbacks), TuiAgenticHost.cs (agentic host
+    implementation), Program.cs (entry point).
+  - `DevMind.Core.Tests` — xUnit test project (net10.0); **67 tests, 67/67 passing** covering
+    all 10 public PatchEngine methods (fuzzy thresholds, CRLF/LF preservation, NormalizeWithMap
+    offset mapping, reverse-order multi-block application).
   - `_archive/` — retired projects (ShellHarness, ShellEncodingProbe, old VSIX).
   - Branch: `master`.
 
@@ -81,21 +97,40 @@ Go stays as the unused fallback.
   - Color (per-`OutputColor`), black background, word wrap.
   - Typing-lag fix (`MaximumIterationsPerSecond = 750`).
   - **Editor-component migration** ✅ (validated faster-than-ever; see §6).
-- **Phase 3 — Port shell features** 🔶 in progress:
-  - ✅ Slash-command parsing + dispatch (`SlashCommand.cs`, 18 commands; wired: /new, /clear,
-    /restart, /think, /reasoning, /depth-cap, /system_prompt, /help).
+- **Phase 3 — Port shell features** ✅ done:
+  - ✅ Slash-command parsing + dispatch (`SlashCommand.cs`, 18 commands).
   - ✅ SQL history backend built (`IHistoryStore`, SqlServer/Sqlite/Null, factory, SessionId) —
     **NOT YET TESTED against a real DB** (needs `DEVMIND_HISTORY_*` env vars + connection
     string). Unblocks /history, /resume, /title stubs.
-  - ⬜ Remaining stubs: /compact, /t, /rules, /lsp, /dir, /output-lines, /training-delete-last.
-  - ⬜ `/copy` (needs clipboard + UI — Opus track).
-  - ⬜ Config / env wiring into the TUI (the `dm.cmd` vars).
+  - ✅ Remaining stubs: /compact, /t, /rules, /lsp, /dir, /output-lines, /training-delete-last.
+  - ✅ `/copy` (clipboard working).
+  - ✅ Config / env wiring into the TUI (`~/.devmind.env` with flat C# vars).
+  - ✅ Depth cap ceiling raised from 10 to 200 (`DepthCapMax` constant).
+  - ✅ 7 tools wired into TUI/Cli skin path: get_diagnostics, go_to_definition, find_references,
+    hover, find_symbol, web_search, web_fetch — all runtime-verified.
+  - ✅ BuildCommandResolver — auto-detects build command with 3-layer precedence.
+  - ✅ Shell timeout: 3-layer precedence (per-call > DEVMIND_SHELL_TIMEOUT env > 120s fallback).
+  - ✅ Scratchpad: real persistence (not theater), runtime-verified.
+  - ✅ Web error mapping: surfaces real HTTP status + detail (removed EnsureSuccessStatusCode).
+  - ✅ _archive added to ContextEngine._noisePathSegments — fixes build detector, makes _archive
+    invisible to list_files/find_in_files/grep uniformly.
+  - ✅ PatchEngine tests: 67 tests, 67/67 passing (DevMind.Core.Tests, xUnit, net10.0).
 - **Phase 4 — Per-tool permission gating** ⬜: at the `TuiAgenticHost`/`IAgenticHost` boundary.
+   **Added 2026-06-13:** `CommandRegistry` system in place — tools registered with names,
+   descriptions, and parameter schemas. Foundation for per-tool gating.
   Hooks ALREADY EXIST in the interface (`ShowDiffPreviewAsync`, `ConfirmUnreadFileWriteAsync` —
   currently auto-approved). Per-method policy (ask/session/always), persisted config,
   Terminal.Gui v2 approval dialogs.
-- **Phase 5 — Cutover** ⬜: new `dm` wrapper → `DevMind.TUI`; retire the TS `DevMindShell`;
-  retire or keep `DevMind.Cli` as fallback.
+- **Phase 5 — Cutover** ✅ mostly done:
+   **Added 2026-06-13:** `IFileSystem` abstraction added to Core — enables testable file
+   operations and paves the way for sandboxed file access in Phase 4.
+  - ✅ Published exe: `C:\Users\pkailas\bin\devmind\DevMind.TUI.exe` (self-contained single-file Release).
+  - ✅ `devmind.cmd` on PATH (`C:\Users\pkailas\bin` added to user PATH).
+  - ✅ Passes `--dir "%CD%"` so `devmind` from any folder targets that folder.
+  - ✅ `~/.devmind.env` updated with flat C# vars: DEVMIND_ENDPOINT, DEVMIND_API_KEY,
+    DEVMIND_SEARCH_URL, DEVMIND_FETCH_URL.
+  - ✅ Runtime-verified: connects to Qwen3.6-27B-Q8_0, answers prompts.
+  - ⬜ TS `DevMindShell` formally retired.
 
 ---
 
@@ -114,9 +149,15 @@ Go stays as the unused fallback.
   `master` history / fallback only.
 - **Layout polish** — current TUI layout is functional but spike-grade; banner had minor render
   glitches. A real layout pass is pending.
-- **Mouse/wheel + copy-paste** — terminal quirks; `/copy` (programmatic clipboard) is the
-  intended fix. Note: copy-paste *into* the terminal mangles input (host-terminal quirk; caused
-  several "bugs" tonight that were actually paste corruption).
+- **PASTE (Ctrl+V) not working** — WT injects bracketed paste (`ESC[200~`) but Editor 2.5.0
+  has no OnPaste override — View.OnPaste returns false, payload silently dropped. Enum-drift
+  also affects paste cluster (Editor's Paste=61, core's 61=Cut, 62=Paste). Fix attempted
+  (Pasting event handler + Ctrl+V STA PowerShell fallback) but not working at runtime.
+  Right-click context menu visibly corrupted (Cut where Paste should be, Paste absent).
+  Next step: run with `DEVMIND_TUI_DIAG` set, paste trace to Fable for ground-truth-before-fix.
+- **Uncommitted files (CRITICAL — lost once already):** Program.cs, TuiInputBox.cs,
+  TuiStatusBar.cs, TuiLoopCallbacks.cs, TuiAgenticHost.cs, TuiOptions.cs, DEVMIND_STATUS.md.
+  Commit the full TUI unit once paste is verified. Do not let this sit untracked again.
 
 ---
 
@@ -147,6 +188,46 @@ this list current as more are found._
 - **Submit event:** `Accepting` (EventHandler<CommandEventArgs>) is the correct "user pressed
   Enter" event for a focused TextField (Enter → `Command.Accept` via `SetupKeyboard`). Set
   `e.Handled = true` to stop the command bubbling to the SuperView.
+- **Shift+Enter is NOT distinguishable from Enter (2.4.4, verified empirically 2026-06-11):**
+  a key-logger spike on `app.Keyboard.KeyDown` (run under both the default host and explicit
+  Windows Terminal, keys injected via SendKeys) shows Shift+Enter arrives as plain `Enter`
+  (0x0000000D — shift bit stripped somewhere in the host→driver chain), while **Ctrl+Enter
+  arrives correctly distinct** (0x4000000D) and Alt+Enter never arrives at all (host consumes
+  it, likely fullscreen toggle). Consequence: any "Shift+Enter = newline" UX must use
+  **Ctrl+Enter** instead. Spike artifacts: `%TEMP%\tg-keyspike\` + `%TEMP%\tg-keyspike.log`.
+- **Command-enum ORDINAL DRIFT between Terminal.Gui.Editor 2.5.0 and core 2.4.4 (verified
+  2026-06-11, offline dispatch harness):** Editor 2.5.0 is compiled against a newer core whose
+  `Command` enum reordered — Editor registers its newline handler under literal **43**, but core
+  2.4.4's `Command.NewLine` is **44** (43 = `DeleteAll` there). Binding `Command.NewLine` to a key
+  on the Editor dispatches into a missing handler ("not supported by this View" → NotBound →
+  silently swallowed; `KeyBindings.TryGet` still returns the binding, so the failure is invisible
+  until dispatch). `Command.Accept` (=1) agrees across versions and its handler lives in core's
+  View, so Enter→Accept rebinds work. **Rule: when binding keys to Editor-implemented commands,
+  recover the command id from the Editor's own stock binding** (e.g.
+  `KeyBindings.TryGet(Key.Enter, out var b); b.Commands[0]`), never from this process's enum
+  names. Repro/fix harness: `%TEMP%\tg-keyspike\BindTest\`.
+  **SUPERSEDED 2026-06-11 (same day, fuller bisection): the drift direction was BACKWARDS.**
+  Editor 2.5.x is not "newer" — **core 2.4.4 inserted `Command.Insert` at ordinal 38**, shifting
+  every later member +1 (NewLine 43→44, SelectAll 41→42, Paste 61→62, …). The ENTIRE Editor 2.5.x
+  line (2.5.0–2.5.2 checked) is compiled against the PRE-insertion enum (core ≤ 2.4.3) despite a
+  nuspec claiming `>= 2.4.0`. Pairing Editor 2.5.x with core 2.4.4+ cross-wires EVERY editing
+  key, not just Enter: Backspace dispatches Editor's SelectAll ("backspace highlights the row"),
+  Delete deletes leftward, the bracketed-paste pipeline lands in a dead handler, and the
+  right-click context menu renders core's names for Editor's ordinals ("Cut" where Paste belongs,
+  no Paste item). All failures are silent. **Fix: pin core 2.4.3 + Editor 2.5.2** — the newest
+  aligned pairing; 2.4.3 already has the full paste pipeline (`View.Pasting`/`Pasted`,
+  `IApplication.Paste`). Never bump either package without re-running the BindTest harness. The
+  stock-binding-recovery rule above remains correct under any pairing and stays in the code.
+- **WT paste (Ctrl+V) — BROKEN (2026-06-14):** Windows Terminal binds Ctrl+V itself and
+  injects the clipboard as a bracketed paste (`ESC[200~…201~`), shown with WT's own multi-line
+  warning dialog when applicable. Editor 2.5.0 has no `OnPaste` override — `View.OnPaste` returns
+  false, payload silently dropped. The enum-drift also affects the paste cluster (Editor's
+  Paste=61, core's 61=Cut, 62=Paste). Fix attempted (Pasting event handler + Ctrl+V STA
+  PowerShell fallback) but not working at runtime — diagnostic trace pending
+  (`DEVMIND_TUI_DIAG`). Right-click context menu visibly corrupted (Cut where Paste should be,
+  Paste absent). **Next step:** run with `DEVMIND_TUI_DIAG` set, paste trace to Fable for
+  ground-truth-before-fix. A real Ctrl+V keystroke only occurs under conhost or a WT profile
+  with the paste keybinding unbound.
 - **TextView WordWrap (2.4.4)** re-wraps the ENTIRE document on every grapheme insert
   (`WrapModel()` unconditional) — O(n) per token, causes streaming sluggishness that grows with
   transcript length. Also has an upstream bug in the wrap-rebuild attribute copy (indexes source
@@ -158,8 +239,9 @@ this list current as more are found._
 ## 6. Editor Component Migration (2026-06-09) — VALIDATED
 
 Migrated the output view from the `[Obsolete]` TextView to **`Terminal.Gui.Editor` 2.5.0**
-(composes with pinned Terminal.Gui 2.4.4; no core bump). Branch `spike/tui-editor-output`
-(`00dc3fe`, -170 lines).
+(composes with pinned Terminal.Gui 2.4.3 per the version-alignment finding in §5; core pinned
+to avoid ordinal drift). Branch `spike/tui-editor-output` (`00dc3fe`, -170 lines).
+**Status:** merged to master. TUI is dressed (Phase 1-5) and published as self-contained exe.
 
 **Why it's better:**
 - **Faster streaming** — rope insert is O(log n), line tree updates incrementally, visual lines
@@ -181,7 +263,7 @@ issue (#5155). It's actively maintained and the framework explicitly targets Cla
 agentic CLIs, so the risk profile is "early-adopter bugs in an actively-developed component aimed
 at our use case," not abandonware. Validated for our path; watch for edge cases.
 
-**Status:** validated, ready to merge `spike/tui-editor-output` → master.
+**Status:** validated, merged to master. TUI is dressed (Phase 1-5) and published as self-contained exe.
 
 ---
 
@@ -213,11 +295,14 @@ Is it porting/wiring against *known* code? → DM (fresh context).
 - **Close the running `DevMind.TUI.exe` before rebuild/relaunch** — a running instance locks the
   binary (MSB3026/3027 build errors) AND a stale instance launched mid-implementation renders the
   OLD behavior (caused a false "colors broken — all white" alarm tonight).
-- **Ctrl+C does NOT quit the TUI** — Esc quits (Terminal.Gui captures input; Ctrl+C is just a
-  keystroke). To force-kill from outside: close the window or `taskkill` the PID.
+- **Ctrl+C three-case behavior** (TuiInputBox): with selection → copy; while running → cancel;
+  idle → armed → second Ctrl+C exits. Esc cancels-while-running, clears-while-idle, does NOT quit.
 - **Paste into the terminal mangles** (PowerShell/Windows Terminal quirk) — caused a 404 (stray
-  `[` appended to the endpoint) and a `[otnet` typo tonight. Type commands by hand or right-click
-  paste; the future `/copy` solves the copy direction programmatically.
+  `[` appended to the endpoint) and a `[otnet` typo. Ctrl+V paste into TUI input box is currently
+  broken (see §4). Type commands by hand or right-click paste; `/copy` solves the copy direction
+  programmatically.
+- **TUI is published** — run `devmind` from any folder (targets that folder via `--dir`).
+  Close running `DevMind.TUI.exe` before rebuild/relaunch (locks binary).
 - **Start DM with `/new`** before a task to avoid the narration-stall.
 - **PowerShell env-var syntax:** `$env:VAR="value"` (not cmd's `set VAR=value`).
 
@@ -231,20 +316,30 @@ fetcher, searxng, parsely], DEVMIND_DB_CONNECTIONS).
 
 **C# TUI (the rebuild):**
 ```
-dotnet run --project DevMind.TUI -- --dir C:\Users\pkailas\source\repos\DevMind --endpoint http://10.0.0.15:8080/v1
+devmind              (from any folder — targets that folder)
 ```
-(Type the endpoint by hand to avoid paste corruption. For history: set `DEVMIND_HISTORY_ENABLED`,
-`DEVMIND_HISTORY_PROVIDER`, `DEVMIND_HISTORY_CONNECTION_STRING`. For render diagnostics:
-`DEVMIND_TUI_DIAG=<logpath>`.)
+Self-contained exe at `C:\Users\pkailas\bin\devmind\DevMind.TUI.exe`.
+Config in `~/.devmind.env`: DEVMIND_ENDPOINT, DEVMIND_API_KEY, DEVMIND_SEARCH_URL, DEVMIND_FETCH_URL.
+For history: set `DEVMIND_HISTORY_ENABLED`, `DEVMIND_HISTORY_PROVIDER`,
+`DEVMIND_HISTORY_CONNECTION_STRING`. For diagnostics: `DEVMIND_TUI_DIAG=<logpath>`.
+
+**Also available (development):**
+```
+dotnet run --project DevMind.TUI -- --dir C:\Users\pkailas\source\repos\DevMind
+```
 
 ---
 
 ## 10. Next Session — Suggested Starting Points
 
-1. Merge `spike/tui-editor-output` → master (Editor migration). _[may be done already]_
-2. Test the SQL history backend against a real DB (decide which server; set env vars; run the
-   /title → /history → /new → /resume cycle).
-3. Continue Phase 3: config/env wiring; remaining slash-command stubs; `/copy` (Opus track).
-4. Phase 4: permission gating at the IAgenticHost boundary.
-5. Add tool-call-in-progress indicator (the UX gap).
-6. Eventually: layout polish; Phase 5 cutover.
+1. **Fix Ctrl+V paste** — run with `DEVMIND_TUI_DIAG` set, paste trace to Fable for
+   ground-truth-before-fix. Enum-drift fix (Editor Paste=61 vs core 61=Cut, 62=Paste)
+   may be the root cause.
+2. **Commit uncommitted files** (CRITICAL — lost once already): Program.cs, TuiInputBox.cs,
+   TuiStatusBar.cs, TuiLoopCallbacks.cs, TuiAgenticHost.cs, TuiOptions.cs, DEVMIND_STATUS.md.
+3. **History backend** — connect to a real SQL Server (decide which: WIN-SQL002, local
+   MSSQLSERVER01, or a dedicated DevMind DB).
+4. **TUI polish** — mouse/wheel, progress indicator for long agentic actions, right-click
+   context menu fix (Cut/Paste labels wrong).
+5. **Deploy to production** — move `devmind` to the production machine, update cron/
+   scheduled tasks if needed.
