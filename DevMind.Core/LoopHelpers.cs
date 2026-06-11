@@ -102,6 +102,8 @@ namespace DevMind
                 case "run_build":
                     if (!string.IsNullOrEmpty(result.ShellOutput))
                         return result.ShellOutput;
+                    if (result.Errors != null && result.Errors.Count > 0)
+                        return $"[Shell failed: {string.Join("; ", result.Errors)}]";
                     return result.ShellExitCode.HasValue
                         ? $"[Shell exited with code {result.ShellExitCode}]"
                         : "[Shell command executed]";
@@ -214,8 +216,16 @@ namespace DevMind
             sb.Append("When list_files or find_in_files returns paths, pass those exact strings to read_file — do not shorten to just the filename.\n\n");
 
             sb.Append("## Build Verification\n");
-            sb.Append($"Build command: {buildCommand}\n");
-            sb.Append("After ANY code change (patch_file or create_file), call run_build to verify the build still passes.\n\n");
+            if (!string.IsNullOrWhiteSpace(buildCommand))
+            {
+                sb.Append($"Build command: {buildCommand}\n");
+                sb.Append("After ANY code change (patch_file or create_file), call run_build to verify the build still passes.\n\n");
+            }
+            else
+            {
+                sb.Append("Build command: none detected in the working directory — run_build is unavailable.\n");
+                sb.Append("After ANY code change (patch_file or create_file), verify the build with run_shell and an explicit build command if one applies.\n\n");
+            }
 
             sb.Append("## Editing Workflow\n");
             sb.Append("Call read_file before patch_file if you have not seen the file. The find argument to patch_file must be copied verbatim from read_file output — never reconstructed from memory.\n");

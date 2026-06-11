@@ -1942,116 +1942,20 @@ internal sealed class DevMindTools
 
     /// <summary>
     /// Auto-detects the correct build command for the current working directory.
-    /// VSIX projects (detected via *.vsixmanifest) use MSBuild; others use dotnet build.
+    /// Shared implementation in DevMind.Core — same code path as the TUI/CLI hosts.
     /// </summary>
     private string DetectBuildCommand()
     {
-        string wd = _svc.WorkingDirectory;
+        string? command = BuildCommandResolver.Resolve(
+            _svc.WorkingDirectory,
+            warn => Console.Error.WriteLine($"[McpServer] Warning: {warn}"));
 
-        // Detect VSIX: search for *.vsixmanifest under WorkingDirectory.
-        string? vsixManifest = null;
-        try
-        {
-            var candidates = Directory.GetFiles(wd, "*.vsixmanifest", SearchOption.AllDirectories)
-                .Where(f => !ContextEngine.IsNoisePath(f))
-                .ToArray();
-            if (candidates.Length > 0) vsixManifest = candidates[0];
-        }
-        catch { }
+        if (command == null)
+            throw new Exception(
+                "Could not auto-detect a build system. No .vsixmanifest, package.json, " +
+                ".sln/.slnx, or .csproj file found.");
 
-        if (vsixManifest != null)
-        {
-            // VSIX project — use MSBuild.
-            // Find the first .sln/.slnx in WorkingDirectory or one level up.
-            string? solution = FindSolutionFile(wd);
-            string  target   = solution ?? wd;
-            string  msbuild  = LoopHelpers.FindMSBuildPath();
-            string  invoke   = msbuild.Contains(" ") ? $"& \"{msbuild}\"" : msbuild;
-
-            // If MSBuild was only found as the bare "msbuild" fallback and this is a non-VS
-            // environment (no VSINSTALLDIR, no vswhere hit), fall back to dotnet build with
-            // an explanatory note rather than a silent failure.
-            if (msbuild == "msbuild" &&
-                string.IsNullOrEmpty(Environment.GetEnvironmentVariable("VSINSTALLDIR")))
-            {
-                Console.Error.WriteLine(
-                    "[McpServer] Warning: VSIX project detected but MSBuild not found via " +
-                    "VSINSTALLDIR or vswhere. Falling back to dotnet build (may fail for VSIX).");
-                return solution != null
-                    ? $"dotnet build \"{solution}\" /p:DeployExtension=false"
-                    : $"dotnet build \"{wd}\" /p:DeployExtension=false";
-            }
-
-            return solution != null
-                ? $"{invoke} \"{solution}\" /p:DeployExtension=false /verbosity:minimal"
-                : $"{invoke} \"{wd}\" /p:DeployExtension=false /verbosity:minimal";
-        }
-        else
-        {
-            // Detect Node/TypeScript: search for package.json.
-            string packageJsonPath = Path.Combine(wd, "package.json");
-            if (File.Exists(packageJsonPath))
-            {
-                bool isBun = File.Exists(Path.Combine(wd, "bun.lockb")) || 
-                             File.Exists(Path.Combine(wd, "bunfig.toml"));
-                
-                if (!isBun)
-                {
-                    try
-                    {
-                        string content = File.ReadAllText(packageJsonPath);
-                        if (content.Contains("\"packageManager\": \"bun@"))
-                        {
-                            isBun = true;
-                        }
-                    }
-                    catch { }
-                }
-                
-                return isBun ? "bun run build" : "npm run build";
-            }
-
-            // .NET project — use dotnet build.
-            string? solution = FindSolutionFile(wd);
-            if (solution != null)
-            {
-                return $"dotnet build \"{solution}\"";
-            }
-
-            throw new Exception("Could not auto-detect a build system. No .vsixmanifest, package.json, or .sln/.slnx file found.");
-        }
-    }
-
-    /// <summary>
-    /// Searches <paramref name="dir"/> for a *.sln or *.slnx file, then one level up.
-    /// Returns the first match, or null if none found.
-    /// </summary>
-    private static string? FindSolutionFile(string dir)
-    {
-        foreach (string pattern in new[] { "*.slnx", "*.sln" })
-        {
-            try
-            {
-                var hits = Directory.GetFiles(dir, pattern, SearchOption.TopDirectoryOnly);
-                if (hits.Length > 0) return hits[0];
-            }
-            catch { }
-        }
-        // One level up.
-        string? parent = Path.GetDirectoryName(dir);
-        if (parent != null && parent != dir)
-        {
-            foreach (string pattern in new[] { "*.slnx", "*.sln" })
-            {
-                try
-                {
-                    var hits = Directory.GetFiles(parent, pattern, SearchOption.TopDirectoryOnly);
-                    if (hits.Length > 0) return hits[0];
-                }
-                catch { }
-            }
-        }
-        return null;
+        return command;
     }
 
     /// <summary>

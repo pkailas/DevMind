@@ -20,6 +20,13 @@ namespace DevMind
         public string ApiKey { get; set; } = "lm-studio";
         public string WorkingDirectory { get; set; } = Directory.GetCurrentDirectory();
 
+        /// <summary>
+        /// Explicit build command for run_build. Empty = auto-detect via
+        /// <see cref="BuildCommandResolver"/> (DEVMIND_BUILD_COMMAND env var,
+        /// then .vsixmanifest/package.json/.sln/.slnx/.csproj detection).
+        /// </summary>
+        public string BuildCommand { get; set; } = "";
+
         // ILlmOptions.
         public string SystemPrompt             { get; set; } = "You are a helpful coding assistant. Be concise and precise.";
         public string ModelName                { get; set; } = "";
@@ -70,6 +77,7 @@ namespace DevMind
                     case "--api-key"      when i + 1 < args.Length: opts.ApiKey                  = args[++i]; break;
                     case "--model"        when i + 1 < args.Length: opts.ModelName               = args[++i]; break;
                     case "--system-prompt" when i + 1 < args.Length: opts.SystemPrompt           = args[++i]; break;
+                    case "--build-command" when i + 1 < args.Length: opts.BuildCommand           = args[++i]; break;
                     case "--dir"          when i + 1 < args.Length: i++; break;
                     case "--max-depth"    when i + 1 < args.Length:
                         if (int.TryParse(args[++i], out int md)) opts.AgenticLoopMaxDepth = md; break;

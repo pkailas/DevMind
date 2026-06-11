@@ -195,6 +195,18 @@ namespace DevMind
 
                     case BlockType.Shell:
                         if (!processShell) break;
+                        // A null command reaches here when run_build could not resolve a build
+                        // command for the working directory — fail with guidance, don't crash.
+                        if (string.IsNullOrWhiteSpace(block.Command))
+                        {
+                            const string noCommandMsg =
+                                "No build command configured or detected for the working directory. " +
+                                "Set DEVMIND_BUILD_COMMAND or pass --build-command, or use run_shell " +
+                                "with an explicit build command.";
+                            result.Errors.Add(noCommandMsg);
+                            _host.AppendOutput($"[SHELL ERROR] {noCommandMsg}\n", OutputColor.Error);
+                            break;
+                        }
                         try
                         {
                             var (exitCode, output) = await _host.RunShellAsync(block.Command);

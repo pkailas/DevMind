@@ -13,7 +13,7 @@ namespace DevMind
     public static class ContextEngine
     {
         private static readonly HashSet<string> _noisePathSegments = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            { "bin", "obj", ".vs", ".git", "node_modules", "packages", ".idea" };
+            { "bin", "obj", ".vs", ".git", "node_modules", "packages", ".idea", "_archive" };
 
         // Files at or above this line count get an outline injection instead of full content
         private const int ReadOutlineThresholdLines = 100;

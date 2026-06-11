@@ -46,6 +46,7 @@ dotnet run --project DevMind.Cli -- --dir <repo> --endpoint <llm-endpoint>
 | `DEVMIND_ENDPOINT` | LLM endpoint URL (overrides default) |
 | `DEVMIND_API_KEY` | API key (overrides default) |
 | `DEVMIND_HISTORY_*` | History store configuration (SqlServer/Sqlite/Null) |
+| `DEVMIND_BUILD_COMMAND` | Explicit build command for `run_build` (overrides auto-detection) |
 
 ### Config Resolution Order
 

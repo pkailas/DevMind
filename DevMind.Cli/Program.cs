@@ -213,8 +213,8 @@ namespace DevMind
                 LoopIterationResult iter;
                 try
                 {
-                    iter = await driver.ProcessIterationAsync(responseBuffer.ToString(), null,
-                        cts.Token);
+                    iter = await driver.ProcessIterationAsync(responseBuffer.ToString(),
+                        ResolveBuildCommand(options), cts.Token);
                 }
                 catch (OperationCanceledException)
                 {
@@ -269,11 +269,21 @@ namespace DevMind
 
         // ── System prompt assembly (mirrors extension's SendToLlm combinedSystemPrompt block) ──
 
+        /// <summary>
+        /// Build command for run_build: explicit --build-command / devmind.json override,
+        /// else auto-detected from the working directory (cached per directory).
+        /// </summary>
+        static string ResolveBuildCommand(CliOptions options)
+            => !string.IsNullOrWhiteSpace(options.BuildCommand)
+                ? options.BuildCommand
+                : BuildCommandResolver.Resolve(options.WorkingDirectory,
+                    warn => Console.Error.WriteLine($"[BUILD] Warning: {warn}"));
+
         static string BuildCombinedSystemPrompt(CliOptions options, string devMindContext)
         {
-            // buildCommand and projectNamespace are null in CLI context — no VS project loaded.
+            // projectNamespace is null in CLI context — no VS project loaded.
             string llmDirective = LoopHelpers.BuildToolUsePrompt(
-                buildCommand: null, projectNamespace: null);
+                buildCommand: ResolveBuildCommand(options), projectNamespace: null);
 
             string combined = $"{options.SystemPrompt}\n\n{llmDirective}";
 
@@ -362,6 +372,7 @@ namespace DevMind
             Console.WriteLine("  --api-key <key>         Bearer token (default: lm-studio)");
             Console.WriteLine("  --model <name>          Model name (default: server default)");
             Console.WriteLine("  --dir <path>            Working directory for file operations (default: CWD)");
+            Console.WriteLine("  --build-command <cmd>   Build command for run_build (default: auto-detect from working directory)");
             Console.WriteLine("  --max-depth <n>         Agentic loop max depth (default: 5)");
             Console.WriteLine("  --always-confirm        Pause for diff preview on all PATCH blocks");
             Console.WriteLine("  --context-size <n>      Override context window size (default: auto-detect)");

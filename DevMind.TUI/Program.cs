@@ -601,8 +601,8 @@ Application.MaximumIterationsPerSecond = 750;
                 LoopIterationResult iter;
                 try
                 {
-                    iter = await driver.ProcessIterationAsync(responseBuffer.ToString(), null,
-                        cts.Token);
+                    iter = await driver.ProcessIterationAsync(responseBuffer.ToString(),
+                        ResolveBuildCommand(options), cts.Token);
                 }
               catch (OperationCanceledException)
                 {
@@ -712,10 +712,20 @@ static string LoadContextFile(string workingDirectory)
 static string BuildCombinedSystemPrompt(TuiOptions options, string devMindContext)
         => BuildCombinedSystemPrompt(options, devMindContext, "");
 
+    /// <summary>
+    /// Build command for run_build: explicit --build-command override, else
+    /// auto-detected from the working directory (cached per directory, so the
+    /// per-iteration call in RunTurnAsync is cheap and /dir changes re-detect).
+    /// </summary>
+    static string ResolveBuildCommand(TuiOptions options)
+        => !string.IsNullOrWhiteSpace(options.BuildCommand)
+            ? options.BuildCommand
+            : BuildCommandResolver.Resolve(options.WorkingDirectory);
+
     static string BuildCombinedSystemPrompt(TuiOptions options, string devMindContext, string behavioralRules)
     {
         string llmDirective = LoopHelpers.BuildToolUsePrompt(
-            buildCommand: null,
+            buildCommand: ResolveBuildCommand(options),
             projectNamespace: null);
 
         var sb = new StringBuilder();

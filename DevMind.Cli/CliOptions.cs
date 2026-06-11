@@ -25,6 +25,13 @@ namespace DevMind
         /// <summary>Working directory for file operations. Defaults to CWD.</summary>
         public string WorkingDirectory { get; set; } = Directory.GetCurrentDirectory();
 
+        /// <summary>
+        /// Explicit build command for run_build. Empty = auto-detect via
+        /// <see cref="BuildCommandResolver"/> (DEVMIND_BUILD_COMMAND env var,
+        /// then .vsixmanifest/package.json/.sln/.slnx/.csproj detection).
+        /// </summary>
+        public string BuildCommand { get; set; } = "";
+
         // ── ILlmOptions ───────────────────────────────────────────────────────────
 
         public string SystemPrompt             { get; set; } = "You are a helpful coding assistant. Be concise and precise.";
@@ -84,6 +91,7 @@ namespace DevMind
                     case "--api-key"      when i + 1 < args.Length: opts.ApiKey                  = args[++i]; break;
                     case "--model"        when i + 1 < args.Length: opts.ModelName               = args[++i]; break;
                     case "--system-prompt" when i + 1 < args.Length: opts.SystemPrompt           = args[++i]; break;
+                    case "--build-command" when i + 1 < args.Length: opts.BuildCommand           = args[++i]; break;
                     case "--dir"          when i + 1 < args.Length: i++; break; // already applied in pass 1
                     case "--max-depth"    when i + 1 < args.Length:
                         if (int.TryParse(args[++i], out int md)) opts.AgenticLoopMaxDepth = md; break;
@@ -124,6 +132,7 @@ namespace DevMind
                 if (TryString(root, "model",               out s))        opts.ModelName               = s;
                 if (TryString(root, "systemPrompt",        out s))        opts.SystemPrompt            = s;
                 if (TryString(root, "customContextEndpoint", out s))      opts.CustomContextEndpoint   = s;
+                if (TryString(root, "buildCommand",        out s))        opts.BuildCommand            = s;
 
                 if (TryInt(root, "maxDepth",               out int n))    opts.AgenticLoopMaxDepth     = n;
                 if (TryInt(root, "manualContextSize",      out n))        opts.ManualContextSize       = n;
