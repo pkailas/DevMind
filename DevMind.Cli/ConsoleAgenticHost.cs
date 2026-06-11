@@ -48,12 +48,16 @@ namespace DevMind
         // (set by typing 'a' at the four-way prompt). Cleared on ResetSession().
         private bool _alwaysApprove;
 
-        // Called by ShowDiffPreviewAsync on 'q' to cancel the enclosing agentic turn.
+       // Called by ShowDiffPreviewAsync on 'q' to cancel the enclosing agentic turn.
         // Wired to cts.Cancel() in Program.cs (Commit 4). Defaults to no-op.
         private readonly Action _cancelTurn;
 
         // Set by the REPL loop before each agentic turn so RunShellAsync respects Ctrl+C.
         public CancellationToken CancellationToken { get; set; } = CancellationToken.None;
+
+        // Task scratchpad — stores cross-turn state from SCRATCHPAD directives.
+        // Injected into the system prompt each turn by Program.cs.
+        private string _taskScratchpad = "";
 
         // ── Construction ─────────────────────────────────────────────────────────
 
@@ -71,7 +75,7 @@ namespace DevMind
         /// <summary>Called at the start of each user-initiated turn to reset the write guard set.</summary>
         public void ResetTaskContext() => _taskReadFiles.Clear();
 
-        /// <summary>Called on /restart to reset session-scoped caches.</summary>
+       /// <summary>Called on /restart to reset session-scoped caches.</summary>
         public void ResetSession()
         {
             _filesRead.Clear();
@@ -79,6 +83,7 @@ namespace DevMind
             _fileCache.InvalidateAll();
             _taskReadFiles.Clear();
             _alwaysApprove = false;
+            _taskScratchpad = "";
         }
 
         // ── IAgenticHost.AppendOutput ─────────────────────────────────────────────
@@ -207,9 +212,17 @@ namespace DevMind
 
         string IAgenticHost.GetWorkingDirectory() => _shellRunner.WorkingDirectory;
 
-        // ── IAgenticHost.UpdateScratchpad ─────────────────────────────────────────
+       // ── IAgenticHost scratchpad ──────────────────────────────────────────────
 
-        void IAgenticHost.UpdateScratchpad(string content) { }
+        void IAgenticHost.UpdateScratchpad(string content)
+        {
+            _taskScratchpad = string.IsNullOrWhiteSpace(content) ? "" : content.Trim();
+        }
+
+       string IAgenticHost.TaskScratchpad => TaskScratchpad;
+
+        /// <summary>Gets the current task scratchpad content.</summary>
+        public string TaskScratchpad => _taskScratchpad;
 
         // ── IAgenticHost.DeleteFileAsync ──────────────────────────────────────────
 

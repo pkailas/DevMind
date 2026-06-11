@@ -95,8 +95,8 @@ namespace DevMind
                     continue;
                 }
 
-                await RunTurnAsync(input, options, llmClient, host, driver, state,
-                    callbacks, combinedSystemPrompt, cts);
+               await RunTurnAsync(input, options, llmClient, host, driver, state,
+                    callbacks, () => BuildCombinedSystemPrompt(options, devMindContext, host.TaskScratchpad), cts);
             }
 
             return 0;
@@ -104,7 +104,7 @@ namespace DevMind
 
         // ── Agentic turn loop ─────────────────────────────────────────────────────
 
-        static async Task RunTurnAsync(
+       static async Task RunTurnAsync(
             string userInput,
             CliOptions options,
             LlmClient llmClient,
@@ -112,7 +112,7 @@ namespace DevMind
             LoopDriver driver,
             LoopState state,
             ConsoleLoopCallbacks callbacks,
-            string combinedSystemPrompt,
+            Func<string> buildSystemPrompt,
             CancellationTokenSource cts)
         {
             state.ResetForUserTurn();
@@ -185,8 +185,8 @@ namespace DevMind
                     },
                     onComplete: () => tcs.TrySetResult(true),
                     onError: ex => tcs.TrySetException(ex),
-                    deferCompression: state.ShellLoopPending,
-                    combinedSystemPrompt: combinedSystemPrompt,
+                   deferCompression: state.ShellLoopPending,
+                    combinedSystemPrompt: buildSystemPrompt(),
                     cancellationToken: cts.Token);
 
                 try
@@ -279,7 +279,7 @@ namespace DevMind
                 : BuildCommandResolver.Resolve(options.WorkingDirectory,
                     warn => Console.Error.WriteLine($"[BUILD] Warning: {warn}"));
 
-        static string BuildCombinedSystemPrompt(CliOptions options, string devMindContext)
+       static string BuildCombinedSystemPrompt(CliOptions options, string devMindContext, string scratchpad = "")
         {
             // projectNamespace is null in CLI context — no VS project loaded.
             string llmDirective = LoopHelpers.BuildToolUsePrompt(
@@ -299,6 +299,11 @@ namespace DevMind
                     combined += $"\n\n--- Session Memory (MEMORY.md) ---\n{memoryIndex}\n---";
             }
             catch { }
+
+            // Scratchpad — model's cross-turn state tracking.
+            // Injected into the system prompt so it survives context compaction.
+            if (!string.IsNullOrEmpty(scratchpad))
+                combined += $"\n\n--- CURRENT SCRATCHPAD ---\n{scratchpad}\n---";
 
             return combined;
         }
