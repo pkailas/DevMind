@@ -52,11 +52,17 @@ namespace DevMind
         /// </summary>
         void AppendOutput(string text, OutputColor color = OutputColor.Normal);
 
-        /// <summary>
-        /// Update the scratchpad content in LlmClient.
+       /// <summary>
+        /// Update the scratchpad content.
         /// Called when a Scratchpad block is found in the response.
         /// </summary>
         void UpdateScratchpad(string content);
+
+        /// <summary>
+        /// Gets the current task scratchpad content (set by the last SCRATCHPAD directive).
+        /// Empty string when no scratchpad has been set.
+        /// </summary>
+        string TaskScratchpad { get; }
 
         /// <summary>
         /// Get the current terminal working directory.

@@ -430,13 +430,15 @@ namespace DevMind
 
         // ── IAgenticHost.UpdateScratchpad ─────────────────────────────────────────
 
-        void IAgenticHost.UpdateScratchpad(string content)
+       void IAgenticHost.UpdateScratchpad(string content)
         {
             string trimLog = _llmClient.UpdateScratchpad(content);
             if (trimLog != null)
                 AppendOutput(trimLog, OutputColor.Dim);
             AppendOutput("[SCRATCHPAD] Updated\n", OutputColor.Dim);
         }
+
+        string IAgenticHost.TaskScratchpad => _llmClient.TaskScratchpad;
 
         // ── IAgenticHost.GetWorkingDirectory ──────────────────────────────────────
 

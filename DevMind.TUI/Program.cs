@@ -233,8 +233,8 @@ Application.MaximumIterationsPerSecond = 750;
                 });
             }
 
-           // Build combined system prompt.
-            string combinedSystemPrompt = BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules);
+           // Build combined system prompt (initial — scratchpad is empty at startup).
+             string combinedSystemPrompt = BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules, host.TaskScratchpad);
 
             // Banner. All output MUST go through the host (never outputView.InsertText
             // directly) — TuiAgenticHost tracks the logical append position for color
@@ -305,7 +305,7 @@ Application.MaximumIterationsPerSecond = 750;
                     {
                         DepthCap = options.AgenticLoopMaxDepth,
                         ThinkingEnabled = options.ShowLlmThinking,
-                        SystemPrompt = llmClient.SystemPromptContent ?? combinedSystemPrompt,
+                       SystemPrompt = llmClient.SystemPromptContent ?? BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules, host.TaskScratchpad),
                        ResetConversation = () =>
                         {
                             state.ResetForUserTurn();
@@ -330,11 +330,10 @@ Application.MaximumIterationsPerSecond = 750;
                             _config.BehavioralRules = rules;
                             _config.Save();
                         },
-                       RebuildSystemPrompt = () =>
-                        {
-                            combinedSystemPrompt = BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules);
-                            return combinedSystemPrompt;
-                        },
+                      RebuildSystemPrompt = () =>
+                         {
+                             return BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules, host.TaskScratchpad);
+                         },
                         // Working directory.
                         WorkingDirectory = options.WorkingDirectory,
                        SetWorkingDirectory = (dir) =>
@@ -345,9 +344,9 @@ Application.MaximumIterationsPerSecond = 750;
                             // Reload AGENTS.md from new directory.
                             devMindContext = LoadContextFile(dir);
                             // Update the host's shell runner working directory.
-                            host.SetWorkingDirectory(dir);
-                            // Rebuild system prompt with new context.
-                            combinedSystemPrompt = BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules);
+                             host.SetWorkingDirectory(dir);
+                             // Rebuild system prompt with new context.
+                             // (The captured Func<string> in RunTurnAsync will pick this up automatically.)
                         },
                         // /dir -b: interactive directory-only picker, run modally on the UI thread.
                         // Returns the chosen directory, or null on cancel/Esc (handler no-ops).
@@ -390,8 +389,8 @@ Application.MaximumIterationsPerSecond = 750;
                             inputField.CanFocus = false;
                             statusLabel.Text = "Processing...";
 
-                            await RunTurnAsync(message, options, llmClient, host, driver, state,
-                                callbacks, combinedSystemPrompt, cts, app,
+                           await RunTurnAsync(message, options, llmClient, host, driver, state,
+                                callbacks, () => BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules, host.TaskScratchpad), cts, app,
                                 historyStore, SessionId.Get(), SessionId.GetMachineName());
 
                             // Revert thinking.
@@ -418,10 +417,10 @@ Application.MaximumIterationsPerSecond = 750;
                 inputField.CanFocus = false;
                 statusLabel.Text = "Processing...";
 
-               // Run the agentic turn.
-                await RunTurnAsync(input, options, llmClient, host, driver, state,
-                    callbacks, combinedSystemPrompt, cts, app,
-                    historyStore, SessionId.Get(), SessionId.GetMachineName());
+              // Run the agentic turn.
+                 await RunTurnAsync(input, options, llmClient, host, driver, state,
+                     callbacks, () => BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules, host.TaskScratchpad), cts, app,
+                     historyStore, SessionId.Get(), SessionId.GetMachineName());
 
                 // Re-enable input.
                 inputField.CanFocus = true;
@@ -437,20 +436,20 @@ Application.MaximumIterationsPerSecond = 750;
 
         // ── Agentic turn loop ─────────────────────────────────────────────────────
 
-     static async Task RunTurnAsync(
-            string userInput,
-            TuiOptions options,
-            LlmClient llmClient,
-            TuiAgenticHost host,
-            LoopDriver driver,
-            LoopState state,
-            TuiLoopCallbacks callbacks,
-            string combinedSystemPrompt,
-            CancellationTokenSource cts,
-            IApplication app,
-            IHistoryStore historyStore,
-            string sessionId,
-            string machineName)
+    static async Task RunTurnAsync(
+             string userInput,
+             TuiOptions options,
+             LlmClient llmClient,
+             TuiAgenticHost host,
+             LoopDriver driver,
+             LoopState state,
+             TuiLoopCallbacks callbacks,
+             Func<string> buildSystemPrompt,
+             CancellationTokenSource cts,
+             IApplication app,
+             IHistoryStore historyStore,
+             string sessionId,
+             string machineName)
         {
             state.ResetForUserTurn();
             host.ResetTaskContext();
@@ -529,8 +528,8 @@ Application.MaximumIterationsPerSecond = 750;
                     },
                     onComplete: () => tcs.TrySetResult(true),
                     onError: ex => tcs.TrySetException(ex),
-                    deferCompression: state.ShellLoopPending,
-                    combinedSystemPrompt: combinedSystemPrompt,
+                   deferCompression: state.ShellLoopPending,
+                    combinedSystemPrompt: buildSystemPrompt(),
                     cancellationToken: cts.Token);
 
                 try
@@ -709,10 +708,7 @@ static string LoadContextFile(string workingDirectory)
 
         // ── System prompt builder ─────────────────────────────────────────────────
 
-static string BuildCombinedSystemPrompt(TuiOptions options, string devMindContext)
-        => BuildCombinedSystemPrompt(options, devMindContext, "");
-
-    /// <summary>
+   /// <summary>
     /// Build command for run_build: explicit --build-command override, else
     /// auto-detected from the working directory (cached per directory, so the
     /// per-iteration call in RunTurnAsync is cheap and /dir changes re-detect).
@@ -722,7 +718,7 @@ static string BuildCombinedSystemPrompt(TuiOptions options, string devMindContex
             ? options.BuildCommand
             : BuildCommandResolver.Resolve(options.WorkingDirectory);
 
-    static string BuildCombinedSystemPrompt(TuiOptions options, string devMindContext, string behavioralRules)
+   static string BuildCombinedSystemPrompt(TuiOptions options, string devMindContext, string behavioralRules, string scratchpad = "")
     {
         string llmDirective = LoopHelpers.BuildToolUsePrompt(
             buildCommand: ResolveBuildCommand(options),
@@ -760,6 +756,15 @@ static string BuildCombinedSystemPrompt(TuiOptions options, string devMindContex
             }
         }
         catch { }
+
+        // Scratchpad — model's cross-turn state tracking.
+        // Injected into the system prompt so it survives context compaction.
+        if (!string.IsNullOrEmpty(scratchpad))
+        {
+            sb.Append("\n\n--- CURRENT SCRATCHPAD ---\n");
+            sb.Append(scratchpad);
+            sb.Append("\n---");
+        }
 
         return sb.ToString();
     }

@@ -66,6 +66,10 @@ namespace DevMind
 
        private readonly Action _cancelTurn;
 
+        // Task scratchpad — stores cross-turn state from SCRATCHPAD directives.
+        // Injected into the system prompt each turn by Program.cs.
+        private string _taskScratchpad = "";
+
         // The Editor that receives all output. Rope-backed document, append-only.
         private readonly GuiEditor _outputView;
 
@@ -121,12 +125,13 @@ namespace DevMind
 
         public void ResetTaskContext() => _taskReadFiles.Clear();
 
-        public void ResetSession()
+       public void ResetSession()
         {
             _filesRead.Clear();
             _fileSnapshots.Clear();
             _fileCache.InvalidateAll();
            _taskReadFiles.Clear();
+            _taskScratchpad = "";
         }
 
         // ── IAgenticHost.AppendOutput ─────────────────────────────────────────────
@@ -309,9 +314,17 @@ namespace DevMind
             }
         }
 
-        // ── IAgenticHost.UpdateScratchpad ─────────────────────────────────────────
+       // ── IAgenticHost scratchpad ──────────────────────────────────────────────
 
-        void IAgenticHost.UpdateScratchpad(string content) { }
+        void IAgenticHost.UpdateScratchpad(string content)
+        {
+            _taskScratchpad = string.IsNullOrWhiteSpace(content) ? "" : content.Trim();
+        }
+
+       string IAgenticHost.TaskScratchpad => TaskScratchpad;
+
+        /// <summary>Gets the current task scratchpad content.</summary>
+        public string TaskScratchpad => _taskScratchpad;
 
         // ── IAgenticHost.DeleteFileAsync ──────────────────────────────────────────
 
