@@ -1083,49 +1083,10 @@ internal sealed class DevMindTools
         [Description("Maximum number of results to return (default 10, max 20).")] int? max_results = null,
         CancellationToken cancellationToken = default)
     {
-        return await _svc.EnqueueAsync(async () =>
-        {
-            try
-            {
-                int limit = Math.Min(max_results ?? 10, 20);
-                string searxngUrl = Environment.GetEnvironmentVariable("DEVMIND_SEARCH_URL")
-                    ?? "http://vard-nas:8180";
-                string url = $"{searxngUrl.TrimEnd('/')}/search?q={Uri.EscapeDataString(query)}&format=json&language=en&safesearch=0";
-
-                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
-                http.DefaultRequestHeaders.Add("User-Agent", "DevMind/1.0");
-                var response = await http.GetAsync(url, cancellationToken);
-                response.EnsureSuccessStatusCode();
-
-                string json = await response.Content.ReadAsStringAsync(cancellationToken);
-                using var doc = JsonDocument.Parse(json);
-                var results = doc.RootElement.GetProperty("results");
-
-                var sb = new StringBuilder();
-                sb.AppendLine($"web_search results for \"{query}\":");
-                int count = 0;
-                foreach (var result in results.EnumerateArray())
-                {
-                    if (count >= limit) break;
-                    string title   = result.TryGetProperty("title",   out var t) ? t.GetString() ?? "" : "";
-                    string resUrl  = result.TryGetProperty("url",     out var u) ? u.GetString() ?? "" : "";
-                    string snippet = result.TryGetProperty("content", out var c) ? c.GetString() ?? "" : "";
-                    sb.AppendLine($"\n[{count + 1}] {title}");
-                    sb.AppendLine($"    URL: {resUrl}");
-                    if (!string.IsNullOrWhiteSpace(snippet))
-                        sb.AppendLine($"    {snippet.Trim()}");
-                    count++;
-                }
-                if (count == 0)
-                    return $"web_search: no results for \"{query}\"";
-
-                return sb.ToString().TrimEnd();
-            }
-            catch (Exception ex)
-            {
-                return $"[web_search error] {ex.Message}";
-            }
-        }, cancellationToken);
+        // Shared implementation in DevMind.Core — same code path as the TUI/CLI hosts.
+        return await _svc.EnqueueAsync(
+            async () => await WebTools.WebSearchAsync(query, max_results, cancellationToken),
+            cancellationToken);
     }
 
     [McpServerTool(Name = "web_fetch")]
@@ -1137,43 +1098,10 @@ internal sealed class DevMindTools
         [Description("URL to fetch.")] string url,
         CancellationToken cancellationToken = default)
     {
-        return await _svc.EnqueueAsync(async () =>
-        {
-            try
-            {
-                string fetcherUrl = Environment.GetEnvironmentVariable("DEVMIND_FETCH_URL")
-                    ?? "http://vard-nas:8181";
-                string endpoint = $"{fetcherUrl.TrimEnd('/')}/fetch";
-
-                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(45) };
-                var payload = new StringContent(
-                    $"{{\"url\":\"{url}\"}}",
-                    Encoding.UTF8,
-                    "application/json");
-
-                var response = await http.PostAsync(endpoint, payload, cancellationToken);
-                response.EnsureSuccessStatusCode();
-
-                string json = await response.Content.ReadAsStringAsync(cancellationToken);
-                using var doc = JsonDocument.Parse(json);
-                string content = doc.RootElement.GetProperty("content").GetString() ?? "";
-
-                if (string.IsNullOrWhiteSpace(content))
-                    return $"[web_fetch] No content extracted from {url}";
-
-                // Cap at 8000 chars to avoid flooding context.
-                const int Cap = 8000;
-                bool capped = content.Length > Cap;
-                string output = capped ? content.Substring(0, Cap) : content;
-                return capped
-                    ? $"{output}\n\n[web_fetch: content truncated at {Cap} chars]"
-                    : output;
-            }
-            catch (Exception ex)
-            {
-                return $"[web_fetch error] {ex.Message}";
-            }
-       }, cancellationToken);
+        // Shared implementation in DevMind.Core — same code path as the TUI/CLI hosts.
+        return await _svc.EnqueueAsync(
+            async () => await WebTools.WebFetchAsync(url, cancellationToken),
+            cancellationToken);
     }
 
     // ── Phase D: ssh_exec ────────────────────────────────────────────────────

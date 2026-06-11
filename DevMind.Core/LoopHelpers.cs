@@ -145,6 +145,37 @@ namespace DevMind
                         return memBlock?.MemoryContent ?? "[No memory topics found]";
                     }
 
+                case "get_diagnostics":
+                case "go_to_definition":
+                case "find_references":
+                case "hover":
+                    {
+                        string key = tc.Arguments?.TryGetValue("filename", out string lf) == true ? lf : null;
+                        if (key != null && result.ToolResultContents != null &&
+                            result.ToolResultContents.TryGetValue(key, out string lspContent))
+                            return lspContent;
+                        return "[LSP result not available]";
+                    }
+
+                case "find_symbol":
+                case "web_search":
+                    {
+                        string key = tc.Arguments?.TryGetValue("query", out string q) == true ? q : null;
+                        if (key != null && result.ToolResultContents != null &&
+                            result.ToolResultContents.TryGetValue(key, out string queryContent))
+                            return queryContent;
+                        return "[Search results not available]";
+                    }
+
+                case "web_fetch":
+                    {
+                        string key = tc.Arguments?.TryGetValue("url", out string u) == true ? u : null;
+                        if (key != null && result.ToolResultContents != null &&
+                            result.ToolResultContents.TryGetValue(key, out string fetchContent))
+                            return fetchContent;
+                        return "[Fetched content not available]";
+                    }
+
                 default:
                     return "[Executed]";
             }
@@ -169,6 +200,8 @@ namespace DevMind
             sb.Append("- Running tests: run_tests\n");
             sb.Append("- Tracking state: scratchpad\n");
             sb.Append("- Saving cross-session knowledge: save_memory / recall_memory / list_memory_topics\n");
+            sb.Append("- Code intelligence (semantic): get_diagnostics (errors without a build), go_to_definition, find_references, hover, find_symbol (solution-wide symbol search)\n");
+            sb.Append("- Web: web_search (docs, APIs, error messages), web_fetch (read a URL as text)\n");
             sb.Append("- Finishing: task_done\n\n");
 
             sb.Append("## Termination Contract\n");

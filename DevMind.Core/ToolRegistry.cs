@@ -217,6 +217,28 @@ namespace DevMind
                 Required("line", "integer", "1-based line number."),
                 Required("character", "integer", "1-based character (column) position.")));
 
+            tools.Add(MakeTool("find_symbol",
+                "Find a type or member across the whole solution by name (semantic, solution-wide). " +
+                "Use this to answer \"where is X defined?\" when you do NOT already have a file+position — " +
+                "prefer it over find_in_files text search for locating a type or member. " +
+                "Returns kind, name, file:line:col, and containing type, capped at 50.",
+                Required("query", "string", "Symbol name or substring to search for (e.g. \"LanguageServerHost\", \"GetDiagnostics\")."),
+                Optional("max_results", "integer", "Max results (default 50, capped at 100)."),
+                Optional("language", "string", "Language to search: \"csharp\" (default) or \"typescript\".")));
+
+            // ── Web tools ────────────────────────────────────────────────────
+            tools.Add(MakeTool("web_search",
+                "Search the web. Returns a ranked list of results with title, URL, and snippet. " +
+                "Use for looking up documentation, APIs, error messages, or any information " +
+                "that requires current web content.",
+                Required("query", "string", "Search query string."),
+                Optional("max_results", "integer", "Maximum number of results to return (default 10, max 20).")));
+
+            tools.Add(MakeTool("web_fetch",
+                "Fetch a URL and return its content as clean text. HTML is stripped to readable text. " +
+                "Use for reading documentation pages, GitHub files, API references, or vendor support articles.",
+                Required("url", "string", "URL to fetch.")));
+
             return tools;
         }
 

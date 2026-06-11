@@ -57,6 +57,9 @@ namespace DevMind
 
        private MemoryManager _memoryManager;
 
+        // Shared Core facade for the five LSP tools — gating and error wrapping live there.
+        private readonly LspToolService _lspTools;
+
         private const int PatchBackupStackLimit = 10;
         private readonly Stack<(string filePath, string backupPath)> _patchBackupStack =
             new Stack<(string, string)>();
@@ -103,6 +106,7 @@ namespace DevMind
         public TuiAgenticHost(string workingDirectory, GuiEditor outputView, Action cancelTurn = null)
         {
             _shellRunner  = new ShellRunner(workingDirectory);
+            _lspTools     = new LspToolService(workingDirectory);
             _outputView   = outputView;
             _cancelTurn   = cancelTurn ?? (() => { });
             if (!string.IsNullOrEmpty(workingDirectory))
@@ -300,6 +304,8 @@ namespace DevMind
                 // Also update the memory manager for the new directory.
                 if (!string.IsNullOrEmpty(dir))
                     _memoryManager = new MemoryManager(dir);
+                // Retarget LSP — disposes the old router; a new one spawns lazily on next use.
+                _lspTools.SetWorkingDirectory(dir);
             }
         }
 
@@ -419,6 +425,67 @@ namespace DevMind
 
             AppendOutputLocal("[MEMORY] Topics listed.\n", OutputColor.Dim);
             return Task.FromResult(index);
+        }
+
+        // ── IAgenticHost LSP tools (delegate to shared Core LspToolService) ───────
+
+        async Task<string> IAgenticHost.GetDiagnosticsAsync(string filename)
+        {
+            string fullPath = ResolveLspPath(filename);
+            if (fullPath == null) return BuildFileNotFoundMessage("get_diagnostics", filename);
+            AppendOutputLocal($"[LSP] get_diagnostics {SafeGetFileName(fullPath)}\n", OutputColor.Dim);
+            return await _lspTools.GetDiagnosticsAsync(fullPath, CancellationToken);
+        }
+
+        async Task<string> IAgenticHost.GoToDefinitionAsync(string filename, int line, int character)
+        {
+            string fullPath = ResolveLspPath(filename);
+            if (fullPath == null) return BuildFileNotFoundMessage("go_to_definition", filename);
+            AppendOutputLocal($"[LSP] go_to_definition {SafeGetFileName(fullPath)}:{line}:{character}\n", OutputColor.Dim);
+            return await _lspTools.GoToDefinitionAsync(fullPath, line, character, CancellationToken);
+        }
+
+        async Task<string> IAgenticHost.FindReferencesAsync(string filename, int line, int character)
+        {
+            string fullPath = ResolveLspPath(filename);
+            if (fullPath == null) return BuildFileNotFoundMessage("find_references", filename);
+            AppendOutputLocal($"[LSP] find_references {SafeGetFileName(fullPath)}:{line}:{character}\n", OutputColor.Dim);
+            return await _lspTools.FindReferencesAsync(fullPath, line, character, CancellationToken);
+        }
+
+        async Task<string> IAgenticHost.HoverAsync(string filename, int line, int character)
+        {
+            string fullPath = ResolveLspPath(filename);
+            if (fullPath == null) return BuildFileNotFoundMessage("hover", filename);
+            AppendOutputLocal($"[LSP] hover {SafeGetFileName(fullPath)}:{line}:{character}\n", OutputColor.Dim);
+            return await _lspTools.HoverAsync(fullPath, line, character, CancellationToken);
+        }
+
+        async Task<string> IAgenticHost.FindSymbolAsync(string query, int maxResults, string language)
+        {
+            AppendOutputLocal($"[LSP] find_symbol \"{query}\"\n", OutputColor.Dim);
+            return await _lspTools.FindSymbolAsync(query, maxResults, language, CancellationToken);
+        }
+
+        // ── IAgenticHost web tools (delegate to shared Core WebTools) ─────────────
+
+        async Task<string> IAgenticHost.WebSearchAsync(string query, int? maxResults)
+        {
+            AppendOutputLocal($"[WEB] search: {query}\n", OutputColor.Dim);
+            return await WebTools.WebSearchAsync(query, maxResults, CancellationToken);
+        }
+
+        async Task<string> IAgenticHost.WebFetchAsync(string url)
+        {
+            AppendOutputLocal($"[WEB] fetch: {url}\n", OutputColor.Dim);
+            return await WebTools.WebFetchAsync(url, CancellationToken);
+        }
+
+        /// <summary>Resolves an LSP tool's filename argument to an existing full path, or null.</summary>
+        private string ResolveLspPath(string filename)
+        {
+            if (string.IsNullOrWhiteSpace(filename)) return null;
+            return FindFile(SafeGetFileName(filename), filename.Replace('\\', '/'));
         }
 
         // ── IAgenticHost.LoadFileContentAsync ────────────────────────────────────
