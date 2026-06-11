@@ -159,5 +159,48 @@ namespace DevMind
 
         /// <summary>Returns the number of PATCH backups on the undo stack.</summary>
         int GetPatchBackupCount();
+
+        /// <summary>
+        /// Returns errors and warnings for a source file via the language server,
+        /// without a full build. Returns a formatted diagnostics string, or an
+        /// error/disabled message.
+        /// </summary>
+        Task<string> GetDiagnosticsAsync(string filename);
+
+        /// <summary>
+        /// Returns the definition location(s) of the symbol at the given 1-based
+        /// line/character position as file:line:column strings.
+        /// </summary>
+        Task<string> GoToDefinitionAsync(string filename, int line, int character);
+
+        /// <summary>
+        /// Returns all references to the symbol at the given 1-based line/character
+        /// position as file:line:column strings.
+        /// </summary>
+        Task<string> FindReferencesAsync(string filename, int line, int character);
+
+        /// <summary>
+        /// Returns the type signature and documentation for the symbol at the given
+        /// 1-based line/character position.
+        /// </summary>
+        Task<string> HoverAsync(string filename, int line, int character);
+
+        /// <summary>
+        /// Solution-wide semantic symbol search by name. Returns kind, name,
+        /// file:line:col, and containing type for each match.
+        /// </summary>
+        Task<string> FindSymbolAsync(string query, int maxResults, string language);
+
+        /// <summary>
+        /// Searches the web via the configured search service (DEVMIND_SEARCH_URL).
+        /// Returns ranked results with title, URL, and snippet, or an error message.
+        /// </summary>
+        Task<string> WebSearchAsync(string query, int? maxResults);
+
+        /// <summary>
+        /// Fetches a URL via the configured fetcher service (DEVMIND_FETCH_URL) and
+        /// returns its content as clean text, or an error message.
+        /// </summary>
+        Task<string> WebFetchAsync(string url);
     }
 }

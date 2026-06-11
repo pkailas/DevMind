@@ -464,6 +464,109 @@ namespace DevMind
                         }
                         break;
 
+                    case BlockType.GetDiagnostics:
+                        try
+                        {
+                            string diagContent = await _host.GetDiagnosticsAsync(block.FileName);
+                            if (diagContent != null)
+                                result.ToolResultContents[block.FileName ?? ""] = diagContent;
+                        }
+                        catch (Exception ex)
+                        {
+                            result.Errors.Add(ex.Message);
+                            _host.AppendOutput($"[LSP ERROR] {block.FileName}: {ex.Message}\n", OutputColor.Error);
+                        }
+                        break;
+
+                    case BlockType.GoToDefinition:
+                        try
+                        {
+                            string defContent = await _host.GoToDefinitionAsync(
+                                block.FileName, block.LspLine, block.LspCharacter);
+                            if (defContent != null)
+                                result.ToolResultContents[block.FileName ?? ""] = defContent;
+                        }
+                        catch (Exception ex)
+                        {
+                            result.Errors.Add(ex.Message);
+                            _host.AppendOutput($"[LSP ERROR] {block.FileName}: {ex.Message}\n", OutputColor.Error);
+                        }
+                        break;
+
+                    case BlockType.FindReferences:
+                        try
+                        {
+                            string refsContent = await _host.FindReferencesAsync(
+                                block.FileName, block.LspLine, block.LspCharacter);
+                            if (refsContent != null)
+                                result.ToolResultContents[block.FileName ?? ""] = refsContent;
+                        }
+                        catch (Exception ex)
+                        {
+                            result.Errors.Add(ex.Message);
+                            _host.AppendOutput($"[LSP ERROR] {block.FileName}: {ex.Message}\n", OutputColor.Error);
+                        }
+                        break;
+
+                    case BlockType.Hover:
+                        try
+                        {
+                            string hoverContent = await _host.HoverAsync(
+                                block.FileName, block.LspLine, block.LspCharacter);
+                            if (hoverContent != null)
+                                result.ToolResultContents[block.FileName ?? ""] = hoverContent;
+                        }
+                        catch (Exception ex)
+                        {
+                            result.Errors.Add(ex.Message);
+                            _host.AppendOutput($"[LSP ERROR] {block.FileName}: {ex.Message}\n", OutputColor.Error);
+                        }
+                        break;
+
+                    case BlockType.FindSymbol:
+                        try
+                        {
+                            string symbolContent = await _host.FindSymbolAsync(
+                                block.Pattern, block.MaxResults, block.Language);
+                            if (symbolContent != null)
+                                result.ToolResultContents[block.Pattern ?? ""] = symbolContent;
+                        }
+                        catch (Exception ex)
+                        {
+                            result.Errors.Add(ex.Message);
+                            _host.AppendOutput($"[LSP ERROR] find_symbol \"{block.Pattern}\": {ex.Message}\n", OutputColor.Error);
+                        }
+                        break;
+
+                    case BlockType.WebSearch:
+                        try
+                        {
+                            int? searchCap = block.MaxResults > 0 ? (int?)block.MaxResults : null;
+                            string searchContent = await _host.WebSearchAsync(block.Pattern, searchCap);
+                            if (searchContent != null)
+                                result.ToolResultContents[block.Pattern ?? ""] = searchContent;
+                        }
+                        catch (Exception ex)
+                        {
+                            result.Errors.Add(ex.Message);
+                            _host.AppendOutput($"[WEB ERROR] search \"{block.Pattern}\": {ex.Message}\n", OutputColor.Error);
+                        }
+                        break;
+
+                    case BlockType.WebFetch:
+                        try
+                        {
+                            string fetchContent = await _host.WebFetchAsync(block.Url);
+                            if (fetchContent != null)
+                                result.ToolResultContents[block.Url ?? ""] = fetchContent;
+                        }
+                        catch (Exception ex)
+                        {
+                            result.Errors.Add(ex.Message);
+                            _host.AppendOutput($"[WEB ERROR] fetch {block.Url}: {ex.Message}\n", OutputColor.Error);
+                        }
+                        break;
+
                     // Text, Done — already handled during streaming or by resolver
                     default:
                         break;

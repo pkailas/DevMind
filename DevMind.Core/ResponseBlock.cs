@@ -24,5 +24,10 @@ namespace DevMind
         public bool FromToolCall { get; set; }        // true when block originated from a tool_call (skip fence stripping)
         public string ListFilesGlob { get; set; }     // for ListFiles — glob pattern (e.g. *.cs, Services/*.cs)
         public bool ListFilesRecursive { get; set; }  // for ListFiles — whether to recurse into subdirectories
+        public int  LspLine      { get; set; }        // for GoToDefinition/FindReferences/Hover — 1-based line
+        public int  LspCharacter { get; set; }        // for GoToDefinition/FindReferences/Hover — 1-based column
+        public int  MaxResults   { get; set; }        // for FindSymbol/WebSearch — result cap (0 = default)
+        public string Language   { get; set; }        // for FindSymbol — "csharp" (default) or "typescript"
+        public string Url        { get; set; }        // for WebFetch — URL to fetch
     }
 }

@@ -196,6 +196,64 @@ namespace DevMind
                         ListFilesRecursive = tc.Arguments?.ContainsKey("recursive") != true || GetBoolArg(tc, "recursive")
                     };
 
+                case "get_diagnostics":
+                    return new ResponseBlock
+                    {
+                        Type = BlockType.GetDiagnostics,
+                        FileName = GetArg(tc, "filename")
+                    };
+
+                case "go_to_definition":
+                    return new ResponseBlock
+                    {
+                        Type = BlockType.GoToDefinition,
+                        FileName = GetArg(tc, "filename"),
+                        LspLine = GetIntArg(tc, "line"),
+                        LspCharacter = GetIntArg(tc, "character")
+                    };
+
+                case "find_references":
+                    return new ResponseBlock
+                    {
+                        Type = BlockType.FindReferences,
+                        FileName = GetArg(tc, "filename"),
+                        LspLine = GetIntArg(tc, "line"),
+                        LspCharacter = GetIntArg(tc, "character")
+                    };
+
+                case "hover":
+                    return new ResponseBlock
+                    {
+                        Type = BlockType.Hover,
+                        FileName = GetArg(tc, "filename"),
+                        LspLine = GetIntArg(tc, "line"),
+                        LspCharacter = GetIntArg(tc, "character")
+                    };
+
+                case "find_symbol":
+                    return new ResponseBlock
+                    {
+                        Type = BlockType.FindSymbol,
+                        Pattern = GetArg(tc, "query"),
+                        MaxResults = GetIntArg(tc, "max_results"),
+                        Language = GetArg(tc, "language")
+                    };
+
+                case "web_search":
+                    return new ResponseBlock
+                    {
+                        Type = BlockType.WebSearch,
+                        Pattern = GetArg(tc, "query"),
+                        MaxResults = GetIntArg(tc, "max_results")
+                    };
+
+                case "web_fetch":
+                    return new ResponseBlock
+                    {
+                        Type = BlockType.WebFetch,
+                        Url = GetArg(tc, "url")
+                    };
+
                 default:
                     // Unknown tool — emit as text so it's visible in output
                     return new ResponseBlock

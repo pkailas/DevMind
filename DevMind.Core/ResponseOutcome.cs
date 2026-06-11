@@ -30,6 +30,8 @@ namespace DevMind
         public bool HasRecallMemory   { get; }
         public bool HasSaveMemory     { get; }
         public bool HasListMemory     { get; }
+        public bool HasLspRequests    { get; }
+        public bool HasWebRequests    { get; }
         public bool IsDone             { get; }
 
         /// <summary>
@@ -74,9 +76,16 @@ namespace DevMind
             HasRecallMemory   = Blocks.Any(b => b.Type == BlockType.RecallMemory);
             HasSaveMemory     = Blocks.Any(b => b.Type == BlockType.SaveMemory);
             HasListMemory     = Blocks.Any(b => b.Type == BlockType.ListMemory);
+            HasLspRequests    = Blocks.Any(b => b.Type == BlockType.GetDiagnostics
+                                             || b.Type == BlockType.GoToDefinition
+                                             || b.Type == BlockType.FindReferences
+                                             || b.Type == BlockType.Hover
+                                             || b.Type == BlockType.FindSymbol);
+            HasWebRequests    = Blocks.Any(b => b.Type == BlockType.WebSearch
+                                             || b.Type == BlockType.WebFetch);
 
             bool hasMutatingAction = HasPatches || HasShellCommands || HasFileCreation || HasDeleteRequests || HasRenameRequests || HasTestRequests || HasSaveMemory;
-            bool hasInfoGather    = HasReadRequests || HasGrepRequests || HasFindRequests || HasDiffRequests || HasRecallMemory || HasListMemory;
+            bool hasInfoGather    = HasReadRequests || HasGrepRequests || HasFindRequests || HasDiffRequests || HasRecallMemory || HasListMemory || HasLspRequests || HasWebRequests;
 
             HasAnyDirective   = hasMutatingAction || hasInfoGather;
             IsEmptyOrBareCode = !HasAnyDirective && !IsDone && ContainsBareCodeBlock(Blocks);
