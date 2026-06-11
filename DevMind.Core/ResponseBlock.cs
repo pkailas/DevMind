@@ -8,7 +8,8 @@ namespace DevMind
         public BlockType Type { get; set; }
         public string Content { get; set; }   // raw text, file source, or full PATCH text
         public string FileName { get; set; }  // for File, Patch, ReadRequest, Grep
-        public string Command { get; set; }   // for Shell
+       public string Command { get; set; }   // for Shell
+        public int?   ShellTimeoutSeconds { get; set; }  // for Shell — override timeout in seconds (null = use default)
         public int  RangeStart    { get; set; }  // for ReadRequest/Grep line-range (0 = full read)
         public int  RangeEnd      { get; set; }  // for ReadRequest/Grep line-range (0 = full read)
         public bool ForceFullRead { get; set; }  // READ! — bypass outline-first behavior
@@ -16,8 +17,9 @@ namespace DevMind
         public string GlobPattern { get; set; }  // for Find — glob file pattern (e.g. *.cs, Services/*.cs)
         public string RenameFrom  { get; set; }  // for Rename — source filename
         public string RenameTo    { get; set; }  // for Rename — destination filename
-        public string TestProject { get; set; }  // for Test — project file path or name
+       public string TestProject { get; set; }  // for Test — project file path or name
         public string TestFilter  { get; set; }  // for Test — optional filter string (nullable)
+        public int?   TestTimeoutSeconds { get; set; }  // for Test — override timeout in seconds (null = use default)
         public string MemoryTopic { get; set; }       // for RecallMemory, SaveMemory — topic slug
         public string MemoryContent { get; set; }     // for SaveMemory — content to save
         public string MemoryDescription { get; set; } // for SaveMemory — index description

@@ -57,10 +57,11 @@ namespace DevMind
         }
 
         /// <summary>
-        /// Execute a shell command (arbitrary PowerShell / cmd.exe) and return buffered
+       /// Execute a shell command (arbitrary PowerShell / cmd.exe) and return buffered
         /// output and exit code. This is the general-purpose run-arbitrary-shell path used
         /// by run_shell, run_build, and the CLI agentic host. Cancellation kills the process
-        /// tree immediately; timeout (default 120s) also kills.
+        /// tree immediately; timeout defaults to 120s, overridable via <paramref name="timeoutSeconds"/>
+        /// or the DEVMIND_SHELL_TIMEOUT environment variable.
         /// <para>
         /// Data-driven callers (git_commit, run_tests, clip_read/clip_write, git log/diff)
         /// must NOT build command strings for this method. They use <see cref="ExecuteArgvAsync"/>,
@@ -69,12 +70,13 @@ namespace DevMind
         /// (Resolves the former Stage 7 Item 3 quoting TODO, now that DevMind.Core targets net10.0.)
         /// </para>
         /// </summary>
-        public async Task<(string output, int exitCode)> ExecuteAsync(
+       public async Task<(string output, int exitCode)> ExecuteAsync(
             string command,
             CancellationToken cancellationToken = default,
-            int timeoutSeconds = 120,
+            int? timeoutSeconds = null,
             IProgress<ShellOutputLine> onLine = null)
         {
+            int effectiveTimeout = ResolveTimeout(timeoutSeconds);
             // npm/npx/yarn/pnpm/bun are .cmd shims on Windows. When PowerShell spawns them it
             // creates a child cmd.exe WITHOUT CreateNoWindow, which causes a visible console window
             // and routes stdio to that window instead of our redirected pipes. Invoking cmd.exe
@@ -93,9 +95,9 @@ namespace DevMind
                 : $"/c \"{sanitized}\"";
 
             var psi = new ProcessStartInfo(shell, args);
-            return await RunProcessAsync(
+           return await RunProcessAsync(
                 psi, shell, args, sanitized, usePowerShell, forceCmdExe,
-                cancellationToken, timeoutSeconds, onLine);
+                cancellationToken, effectiveTimeout, onLine);
         }
 
         /// <summary>
@@ -105,14 +107,16 @@ namespace DevMind
         /// Use this for every data-driven invocation (git, dotnet, and Set-Clipboard with the
         /// clipboard value supplied via <paramref name="extraEnv"/> rather than the command text).
         /// </summary>
-        public async Task<(string output, int exitCode)> ExecuteArgvAsync(
+       public async Task<(string output, int exitCode)> ExecuteArgvAsync(
             string fileName,
             IReadOnlyList<string> arguments,
             CancellationToken cancellationToken = default,
-            int timeoutSeconds = 120,
+            int? timeoutSeconds = null,
             IProgress<ShellOutputLine> onLine = null,
             IReadOnlyDictionary<string, string> extraEnv = null)
         {
+            int effectiveTimeout = ResolveTimeout(timeoutSeconds);
+
             var psi = new ProcessStartInfo(fileName);
             if (arguments != null)
                 foreach (var a in arguments)
@@ -125,7 +129,7 @@ namespace DevMind
             string traceArgs = arguments != null ? string.Join(" ", arguments) : "";
             return await RunProcessAsync(
                 psi, fileName, traceArgs, traceArgs, tracePowerShell: false, traceForceCmdExe: false,
-                cancellationToken, timeoutSeconds, onLine);
+                cancellationToken, effectiveTimeout, onLine);
         }
 
         /// <summary>
@@ -324,6 +328,26 @@ namespace DevMind
             {
                 return ($"(error: {ex.Message})", -1);
             }
+        }
+
+       /// <summary>
+        /// Resolves the effective timeout in seconds for a shell command.
+        /// Precedence: explicit value (if > 0) > DEVMIND_SHELL_TIMEOUT env var > 120s fallback.
+        /// A value of 0 or negative from <paramref name="explicit"/> means "use the default."
+        /// </summary>
+        public static int ResolveTimeout(int? explicitSeconds = null)
+        {
+            // Layer 1: explicit per-call value (must be positive)
+            if (explicitSeconds.HasValue && explicitSeconds.Value > 0)
+                return explicitSeconds.Value;
+
+            // Layer 2: DEVMIND_SHELL_TIMEOUT environment variable
+            string envVal = Environment.GetEnvironmentVariable("DEVMIND_SHELL_TIMEOUT");
+            if (envVal != null && int.TryParse(envVal, out int envTimeout) && envTimeout > 0)
+                return envTimeout;
+
+            // Layer 3: hardcoded fallback
+            return 120;
         }
 
         public static bool IsPowerShellAvailable()

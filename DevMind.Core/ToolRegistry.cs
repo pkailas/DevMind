@@ -59,15 +59,16 @@ namespace DevMind
                 Required("find", "string", "Exact text to find in the file (verbatim from read_file output)"),
                 Required("replace", "string", "Replacement text")));
 
-            // ── run_shell ────────────────────────────────────────────────────
+           // ── run_shell ────────────────────────────────────────────────────
             tools.Add(MakeTool("run_shell",
                 "Execute a shell command and return its output. " +
-                "Commands run via powershell.exe with a 120-second timeout. " +
+                "Commands run via powershell.exe with a default 120-second timeout (overridable via timeout_seconds or DEVMIND_SHELL_TIMEOUT env var). " +
                 "Use this for git commands, one-off scripts, and operations no other tool covers. " +
                 "Do NOT use run_shell to list, search, or find files — use list_files for enumeration, " +
                 "find_in_files for content search across files, or grep_file for content search in a known file. " +
                 "Use run_build for build commands and run_tests for tests.",
-                Required("command", "string", "The shell command to execute")));
+                Required("command", "string", "The shell command to execute"),
+                Optional("timeout_seconds", "integer", "Override the default command timeout in seconds. Use for long builds or test runs. Omit or pass 0/negative to use the default (from DEVMIND_SHELL_TIMEOUT env var or 120s fallback).")));
 
             // ── grep_file ────────────────────────────────────────────────────
             tools.Add(MakeTool("grep_file",
@@ -112,14 +113,16 @@ namespace DevMind
                 "Information-gathering only — does not modify files.",
                 Required("filename", "string", "Absolute file path — e.g., 'C:\\Projects\\MyApp\\Services\\UserService.cs'. Always pass the full absolute path that list_files or find_in_files returned; do not shorten to just the filename.")));
 
-            // ── run_tests ────────────────────────────────────────────────────
+           // ── run_tests ────────────────────────────────────────────────────
             tools.Add(MakeTool("run_tests",
                 "Run dotnet test and return structured pass/fail results. " +
                 "Output is compact — only failed tests show details. " +
                 "Use run_tests after making changes to verify correctness. " +
+                "Default timeout is 120s (overridable via timeout_seconds or DEVMIND_SHELL_TIMEOUT env var). " +
                 "If tests fail, fix the code with patch_file and run_tests again.",
                 Optional("project", "string", "Project file name (e.g., 'MyProject.csproj'). Omit to run all tests."),
-                Optional("filter", "string", "Test filter expression (e.g., 'FullyQualifiedName~SomeTest' or 'ClassName.MethodName')")));
+                Optional("filter", "string", "Test filter expression (e.g., 'FullyQualifiedName~SomeTest' or 'ClassName.MethodName')"),
+                Optional("timeout_seconds", "integer", "Override the default timeout in seconds. Use for large test suites. Omit or pass 0/negative to use the default (from DEVMIND_SHELL_TIMEOUT env var or 120s fallback).")));
 
             // ── scratchpad ───────────────────────────────────────────────────
             tools.Add(MakeTool("scratchpad",
