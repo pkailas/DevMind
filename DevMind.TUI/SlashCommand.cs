@@ -58,7 +58,7 @@ namespace DevMind
         /// <summary>Called to toggle thinking mode.</summary>
         public Action<bool> SetThinking { get; set; }
 
-        // ── History (session persistence) ──────────────────────────────────────
+        // -- History (session persistence) --------------------------------------
 
         /// <summary>History store for session management commands. Null when history is disabled.</summary>
         public IHistoryStore HistoryStore { get; set; }
@@ -75,7 +75,7 @@ namespace DevMind
        /// <summary>Set to true by /t to enable one-shot thinking for the next turn only.</summary>
         public bool OneShotThinking { get; set; }
 
-        // ── Behavioral rules ─────────────────────────────────────────────────────
+        // -- Behavioral rules -----------------------------------------------------
 
         /// <summary>Current behavioral rules text (from TuiConfig).</summary>
         public string BehavioralRules { get; set; } = "";
@@ -86,7 +86,7 @@ namespace DevMind
        /// <summary>Called to rebuild the system prompt after rules change.</summary>
         public Func<string> RebuildSystemPrompt { get; set; }
 
-        // ── Working directory ────────────────────────────────────────────────────
+        // -- Working directory ----------------------------------------------------
 
         /// <summary>Current working directory.</summary>
         public string WorkingDirectory { get; set; } = "";
@@ -234,7 +234,7 @@ namespace DevMind
             }
         }
 
-        // ── Builtin command handlers ──────────────────────────────────────────────
+        // -- Builtin command handlers ----------------------------------------------
 
         static void RegisterBuiltinCommands()
         {
@@ -254,7 +254,7 @@ namespace DevMind
                 ThinkHandler);
 
             RegisterCommand("/depth-cap",
-                "Show or set agentic depth cap (1-10)",
+                "Show or set agentic depth cap (1-200)",
                 "/depth-cap [N]",
                 DepthCapHandler);
 
@@ -274,7 +274,7 @@ namespace DevMind
                 "/restart",
                 NewHandler);
 
-           // ── History commands ─────────────────────────────────────────────────
+           // -- History commands -------------------------------------------------
 
             RegisterCommand("/history",
                 "List past sessions from history",
@@ -348,7 +348,7 @@ namespace DevMind
                 }));
         }
 
-        // ── /new ──────────────────────────────────────────────────────────────────
+        // -- /new ------------------------------------------------------------------
 
        static Task<CommandResult> NewHandler(string[] args, CommandContext ctx)
         {
@@ -356,7 +356,7 @@ namespace DevMind
             return Task.FromResult(new CommandResult { Message = "New session started." });
         }
 
-        // ── /clear ────────────────────────────────────────────────────────────────
+        // -- /clear ----------------------------------------------------------------
 
        static Task<CommandResult> ClearHandler(string[] args, CommandContext ctx)
         {
@@ -364,7 +364,7 @@ namespace DevMind
             return Task.FromResult(new CommandResult { Message = "Conversation cleared." });
         }
 
-        // ── /think on|off ─────────────────────────────────────────────────────────
+        // -- /think on|off ---------------------------------------------------------
 
        static Task<CommandResult> ThinkHandler(string[] args, CommandContext ctx)
         {
@@ -395,7 +395,7 @@ namespace DevMind
             });
         }
 
-       // ── /t <message> ──────────────────────────────────────────────────────────
+       // -- /t <message> ----------------------------------------------------------
 
         static Task<CommandResult> OneShotThinkHandler(string[] args, CommandContext ctx)
         {
@@ -413,7 +413,7 @@ namespace DevMind
             });
         }
 
-       // ── /rules [text|clear] ───────────────────────────────────────────────────
+       // -- /rules [text|clear] ---------------------------------------------------
 
         static Task<CommandResult> RulesHandler(string[] args, CommandContext ctx)
         {
@@ -422,8 +422,8 @@ namespace DevMind
                 // Show current rules.
                 if (string.IsNullOrEmpty(ctx.BehavioralRules))
                     return Task.FromResult(new CommandResult { Message = "No rules set." });
-                string top = "─── Behavioral Rules ───";
-                string bot = "────────────────────────";
+                string top = "--- Behavioral Rules ---";
+                string bot = "------------------------";
                 return Task.FromResult(new CommandResult
                 {
                     Message = $"{top}\n{ctx.BehavioralRules}\n{bot}",
@@ -445,7 +445,7 @@ namespace DevMind
             return Task.FromResult(new CommandResult { Message = $"Behavioral rules set ({text.Length} chars)." });
         }
 
-       // ── /dir [path] ────────────────────────────────────────────────────────────
+       // -- /dir [path] ------------------------------------------------------------
 
         static Task<CommandResult> DirHandler(string[] args, CommandContext ctx)
         {
@@ -481,10 +481,10 @@ namespace DevMind
             return Task.FromResult(new CommandResult { Message = $"Working directory changed to: {path}" });
         }
 
-        // ── /depth-cap [N] ────────────────────────────────────────────────
+        // -- /depth-cap [N] ------------------------------------------------
 
         const int DepthCapMin = 1;
-        const int DepthCapMax = 10;
+        const int DepthCapMax = 200;
        static Task<CommandResult> DepthCapHandler(string[] args, CommandContext ctx)
         {
             if (args.Length == 0)
@@ -510,17 +510,17 @@ namespace DevMind
             return Task.FromResult(new CommandResult { Message = $"Depth cap set to {n}" });
         }
 
-        // ── /system_prompt ────────────────────────────────────────────────────────
+        // -- /system_prompt --------------------------------------------------------
 
        static Task<CommandResult> SystemPromptHandler(string[] args, CommandContext ctx)
         {
             string prompt = ctx.SystemPrompt ?? "(not available)";
-            string top = "─── Current System Prompt ───";
-            string bot = "─────────────────────────────";
+            string top = "--- Current System Prompt ---";
+            string bot = "-----------------------------";
             return Task.FromResult(new CommandResult { Message = $"{top}\n{prompt}\n{bot}" });
         }
 
-        // ── /help ─────────────────────────────────────────────────────────────────
+        // -- /help -----------------------------------------------------------------
 
        static Task<CommandResult> HelpHandler(string[] args, CommandContext ctx)
         {
@@ -541,7 +541,7 @@ namespace DevMind
            return Task.FromResult(new CommandResult { Message = lines.ToString().TrimEnd() });
         }
 
-        // ── /history ──────────────────────────────────────────────────────────────
+        // -- /history --------------------------------------------------------------
 
         static async Task<CommandResult> HistoryHandler(string[] args, CommandContext ctx)
         {
@@ -575,7 +575,7 @@ namespace DevMind
             }
         }
 
-        // ── /resume <n> ───────────────────────────────────────────────────────────
+        // -- /resume <n> -----------------------------------------------------------
 
         static async Task<CommandResult> ResumeHandler(string[] args, CommandContext ctx)
         {
@@ -635,7 +635,7 @@ namespace DevMind
             }
         }
 
-        // ── /title <text> ─────────────────────────────────────────────────────────
+        // -- /title <text> ---------------------------------------------------------
 
         static async Task<CommandResult> TitleHandler(string[] args, CommandContext ctx)
         {
