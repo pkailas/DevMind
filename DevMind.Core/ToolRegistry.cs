@@ -186,8 +186,10 @@ namespace DevMind
             // ── run_build ────────────────────────────────────────────────────
             tools.Add(MakeTool("run_build",
                 "Run the project build command. Call this after ANY code change (patch_file or create_file). " +
-                "The build command is auto-detected: VSIX projects (detected via .vsixmanifest) use " +
-                "MSBuild with /p:DeployExtension=false; other projects use dotnet build. " +
+                "The build command is auto-detected from the working directory: VSIX projects " +
+                "(detected via .vsixmanifest) use MSBuild with /p:DeployExtension=false; Node projects " +
+                "(package.json) use npm/bun run build; other projects use dotnet build against the first " +
+                ".sln/.slnx (or .csproj) found. " +
                 "No parameters needed — the system knows the correct build command."));
 
             // ── LSP tools (per-extension language servers) ─────────────────
