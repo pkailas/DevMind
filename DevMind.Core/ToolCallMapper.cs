@@ -88,12 +88,16 @@ namespace DevMind
                         };
                     }
 
-                case "run_shell":
-                    return new ResponseBlock
+               case "run_shell":
                     {
-                        Type = BlockType.Shell,
-                        Command = GetArg(tc, "command")
-                    };
+                        int timeoutVal = GetIntArg(tc, "timeout_seconds");
+                        return new ResponseBlock
+                        {
+                            Type = BlockType.Shell,
+                            Command = GetArg(tc, "command"),
+                            ShellTimeoutSeconds = timeoutVal > 0 ? (int?)timeoutVal : null
+                        };
+                    }
 
                 case "grep_file":
                     return new ResponseBlock
@@ -137,13 +141,17 @@ namespace DevMind
                         FileName = GetArg(tc, "filename")
                     };
 
-                case "run_tests":
-                    return new ResponseBlock
+               case "run_tests":
                     {
-                        Type = BlockType.Test,
-                        TestProject = GetArg(tc, "project"),
-                        TestFilter = GetArg(tc, "filter")
-                    };
+                        int testTimeoutVal = GetIntArg(tc, "timeout_seconds");
+                        return new ResponseBlock
+                        {
+                            Type = BlockType.Test,
+                            TestProject = GetArg(tc, "project"),
+                            TestFilter = GetArg(tc, "filter"),
+                            TestTimeoutSeconds = testTimeoutVal > 0 ? (int?)testTimeoutVal : null
+                        };
+                    }
 
                 case "scratchpad":
                     return new ResponseBlock

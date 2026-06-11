@@ -15,12 +15,13 @@ namespace DevMind
     /// </summary>
     public interface IAgenticHost
     {
-        /// <summary>
+       /// <summary>
         /// Run a shell command and capture its output.
         /// Returns the exit code and combined stdout+stderr output.
         /// Uses the current terminal working directory.
+        /// <paramref name="timeoutSeconds"/> overrides the default timeout (null = use default from DEVMIND_SHELL_TIMEOUT or 120s).
         /// </summary>
-        Task<(int exitCode, string output)> RunShellAsync(string command);
+        Task<(int exitCode, string output)> RunShellAsync(string command, int? timeoutSeconds = null);
 
         /// <summary>
         /// Save a FILE: block to disk. The fileName may be relative (resolved
@@ -105,13 +106,14 @@ namespace DevMind
         /// </summary>
         Task<string> GetFileDiffAsync(string filename);
 
-        /// <summary>
+       /// <summary>
         /// Runs dotnet test on the specified project with an optional filter.
         /// Parses TRX output into a compact summary: total/pass/fail/skip counts,
         /// plus details for each failed test (name, duration, error message).
         /// Falls back to raw console output if TRX parsing fails.
+        /// <paramref name="timeoutSeconds"/> overrides the default timeout (null = use default from DEVMIND_SHELL_TIMEOUT or 120s).
         /// </summary>
-        Task<string> RunTestsAsync(string project, string filter);
+        Task<string> RunTestsAsync(string project, string filter, int? timeoutSeconds = null);
 
         /// <summary>
         /// Resolves a PATCH block without applying it. Returns a

@@ -209,7 +209,7 @@ namespace DevMind
                         }
                         try
                         {
-                            var (exitCode, output) = await _host.RunShellAsync(block.Command);
+                           var (exitCode, output) = await _host.RunShellAsync(block.Command, block.ShellTimeoutSeconds);
                             result.ShellExitCode    = exitCode;
                             result.ShellOutput      = output ?? string.Empty;
                             result.LastShellCommand = block.Command;
@@ -387,7 +387,7 @@ namespace DevMind
                     case BlockType.Test:
                         try
                         {
-                            string testSummary = await _host.RunTestsAsync(block.TestProject, block.TestFilter);
+                           string testSummary = await _host.RunTestsAsync(block.TestProject, block.TestFilter, block.TestTimeoutSeconds);
                             bool allPassed = testSummary != null
                                 && !testSummary.Contains("FAILED:")
                                 && !testSummary.Contains("failed,");

@@ -203,12 +203,12 @@ namespace DevMind
 
         // ── IAgenticHost.RunShellAsync ────────────────────────────────────────────
 
-        async Task<(int exitCode, string output)> IAgenticHost.RunShellAsync(string command)
+       async Task<(int exitCode, string output)> IAgenticHost.RunShellAsync(string command, int? timeoutSeconds)
         {
             AppendOutputLocal($"[SHELL] > {command}\n", OutputColor.Dim);
             var progress = new Progress<ShellOutputLine>(line =>
                 AppendOutputLocal(line.Line + "\n", line.IsError ? OutputColor.Error : OutputColor.Normal));
-            var (output, exitCode) = await _shellRunner.ExecuteAsync(command, CancellationToken, onLine: progress);
+            var (output, exitCode) = await _shellRunner.ExecuteAsync(command, CancellationToken, timeoutSeconds, progress);
             return (exitCode, output);
         }
 
@@ -715,7 +715,7 @@ namespace DevMind
 
         // ── IAgenticHost.RunTestsAsync ────────────────────────────────────────────
 
-        async Task<string> IAgenticHost.RunTestsAsync(string project, string filter)
+       async Task<string> IAgenticHost.RunTestsAsync(string project, string filter, int? timeoutSeconds)
         {
             if (string.IsNullOrWhiteSpace(project))
             {
@@ -760,7 +760,7 @@ namespace DevMind
 
             try
             {
-                var (output, exitCode) = await _shellRunner.ExecuteAsync(cmd, CancellationToken);
+                var (output, exitCode) = await _shellRunner.ExecuteAsync(cmd, CancellationToken, timeoutSeconds);
                 return string.IsNullOrWhiteSpace(output)
                     ? $"TEST: no output (exit code {exitCode})"
                     : output;
