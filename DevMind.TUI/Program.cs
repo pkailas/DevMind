@@ -455,9 +455,10 @@ Application.MaximumIterationsPerSecond = 750;
             state.ResetForUserTurn();
             host.ResetTaskContext();
 
-            var thinkFilter = new ThinkFilter();
+           var thinkFilter = new ThinkFilter();
             string currentPrompt = userInput;
             bool firstIteration = true;
+            bool forceToolChoiceRequired = false; // Layer 2 narration-retry flag
 
             while (true)
             {
@@ -479,8 +480,9 @@ Application.MaximumIterationsPerSecond = 750;
 
                 using var cancelReg = cts.Token.Register(() => tcs.TrySetCanceled(cts.Token));
 
-                await llmClient.SendMessageAsync(
+               await llmClient.SendMessageAsync(
                     currentPrompt,
+                    forceToolChoiceRequired: forceToolChoiceRequired,
                     onToken: token =>
                     {
                         string visible = thinkFilter.Process(token, options.ShowLlmThinking,
@@ -617,9 +619,10 @@ Application.MaximumIterationsPerSecond = 750;
                     case LoopIterationKind.Cancelled:
                         return;
 
-                    case LoopIterationKind.ShouldReTrigger:
+                   case LoopIterationKind.ShouldReTrigger:
                         if (cts.Token.IsCancellationRequested) return;
                         currentPrompt = iter.NextContextualMessage ?? callbacks.GetInputText();
+                        forceToolChoiceRequired = iter.ForceToolChoiceRequired;
                         callbacks.SetInputText(string.Empty);
                         break;
                 }

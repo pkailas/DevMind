@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -22,11 +23,61 @@ namespace DevMind
         private readonly ILlmOptions _options;
         private readonly LoopState _state;
 
-        // Same heuristic as the extension constant — gives slack for legitimate
+       // Same heuristic as the extension constant — gives slack for legitimate
         // progressive debugging cycles without masking genuine stuck loops.
         private const int ConsecutiveErrorAbortThreshold = 5;
 
-        public LoopDriver(
+        // ── Layer 2: Narration-stall retry guard ──────────────────────────────
+        //
+        // When the model returns prose with no tool_calls but the content matches
+        // a "claim signal" (language that asserts a tool-worthy action), re-issue
+        // the same turn once with tool_choice forced to "required". This catches
+        // mid-session stalls that Layer 1 (cold-start) cannot reach.
+        //
+        // Patterns ported from tools/narration_scan.py (validated against 68-stall scan).
+        // Cap: ONE forced retry per user turn. If it still returns no tool_call, stop.
+
+        private const bool NARRATION_RETRY_ENABLED = true;
+
+       private static readonly Regex[] _narrationClaimPatterns =
+        {
+            // announced_action: "let me read/check/look/inspect/verify/find/search/
+            //   grep/fix/update/edit/modify/change/add/create/remove/delete/rename/
+            //   run/build/test"
+            new Regex(
+                @"\b(?:now\s+)?let me\s+" +
+                @"(?:read|check|look|inspect|verify|find|search|grep|fix|update|" +
+                @"edit|modify|change|add|create|remove|delete|rename|run|build|test)" +
+                @"\b",
+                RegexOptions.IgnoreCase | RegexOptions.Compiled),
+
+            // build_test_claim: "build: N errors", "build succeeded/failed"
+            new Regex(@"\bbuild:\s*\d+\s*(?:errors?|warnings?)\b",
+                RegexOptions.IgnoreCase | RegexOptions.Compiled),
+
+            // build_test_claim: "0 errors", "0 warnings"
+            new Regex(@"\b0\s+(?:errors?|warnings?)\b",
+                RegexOptions.IgnoreCase | RegexOptions.Compiled),
+
+            // build_test_claim: "build succeeded/failed"
+            new Regex(@"\bbuild\s+(?:succeeded|failed)\b",
+                RegexOptions.IgnoreCase | RegexOptions.Compiled),
+
+            // build_test_claim: "tests passed", "test passed"
+            new Regex(@"\btests?\s+pass(?:ed)?\b",
+                RegexOptions.IgnoreCase | RegexOptions.Compiled),
+
+            // build_test_claim: "compiles cleanly"
+            new Regex(@"\bcompiles?\s+cleanly\b",
+                RegexOptions.IgnoreCase | RegexOptions.Compiled),
+
+            // report_header: "## Fix", "## Root Cause", "## Changes", "## Summary"
+            new Regex(
+                @"^\s*#{1,6}\s+(?:fix|root cause|changes|summary)\b",
+                RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.Multiline),
+        };
+
+       public LoopDriver(
             ILlmClient llmClient,
             IAgenticHost agenticHost,
             ILoopCallbacks callbacks,
@@ -38,6 +89,22 @@ namespace DevMind
             _callbacks   = callbacks;
             _options     = options;
             _state       = state;
+        }
+
+        /// <summary>
+        /// Returns the first matching claim-signal category from the narration patterns,
+        /// or null if no pattern matched. Used to gate the Layer 2 retry.
+        /// </summary>
+        private static string MatchNarrationClaim(string text)
+        {
+            if (string.IsNullOrEmpty(text))
+                return null;
+            for (int i = 0; i < _narrationClaimPatterns.Length; i++)
+            {
+                if (_narrationClaimPatterns[i].IsMatch(text))
+                    return _narrationClaimPatterns[i].ToString(); // pattern as identifier
+            }
+            return null;
         }
 
         /// <summary>
@@ -208,7 +275,7 @@ namespace DevMind
                     assistantResponse, outcome, result, lastToolCalls,
                     "Continue with the task.", shouldLog: true);
             }
-            else
+           else
             {
                 // No-tool-calls path: model answered in prose or called task_done inline.
                 if (outcome.IsDone)
@@ -217,6 +284,37 @@ namespace DevMind
                 string trimmedResponse = assistantResponse?.Trim() ?? "";
                 bool insideAgenticCycle = _state.AgenticDepth > 0 || _state.ShellLoopPending;
                 bool prosePresent       = trimmedResponse.Length > 40 && !outcome.HasAnyDirective && !outcome.IsDone;
+
+                // ── Layer 2: Narration-stall retry guard ─────────────────────────
+                // When inside an agentic cycle, no tool calls were made, but the prose
+                // matches a claim signal (e.g. "let me check the build" or "build: 0 errors"),
+                // re-issue the turn once with tool_choice forced to "required".
+                // This catches mid-session stalls that Layer 1 (cold-start) cannot reach.
+                //
+                // Gate: ONE retry per user turn. If the retry also returns no tool_call,
+                // fall through to the normal prose-finish / terminal path.
+                if (NARRATION_RETRY_ENABLED && insideAgenticCycle && !_state.NarrationRetryUsed && !outcome.IsDone)
+                {
+                    string claimSignal = MatchNarrationClaim(trimmedResponse);
+                    if (claimSignal != null)
+                    {
+                        _state.NarrationRetryUsed = true;
+                        _state.ShellLoopPending   = true;
+
+                        if (_options.ShowDebugOutput)
+                            _agenticHost.AppendOutput(
+                                $"[DIAG] Narration stall detected (claim: {claimSignal}) — " +
+                                $"retrying with tool_choice=required.\n", OutputColor.Dim);
+
+                        const string NarrationRetryPrompt =
+                            "You described an action but did not call any tool. " +
+                            "Call the appropriate tool now to perform the action you described.";
+                        return LoopIterationResult.MakeShouldReTrigger(
+                            assistantResponse, outcome, null, null,
+                            NarrationRetryPrompt, shouldLog: false,
+                            forceToolChoiceRequired: true);
+                    }
+                }
 
                 if (insideAgenticCycle && prosePresent && !_state.PromptedForTaskDone)
                 {
@@ -243,6 +341,10 @@ namespace DevMind
                     if (_state.PromptedForTaskDone)
                         _agenticHost.AppendOutput(
                             "[DIAG] Tool use loop: re-prompt also produced no tool calls — accepting prose-finish.\n",
+                            OutputColor.Dim);
+                    else if (_state.NarrationRetryUsed)
+                        _agenticHost.AppendOutput(
+                            "[DIAG] Narration retry also produced no tool calls — accepting prose-finish.\n",
                             OutputColor.Dim);
                     else
                         _agenticHost.AppendOutput("[DIAG] Tool use loop: no tool calls — stopping.\n", OutputColor.Dim);
