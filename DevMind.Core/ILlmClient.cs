@@ -28,6 +28,12 @@ namespace DevMind
         /// <summary>Server-reported tokens-in-use from the last response (n_past). 0 until first response.</summary>
         int LastContextUsed { get; }
 
+        /// <summary>Generated-token count from the last response's server timings (predicted_n). 0 until first response.</summary>
+        int LastGeneratedTokens { get; }
+
+        /// <summary>Generation wall time in milliseconds from the last response's server timings (predicted_ms). 0 until first response.</summary>
+        double LastGeneratedMs { get; }
+
         /// <summary>Estimates total history token usage from conversation message lengths.</summary>
         int EstimateHistoryTokens();
 

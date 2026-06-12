@@ -11,9 +11,18 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Terminal.Gui.Editor" Version="2.5.0" />
+    <!-- VERSION PAIRING RULE (verified 2026-06-11, offline dispatch harness — see
+         DEVMIND_STATUS.md §5): Terminal.Gui 2.4.4 inserted Command.Insert at ordinal
+         38, shifting every later Command member +1. The whole Terminal.Gui.Editor
+         2.5.x line is compiled against the PRE-insertion enum (core ≤ 2.4.3), so
+         pairing Editor 2.5.x with core 2.4.4+ cross-wires EVERY editing key
+         (Backspace → SelectAll, Enter → DeleteAll, Paste → Cut, corrupted context
+         menu). Core must stay ≤ 2.4.3 until an Editor release is compiled against
+         the new enum. Do not bump either package without re-running the harness
+         (%TEMP%\tg-keyspike\BindTest). -->
+    <PackageReference Include="Terminal.Gui.Editor" Version="2.5.2" />
     <ProjectReference Include="..\DevMind.Core\DevMind.Core.csproj" />
-    <PackageReference Include="Terminal.Gui" Version="2.4.4" />
+    <PackageReference Include="Terminal.Gui" Version="2.4.3" />
   </ItemGroup>
 
 </Project>

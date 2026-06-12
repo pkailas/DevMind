@@ -11,6 +11,26 @@ namespace DevMind
     /// </summary>
     public static class ToolRegistry
     {
+        private static int _cachedToolCount = -1;
+
+        /// <summary>
+        /// Number of tools in the registry, computed once from <see cref="BuildToolsArray"/>
+        /// so the count can never drift from the actual tool set. For UI display (status bars).
+        /// </summary>
+        public static int ToolCount
+        {
+            get
+            {
+                int count = _cachedToolCount;
+                if (count < 0)
+                {
+                    count = BuildToolsArray().Count;
+                    _cachedToolCount = count;
+                }
+                return count;
+            }
+        }
+
         /// <summary>
         /// Builds the complete tools array for inclusion in the chat completion request.
         /// </summary>

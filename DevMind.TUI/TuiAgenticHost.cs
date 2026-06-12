@@ -1,11 +1,11 @@
-﻿// File: TuiAgenticHost.cs  v2.0 (SPIKE — Editor migration)
+﻿// File: TuiAgenticHost.cs  v2.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 implementation of IAgenticHost.
 // Cribbed from ConsoleAgenticHost — file/shell/patch/memory logic is identical;
 // only AppendOutput routes to a Terminal.Gui.Editor.Editor instead of Console.Write.
 //
-// SPIKE (output-view migration): the output transcript was a [Obsolete] TextView
+// (output-view migration): the output transcript was a [Obsolete] TextView
 // whose WordWrap rebuilds the ENTIRE wrapped model on every grapheme insert (O(n)
 // per token — sluggish on long transcripts) and whose per-cell color required
 // reflection into _wrapManager/WrapTextModel plus a hand-written fix for an upstream
@@ -20,7 +20,7 @@
 //               view is a non-editable programmatic log (no ReadOnly=false hack).
 // ResolveAttribute (OutputColor→RGB) is the only piece of the old color path kept.
 
-// SPIKE: suppress obsolete warnings for Terminal.Gui v2 legacy APIs.
+// Suppress obsolete warnings for Terminal.Gui v2 legacy APIs.
 #pragma warning disable CS0618
 
 using System;
@@ -38,7 +38,7 @@ using GuiEditor = Terminal.Gui.Editor.Editor;
 namespace DevMind
 {
     /// <summary>
-    /// Terminal.Gui v2 implementation of IAgenticHost for the DevMind TUI spike.
+    /// Terminal.Gui v2 implementation of IAgenticHost for the DevMind TUI.
     /// All file/shell/patch/memory logic cribbed verbatim from ConsoleAgenticHost.
     /// AppendOutput routes to a Terminal.Gui.Editor.Editor via IApplication.Invoke.
     /// </summary>
@@ -122,6 +122,9 @@ namespace DevMind
         }
 
         // ── Context lifecycle helpers ────────────────────────────────────────────
+
+        /// <summary>LSP availability for the status bar (delegates to Core's LspToolService).</summary>
+        public (bool enabled, string languages) GetLspStatus() => _lspTools.GetStatus();
 
         public void ResetTaskContext() => _taskReadFiles.Clear();
 
@@ -911,7 +914,7 @@ namespace DevMind
         }
 
         // ── IAgenticHost.ShowDiffPreviewAsync ─────────────────────────────────────
-        // SPIKE: auto-approve all patches. No interactive y/n/a/q prompt in TUI.
+        // Auto-approve all patches. No interactive y/n/a/q prompt in TUI.
 
         Task<List<int>> IAgenticHost.ShowDiffPreviewAsync(
             List<PatchResolveResult> resolvedPatches, CancellationToken cancellationToken)
@@ -932,7 +935,7 @@ namespace DevMind
                 AppendOutputLocal(DiffHelper.GenerateUnifiedDiff(r.FileName, oldLns, newLns) + "\n",
                     OutputColor.Normal);
 
-                // SPIKE: auto-approve — no interactive prompt in TUI.
+                // Auto-approve — no interactive prompt in TUI.
                 approved.Add(i);
                 AppendOutputLocal($"[PATCH] Auto-approved ({i + 1}/{resolvedPatches.Count})\n", OutputColor.Dim);
             }
@@ -1046,7 +1049,7 @@ namespace DevMind
 
         private Task<bool> ConfirmUnreadFileWriteAsync(string fileNameOnly)
         {
-            // SPIKE: auto-approve all writes — no interactive prompt.
+            // Auto-approve all writes — no interactive prompt.
             return Task.FromResult(true);
         }
 

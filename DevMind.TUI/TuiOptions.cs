@@ -1,7 +1,7 @@
-﻿// File: TuiOptions.cs  v1.0 (SPIKE)
+﻿// File: TuiOptions.cs  v1.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
-// Minimal ILlmOptions implementation for the TUI spike.
+// Minimal ILlmOptions implementation for the TUI.
 // Mirrors CliOptions but without the CLI-specific arg parsing.
 
 using System;
