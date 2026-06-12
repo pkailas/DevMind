@@ -1,13 +1,13 @@
-﻿// File: Program.cs  v1.5 (SPIKE)
+﻿// File: Program.cs  v3.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
-// Terminal.Gui v2 TUI for DevMind — Phase 1 SPIKE.
-// Proves DevMind.Core's engine can drive a TUI through IAgenticHost + ILoopCallbacks.
+// Terminal.Gui v2 TUI for DevMind.
+// Drives DevMind.Core's agentic engine through IAgenticHost + ILoopCallbacks.
 //
 // Layout:
 //   Row 0: Output area (gui-cs/Editor, fills remaining space)
-//   Row 1: Input line (TextField with "> " prompt)
-//   Row 2: Status bar (Label)
+//   Row 1: Input box (TuiInputBox, bordered, grows 1..6 rows)
+//   Row 2: Status bar (TuiStatusBar, composed labels)
 //
 // Launch:
 //   dotnet run --project DevMind.TUI -- --dir C:\path\to\project
@@ -17,7 +17,7 @@
 //   DEVMIND_ENDPOINT  — LLM endpoint URL (overrides default)
 //   DEVMIND_API_KEY   — API key (overrides default)
 
-// SPIKE: suppress obsolete warnings for Terminal.Gui v2 legacy APIs.
+// Suppress obsolete warnings for Terminal.Gui v2 legacy APIs.
 #pragma warning disable CS0618
 
 using System;
@@ -41,6 +41,26 @@ namespace DevMind
         // Global TUI config — loaded at startup, persisted by slash commands.
         static TuiConfig _config;
 
+        // ── Ctrl+C / Esc state machine ──────────────────────────────────────────
+        // Tracks whether a turn is currently running (set around RunTurnAsync calls).
+        static bool _isTurnRunning;
+        // Double-press-to-exit: armed after first Ctrl+C when idle.
+        static bool _ctrlCArmed;
+        static DateTime _ctrlCArmedTime;
+        // Armed-state expiry (seconds). Second press must land within this window.
+        const int CtrlCArmedExpirySeconds = 3;
+
+        // Clear the armed state and any warning message. Called on any user activity
+        // (typing, submitting, state change) so the warning doesn't persist.
+        static void ClearCtrlCArmed(IApplication app, TuiStatusBar statusBar)
+        {
+            if (_ctrlCArmed)
+            {
+                _ctrlCArmed = false;
+                _ctrlCArmedTime = default;
+                app.Invoke(() => statusBar.SetReady());
+            }
+        }
        static async Task<int> Main(string[] args)
         {
             // Load ~/.devmind.env before any env var reads.
@@ -100,8 +120,20 @@ namespace DevMind
             // collapse into a CPU-pinning busy spin.
 Application.MaximumIterationsPerSecond = 750;
 
+            // Paste-pipeline diagnostics (inert unless DEVMIND_TUI_DIAG is set).
+            // Three rungs of the bracketed-paste ladder, outermost first:
+            //   Driver.Paste  — the driver's input processor parsed ESC[200~…201~
+            //   App.Paste     — ApplicationImpl.RaisePasteEvent reached (also logs which
+            //                   view is focused — Command.Paste is invoked on THAT view)
+            // The remaining rungs (View.Pasting, KeyDown Ctrl+V, InsertAtCaret) are
+            // traced inside TuiInputBox. One paste attempt should light up a contiguous
+            // prefix of this ladder; where the trace stops is where the chain is broken.
+            if (app.Driver != null)
+                app.Driver.Paste += (s, text) =>
+                    TuiAgenticHost.Diag($"[PASTE] Driver.Paste len={text?.Length ?? -1}");
+
             // Main window.
-            using Window window = new() { Title = "DevMind TUI (SPIKE) — Esc to quit" };
+            using Window window = new() { Title = "DevMind TUI — Enter send · Ctrl+Enter newline · Ctrl+C copies/×2 quits · Esc interrupts" };
 
            // Output pane — programmatically-written, non-interactive log (gui-cs/Editor).
             //
@@ -143,36 +175,45 @@ Application.MaximumIterationsPerSecond = 750;
             });
 
 
-            // Input TextField.
-            TextField inputField = new()
+            // Multi-line bordered input box: Enter submits, Ctrl+Enter inserts a newline,
+            // grows 1..6 content rows. Border blue when active.
+            var inputBox = new TuiInputBox();
+
+            // Output pane fills everything above the input box + status row.
+            // The Dim.Height reference keeps the layout correct as the input box grows.
+            outputView.Height = Dim.Fill(Dim.Height(inputBox.View) + 1);
+
+            // WT bracketed-paste consumption (app level). Windows Terminal owns Ctrl+V
+            // and injects the clipboard as a bracketed paste (ESC[200~…201~); the
+            // keystroke never reaches the app. With the aligned 2.4.3/2.5.2 pairing,
+            // Editor's own Command.Paste handler replaces core's DefaultPasteHandler
+            // and reads the DRIVER clipboard, ignoring the bracketed payload — an
+            // unnecessary failure surface. Consume the payload here instead:
+            // IApplication.Paste fires before routing to the focused view and its
+            // PasteEventArgs is cancellable, so insert the payload text directly into
+            // the input box and mark the event handled. While a turn is running the
+            // input is disabled (CanFocus=false) and the paste is swallowed.
+            app.Paste += (s, e) =>
             {
-                X = 1, Y = Pos.AnchorEnd(2), // 2 rows from bottom (input + status)
-                Width = Dim.Fill() - 1,
-                Text = "",
+                TuiAgenticHost.Diag($"[PASTE] App.Paste len={e.Text?.Length ?? -1} " +
+                    $"focused={app.Navigation?.GetFocused()?.GetType().Name ?? "(null)"}");
+                e.Handled = true;
+                if (inputBox.View.CanFocus)
+                    inputBox.InsertAtCaret(e.Text);
             };
 
-            // Prompt label ("> ").
-            Label promptLabel = new()
-            {
-                X = 0, Y = Pos.AnchorEnd(2),
-                Width = 1,
-                Text = ">",
-            };
+            // Construct the host first — the status bar needs its LSP availability.
+            var host = new TuiAgenticHost(options.WorkingDirectory, outputView, () => cts.Cancel());
 
-            // Status Label.
-            Label statusLabel = new()
-            {
-                X = 0, Y = Pos.AnchorEnd(1),
-                Width = Dim.Fill(),
-                Text = "Ready",
-            };
+            // Status bar: composed-Labels row — state + hints left, LSP chip + context meter right.
+            var (lspEnabled, lspLanguages) = host.GetLspStatus();
+            var statusBar = new TuiStatusBar(ToolRegistry.ToolCount, lspEnabled, lspLanguages);
 
             // Add views to window.
-            window.Add(outputView, promptLabel, inputField, statusLabel);
+            window.Add(outputView, inputBox.View, statusBar.Root);
 
-            // Construct host and callbacks with references to TUI views.
-            var host = new TuiAgenticHost(options.WorkingDirectory, outputView, () => cts.Cancel());
-            var callbacks = new TuiLoopCallbacks(llmClient, statusLabel, host, inputField);
+            // Construct callbacks with references to TUI views.
+            var callbacks = new TuiLoopCallbacks(llmClient, statusBar, host, inputBox.View);
             var state = new LoopState();
             var driver = new LoopDriver(llmClient, host, callbacks, options, state);
 
@@ -237,52 +278,103 @@ Application.MaximumIterationsPerSecond = 750;
              string combinedSystemPrompt = BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules, host.TaskScratchpad);
 
             // Banner. All output MUST go through the host (never outputView.InsertText
-            // directly) — TuiAgenticHost tracks the logical append position for color
+            // directly) - TuiAgenticHost tracks the logical append position for color
             // stamping, and a bypassing insert would desync it.
             host.AppendOutputLocal(
-                "╔══════════════════════════════════════════════════════════╗\n" +
-                "║  DevMind TUI — Phase 1 SPIKE                           ║\n" +
-                $"║  Endpoint: {options.EndpointUrl,-47}║\n" +
-                $"║  Working dir: {options.WorkingDirectory,-43}║\n" +
-                "╚══════════════════════════════════════════════════════════╝\n\n",
+                $"DevMind TUI  ·  {options.EndpointUrl}  ·  {options.WorkingDirectory}\n\n",
                 OutputColor.Dim);
 
             // Focus the input field. Setting focus before the loop runs is unreliable in
             // Terminal.Gui v2 (layout/focus is resolved during app.Run), so also re-assert it
-            // once the window is initialized. With outputView non-focusable and the Labels
-            // non-focusable by default, inputField is the only tab stop — but this guarantees
+            // once the window is initialized. With outputView non-focusable and the status
+            // bar non-focusable, the input box is the only tab stop - but this guarantees
             // the cursor lands there on startup.
-            inputField.SetFocus();
-            window.Initialized += (s, e) => inputField.SetFocus();
+            inputBox.View.SetFocus();
+            window.Initialized += (s, e) => inputBox.View.SetFocus();
 
-            // Ctrl+C → copy the output pane's current mouse selection to the Windows clipboard.
-            // Bound app-wide via the instance model's Keyboard (this process uses Application.Create,
-            // so the static Application.KeyDown would throw a mixed-model error). It fires regardless
-            // of focus (the output Editor is non-focusable, so the input TextField holds focus);
-            // marking the key Handled keeps it from reaching the input field. Esc remains the quit
-            // key, so Ctrl+C is free here, and the driver delivers it as a normal keystroke
-            // (TreatControlCAsInput), not a SIGINT.
+            // Ctrl+C state machine + Esc handler (app-wide, bound on the instance keyboard).
+            // Ctrl+C: (a) copy selection, (b) cancel turn, (c) double-press to exit.
+            // Esc: cancel turn if running, otherwise no-op (must NOT quit).
             app.Keyboard.KeyDown += (s, key) =>
             {
-                if (key.KeyCode != Key.C.WithCtrl.KeyCode) return;
-                key.Handled = true;
-                CopySelectionToClipboard(outputView, host);
+                // ── Ctrl+C ──────────────────────────────────────────────────────
+                if (key.KeyCode == Key.C.WithCtrl.KeyCode)
+                {
+                    key.Handled = true;
+
+                    // (a) If output pane has a text selection → copy to clipboard.
+                    if (!string.IsNullOrEmpty(outputView.SelectedText))
+                    {
+                        CopySelectionToClipboard(outputView, host);
+                        ClearCtrlCArmed(app, statusBar);
+                        return;
+                    }
+
+                    // (b) If a turn is running → cancel it.
+                    if (_isTurnRunning)
+                    {
+                        cts.Cancel();
+                        ClearCtrlCArmed(app, statusBar);
+                        return;
+                    }
+
+                    // (c) Idle, no selection → double-press to exit.
+                    if (_ctrlCArmed && (DateTime.UtcNow - _ctrlCArmedTime).TotalSeconds < CtrlCArmedExpirySeconds)
+                    {
+                        // Second press within window → exit.
+                        _ctrlCArmed = false;
+                        app.RequestStop();
+                        return;
+                    }
+
+                    // First press → arm the warning.
+                    _ctrlCArmed = true;
+                    _ctrlCArmedTime = DateTime.UtcNow;
+                    statusBar.SetBusy("Press Ctrl+C again to exit");
+                }
+
+                // ── Esc ─────────────────────────────────────────────────────────
+                if (key.KeyCode == Key.Esc.KeyCode)
+                {
+                    key.Handled = true;
+
+                    if (_isTurnRunning)
+                    {
+                        cts.Cancel();
+                        return;
+                    }
+
+                    // Idle: clear input if non-empty, do NOT exit.
+                    if (!string.IsNullOrEmpty(inputBox.Text?.Trim()))
+                    {
+                        inputBox.Clear();
+                    }
+                }
+            };
+
+            // Clear Ctrl+C armed state on any keystroke in the input box.
+            inputBox.View.KeyDown += (s, key) =>
+            {
+                ClearCtrlCArmed(app, statusBar);
             };
 
            // Handle Enter in input field — submit to LLM.
-            inputField.Accepting += async (s, e) =>
+            inputBox.View.Accepting += async (s, e) =>
             {
+                // Any user activity clears the Ctrl+C armed state.
+                ClearCtrlCArmed(app, statusBar);
+
                 // Mark the Accept command handled so it does not bubble to the SuperView.
                 // In Terminal.Gui v2, an unhandled Accepting raises Command.Accept on the
                 // SuperView (per View.RaiseAccepting), which can trigger a default-button /
                 // toplevel Accept we don't want. We own Enter on this field.
                 e.Handled = true;
 
-                string input = inputField.Text?.Trim() ?? "";
+                string input = inputBox.Text?.Trim() ?? "";
                 if (string.IsNullOrEmpty(input)) return;
 
                 // Clear input.
-                inputField.Text = "";
+                inputBox.Clear();
 
                 // Echo user input (through the host — keeps the stamping tracker in sync).
                 host.AppendOutputLocal($"\n> {input}\n", OutputColor.Input);
@@ -386,8 +478,10 @@ Application.MaximumIterationsPerSecond = 750;
                             bool previousThinking = options.ShowLlmThinking;
                             options.ShowLlmThinking = true;
 
-                            inputField.CanFocus = false;
-                            statusLabel.Text = "Processing...";
+                            inputBox.View.CanFocus = false;
+                            inputBox.SetActive(false);
+                            statusBar.SetBusy("Processing...");
+                            _isTurnRunning = true;
 
                            await RunTurnAsync(message, options, llmClient, host, driver, state,
                                 callbacks, () => BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules, host.TaskScratchpad), cts, app,
@@ -396,9 +490,11 @@ Application.MaximumIterationsPerSecond = 750;
                             // Revert thinking.
                             options.ShowLlmThinking = previousThinking;
 
-                            inputField.CanFocus = true;
-                            inputField.SetFocus();
-                            statusLabel.Text = "Ready";
+                            inputBox.View.CanFocus = true;
+                            _isTurnRunning = false;
+                            inputBox.SetActive(true);
+                            inputBox.View.SetFocus();
+                            statusBar.SetReady();
                             return;
                         }
                     }
@@ -407,25 +503,32 @@ Application.MaximumIterationsPerSecond = 750;
                     // but keep backward compatibility by registering it explicitly.
                     // (The /new handler already does the full reset.)
 
-                    inputField.CanFocus = true;
-                    inputField.SetFocus();
-                    statusLabel.Text = "Ready";
+                    inputBox.View.CanFocus = true;
+                    inputBox.SetActive(true);
+                    inputBox.View.SetFocus();
+                    statusBar.SetReady();
                     return;
                 }
 
                 // Disable input during agentic processing.
-                inputField.CanFocus = false;
-                statusLabel.Text = "Processing...";
+                inputBox.View.CanFocus = false;
+                inputBox.SetActive(false);
+                statusBar.SetBusy("Processing...");
+                _isTurnRunning = true;
 
               // Run the agentic turn.
                  await RunTurnAsync(input, options, llmClient, host, driver, state,
                      callbacks, () => BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules, host.TaskScratchpad), cts, app,
                      historyStore, SessionId.Get(), SessionId.GetMachineName());
 
+                // Turn completed — clear running flag.
+                _isTurnRunning = false;
+
                 // Re-enable input.
-                inputField.CanFocus = true;
-                inputField.SetFocus();
-                statusLabel.Text = "Ready";
+                inputBox.View.CanFocus = true;
+                inputBox.SetActive(true);
+                inputBox.View.SetFocus();
+                statusBar.SetReady();
             };
 
             // Run the application.

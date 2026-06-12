@@ -78,6 +78,18 @@ namespace DevMind
                 r => r.FindSymbolAsync(query, cap, language ?? "csharp", cancellationToken));
         }
 
+        /// <summary>
+        /// UI-facing availability snapshot for status display: whether LSP tooling is
+        /// enabled (the DEVMIND_LSP_ENABLED gate) and the supported-language labels
+        /// (e.g. "C#/TS"). Data only — no UI concerns, no server spawn.
+        /// </summary>
+        public (bool enabled, string languages) GetStatus()
+        {
+            string languages = LanguageServerProfile.CSharpProfile.DisplayName + "/" +
+                               LanguageServerProfile.TypeScriptProfile.DisplayName;
+            return (LanguageServerRouter.IsEnabled(), languages);
+        }
+
         public void Dispose()
         {
             lock (_gate)
