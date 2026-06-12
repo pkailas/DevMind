@@ -482,19 +482,26 @@ Application.MaximumIterationsPerSecond = 750;
                             inputBox.SetActive(false);
                             statusBar.SetBusy("Processing...");
                             _isTurnRunning = true;
+                            callbacks.BeginTurn();
 
-                           await RunTurnAsync(message, options, llmClient, host, driver, state,
-                                callbacks, () => BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules, host.TaskScratchpad), cts, app,
-                                historyStore, SessionId.Get(), SessionId.GetMachineName());
-
-                            // Revert thinking.
-                            options.ShowLlmThinking = previousThinking;
-
-                            inputBox.View.CanFocus = true;
-                            _isTurnRunning = false;
-                            inputBox.SetActive(true);
-                            inputBox.View.SetFocus();
-                            statusBar.SetReady();
+                            try
+                            {
+                                await RunTurnAsync(message, options, llmClient, host, driver, state,
+                                    callbacks, () => BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules, host.TaskScratchpad), cts, app,
+                                    historyStore, SessionId.Get(), SessionId.GetMachineName());
+                            }
+                            finally
+                            {
+                                // Guaranteed teardown on completion, cancellation, AND
+                                // exception — EndTurn disposes the turn ticker (otherwise
+                                // it re-orphans and "Generating" returns) and shows Ready.
+                                options.ShowLlmThinking = previousThinking; // revert one-shot thinking
+                                _isTurnRunning = false;
+                                inputBox.View.CanFocus = true;
+                                inputBox.SetActive(true);
+                                inputBox.View.SetFocus();
+                                callbacks.EndTurn();
+                            }
                             return;
                         }
                     }
@@ -515,20 +522,28 @@ Application.MaximumIterationsPerSecond = 750;
                 inputBox.SetActive(false);
                 statusBar.SetBusy("Processing...");
                 _isTurnRunning = true;
+                callbacks.BeginTurn();
 
-              // Run the agentic turn.
-                 await RunTurnAsync(input, options, llmClient, host, driver, state,
-                     callbacks, () => BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules, host.TaskScratchpad), cts, app,
-                     historyStore, SessionId.Get(), SessionId.GetMachineName());
-
-                // Turn completed — clear running flag.
-                _isTurnRunning = false;
-
-                // Re-enable input.
-                inputBox.View.CanFocus = true;
-                inputBox.SetActive(true);
-                inputBox.View.SetFocus();
-                statusBar.SetReady();
+                try
+                {
+                    // Run the agentic turn.
+                    await RunTurnAsync(input, options, llmClient, host, driver, state,
+                        callbacks, () => BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules, host.TaskScratchpad), cts, app,
+                        historyStore, SessionId.Get(), SessionId.GetMachineName());
+                }
+                finally
+                {
+                    // Guaranteed teardown on completion, cancellation, AND exception.
+                    // EndTurn disposes the turn ticker (otherwise a cancelled turn
+                    // re-orphans it and "Generating" comes right back), syncs the
+                    // context meter to server truth, publishes the turn's tok/s, and
+                    // shows Ready.
+                    _isTurnRunning = false;
+                    inputBox.View.CanFocus = true;
+                    inputBox.SetActive(true);
+                    inputBox.View.SetFocus();
+                    callbacks.EndTurn();
+                }
             };
 
             // Run the application.
@@ -587,6 +602,11 @@ Application.MaximumIterationsPerSecond = 750;
                     forceToolChoiceRequired: forceToolChoiceRequired,
                     onToken: token =>
                     {
+                        // Feed the live token counter (drives the status bar's "N tok ·
+                        // X tok/s" suffix). One SSE token per call; counts thinking and
+                        // visible alike, matching the engine's LastGeneratedTokens.
+                        callbacks.OnStreamToken();
+
                         string visible = thinkFilter.Process(token, options.ShowLlmThinking,
                             out string thinkText);
 
