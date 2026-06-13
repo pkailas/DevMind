@@ -203,6 +203,13 @@ namespace DevMind
         public int ServerContextSize { get; private set; } // n_ctx
         public int LastContextDelta { get; private set; }  // n_past growth since previous response
 
+        // ── Live running usage for the in-progress response (per-chunk usage.*) ───
+        // Reliable across content / reasoning / tool_call chunks; the live status-bar
+        // counter reads these instead of counting content deltas (which are null on
+        // tool-call and reasoning turns). Reset per send; finalized from timings.
+        public int LiveGeneratedTokens { get; private set; }
+        public int LivePromptTokens { get; private set; }
+
         // ── Predictive context growth tracking ──────────────────────────────
         private readonly List<int> _contextDeltas = new List<int>();
         private int _previousContextUsed;
@@ -825,6 +832,16 @@ namespace DevMind
                 var firstTokenDeadline = DateTime.UtcNow.AddMinutes(
                     _options.FirstTokenTimeoutMinutes);
                 string lastDataLine = null; // Track last SSE data line for tool_calls extraction
+                // Reasoning-channel state: llama-server emits thinking on the native
+                // delta.reasoning_content field (not inline <think> tags). Track whether
+                // we are mid-reasoning so we can re-synthesize <think>…</think> boundaries
+                // for ThinkFilter and the live token counter (see ParseReasoningDelta).
+                bool inReasoning = false;
+
+                // Reset live running usage for this response — updated per-chunk from
+                // usage.completion_tokens / usage.prompt_tokens (see ParseLiveUsage).
+                LiveGeneratedTokens = 0;
+                LivePromptTokens = 0;
 
                 // Accumulate tool calls across SSE delta chunks.
                 // llama-server streams tool_calls incrementally:
@@ -895,9 +912,29 @@ namespace DevMind
 
                     lastDataLine = data;
 
+                    // Live running usage — llama-server attaches an incrementing usage object
+                    // (completion_tokens / prompt_tokens) to every streamed chunk. This is the
+                    // reliable real-time output counter: it advances on content, reasoning, AND
+                    // tool_call chunks, where a content-delta count would sit at 0.
+                    ParseLiveUsage(data);
+
+                    // Reasoning tokens arrive on delta.reasoning_content; visible tokens on
+                    // delta.content. Re-synthesize <think>…</think> boundaries so ThinkFilter
+                    // and the live token counter (onToken) see reasoning exactly as they would
+                    // an inline-tagged stream. Reasoning is fed through onToken (counted +
+                    // displayed) but NOT appended to fullResponse — it stays out of history.
+                    string reasoning = ParseReasoningDelta(data);
+                    if (reasoning != null)
+                    {
+                        if (!inReasoning) { inReasoning = true; onToken("<think>"); }
+                        firstTokenReceived = true;
+                        onToken(reasoning);
+                    }
+
                     string token = ParseContentDelta(data);
                     if (token != null)
                     {
+                        if (inReasoning) { inReasoning = false; onToken("</think>"); }
                         firstTokenReceived = true;
                         fullResponse.Append(token);
                         onToken(token);
@@ -2987,6 +3024,9 @@ namespace DevMind
                 if (promptN > 0) LastPromptTokens = promptN;
                 if (promptMs > 0) LastPromptMs = promptMs;
                 if (predictedN > 0) LastGeneratedTokens = predictedN;
+                // Finalize the live counter to the authoritative server count, so the displayed
+                // number lands exactly on predicted_n at end-of-turn regardless of usage cadence.
+                if (predictedN > LiveGeneratedTokens) LiveGeneratedTokens = predictedN;
                 if (predictedMs > 0) LastGeneratedMs = predictedMs;
                 if (nCtx > 0) ServerContextSize = nCtx;
                 if (nPast > 0)
@@ -3029,6 +3069,50 @@ namespace DevMind
             catch
             {
                 return null;
+            }
+        }
+
+        /// <summary>
+        /// Extracts the streamed reasoning delta (<c>choices[0].delta.reasoning_content</c>)
+        /// that llama-server emits for reasoning models. Returns null when absent — the
+        /// streaming loop re-wraps non-null reasoning in &lt;think&gt; tags for ThinkFilter.
+        /// </summary>
+        private static string ParseReasoningDelta(string json)
+        {
+            try
+            {
+                var obj = JObject.Parse(json);
+                return obj?["choices"]?[0]?["delta"]?["reasoning_content"]?.ToString();
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Reads the running <c>usage</c> object llama-server attaches to each streamed chunk
+        /// and updates <see cref="LiveGeneratedTokens"/> / <see cref="LivePromptTokens"/>.
+        /// Monotonic and channel-agnostic (content, reasoning, tool_calls), so it drives the
+        /// live status-bar counter reliably. No-op when the server omits usage on a chunk.
+        /// </summary>
+        private void ParseLiveUsage(string json)
+        {
+            try
+            {
+                var usage = JObject.Parse(json)?["usage"];
+                if (usage == null) return;
+
+                int completion = usage["completion_tokens"]?.Value<int>() ?? 0;
+                int prompt = usage["prompt_tokens"]?.Value<int>() ?? 0;
+                // Guard against a server emitting a 0/absent usage on the terminal chunk after
+                // a real count — never let the live counter regress mid-stream.
+                if (completion > LiveGeneratedTokens) LiveGeneratedTokens = completion;
+                if (prompt > LivePromptTokens) LivePromptTokens = prompt;
+            }
+            catch
+            {
+                // Malformed/partial chunk — keep the last good live counts.
             }
         }
 

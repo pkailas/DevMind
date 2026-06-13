@@ -143,6 +143,12 @@ namespace DevMind
         {
             if (string.IsNullOrEmpty(text)) return;
 
+            // Quiet transcript (DevMindShell parity): the engine still emits per-iteration
+            // churn ([CONTEXT] usage / [TOOL_USE] / [LLM] / [AGENTIC] Iteration / [READ] status)
+            // for the CLI skin and history, but the TUI keeps that state in the status bar — not
+            // the scrollback. Swallow those lines here unless verbose output is enabled.
+            if (IsSuppressedNoise(text)) return;
+
             // Terminal.Gui v2: all view mutations must be on the main UI thread.
             // Use the instance-based IApplication.Invoke (not the deprecated static).
             // Invoke marshals to the UI thread via TimedEvents (zero-delay timeouts keyed by
@@ -203,6 +209,57 @@ namespace DevMind
                 Diag($"[APPEND] EXCEPTION color={color} len={text.Length} ex={ex}");
             }
         }
+
+        // ── Quiet-transcript filter ───────────────────────────────────────────────
+        // DevMindShell kept the scrollback clean — model output + tool-output regions only —
+        // with agentic/context/token state in the status bar. The C# engine emits the same
+        // state as bracketed status lines (for the CLI skin + history); we suppress the noisy
+        // subset in the TUI so the transcript matches DevMindShell. Set DEVMIND_TUI_VERBOSE to
+        // restore the full firehose (parity with the roadmap's /verbose).
+        private static readonly bool VerboseOutput =
+            !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DEVMIND_TUI_VERBOSE"));
+
+        private static bool IsSuppressedNoise(string text)
+        {
+            if (VerboseOutput) return false;
+
+            // Engine status lines arrive as a complete "[TAG] …\n" call, often with a leading
+            // "\n" (Core's onToken lines). Find the first non-whitespace char and match there.
+            int i = 0;
+            while (i < text.Length && (text[i] == '\n' || text[i] == '\r' || text[i] == ' ' || text[i] == '\t'))
+                i++;
+            if (i >= text.Length) return false;
+
+            // [TOOL_USE] / [LLM] — always per-turn churn.
+            if (StartsAt(text, i, "[TOOL_USE]")) return true;
+            if (StartsAt(text, i, "[LLM]")) return true;
+
+            // [AGENTIC] — drop only the per-iteration counter; KEEP terminal states
+            // (Task complete / Depth cap / Aborted / Cancelled / Run-succeeded).
+            if (StartsAt(text, i, "[AGENTIC] Iteration")) return true;
+
+            // [READ] — drop the file/git status one-liners; KEEP "[READ ERROR]" (real errors).
+            if (StartsAt(text, i, "[READ] ")) return true;
+
+            // [CONTEXT] — drop the routine usage meter (numeric / "~" estimate / "Working:");
+            // KEEP signal lines (CRITICAL, Hard/Soft trim, Warning, Compacting, Brainwash, …).
+            if (StartsAt(text, i, "[CONTEXT] "))
+            {
+                int j = i + "[CONTEXT] ".Length;
+                if (j < text.Length)
+                {
+                    char c = text[j];
+                    if (char.IsDigit(c) || c == '~') return true;
+                    if (StartsAt(text, j, "Working:")) return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool StartsAt(string s, int offset, string prefix)
+            => offset + prefix.Length <= s.Length
+               && string.CompareOrdinal(s, offset, prefix, 0, prefix.Length) == 0;
 
         // ── IAgenticHost.RunShellAsync ────────────────────────────────────────────
 
