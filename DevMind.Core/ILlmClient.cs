@@ -31,6 +31,16 @@ namespace DevMind
         /// <summary>Generated-token count from the last response's server timings (predicted_n). 0 until first response.</summary>
         int LastGeneratedTokens { get; }
 
+        /// <summary>Live running output-token count for the IN-PROGRESS response, read from each
+        /// SSE chunk's <c>usage.completion_tokens</c>. Increments across content, reasoning, and
+        /// tool_call chunks alike (unlike a content-delta counter). Reset to 0 at the start of each
+        /// send; finalized to predicted_n at completion. 0 when the server does not report usage.</summary>
+        int LiveGeneratedTokens { get; }
+
+        /// <summary>Live running input-token count for the in-progress response, read from each SSE
+        /// chunk's <c>usage.prompt_tokens</c>. 0 when the server does not report usage.</summary>
+        int LivePromptTokens { get; }
+
         /// <summary>Generation wall time in milliseconds from the last response's server timings (predicted_ms). 0 until first response.</summary>
         double LastGeneratedMs { get; }
 

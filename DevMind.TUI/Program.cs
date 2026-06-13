@@ -81,6 +81,11 @@ namespace DevMind
                     options.WorkingDirectory = _config.WorkingDirectory;
             }
 
+            // Apply persisted depth cap (lower priority than CLI --max-depth). 0 means
+            // "not set" in config; only override the default when a valid value was saved.
+            if (_config.DepthCap > 0 && Array.IndexOf(args, "--max-depth") < 0)
+                options.AgenticLoopMaxDepth = _config.DepthCap;
+
             // Context file discovery.
             string devMindContext = LoadContextFile(options.WorkingDirectory);
 
@@ -408,7 +413,12 @@ Application.MaximumIterationsPerSecond = 750;
                             cts = new CancellationTokenSource();
                             oldCts.Dispose();
                         },
-                        SetDepthCap = (n) => { options.AgenticLoopMaxDepth = n; },
+                        SetDepthCap = (n) =>
+                        {
+                            options.AgenticLoopMaxDepth = n;
+                            _config.DepthCap = n;
+                            _config.Save();
+                        },
                         SetThinking = (on) => { options.ShowLlmThinking = on; },
                         // History fields.
                         HistoryStore = historyStore,

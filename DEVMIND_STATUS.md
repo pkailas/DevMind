@@ -158,6 +158,13 @@ Go stays as the unused fallback.
 - **Uncommitted files (CRITICAL — lost once already):** Program.cs, TuiInputBox.cs,
   TuiStatusBar.cs, TuiLoopCallbacks.cs, TuiAgenticHost.cs, TuiOptions.cs, DEVMIND_STATUS.md.
   Commit the full TUI unit once paste is verified. Do not let this sit untracked again.
+- Logging: quiet-by-default once daily driver. Keep the audit trail ([READ]/[LIST]/[SHELL] tool actions + turn terminal state: Task complete / Depth cap). Drop per-iteration churn ([LLM]/[CONTEXT]/[TOOL_USE]/Iteration N) — now redundant with the working status bar. Full firehose behind /verbose or DEVMIND_TUI_DIAG. DM-tier: locate emission sites + any existing /output-lines knob, wire quiet/verbose.
+- Word doc generation: add a create_document / write_document tool to DevMind.McpServer
+  using DocumentFormat.OpenXml (NuGet, net10.0, no Office required). Takes content +
+  structure, emits .docx. Interim workaround: model generates markdown, shell tool runs
+  pandoc (pandoc input.md -o output.docx). DM-tier once McpServer tool work resumes.
+
+
 
 ---
 

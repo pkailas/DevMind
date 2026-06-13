@@ -224,7 +224,11 @@ namespace DevMind
             }
             else
             {
-                int streamed = Volatile.Read(ref _streamedTokens);
+                // Prefer the server's running usage count (advances on content, reasoning, AND
+                // tool_call chunks); fall back to the content-delta count for endpoints that
+                // don't report per-chunk usage.
+                int serverLive = _llmClient.LiveGeneratedTokens;
+                int streamed = serverLive > 0 ? serverLive : Volatile.Read(ref _streamedTokens);
                 long firstMs = Interlocked.Read(ref _firstTokenMs);
                 double genSecs = firstMs >= 0
                     ? Math.Max(0.1, (_turnClock.ElapsedMilliseconds - firstMs) / 1000.0)
@@ -242,7 +246,9 @@ namespace DevMind
             if (tick % 3 == 0)
             {
                 var (anchor, total) = GetContextMetrics();
-                _statusBar.SetContextMeter(anchor + Volatile.Read(ref _streamedTokens), total);
+                int serverLive = _llmClient.LiveGeneratedTokens;
+                int live = serverLive > 0 ? serverLive : Volatile.Read(ref _streamedTokens);
+                _statusBar.SetContextMeter(anchor + live, total);
             }
         }
 

@@ -27,6 +27,11 @@ namespace DevMind
         [JsonPropertyName("workingDirectory")]
         public string WorkingDirectory { get; set; } = null;
 
+        /// <summary>Persisted agentic depth cap (1-200). 0 means "not set" — the
+        /// startup default / CLI --max-depth applies instead.</summary>
+        [JsonPropertyName("depthCap")]
+        public int DepthCap { get; set; } = 0;
+
         private static string ConfigPath => Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             ConfigDirName, ConfigFileName);
@@ -54,6 +59,10 @@ namespace DevMind
 
                 if (root.TryGetProperty("workingDirectory", out var dir) && dir.ValueKind == JsonValueKind.String)
                     config.WorkingDirectory = dir.GetString();
+
+                if (root.TryGetProperty("depthCap", out var depth) && depth.ValueKind == JsonValueKind.Number
+                    && depth.TryGetInt32(out int depthVal))
+                    config.DepthCap = depthVal;
             }
             catch
             {
@@ -86,7 +95,9 @@ namespace DevMind
 
                 string json = JsonSerializer.Serialize(this, options);
                 File.WriteAllText(tmpPath, json, Encoding.UTF8);
-                File.Move(tmpPath, path);
+                // overwrite: true — File.Move(src, dest) throws if dest already exists,
+                // which silently broke every save after the file was first created.
+                File.Move(tmpPath, path, overwrite: true);
             }
             catch
             {
