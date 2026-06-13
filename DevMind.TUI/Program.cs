@@ -512,9 +512,13 @@ Application.MaximumIterationsPerSecond = 750;
 
                             try
                             {
-                                await RunTurnAsync(message, options, llmClient, host, driver, state,
+                                // Run off the UI thread so synchronous tool I/O (FIND/READ/LIST)
+                                // can't block the main loop and freeze the spinner. All UI writes
+                                // already marshal via app.Invoke; this await resumes the finally
+                                // back on the UI thread.
+                                await Task.Run(() => RunTurnAsync(message, options, llmClient, host, driver, state,
                                     callbacks, () => BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules, host.TaskScratchpad), cts, app,
-                                    historyStore, SessionId.Get(), SessionId.GetMachineName());
+                                    historyStore, SessionId.Get(), SessionId.GetMachineName()));
                             }
                             finally
                             {
@@ -552,10 +556,13 @@ Application.MaximumIterationsPerSecond = 750;
 
                 try
                 {
-                    // Run the agentic turn.
-                    await RunTurnAsync(input, options, llmClient, host, driver, state,
+                    // Run the agentic turn OFF the UI thread — synchronous tool I/O
+                    // (FIND/READ/LIST/GREP) would otherwise block the main loop and freeze the
+                    // animated spinner. All UI writes marshal via app.Invoke; this await resumes
+                    // the finally back on the UI thread for the teardown.
+                    await Task.Run(() => RunTurnAsync(input, options, llmClient, host, driver, state,
                         callbacks, () => BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules, host.TaskScratchpad), cts, app,
-                        historyStore, SessionId.Get(), SessionId.GetMachineName());
+                        historyStore, SessionId.Get(), SessionId.GetMachineName()));
                 }
                 finally
                 {
