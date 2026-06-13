@@ -22,18 +22,29 @@ namespace DevMind
         /// </summary>
         public bool   NarrationRetryUsed       { get; set; }
 
+        /// <summary>Cumulative model-generated tokens across all rounds of the current turn
+        /// (sum of the server's predicted_n). Drives the per-turn token-budget guard.</summary>
+        public int    CumulativeGeneratedTokens { get; set; }
+
+        /// <summary>The token count at which the budget guard next pauses. Starts at the
+        /// configured budget and is raised by another budget each time the user chooses to
+        /// continue, so the guard re-arms instead of firing every round.</summary>
+        public int    TokenBudgetCeiling        { get; set; }
+
         /// <summary>
         /// Resets all fields to initial values for a new user-initiated turn.
         /// Does NOT clear _taskReadFiles — the caller handles that separately.
         /// </summary>
        public void ResetForUserTurn()
         {
-            AgenticDepth             = 0;
-            ShellLoopPending         = false;
-            PromptedForTaskDone      = false;
-            ConsecutiveErrorToolName = null;
-            ConsecutiveErrorCount    = 0;
-            NarrationRetryUsed       = false;
+            AgenticDepth              = 0;
+            ShellLoopPending          = false;
+            PromptedForTaskDone       = false;
+            ConsecutiveErrorToolName  = null;
+            ConsecutiveErrorCount     = 0;
+            NarrationRetryUsed        = false;
+            CumulativeGeneratedTokens = 0;
+            TokenBudgetCeiling        = 0; // lazily set to the configured budget on first use
         }
     }
 }

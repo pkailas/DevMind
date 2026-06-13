@@ -157,6 +157,9 @@ namespace DevMind
             executor.SetCancellationToken(ct);
             int maxDepth = _options.AgenticLoopMaxDepth;
 
+            // Accumulate this round's generated tokens for the per-turn budget guard.
+            _state.CumulativeGeneratedTokens += _llmClient.LastGeneratedTokens;
+
             if (_options.ShowDebugOutput)
                 _agenticHost.AppendOutput(
                     $"[DIAG] Outcome: HasPatches={outcome.HasPatches}, HasShell={outcome.HasShellCommands}, " +
@@ -248,6 +251,34 @@ namespace DevMind
                     }
                     _state.AgenticDepth = 0;
                     return MakeTerminal(assistantResponse, outcome, result, lastToolCalls);
+                }
+
+                // ── Per-turn token-budget guard ────────────────────────────────────────
+                // Pause and ask before spending another (expensive) round once the model has
+                // generated more than the configured budget this turn. Continuing raises the
+                // ceiling by another budget so it re-arms instead of asking every round.
+                int tokenBudget = _options.AgenticTokenBudget;
+                if (tokenBudget > 0)
+                {
+                    if (_state.TokenBudgetCeiling == 0) _state.TokenBudgetCeiling = tokenBudget;
+                    if (_state.CumulativeGeneratedTokens >= _state.TokenBudgetCeiling)
+                    {
+                        bool cont = await _agenticHost.ConfirmContinueAsync(
+                            $"Token budget reached: the model has generated {_state.CumulativeGeneratedTokens:N0} " +
+                            $"tokens this turn across {_state.AgenticDepth + 1} rounds. Continue?");
+                        if (!cont)
+                        {
+                            _agenticHost.AppendOutput(
+                                $"[AGENTIC] Stopped at token budget — {_state.CumulativeGeneratedTokens:N0} generated tokens.\n",
+                                OutputColor.Dim);
+                            _state.AgenticDepth = 0;
+                            return MakeTerminal(assistantResponse, outcome, result, lastToolCalls);
+                        }
+                        _state.TokenBudgetCeiling += tokenBudget;
+                        _agenticHost.AppendOutput(
+                            $"[AGENTIC] Continuing — token budget raised to {_state.TokenBudgetCeiling:N0}.\n",
+                            OutputColor.Dim);
+                    }
                 }
 
                 // Re-trigger: feed results back, let model decide next step

@@ -392,6 +392,20 @@ namespace DevMind
             return await WebTools.WebFetchAsync(url, CancellationToken);
         }
 
+        Task<bool> IAgenticHost.ConfirmContinueAsync(string message)
+        {
+            // Console prompt: 'c'/'y' (or empty) continues; anything else stops. A
+            // non-interactive run (no console input) continues so it doesn't hang.
+            AppendOutput($"\n[AGENTIC] {message} [C]ontinue / [S]top: ", OutputColor.Warning);
+            string answer;
+            try { answer = Console.ReadLine(); }
+            catch { return Task.FromResult(true); }
+            if (answer == null) return Task.FromResult(true);
+            string a = answer.Trim().ToLowerInvariant();
+            bool cont = a.Length == 0 || a.StartsWith("c") || a.StartsWith("y");
+            return Task.FromResult(cont);
+        }
+
         /// <summary>Resolves an LSP tool's filename argument to an existing full path, or null.</summary>
         private string ResolveLspPath(string filename)
         {

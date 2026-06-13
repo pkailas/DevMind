@@ -27,5 +27,10 @@ namespace DevMind
         bool MicroCompactBrainwash { get; }
         bool AlwaysConfirmPatch { get; }
         int AgenticLoopMaxDepth { get; }
+
+        /// <summary>Per-turn cumulative generated-token budget. When the model has generated
+        /// this many tokens across a turn's rounds, the loop pauses and asks before continuing.
+        /// 0 disables the guard.</summary>
+        int AgenticTokenBudget { get; }
     }
 }

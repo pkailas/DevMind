@@ -55,6 +55,12 @@ namespace DevMind
         /// <summary>Called to set the depth cap.</summary>
         public Action<int> SetDepthCap { get; set; }
 
+        /// <summary>Current per-turn generated-token budget (0 = off).</summary>
+        public int TokenBudget { get; set; }
+
+        /// <summary>Called to set the token budget (0 disables).</summary>
+        public Action<int> SetTokenBudget { get; set; }
+
         /// <summary>Called to toggle thinking mode.</summary>
         public Action<bool> SetThinking { get; set; }
 
@@ -257,6 +263,11 @@ namespace DevMind
                 "Show or set agentic depth cap (1-200)",
                 "/depth-cap [N]",
                 DepthCapHandler);
+
+            RegisterCommand("/token-budget",
+                "Show or set the per-turn generated-token budget (pauses to ask once exceeded)",
+                "/token-budget [N|off]",
+                TokenBudgetHandler);
 
             RegisterCommand("/system_prompt",
                 "Display the assembled system prompt",
@@ -508,6 +519,33 @@ namespace DevMind
 
             ctx.SetDepthCap(n);
             return Task.FromResult(new CommandResult { Message = $"Depth cap set to {n}" });
+        }
+
+        // -- /token-budget [N|off] -----------------------------------------------
+        // Per-turn generated-token budget; the loop pauses to ask once exceeded.
+        static Task<CommandResult> TokenBudgetHandler(string[] args, CommandContext ctx)
+        {
+            if (args.Length == 0)
+            {
+                string cur = ctx.TokenBudget > 0 ? $"{ctx.TokenBudget:N0} tokens" : "off";
+                return Task.FromResult(new CommandResult { Message = $"Current token budget: {cur}" });
+            }
+
+            int value;
+            if (args[0].Equals("off", StringComparison.OrdinalIgnoreCase) || args[0] == "0")
+                value = 0;
+            else if (!int.TryParse(args[0], out value) || value < 0)
+                return Task.FromResult(new CommandResult
+                {
+                    Message = "Usage: /token-budget [N|off]   (N = generated tokens per turn before pausing)",
+                    IsError = true,
+                });
+
+            ctx.SetTokenBudget(value);
+            return Task.FromResult(new CommandResult
+            {
+                Message = value > 0 ? $"Token budget set to {value:N0} tokens" : "Token budget disabled",
+            });
         }
 
         // -- /system_prompt --------------------------------------------------------
