@@ -214,12 +214,17 @@ namespace DevMind
             bool generating;
             lock (_tickerLock) { generating = _generating; }
 
+            // Round counter (DevMindShell parity): the agentic loop is 1-based
+            // (round 1..depthCap), so display _thinkingDepth + 1 against the configured
+            // cap (_thinkingMaxDepth = options.AgenticLoopMaxDepth, the persistent /depth-cap).
+            int round = _thinkingDepth + 1;
+            string rounds = _thinkingMaxDepth > 0
+                ? $"round {round}/{_thinkingMaxDepth}"
+                : $"round {round}";
+
             if (!generating)
             {
-                string depthSuffix = _thinkingMaxDepth > 0
-                    ? $" (depth {_thinkingDepth}/{_thinkingMaxDepth})"
-                    : string.Empty;
-                _statusBar.SetState($"{frame} Thinking... {elapsed}{depthSuffix}",
+                _statusBar.SetState($"{frame} Thinking... ({elapsed}, {rounds})",
                     StatusState.Thinking);
             }
             else
@@ -233,10 +238,10 @@ namespace DevMind
                 double genSecs = firstMs >= 0
                     ? Math.Max(0.1, (_turnClock.ElapsedMilliseconds - firstMs) / 1000.0)
                     : 0;
-                string rateSuffix = streamed > 0 && genSecs > 0
-                    ? $" ({streamed:N0} tok · {streamed / genSecs:F1} tok/s)"
+                string tokPart = streamed > 0 && genSecs > 0
+                    ? $", {streamed:N0} tok · {streamed / genSecs:F1} tok/s"
                     : string.Empty;
-                _statusBar.SetState($"{frame} Generating... {elapsed}{rateSuffix}",
+                _statusBar.SetState($"{frame} Generating... ({elapsed}, {rounds}{tokPart})",
                     StatusState.Busy);
             }
 
