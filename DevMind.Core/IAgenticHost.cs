@@ -210,5 +210,12 @@ namespace DevMind
         /// returns its content as clean text, or an error message.
         /// </summary>
         Task<string> WebFetchAsync(string url);
+
+        /// <summary>
+        /// Asks the user a yes/no question mid-turn and awaits the answer (used by the
+        /// token-budget guard to pause a long agentic run). Returns true to continue,
+        /// false to stop. Hosts without an interactive UI may auto-answer.
+        /// </summary>
+        Task<bool> ConfirmContinueAsync(string message);
     }
 }

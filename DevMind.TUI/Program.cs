@@ -86,6 +86,11 @@ namespace DevMind
             if (_config.DepthCap > 0 && Array.IndexOf(args, "--max-depth") < 0)
                 options.AgenticLoopMaxDepth = _config.DepthCap;
 
+            // Apply persisted token budget (lower priority than CLI --token-budget). -1 means
+            // "not set"; 0 = explicitly disabled; >0 = the budget.
+            if (_config.TokenBudget >= 0 && Array.IndexOf(args, "--token-budget") < 0)
+                options.AgenticTokenBudget = _config.TokenBudget;
+
             // Context file discovery.
             string devMindContext = LoadContextFile(options.WorkingDirectory);
 
@@ -401,6 +406,7 @@ Application.MaximumIterationsPerSecond = 750;
                     var cmdCtx = new CommandContext
                     {
                         DepthCap = options.AgenticLoopMaxDepth,
+                        TokenBudget = options.AgenticTokenBudget,
                         ThinkingEnabled = options.ShowLlmThinking,
                        SystemPrompt = llmClient.SystemPromptContent ?? BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules, host.TaskScratchpad),
                        ResetConversation = () =>
@@ -417,6 +423,12 @@ Application.MaximumIterationsPerSecond = 750;
                         {
                             options.AgenticLoopMaxDepth = n;
                             _config.DepthCap = n;
+                            _config.Save();
+                        },
+                        SetTokenBudget = (n) =>
+                        {
+                            options.AgenticTokenBudget = n;
+                            _config.TokenBudget = n;
                             _config.Save();
                         },
                         SetThinking = (on) => { options.ShowLlmThinking = on; },

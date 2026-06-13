@@ -44,6 +44,8 @@ namespace DevMind
         public bool   MicroCompactBrainwash    { get; set; } = false;
         public bool   AlwaysConfirmPatch       { get; set; } = false;
         public int    AgenticLoopMaxDepth      { get; set; } = 5;
+        // Per-turn generated-token budget before the loop pauses to ask. 0 disables.
+        public int    AgenticTokenBudget       { get; set; } = 25000;
 
         /// <summary>Builds a TuiOptions from command-line args and environment variables.</summary>
         public static TuiOptions FromArgs(string[] args)
@@ -81,6 +83,8 @@ namespace DevMind
                     case "--dir"          when i + 1 < args.Length: i++; break;
                     case "--max-depth"    when i + 1 < args.Length:
                         if (int.TryParse(args[++i], out int md)) opts.AgenticLoopMaxDepth = md; break;
+                    case "--token-budget" when i + 1 < args.Length:
+                        if (int.TryParse(args[++i], out int tb)) opts.AgenticTokenBudget = tb; break;
                     case "--context-size" when i + 1 < args.Length:
                         if (int.TryParse(args[++i], out int cs)) opts.ManualContextSize   = cs; break;
                     case "--timeout"      when i + 1 < args.Length:

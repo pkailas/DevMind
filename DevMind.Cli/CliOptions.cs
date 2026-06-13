@@ -54,6 +54,8 @@ namespace DevMind
 
         public bool   AlwaysConfirmPatch       { get; set; } = false;
         public int    AgenticLoopMaxDepth      { get; set; } = 5;
+        // Per-turn generated-token budget before the loop pauses to ask. 0 disables.
+        public int    AgenticTokenBudget       { get; set; } = 25000;
 
         // ── Factory ───────────────────────────────────────────────────────────────
 

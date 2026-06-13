@@ -31,6 +31,8 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Terminal.Gui.App;
+using Terminal.Gui.ViewBase;
+using Terminal.Gui.Views;
 using Terminal.Gui.Editor.Document;
 using Terminal.Gui.Editor.Rendering;
 using GuiEditor = Terminal.Gui.Editor.Editor;
@@ -220,6 +222,45 @@ namespace DevMind
                 // Keep the app alive — an append failure must never take down the UI loop.
                 Diag($"[APPEND] EXCEPTION len={text.Length} ex={ex}");
             }
+        }
+
+        // ── IAgenticHost.ConfirmContinueAsync ─────────────────────────────────────
+        // Mid-turn yes/no prompt for the token-budget guard. Marshals to the UI thread,
+        // runs a modal Continue/Stop dialog, and resolves the awaiting loop with the choice.
+        Task<bool> IAgenticHost.ConfirmContinueAsync(string message)
+        {
+            IApplication app = _outputView.App;
+            if (app == null) return Task.FromResult(true); // pre-init / non-interactive — don't block
+
+            var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            app.Invoke(() =>
+            {
+                bool answer = false;
+                var dlg = new Dialog
+                {
+                    Title  = "Token budget",
+                    Width  = Dim.Percent(70),
+                    Height = 9,
+                };
+                var label = new Label
+                {
+                    Text   = message,
+                    X = 1, Y = 1,
+                    Width  = Dim.Fill(2),
+                    Height = Dim.Fill(2),
+                };
+                var contBtn = new Button { Text = "_Continue" };
+                var stopBtn = new Button { Text = "_Stop", IsDefault = true };
+                contBtn.Accepting += (s, e) => { answer = true;  e.Handled = true; app.RequestStop(); };
+                stopBtn.Accepting += (s, e) => { answer = false; e.Handled = true; app.RequestStop(); };
+                dlg.Add(label);
+                dlg.AddButton(contBtn);
+                dlg.AddButton(stopBtn);
+
+                try { app.Run(dlg); }
+                finally { dlg.Dispose(); tcs.TrySetResult(answer); }
+            });
+            return tcs.Task;
         }
 
         // ── Syntax-highlighted code append ────────────────────────────────────────
