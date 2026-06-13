@@ -233,20 +233,24 @@ namespace DevMind
                 // tool_call chunks); fall back to the content-delta count for endpoints that
                 // don't report per-chunk usage.
                 int serverLive = _llmClient.LiveGeneratedTokens;
-                int streamed = serverLive > 0 ? serverLive : Volatile.Read(ref _streamedTokens);
+                int outTok = serverLive > 0 ? serverLive : Volatile.Read(ref _streamedTokens);
+                int inTok  = _llmClient.LivePromptTokens; // prompt tokens for this round (server usage)
                 long firstMs = Interlocked.Read(ref _firstTokenMs);
                 double genSecs = firstMs >= 0
                     ? Math.Max(0.1, (_turnClock.ElapsedMilliseconds - firstMs) / 1000.0)
                     : 0;
-                string tokPart = streamed > 0 ? $", {streamed:N0} tok" : string.Empty;
+                // DevMindShell parity: show input/output split rather than a single count.
+                string tokPart = (inTok > 0 || outTok > 0)
+                    ? $", {inTok:N0} in / {outTok:N0} out"
+                    : string.Empty;
                 _statusBar.SetState($"{frame} Generating... ({elapsed}, {rounds}{tokPart})",
                     StatusState.Busy);
 
                 // Live tok/s on the far-right rate chip — updates every tick during
                 // generation and persists after EndTurn (which finalizes it to the
                 // server-true rate), so there's always a tok/s readout to glance at.
-                if (streamed > 0 && genSecs > 0)
-                    _statusBar.SetTokRate(streamed / genSecs);
+                if (outTok > 0 && genSecs > 0)
+                    _statusBar.SetTokRate(outTok / genSecs);
             }
 
             // Live context meter at ~3 Hz: per-iteration server anchor + tokens
