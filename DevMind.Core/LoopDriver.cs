@@ -157,9 +157,6 @@ namespace DevMind
             executor.SetCancellationToken(ct);
             int maxDepth = _options.AgenticLoopMaxDepth;
 
-            // Accumulate this round's generated tokens for the per-turn budget guard.
-            _state.CumulativeGeneratedTokens += _llmClient.LastGeneratedTokens;
-
             if (_options.ShowDebugOutput)
                 _agenticHost.AppendOutput(
                     $"[DIAG] Outcome: HasPatches={outcome.HasPatches}, HasShell={outcome.HasShellCommands}, " +
@@ -253,31 +250,34 @@ namespace DevMind
                     return MakeTerminal(assistantResponse, outcome, result, lastToolCalls);
                 }
 
-                // ── Per-turn token-budget guard ────────────────────────────────────────
-                // Pause and ask before spending another (expensive) round once the model has
-                // generated more than the configured budget this turn. Continuing raises the
-                // ceiling by another budget so it re-arms instead of asking every round.
-                int tokenBudget = _options.AgenticTokenBudget;
-                if (tokenBudget > 0)
+                // ── Context-window guard ───────────────────────────────────────────────
+                // Pause and ask before another round once the conversation fills the context
+                // window past the limit (n_past / n_ctx ≥ limit%). Fires once per upward
+                // crossing; re-arms after usage drops back below the limit (e.g. a compaction).
+                int ctxLimitPct = _options.AgenticContextLimitPercent;
+                if (ctxLimitPct > 0 && _llmClient.ServerContextSize > 0 && _llmClient.LastContextUsed > 0)
                 {
-                    if (_state.TokenBudgetCeiling == 0) _state.TokenBudgetCeiling = tokenBudget;
-                    if (_state.CumulativeGeneratedTokens >= _state.TokenBudgetCeiling)
+                    int usedPct = (int)(_llmClient.LastContextUsed * 100L / _llmClient.ServerContextSize);
+                    if (usedPct >= ctxLimitPct && _state.ContextGuardArmed)
                     {
                         bool cont = await _agenticHost.ConfirmContinueAsync(
-                            $"Token budget reached: the model has generated {_state.CumulativeGeneratedTokens:N0} " +
-                            $"tokens this turn across {_state.AgenticDepth + 1} rounds. Continue?");
+                            $"Context window at {usedPct}% " +
+                            $"({_llmClient.LastContextUsed:N0} / {_llmClient.ServerContextSize:N0} tokens), " +
+                            $"past the {ctxLimitPct}% limit. Continue?");
                         if (!cont)
                         {
                             _agenticHost.AppendOutput(
-                                $"[AGENTIC] Stopped at token budget — {_state.CumulativeGeneratedTokens:N0} generated tokens.\n",
+                                $"[AGENTIC] Stopped at {usedPct}% context " +
+                                $"({_llmClient.LastContextUsed:N0} / {_llmClient.ServerContextSize:N0}).\n",
                                 OutputColor.Dim);
                             _state.AgenticDepth = 0;
                             return MakeTerminal(assistantResponse, outcome, result, lastToolCalls);
                         }
-                        _state.TokenBudgetCeiling += tokenBudget;
-                        _agenticHost.AppendOutput(
-                            $"[AGENTIC] Continuing — token budget raised to {_state.TokenBudgetCeiling:N0}.\n",
-                            OutputColor.Dim);
+                        _state.ContextGuardArmed = false; // don't nag until usage drops and climbs again
+                    }
+                    else if (usedPct < ctxLimitPct - 5)
+                    {
+                        _state.ContextGuardArmed = true; // headroom restored — re-arm
                     }
                 }
 

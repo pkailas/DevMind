@@ -32,10 +32,10 @@ namespace DevMind
         [JsonPropertyName("depthCap")]
         public int DepthCap { get; set; } = 0;
 
-        /// <summary>Persisted per-turn generated-token budget. -1 means "not set" (use the
-        /// startup default); 0 means explicitly disabled; &gt;0 sets the budget.</summary>
-        [JsonPropertyName("tokenBudget")]
-        public int TokenBudget { get; set; } = -1;
+        /// <summary>Persisted context-window utilization limit (percent). -1 means "not set"
+        /// (use the startup default); 0 means explicitly disabled; 1-99 sets the limit.</summary>
+        [JsonPropertyName("contextLimitPercent")]
+        public int ContextLimitPercent { get; set; } = -1;
 
         private static string ConfigPath => Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
@@ -69,9 +69,9 @@ namespace DevMind
                     && depth.TryGetInt32(out int depthVal))
                     config.DepthCap = depthVal;
 
-                if (root.TryGetProperty("tokenBudget", out var tb) && tb.ValueKind == JsonValueKind.Number
-                    && tb.TryGetInt32(out int tbVal))
-                    config.TokenBudget = tbVal;
+                if (root.TryGetProperty("contextLimitPercent", out var clp) && clp.ValueKind == JsonValueKind.Number
+                    && clp.TryGetInt32(out int clpVal))
+                    config.ContextLimitPercent = clpVal;
             }
             catch
             {

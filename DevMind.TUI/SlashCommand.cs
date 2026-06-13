@@ -55,11 +55,11 @@ namespace DevMind
         /// <summary>Called to set the depth cap.</summary>
         public Action<int> SetDepthCap { get; set; }
 
-        /// <summary>Current per-turn generated-token budget (0 = off).</summary>
-        public int TokenBudget { get; set; }
+        /// <summary>Current context-window utilization limit, percent (0 = off).</summary>
+        public int ContextLimitPercent { get; set; }
 
-        /// <summary>Called to set the token budget (0 disables).</summary>
-        public Action<int> SetTokenBudget { get; set; }
+        /// <summary>Called to set the context-window limit percent (0 disables).</summary>
+        public Action<int> SetContextLimitPercent { get; set; }
 
         /// <summary>Called to toggle thinking mode.</summary>
         public Action<bool> SetThinking { get; set; }
@@ -264,10 +264,10 @@ namespace DevMind
                 "/depth-cap [N]",
                 DepthCapHandler);
 
-            RegisterCommand("/token-budget",
-                "Show or set the per-turn generated-token budget (pauses to ask once exceeded)",
-                "/token-budget [N|off]",
-                TokenBudgetHandler);
+            RegisterCommand("/context-limit",
+                "Show or set the context-window % at which the loop pauses to ask",
+                "/context-limit [1-99|off]",
+                ContextLimitHandler);
 
             RegisterCommand("/system_prompt",
                 "Display the assembled system prompt",
@@ -521,30 +521,34 @@ namespace DevMind
             return Task.FromResult(new CommandResult { Message = $"Depth cap set to {n}" });
         }
 
-        // -- /token-budget [N|off] -----------------------------------------------
-        // Per-turn generated-token budget; the loop pauses to ask once exceeded.
-        static Task<CommandResult> TokenBudgetHandler(string[] args, CommandContext ctx)
+        // -- /context-limit [PCT|off] --------------------------------------------
+        // Context-window utilization %; the loop pauses to ask once a round reaches it.
+        static Task<CommandResult> ContextLimitHandler(string[] args, CommandContext ctx)
         {
             if (args.Length == 0)
             {
-                string cur = ctx.TokenBudget > 0 ? $"{ctx.TokenBudget:N0} tokens" : "off";
-                return Task.FromResult(new CommandResult { Message = $"Current token budget: {cur}" });
+                string cur = ctx.ContextLimitPercent > 0 ? $"{ctx.ContextLimitPercent}%" : "off";
+                return Task.FromResult(new CommandResult { Message = $"Current context limit: {cur}" });
             }
 
             int value;
             if (args[0].Equals("off", StringComparison.OrdinalIgnoreCase) || args[0] == "0")
                 value = 0;
-            else if (!int.TryParse(args[0], out value) || value < 0)
-                return Task.FromResult(new CommandResult
-                {
-                    Message = "Usage: /token-budget [N|off]   (N = generated tokens per turn before pausing)",
-                    IsError = true,
-                });
+            else
+            {
+                string raw = args[0].TrimEnd('%');
+                if (!int.TryParse(raw, out value) || value < 1 || value > 99)
+                    return Task.FromResult(new CommandResult
+                    {
+                        Message = "Usage: /context-limit [1-99|off]   (% of context window before pausing)",
+                        IsError = true,
+                    });
+            }
 
-            ctx.SetTokenBudget(value);
+            ctx.SetContextLimitPercent(value);
             return Task.FromResult(new CommandResult
             {
-                Message = value > 0 ? $"Token budget set to {value:N0} tokens" : "Token budget disabled",
+                Message = value > 0 ? $"Context limit set to {value}%" : "Context limit disabled",
             });
         }
 
