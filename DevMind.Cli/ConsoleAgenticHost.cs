@@ -524,6 +524,9 @@ namespace DevMind
 
                 if (!_fileCache.Contains(fileNameOnly))
                 {
+                    // Skip cloud/OneDrive placeholders (would download), binaries, oversized.
+                    if (ContextEngine.ShouldSkipForContentSearch(filePath)) continue;
+
                     string diskContent;
                     try { diskContent = File.ReadAllText(filePath); }
                     catch { continue; }

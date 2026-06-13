@@ -795,6 +795,10 @@ namespace DevMind
 
                 if (!_fileCache.Contains(fileNameOnly))
                 {
+                    // Never open cloud/OneDrive placeholders (would download), binaries, or
+                    // oversized files for a text search — checks metadata only, no hydration.
+                    if (ContextEngine.ShouldSkipForContentSearch(filePath)) continue;
+
                     string diskContent;
                     try { diskContent = File.ReadAllText(filePath); }
                     catch { continue; }
