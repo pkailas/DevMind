@@ -1,6 +1,6 @@
 # DevMind — Status & Architecture
 
-_Last updated: 2026-06-14_
+_Last updated: 2026-06-13_
 
 This is the living "where am I and why" reference for the DevMind rebuild. It captures current
 state, the architectural decisions behind it, the phase roadmap, hard-won Terminal.Gui v2 facts,
@@ -136,12 +136,46 @@ Go stays as the unused fallback.
 
 ## 4. Known Issues / Open Items
 
+### ✅ Completed in the 2026-06-13 session (all live in `bin\devmind`, branch `fix/tui-token-counting-quiet-transcript-depthcap`)
+
+- **Live token counting** — driven off each SSE chunk's `usage.completion_tokens`/`prompt_tokens`
+  (advances on content, reasoning, AND tool_call chunks, where the old content-delta counter sat
+  at 0). Reasoning re-wrapped as `<think>` so it counts + routes to the thinking display.
+- **Quiet transcript** — `TuiAgenticHost.IsSuppressedNoise` drops `[TOOL_USE]`/`[LLM]`/`[CONTEXT]`
+  usage/`[AGENTIC] Iteration` churn; KEEPS green/amber tool calls (`[READ]`/`[SHELL]`/`[FILE]`/…),
+  errors, terminal states. `DEVMIND_TUI_VERBOSE` = full firehose.
+- **Status bar** — `round N/total` (1-based vs `/depth-cap`) + live, persistent `tok/s` chip.
+- **Syntax highlighting** — `SyntaxHighlighter` (C# lexer + generic fallback, VS Code Dark+
+  palette). Applied to file reads (full + range) and to fenced ```lang blocks in streamed
+  responses (`CodeBlockStreamer`, per-line, prose still streams live, fence markers hidden).
+- **Colored patch diffs** — `AppendPatchDiff` shows the change after each PATCH (+green/−red).
+- **Context-window guard** — pauses & asks (`ConfirmContinueAsync` modal) when a round's
+  `n_past/n_ctx` ≥ `/context-limit` % (default 78). Persisted. Replaced an earlier fixed
+  token-budget guard.
+- **Persistent `/depth-cap`** + fixed `TuiConfig.Save()` (`File.Move` needed `overwrite: true`;
+  every save after the first was silently no-op'ing — also repaired `/rules`,`/dir` persistence).
+- **Search safety** — `ContextEngine.ShouldSkipForContentSearch` skips OneDrive/cloud
+  placeholders (no more hydrating/downloading personal files on a `**/*` FIND), binaries, >5 MB.
+- **Ctrl+C-to-exit fix** — the input box no longer disarms the exit on the Ctrl+C keystroke, and
+  the input Editor's stock Ctrl+C→Copy binding is removed (it hijacked the exit).
+- **No more spinner freeze** — the agentic turn now runs **off the UI thread** (`Task.Run`); the
+  synchronous tool I/O was blocking the main loop.
+
+### Open
+
+- **Tool-call-in-progress feedback (partial)** — round counter + live tok/s + off-UI spinner now
+  cover most of the gap, but a tool call still generates invisibly (tokens are `delta.tool_calls`,
+  not content). A live `→ <toolname>` status indicator is designed but not built.
+- **Type-while-active input** — input is disabled during a turn; the off-UI-thread fix makes a
+  "type + queue follow-up" mode feasible. Not built (held at user request).
+- **Silent FIND skip** — `ShouldSkipForContentSearch` drops files without a note; could surface
+  `[FIND] … (skipped N cloud/binary/large)` so a missed match isn't invisible.
 - **History backend untested** — built but never run against a real SQL Server. Needs env vars
   + a connection string (decide DB: WIN-SQL002, local MSSQLSERVER01, or a dedicated DevMind DB).
   Note: history uses its OWN config (`DEVMIND_HISTORY_*`), separate from `DEVMIND_DB_CONNECTIONS`.
-- **No progress indicator for long agentic actions** (UX gap) — when DM does a lengthy tool
-  action (e.g. writing a big file), the screen is static with no in-flight indication; only the
-  Thinking spinner covers LLM calls. Worth adding tool-call-in-progress feedback.
+- **Progress indicator (largely addressed)** — status bar now shows round N/total, live tok/s,
+  and a spinner that no longer freezes (off-UI-thread turn). Remaining gap: a tool call still
+  generates invisibly — see "Open → Tool-call-in-progress feedback" above.
 - **404 root cause not fully confirmed** — one 404 was a paste-corrupted endpoint (`[` appended).
   A separate possible cause (system HTTP proxy) was mid-investigation when work shifted. If real
   turns 404 again, check the proxy; validate streaming via the diag self-test meanwhile.
@@ -155,10 +189,13 @@ Go stays as the unused fallback.
   (Pasting event handler + Ctrl+V STA PowerShell fallback) but not working at runtime.
   Right-click context menu visibly corrupted (Cut where Paste should be, Paste absent).
   Next step: run with `DEVMIND_TUI_DIAG` set, paste trace to Fable for ground-truth-before-fix.
-- **Uncommitted files (CRITICAL — lost once already):** Program.cs, TuiInputBox.cs,
-  TuiStatusBar.cs, TuiLoopCallbacks.cs, TuiAgenticHost.cs, TuiOptions.cs, DEVMIND_STATUS.md.
-  Commit the full TUI unit once paste is verified. Do not let this sit untracked again.
-- Logging: quiet-by-default once daily driver. Keep the audit trail ([READ]/[LIST]/[SHELL] tool actions + turn terminal state: Task complete / Depth cap). Drop per-iteration churn ([LLM]/[CONTEXT]/[TOOL_USE]/Iteration N) — now redundant with the working status bar. Full firehose behind /verbose or DEVMIND_TUI_DIAG. DM-tier: locate emission sites + any existing /output-lines knob, wire quiet/verbose.
+- ✅ **TUI unit committed** — Program.cs, TuiInputBox.cs, TuiStatusBar.cs, TuiLoopCallbacks.cs,
+  TuiAgenticHost.cs, TuiOptions.cs and the rest are committed on
+  `fix/tui-token-counting-quiet-transcript-depthcap` and pushed to the `nas` remote (not yet
+  merged to `master`).
+- ✅ **Logging quiet-by-default — DONE.** `TuiAgenticHost.IsSuppressedNoise` drops the per-iteration
+  churn ([LLM]/[CONTEXT] usage/[TOOL_USE]/[AGENTIC] Iteration) while keeping the green/amber audit
+  trail ([READ]/[LIST]/[SHELL]/…) and terminal states. Firehose via `DEVMIND_TUI_VERBOSE`.
 - Word doc generation: add a create_document / write_document tool to DevMind.McpServer
   using DocumentFormat.OpenXml (NuGet, net10.0, no Office required). Takes content +
   structure, emits .docx. Interim workaround: model generates markdown, shell tool runs

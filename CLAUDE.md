@@ -47,6 +47,8 @@ dotnet run --project DevMind.Cli -- --dir <repo> --endpoint <llm-endpoint>
 | `DEVMIND_API_KEY` | API key (overrides default) |
 | `DEVMIND_HISTORY_*` | History store configuration (SqlServer/Sqlite/Null) |
 | `DEVMIND_BUILD_COMMAND` | Explicit build command for `run_build` (overrides auto-detection) |
+| `DEVMIND_TUI_VERBOSE` | Show the full firehose in the TUI transcript (disables the quiet filter that hides `[CONTEXT]`/`[TOOL_USE]`/`[LLM]`/`[AGENTIC] Iteration` churn) |
+| `DEVMIND_TUI_DIAG` | Path to a trace file for the TUI color-stamping/append pipeline (inert when unset) |
 
 ### Config Resolution Order
 
@@ -86,7 +88,7 @@ User input → LlmClient.SendMessageAsync() → SSE streaming → onComplete
 | `MemoryManager` | Persistent knowledge store (`MEMORY.md` + topic files in `.devmind/` directory). |
 | `IHistoryStore` | Conversation history persistence (SqlServer/Sqlite/Null providers). |
 | `LanguageServerRouter` | Routes LSP operations (find_symbol, go_to_definition, etc.) to the appropriate language server. |
-| `TuiConfig` | Global TUI config at `%APPDATA%\devmind\devmind.json`. Atomic write-back. Fields: `BehavioralRules`, `WorkingDirectory`. |
+| `TuiConfig` | Global TUI config at `%APPDATA%\devmind\devmind.json`. Atomic write-back (`File.Move(..., overwrite: true)`). Fields: `BehavioralRules`, `WorkingDirectory`, `DepthCap`, `ContextLimitPercent`. |
 
 ### LLM Directives
 
@@ -117,7 +119,8 @@ The model communicates actions through directives in its response:
 | `/t <message>` | One-shot: send with thinking ON for this turn only |
 | `/rules [text\|clear]` | Show, set, or clear behavioral rules (persisted) |
 | `/dir [path]` | Show or change working directory (persisted) |
-| `/depth-cap [N]` | Show or set agentic depth cap (1-10) |
+| `/depth-cap [N]` | Show or set agentic depth cap (1-200, persisted) |
+| `/context-limit [N\|off]` | Show or set the context-window % (1-99) at which the loop pauses to ask before continuing (persisted; default 78) |
 | `/system_prompt` | Display the assembled system prompt |
 | `/history` | List past sessions from history |
 | `/resume <n>` | Resume a past session |
@@ -133,4 +136,6 @@ The model communicates actions through directives in its response:
 - Do not reintroduce VSIX/WPF/.NET Framework patterns.
 - Use `LoggerMessage` for logging where applicable.
 - `TreatWarningsAsErrors` is on for C# projects.
-- Global TUI config uses atomic write (write to `.tmp` then `File.Move`).
+- Global TUI config uses atomic write (write to `.tmp` then `File.Move(..., overwrite: true)` — the overwrite flag is required; plain `File.Move` throws once the file exists, silently no-op'ing every save after the first).
+- TUI: render the agentic turn **off the UI thread** (`Task.Run`); synchronous tool I/O on the UI thread freezes the spinner/redraws. All UI writes marshal via `app.Invoke`.
+- TUI content searches (`FIND`/`GREP`) must skip cloud placeholders, binaries, and oversized files via `ContextEngine.ShouldSkipForContentSearch` — opening a OneDrive online-only file hydrates (downloads) it.

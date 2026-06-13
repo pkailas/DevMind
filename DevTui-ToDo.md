@@ -1,6 +1,15 @@
 ﻿---
 # DevMind TUI — Known Issues & Next Session TODO
 
+## ✅ RESOLVED (2026-06-13 session — live in `bin\devmind`, branch `fix/tui-token-counting-quiet-transcript-depthcap`)
+- **#1 live token counter** — driven off per-SSE-chunk `usage.completion_tokens` (counts content/reasoning/tool_call alike).
+- **#2 tok/s chip** — live + persistent on the status bar.
+- **#3 timer/spinner** — runs per turn; also no longer freezes (turn moved off the UI thread).
+- **Uncommitted work** — the whole TUI unit is committed + pushed to `nas` (not merged to `master`).
+- Plus this session: quiet transcript, syntax highlighting (reads + fenced blocks), colored patch
+  diffs, persistent /depth-cap, /context-limit guard, OneDrive/binary search skip, Ctrl+C-to-exit fix.
+- See DEVMIND_STATUS.md §4 for the full list. Items below are historical; #0 (system prompt) should be re-verified.
+
 ## BLOCKERS (fix first, in order)
 
 ### 0. System prompt is bare default — CRITICAL
