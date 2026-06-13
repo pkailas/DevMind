@@ -74,6 +74,48 @@ namespace DevMind
             }
         }
 
+        // Binary / non-text file extensions that a content search must never open.
+        private static readonly HashSet<string> _binarySearchExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ".jpg",".jpeg",".png",".gif",".bmp",".webp",".ico",".tif",".tiff",".heic",".heif",".raw",".dng",".psd",".ai",
+            ".mp4",".mov",".avi",".mkv",".webm",".wmv",".flv",".m4v",".mp3",".wav",".flac",".aac",".ogg",".m4a",
+            ".zip",".gz",".tgz",".7z",".rar",".tar",".bz2",".xz",".nupkg",".jar",".war",
+            ".dll",".exe",".pdb",".so",".dylib",".a",".lib",".obj",".o",".class",".wasm",
+            ".pdf",".doc",".docx",".xls",".xlsx",".ppt",".pptx",".odt",".ods",
+            ".bin",".dat",".db",".sqlite",".mdf",".ldf",".pack",".idx",
+            ".woff",".woff2",".ttf",".otf",".eot",
+        };
+
+        private const long MaxSearchableFileBytes = 5L * 1024 * 1024; // 5 MB
+
+        /// <summary>
+        /// True when a file must NOT be opened for a content search: an offline / cloud
+        /// (OneDrive Files-On-Demand) placeholder whose open would hydrate (download) it, a
+        /// known binary type, or an oversized file. Reads only metadata (attributes/length) —
+        /// never the content — so the check itself can never trigger a download.
+        /// </summary>
+        public static bool ShouldSkipForContentSearch(string filePath)
+        {
+            try
+            {
+                var fi = new FileInfo(filePath);
+                FileAttributes a = fi.Attributes;
+                // Cloud / offline placeholders. Opening these hydrates them from the cloud.
+                const int RecallOnDataAccess = 0x400000; // FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+                const int RecallOnOpen       = 0x40000;  // FILE_ATTRIBUTE_RECALL_ON_OPEN
+                if ((a & FileAttributes.Offline) != 0) return true;
+                if (((int)a & RecallOnDataAccess) != 0) return true;
+                if (((int)a & RecallOnOpen) != 0) return true;
+                if (_binarySearchExtensions.Contains(fi.Extension)) return true;
+                if (fi.Length > MaxSearchableFileBytes) return true;
+            }
+            catch
+            {
+                return true; // unreadable / missing — skip rather than risk an open
+            }
+            return false;
+        }
+
         public static string GetLanguageHint(string fileName)
         {
             string ext = Path.GetExtension(fileName ?? "").TrimStart('.').ToLowerInvariant();
