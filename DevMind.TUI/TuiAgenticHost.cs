@@ -1088,6 +1088,11 @@ namespace DevMind
                 int undosAvailable = _patchBackupStack.Count;
                 AppendOutputLocal($"[PATCH] Applied to {resolved.FullPath} (undo depth: {undosAvailable})\n",
                     OutputColor.Success);
+
+                // Show what changed as a colored unified diff (− removed / + added), so the
+                // edit is visible instead of just a confirmation line.
+                AppendPatchDiff(resolved.OriginalContent, result.UpdatedContent, SafeGetFileName(resolved.FullPath));
+
                 return Task.FromResult(resolved.FullPath);
             }
             catch (Exception ex)
@@ -1095,6 +1100,45 @@ namespace DevMind
                 AppendOutputLocal($"[PATCH] Error: {ex.Message}\n", OutputColor.Error);
                 return Task.FromResult<string>(null);
             }
+        }
+
+        // Render a unified diff with per-line color: − removed (red), + added (green),
+        // @@ hunk header (blue), context (dim). Capped so a large edit can't flood.
+        private const int MaxPatchDiffLines = 80;
+        private void AppendPatchDiff(string oldContent, string newContent, string fileName)
+        {
+            try
+            {
+                string[] oldLines = (oldContent ?? string.Empty).Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
+                string[] newLines = (newContent ?? string.Empty).Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
+                string diff = DiffHelper.GenerateUnifiedDiff(fileName, oldLines, newLines);
+                if (string.IsNullOrWhiteSpace(diff)) return;
+
+                string[] lines = diff.Replace("\r\n", "\n").Split('\n');
+                int shown = 0;
+                foreach (string line in lines)
+                {
+                    // The [PATCH] line already names the file — drop the diff's file headers.
+                    if (line.StartsWith("---", StringComparison.Ordinal) ||
+                        line.StartsWith("+++", StringComparison.Ordinal))
+                        continue;
+
+                    if (shown >= MaxPatchDiffLines)
+                    {
+                        AppendOutputLocal($"  … ({lines.Length - shown} more diff lines)\n", OutputColor.Dim);
+                        break;
+                    }
+
+                    OutputColor color;
+                    if (line.StartsWith("@@", StringComparison.Ordinal)) color = OutputColor.Input;   // hunk header
+                    else if (line.StartsWith("+", StringComparison.Ordinal)) color = OutputColor.Success; // added
+                    else if (line.StartsWith("-", StringComparison.Ordinal)) color = OutputColor.Error;   // removed
+                    else color = OutputColor.Dim;                                                          // context
+                    AppendOutputLocal(line + "\n", color);
+                    shown++;
+                }
+            }
+            catch { /* diff display is best-effort — never break a successful patch */ }
         }
 
         // ── IAgenticHost.ShowDiffPreviewAsync ─────────────────────────────────────
