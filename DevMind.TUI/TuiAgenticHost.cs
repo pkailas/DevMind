@@ -144,9 +144,10 @@ namespace DevMind
             if (string.IsNullOrEmpty(text)) return;
 
             // Quiet transcript (DevMindShell parity): the engine still emits per-iteration
-            // churn ([CONTEXT] usage / [TOOL_USE] / [LLM] / [AGENTIC] Iteration / [READ] status)
-            // for the CLI skin and history, but the TUI keeps that state in the status bar — not
-            // the scrollback. Swallow those lines here unless verbose output is enabled.
+            // churn ([CONTEXT] usage / [TOOL_USE] / [LLM] / [AGENTIC] Iteration) for the CLI
+            // skin and history, but the TUI keeps that state in the status bar — not the
+            // scrollback. The actual tool-call lines (green/amber: [READ]/[SHELL]/[FILE]/…) are
+            // KEPT. Swallow only the churn here unless verbose output is enabled.
             if (IsSuppressedNoise(text)) return;
 
             // Terminal.Gui v2: all view mutations must be on the main UI thread.
@@ -238,8 +239,9 @@ namespace DevMind
             // (Task complete / Depth cap / Aborted / Cancelled / Run-succeeded).
             if (StartsAt(text, i, "[AGENTIC] Iteration")) return true;
 
-            // [READ] — drop the file/git status one-liners; KEEP "[READ ERROR]" (real errors).
-            if (StartsAt(text, i, "[READ] ")) return true;
+            // NOTE: [READ] / [SHELL] / [FILE] / [PATCH] / [GREP] / [FIND] / [LSP] are the
+            // actual tool-call lines (green Success / amber Warning) — KEEP them all. Only the
+            // white [TOOL_USE] placeholder above is dropped; the real tool action stays.
 
             // [CONTEXT] — drop the routine usage meter (numeric / "~" estimate / "Working:");
             // KEEP signal lines (CRITICAL, Hard/Soft trim, Warning, Compacting, Brainwash, …).
