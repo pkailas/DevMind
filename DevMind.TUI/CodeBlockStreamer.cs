@@ -1,10 +1,12 @@
 // File: CodeBlockStreamer.cs  v1.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
-// Splits a streamed assistant response into prose and fenced code blocks. Prose is
-// forwarded LIVE (char-by-char, so the smooth streaming feel is preserved); a
-// ```lang … ``` fenced block is buffered and emitted as one syntax-highlighted unit
-// when its closing fence arrives, with the ``` marker lines hidden.
+// Splits a streamed assistant response into prose and fenced code blocks, rendering
+// both LIVE so the transcript never stalls. Prose forwards as it arrives; inside a
+// ```lang … ``` block each code line is emitted syntax-highlighted the moment it
+// completes (one line of latency, never the whole block), with the ``` marker lines
+// hidden. Per-line highlighting means a multi-line construct (block comment, verbatim
+// string) is colored per line — a minor cosmetic trade for continuous feedback.
 //
 // Only the first character of each line is ever held back (to test for a fence
 // marker), so prose streaming is effectively unbuffered. Feed visible tokens via
@@ -29,7 +31,6 @@ namespace DevMind
         private bool _inCode;
         private bool _collectingLang;                              // reading the language tag after ```
         private string _lang = string.Empty;
-        private readonly StringBuilder _codeBuf  = new StringBuilder(); // accumulated body
         private readonly StringBuilder _codeLine = new StringBuilder(); // current (incomplete) code line
 
         // Prose state.
@@ -74,9 +75,7 @@ namespace DevMind
                     _codeLine.Clear();
                     if (FenceLine.IsMatch(line.Trim()))
                     {
-                        // Closing fence — emit the buffered block highlighted, markers dropped.
-                        _code(_codeBuf.ToString(), _lang.Trim());
-                        _codeBuf.Clear();
+                        // Closing fence — hide the marker and leave code mode.
                         _inCode = false;
                         _lang = string.Empty;
                         _lineClassified = false;
@@ -84,7 +83,8 @@ namespace DevMind
                     }
                     else
                     {
-                        _codeBuf.Append(line).Append('\n');
+                        // Emit this code line highlighted immediately — live, no block buffering.
+                        _code(line + "\n", _lang.Trim());
                     }
                 }
                 else _codeLine.Append(c);
@@ -146,7 +146,6 @@ namespace DevMind
         {
             FlushProse(); // emit any prose before the code block, in order
             _inCode = true;
-            _codeBuf.Clear();
             _codeLine.Clear();
 
             string after = ts.Substring(3);
@@ -169,9 +168,8 @@ namespace DevMind
         {
             if (_inCode)
             {
-                string remaining = _codeBuf.ToString() + _codeLine.ToString();
-                if (remaining.Length > 0) _code(remaining, _lang.Trim());
-                _codeBuf.Clear();
+                // Unterminated block — emit the partial last line so nothing is lost.
+                if (_codeLine.Length > 0) _code(_codeLine.ToString(), _lang.Trim());
                 _codeLine.Clear();
                 _inCode = false;
                 _collectingLang = false;
