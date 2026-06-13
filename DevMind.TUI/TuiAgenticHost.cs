@@ -1423,6 +1423,10 @@ namespace DevMind
                     AppendOutputLocal(
                         $"[READ] {fileNameOnly}:{clampedStart}-{clampedEnd} ({clampedEnd - clampedStart + 1} lines){(clamped ? " [clamped]" : "")}\n",
                         OutputColor.Success);
+
+                    // Show the requested lines syntax-highlighted (same as a full read).
+                    AppendHighlightedListing(rangeContent, fullPath, clampedEnd - clampedStart + 1);
+
                     return rangeBlock;
                 }
 
