@@ -96,6 +96,12 @@ namespace DevMind
             _editor.KeyBindings.Add(Key.Enter, Command.Accept);
             _editor.KeyBindings.Add(Key.Enter.WithCtrl, editorNewLine);
 
+            // Ctrl+C belongs to the app-level handler (copy-selection / cancel-turn /
+            // double-press-to-exit). Remove the Editor's stock Ctrl+C → Copy binding so it
+            // can't consume the keystroke (copying the input selection) before the exit
+            // logic runs — this is the "Ctrl+C to exit gets hijacked" regression.
+            _editor.KeyBindings.Remove(Key.C.WithCtrl);
+
             // ── Paste (verified 2026-06-11 against decompiled core 2.4.4 + Editor 2.5.0) ──
             //
             // Two delivery paths, two fixes. Root causes:

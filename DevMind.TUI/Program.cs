@@ -362,9 +362,13 @@ Application.MaximumIterationsPerSecond = 750;
                 }
             };
 
-            // Clear Ctrl+C armed state on any keystroke in the input box.
+            // Clear Ctrl+C armed state on any keystroke in the input box — EXCEPT Ctrl+C
+            // itself. The app-level handler arms the exit on Ctrl+C; if this handler then
+            // cleared it on the same keystroke, the second press would re-arm instead of
+            // exiting (the "Ctrl+C to exit is hijacked" bug). Only a DIFFERENT key disarms.
             inputBox.View.KeyDown += (s, key) =>
             {
+                if (key.KeyCode == Key.C.WithCtrl.KeyCode) return;
                 ClearCtrlCArmed(app, statusBar);
             };
 
