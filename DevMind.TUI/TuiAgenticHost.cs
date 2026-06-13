@@ -179,6 +179,18 @@ namespace DevMind
         //   * CaretOffset = TextLength scrolls to the newest line (auto-scroll). The caret is
         //     navigation, not an edit, so it works under ReadOnly and CanFocus=false.
         private void AppendCore(string text, OutputColor color)
+            => InsertSpan(text, ResolveAttribute(color));
+
+        // Insert pre-tokenized text painted with an explicit foreground color (syntax
+        // highlighting). Same span model as AppendCore, but the color is an arbitrary RGB
+        // rather than one of the seven OutputColor roles. MUST run on the UI thread.
+        private void AppendCoreColor(string text, Terminal.Gui.Drawing.Color fg)
+            => InsertSpan(text, new Terminal.Gui.Drawing.Attribute(fg, _outputView.GetScheme().Normal.Background));
+
+        // Shared insert: normalize newlines, splice at document end, record the color span,
+        // auto-scroll. MUST run on the UI thread. ALL output flows through here (banner, echo,
+        // stream tokens, status lines, highlighted code).
+        private void InsertSpan(string text, Terminal.Gui.Drawing.Attribute attr)
         {
             // Normalize line endings — the document is '\n'-based; a stray '\r' would render
             // as a visible glyph and skew offsets.
@@ -190,24 +202,92 @@ namespace DevMind
             {
                 // Document is assigned in Program.cs before the window runs; guard anyway so a
                 // stray pre-init append can never NRE the UI loop.
-                Diag($"[APPEND] SKIP (no document) color={color} len={text.Length}");
+                Diag($"[APPEND] SKIP (no document) len={text.Length}");
                 return;
             }
 
             int start = doc.TextLength;
-            Terminal.Gui.Drawing.Attribute attr = ResolveAttribute(color);
 
             try
             {
                 doc.Insert(start, text);
                 _colorSpans.Add(new ColorSpan(start, text.Length, attr));
                 _outputView.CaretOffset = doc.TextLength; // auto-scroll to newest line
-                Diag($"[APPEND] color={color} len={text.Length} start={start} total={doc.TextLength} spans={_colorSpans.Count}");
+                Diag($"[APPEND] len={text.Length} start={start} total={doc.TextLength} spans={_colorSpans.Count}");
             }
             catch (Exception ex)
             {
                 // Keep the app alive — an append failure must never take down the UI loop.
-                Diag($"[APPEND] EXCEPTION color={color} len={text.Length} ex={ex}");
+                Diag($"[APPEND] EXCEPTION len={text.Length} ex={ex}");
+            }
+        }
+
+        // ── Syntax-highlighted code append ────────────────────────────────────────
+        // Tokenizes `code` for `language` and paints each token its VS Code Dark+ color.
+        // One App.Invoke marshals the whole block (not per token) so a large listing is a
+        // single UI hop. Bypasses the quiet-transcript filter — this is real code, not churn.
+        internal void AppendCode(string code, string language)
+        {
+            if (string.IsNullOrEmpty(code)) return;
+            var tokens = SyntaxHighlighter.Highlight(code, language);
+
+            void Paint()
+            {
+                foreach (var t in tokens)
+                    AppendCoreColor(t.Text, SyntaxColor(t.Kind));
+            }
+
+            IApplication app = _outputView.App;
+            if (app == null) Paint();
+            else app.Invoke(Paint);
+        }
+
+        // VS Code Dark+ palette, matching the reference screenshot.
+        private static readonly Terminal.Gui.Drawing.Color SynKeyword = new Terminal.Gui.Drawing.Color(0x56, 0x9C, 0xD6); // #569CD6 blue
+        private static readonly Terminal.Gui.Drawing.Color SynControl = new Terminal.Gui.Drawing.Color(0xC5, 0x86, 0xC0); // #C586C0 purple
+        private static readonly Terminal.Gui.Drawing.Color SynType    = new Terminal.Gui.Drawing.Color(0x4E, 0xC9, 0xB0); // #4EC9B0 teal
+        private static readonly Terminal.Gui.Drawing.Color SynMethod  = new Terminal.Gui.Drawing.Color(0xDC, 0xDC, 0xAA); // #DCDCAA yellow
+        private static readonly Terminal.Gui.Drawing.Color SynString  = new Terminal.Gui.Drawing.Color(0xCE, 0x91, 0x78); // #CE9178 orange
+        private static readonly Terminal.Gui.Drawing.Color SynComment = new Terminal.Gui.Drawing.Color(0x6A, 0x99, 0x55); // #6A9955 green
+        private static readonly Terminal.Gui.Drawing.Color SynNumber  = new Terminal.Gui.Drawing.Color(0xB5, 0xCE, 0xA8); // #B5CEA8 pale green
+        private static readonly Terminal.Gui.Drawing.Color SynPlain   = new Terminal.Gui.Drawing.Color(0xD4, 0xD4, 0xD4); // #D4D4D4 light
+
+        private static Terminal.Gui.Drawing.Color SyntaxColor(TokenKind kind)
+        {
+            switch (kind)
+            {
+                case TokenKind.Keyword:        return SynKeyword;
+                case TokenKind.ControlKeyword: return SynControl;
+                case TokenKind.Type:           return SynType;
+                case TokenKind.Method:         return SynMethod;
+                case TokenKind.StringLit:      return SynString;
+                case TokenKind.Comment:        return SynComment;
+                case TokenKind.Number:         return SynNumber;
+                default:                       return SynPlain;
+            }
+        }
+
+        // Max lines of a file echoed into the transcript on a full read. Beyond this we
+        // highlight the head and note the remainder, so a large file (or a busy agentic
+        // loop reading many files) cannot flood the scrollback.
+        private const int MaxListingLines = 400;
+
+        private void AppendHighlightedListing(string content, string fullPath, int lineCount)
+        {
+            string lang = SyntaxHighlighter.LanguageFromExtension(fullPath);
+
+            if (lineCount > MaxListingLines)
+            {
+                string[] lines = content.Replace("\r\n", "\n").Split('\n');
+                string head = string.Join("\n", lines, 0, MaxListingLines);
+                AppendCode(head + "\n", lang);
+                AppendOutputLocal(
+                    $"… ({lineCount - MaxListingLines:N0} more lines — {lineCount:N0} total)\n",
+                    OutputColor.Dim);
+            }
+            else
+            {
+                AppendCode(content.EndsWith("\n", StringComparison.Ordinal) ? content : content + "\n", lang);
             }
         }
 
@@ -1272,6 +1352,11 @@ namespace DevMind
                     ? $"[READ] {fullPath} ({lineCount} lines — outline{(alreadyRead ? ", re-read" : "")})\n"
                     : $"[READ] Loaded {fullPath} ({lineCount} lines)\n",
                     OutputColor.Success);
+
+                // List the source syntax-highlighted (DevMindShell-style). Full reads only —
+                // outline re-reads stay terse so agentic loops don't flood the transcript.
+                if (!wasOutline)
+                    AppendHighlightedListing(content, fullPath, lineCount);
 
                 return rendered;
             }
