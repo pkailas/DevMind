@@ -603,6 +603,13 @@ Application.MaximumIterationsPerSecond = 750;
                 bool suppressDisplay = false;
                 string lineAccum = string.Empty;
 
+                // Render prose live, but buffer ```lang fenced blocks and emit them syntax-
+                // highlighted (markers hidden). One instance per LLM iteration. Prose and code
+                // both marshal to the UI thread inside the host (FIFO), so order is preserved.
+                var codeStreamer = new CodeBlockStreamer(
+                    prose: text => ((TuiAgenticHost)host).AppendOutputLocal(text, OutputColor.Normal),
+                    code:  (code, lang) => ((TuiAgenticHost)host).AppendCode(code, lang));
+
                 callbacks.StartThinkingTimer(state.AgenticDepth, options.AgenticLoopMaxDepth);
 
                 using var cancelReg = cts.Token.Register(() => tcs.TrySetCanceled(cts.Token));
@@ -653,10 +660,9 @@ Application.MaximumIterationsPerSecond = 750;
 
                       if (!suppressDisplay)
                         {
-                            app.Invoke(() =>
-                            {
-                                ((TuiAgenticHost)host).AppendOutputLocal(visible, OutputColor.Normal);
-                            });
+                            // Route through the code-block streamer: prose appends live,
+                            // fenced code is buffered and emitted highlighted on close.
+                            codeStreamer.Feed(visible);
                         }
                     },
                     onComplete: () => tcs.TrySetResult(true),
@@ -690,6 +696,8 @@ Application.MaximumIterationsPerSecond = 750;
                finally
                 {
                     if (!timerStopped) callbacks.StopThinkingTimer();
+                    // Release any buffered code block / held prose (terminated or not).
+                    codeStreamer.Flush();
                 }
 
                 // Save this turn to history (user message + assistant response).
