@@ -238,11 +238,15 @@ namespace DevMind
                 double genSecs = firstMs >= 0
                     ? Math.Max(0.1, (_turnClock.ElapsedMilliseconds - firstMs) / 1000.0)
                     : 0;
-                string tokPart = streamed > 0 && genSecs > 0
-                    ? $", {streamed:N0} tok · {streamed / genSecs:F1} tok/s"
-                    : string.Empty;
+                string tokPart = streamed > 0 ? $", {streamed:N0} tok" : string.Empty;
                 _statusBar.SetState($"{frame} Generating... ({elapsed}, {rounds}{tokPart})",
                     StatusState.Busy);
+
+                // Live tok/s on the far-right rate chip — updates every tick during
+                // generation and persists after EndTurn (which finalizes it to the
+                // server-true rate), so there's always a tok/s readout to glance at.
+                if (streamed > 0 && genSecs > 0)
+                    _statusBar.SetTokRate(streamed / genSecs);
             }
 
             // Live context meter at ~3 Hz: per-iteration server anchor + tokens
