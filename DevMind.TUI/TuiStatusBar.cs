@@ -82,7 +82,7 @@ namespace DevMind
             _stateLabel.X = 0;
             _stateLabel.Y = 0;
 
-            _hintLabel = MakeLabel($"({toolCount} tools · Enter send · Ctrl+Enter newline · Ctrl+C×2 exit)", FgDim);
+            _hintLabel = MakeLabel($"({toolCount} tools · Enter send · Ctrl+Enter newline · F10 or /quit)", FgDim);
             _hintLabel.X = Pos.Right(_stateLabel);
             _hintLabel.Y = 0;
 
