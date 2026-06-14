@@ -75,15 +75,34 @@ namespace DevMind
         // The Editor that receives all output. Rope-backed document, append-only.
         private readonly GuiEditor _outputView;
 
-        // Color is decoupled from the document: each AppendCore call records the
+        // Color is decoupled from the document: each InsertSpan call records the
         // [start, start+len) document offset range it inserted plus the resolved
         // Attribute. OffsetColorTransformer (registered on _outputView.LineTransformers)
         // reads this list during visual-line construction and stamps element.Attribute
         // by offset. Append-only and strictly increasing in Start, so lookups binary-
-        // search. Mutated by AppendCore and read by the transformer — both run on the
-        // Terminal.Gui UI thread (append marshals via App.Invoke; Transform runs in Draw),
+        // search. Mutated by InsertSpan and read by the transformer — both run on the
+        // Terminal.Gui UI thread (the flush timer drains via App.Invoke; Transform runs in Draw),
         // so no locking is required.
         private readonly List<ColorSpan> _colorSpans = new List<ColorSpan>();
+
+        // ── Coalesced append buffer + UI render pump ─────────────────────────────
+        // Streamed output (one SSE token per call) used to queue one App.Invoke — and so one
+        // InsertSpan + one full window redraw — per token. Worse, the Terminal.Gui Windows main
+        // loop parks in its input-wait during a turn and is NOT reliably woken by a background
+        // thread's App.Invoke: nothing rendered (no token text, no spinner advance) until the
+        // turn's teardown ran on the UI thread and drove the loop, which dumped the whole backlog
+        // at once — the "frozen spinner, then a burst of text at end of round" symptom.
+        //
+        // Fix: producers enqueue spans here (no Invoke), and a persistent main-loop timeout — the
+        // render pump, registered via IApplication.AddTimeout — drains the backlog on the UI thread
+        // every FlushIntervalMs. AddTimeout is part of the loop's wait computation, so the loop is
+        // GUARANTEED to wake on that cadence (unlike App.Invoke). Those same wakes also service the
+        // status ticker's queued Invoke, so the spinner animates throughout generation.
+        private const int FlushIntervalMs = 40; // ~25 fps
+        private readonly object _pendingLock = new object();
+        private readonly List<(string text, Terminal.Gui.Drawing.Attribute attr)> _pending =
+            new List<(string, Terminal.Gui.Drawing.Attribute)>();
+        private object _renderPumpToken; // AddTimeout handle; non-null once the pump is registered
 
         // ── Diagnostics ──────────────────────────────────────────────────────────
         // Set DEVMIND_TUI_DIAG to a file path to trace the color-stamping pipeline
@@ -118,7 +137,7 @@ namespace DevMind
             if (!string.IsNullOrEmpty(workingDirectory))
                 _memoryManager = new MemoryManager(workingDirectory);
 
-            // Register the color transformer. It reads _colorSpans (populated by AppendCore)
+            // Register the color transformer. It reads _colorSpans (populated by InsertSpan)
             // and stamps element.Attribute by document offset during visual-line construction.
             _outputView.LineTransformers.Add(new OffsetColorTransformer(_colorSpans));
         }
@@ -152,26 +171,11 @@ namespace DevMind
             // KEPT. Swallow only the churn here unless verbose output is enabled.
             if (IsSuppressedNoise(text)) return;
 
-            // Terminal.Gui v2: all view mutations must be on the main UI thread.
-            // Use the instance-based IApplication.Invoke (not the deprecated static).
-            // Invoke marshals to the UI thread via TimedEvents (zero-delay timeouts keyed by
-            // a monotonically-increasing unique tick), so callbacks drain strictly FIFO —
-            // streamed tokens stay in arrival order.
-            //
-            // App is null before app.Run() attaches the window (startup banner). At that
-            // point we are still on the main thread, so append directly.
-            IApplication app = _outputView.App;
-            if (app == null)
-                AppendCore(text, color);
-            else
-                app.Invoke(() => AppendCore(text, color));
+            EnqueueSpan(text, ResolveAttribute(color));
         }
 
-        // Appends text to the end of the Editor's rope-backed document and records the color
-        // span for OffsetColorTransformer. MUST run on the UI thread. ALL output flows through
-        // here (banner, echo, stream tokens, status lines).
-        //
-        // Versus the old TextView path this is dramatically simpler and cheaper:
+        // ── Coalesced append pipeline ─────────────────────────────────────────────
+        // Versus the old TextView path the underlying insert is dramatically simpler and cheaper:
         //   * Document.Insert at TextLength is an O(log n) rope splice — no whole-document
         //     re-wrap per token (the TextView cost that hurt long, fast-streaming transcripts).
         //   * Color is NOT stamped into the model. We record (start, len, attr); the registered
@@ -180,19 +184,68 @@ namespace DevMind
         //     hand-patched wrap-attribute-copy bug.
         //   * CaretOffset = TextLength scrolls to the newest line (auto-scroll). The caret is
         //     navigation, not an edit, so it works under ReadOnly and CanFocus=false.
-        private void AppendCore(string text, OutputColor color)
-            => InsertSpan(text, ResolveAttribute(color));
 
-        // Insert pre-tokenized text painted with an explicit foreground color (syntax
-        // highlighting). Same span model as AppendCore, but the color is an arbitrary RGB
-        // rather than one of the seven OutputColor roles. MUST run on the UI thread.
-        private void AppendCoreColor(string text, Terminal.Gui.Drawing.Color fg)
-            => InsertSpan(text, new Terminal.Gui.Drawing.Attribute(fg, _outputView.GetScheme().Normal.Background));
+        /// <summary>
+        /// Register the UI render pump — a recurring main-loop timeout that drains the coalesced
+        /// append buffer on the UI thread. Call once, on the UI thread, with the live application
+        /// (the output view's App is still null before app.Run, so it's passed in). Idempotent.
+        /// </summary>
+        public void StartRenderPump(IApplication app)
+        {
+            if (app == null || _renderPumpToken != null) return;
+            _renderPumpToken = app.AddTimeout(
+                TimeSpan.FromMilliseconds(FlushIntervalMs),
+                () => { FlushPending(); return true; }); // true = keep pumping for the app's life
+        }
 
-        // Shared insert: normalize newlines, splice at document end, record the color span,
-        // auto-scroll. MUST run on the UI thread. ALL output flows through here (banner, echo,
-        // stream tokens, status lines, highlighted code).
-        private void InsertSpan(string text, Terminal.Gui.Drawing.Attribute attr)
+        // Enqueue one colored span. Producers call this from any thread — no App.Invoke; the render
+        // pump drains the buffer on the next UI tick. App is null before app.Run() attaches the
+        // window (startup banner): at that point we are on the main thread with no running loop and
+        // no pump, so insert directly to keep ordering with the banner.
+        private void EnqueueSpan(string text, Terminal.Gui.Drawing.Attribute attr)
+        {
+            if (string.IsNullOrEmpty(text)) return;
+
+            if (_outputView.App == null)
+            {
+                InsertSpan(text, attr, scroll: true);
+                return;
+            }
+
+            lock (_pendingLock)
+                _pending.Add((text, attr));
+        }
+
+        // Drain the whole pending backlog into the document in one UI-thread pass: a batch of
+        // inserts followed by exactly one auto-scroll — not one Invoke + redraw per token. Cheap
+        // when idle (lock + count check). MUST run on the UI thread (invoked by the render pump).
+        private void FlushPending()
+        {
+            (string text, Terminal.Gui.Drawing.Attribute attr)[] batch;
+            lock (_pendingLock)
+            {
+                if (_pending.Count == 0) return;
+                batch = _pending.ToArray();
+                _pending.Clear();
+            }
+
+            TextDocument doc = _outputView.Document;
+            if (doc == null)
+            {
+                Diag($"[APPEND] SKIP (no document) batch={batch.Length}");
+                return;
+            }
+
+            foreach (var (text, attr) in batch)
+                InsertSpan(text, attr, scroll: false);
+
+            _outputView.CaretOffset = doc.TextLength; // one auto-scroll for the whole batch
+        }
+
+        // Shared insert: normalize newlines, splice at document end, record the color span. When
+        // scroll is true the caret follows the newest line (direct/pre-init path); the batched
+        // flush sets the caret once for the whole batch instead. MUST run on the UI thread.
+        private void InsertSpan(string text, Terminal.Gui.Drawing.Attribute attr, bool scroll)
         {
             // Normalize line endings — the document is '\n'-based; a stray '\r' would render
             // as a visible glyph and skew offsets.
@@ -214,7 +267,7 @@ namespace DevMind
             {
                 doc.Insert(start, text);
                 _colorSpans.Add(new ColorSpan(start, text.Length, attr));
-                _outputView.CaretOffset = doc.TextLength; // auto-scroll to newest line
+                if (scroll) _outputView.CaretOffset = doc.TextLength; // auto-scroll to newest line
                 Diag($"[APPEND] len={text.Length} start={start} total={doc.TextLength} spans={_colorSpans.Count}");
             }
             catch (Exception ex)
@@ -264,23 +317,17 @@ namespace DevMind
         }
 
         // ── Syntax-highlighted code append ────────────────────────────────────────
-        // Tokenizes `code` for `language` and paints each token its VS Code Dark+ color.
-        // One App.Invoke marshals the whole block (not per token) so a large listing is a
-        // single UI hop. Bypasses the quiet-transcript filter — this is real code, not churn.
+        // Tokenizes `code` for `language` and paints each token its VS Code Dark+ color. Tokens
+        // enqueue onto the shared coalesced buffer — the same queue prose uses — so code and prose
+        // keep strict arrival order and the whole block drains in the next flush rather than one
+        // UI hop per token. Bypasses the quiet-transcript filter — this is real code, not churn.
         internal void AppendCode(string code, string language)
         {
             if (string.IsNullOrEmpty(code)) return;
             var tokens = SyntaxHighlighter.Highlight(code, language);
-
-            void Paint()
-            {
-                foreach (var t in tokens)
-                    AppendCoreColor(t.Text, SyntaxColor(t.Kind));
-            }
-
-            IApplication app = _outputView.App;
-            if (app == null) Paint();
-            else app.Invoke(Paint);
+            Terminal.Gui.Drawing.Color bg = _outputView.GetScheme().Normal.Background;
+            foreach (var t in tokens)
+                EnqueueSpan(t.Text, new Terminal.Gui.Drawing.Attribute(SyntaxColor(t.Kind), bg));
         }
 
         // VS Code Dark+ palette, matching the reference screenshot.
@@ -1230,7 +1277,7 @@ namespace DevMind
         // Spans are sorted by Start, so we binary-search the span covering the line's first
         // element, then advance a cursor as element offsets increase — O(elements + spans-in-
         // line) per line, only for VISIBLE lines. Runs on the UI thread (Draw), same thread as
-        // AppendCore's writes, so reading the shared list needs no lock.
+        // InsertSpan's writes, so reading the shared list needs no lock.
         private sealed class OffsetColorTransformer : IVisualLineTransformer
         {
             private readonly List<ColorSpan> _spans;

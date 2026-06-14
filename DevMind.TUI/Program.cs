@@ -143,7 +143,7 @@ Application.MaximumIterationsPerSecond = 750;
                     TuiAgenticHost.Diag($"[PASTE] Driver.Paste len={text?.Length ?? -1}");
 
             // Main window.
-            using Window window = new() { Title = "DevMind TUI — Enter send · Ctrl+Enter newline · Ctrl+C copies/×2 quits · Esc interrupts" };
+            using Window window = new() { Title = "DevMind TUI — Enter send · Ctrl+Enter newline · Ctrl+C copies · F10 quits · Esc interrupts" };
 
            // Output pane — programmatically-written, non-interactive log (gui-cs/Editor).
             //
@@ -307,6 +307,17 @@ Application.MaximumIterationsPerSecond = 750;
             // Esc: cancel turn if running, otherwise no-op (must NOT quit).
             app.Keyboard.KeyDown += (s, key) =>
             {
+                // ── Quit ── F10 or Ctrl+Q, unconditional, in any state (idle or mid-turn).
+                // F10 is the dependable one: Ctrl+Q is XON flow-control on many terminals and may
+                // be swallowed before it reaches the app. (/quit and /exit also work as commands.)
+                if (key.KeyCode == Key.F10.KeyCode || key.KeyCode == Key.Q.WithCtrl.KeyCode)
+                {
+                    key.Handled = true;
+                    cts.Cancel();        // ask any running turn to stop
+                    app.RequestStop();   // exit the main loop → process returns
+                    return;
+                }
+
                 // ── Ctrl+C ──────────────────────────────────────────────────────
                 if (key.KeyCode == Key.C.WithCtrl.KeyCode)
                 {
@@ -392,6 +403,18 @@ Application.MaximumIterationsPerSecond = 750;
 
                 // Echo user input (through the host — keeps the stamping tracker in sync).
                 host.AppendOutputLocal($"\n> {input}\n", OutputColor.Input);
+
+                // ── Reliable exit ───────────────────────────────────────────────
+                // Ctrl+Q is XON flow-control on many terminals and never reaches the app, so a
+                // typed command is the dependable way out. Submitted as normal input → no special-
+                // key interception possible.
+                if (input.Equals("/quit", StringComparison.OrdinalIgnoreCase) ||
+                    input.Equals("/exit", StringComparison.OrdinalIgnoreCase))
+                {
+                    cts.Cancel();        // stop any running turn
+                    app.RequestStop();   // exit the main loop → process returns
+                    return;
+                }
 
                 // Refresh CTS after a cancelled turn.
                 if (cts.IsCancellationRequested)
@@ -579,6 +602,12 @@ Application.MaximumIterationsPerSecond = 750;
                 }
             };
 
+            // Start the UI render pump before the loop runs: a recurring main-loop timeout that
+            // drains streamed output on the UI thread at a fixed cadence. This is what keeps the
+            // spinner animating and text flowing during a turn — a background thread's App.Invoke
+            // does not reliably wake the parked Windows input-wait, but an AddTimeout does.
+            host.StartRenderPump(app);
+
             // Run the application.
             app.Run(window);
 
@@ -653,12 +682,9 @@ Application.MaximumIterationsPerSecond = 750;
                        if (!string.IsNullOrEmpty(thinkText))
                         {
                             if (!timerStopped) { callbacks.StopThinkingTimer(); timerStopped = true; }
-                            // Thinking text — append to output.
-                            app.Invoke(() =>
-                            {
-                                // Thinking tokens render in the muted Thinking color.
-                                ((TuiAgenticHost)host).AppendOutputLocal(thinkText, OutputColor.Thinking);
-                            });
+                            // Thinking text — append to output in the muted Thinking color.
+                            // No App.Invoke: AppendOutputLocal buffers and the render pump drains it.
+                            ((TuiAgenticHost)host).AppendOutputLocal(thinkText, OutputColor.Thinking);
                         }
 
                         if (string.IsNullOrEmpty(visible)) return;
