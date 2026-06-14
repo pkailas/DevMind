@@ -98,7 +98,13 @@ namespace DevMind
         // every FlushIntervalMs. AddTimeout is part of the loop's wait computation, so the loop is
         // GUARANTEED to wake on that cadence (unlike App.Invoke). Those same wakes also service the
         // status ticker's queued Invoke, so the spinner animates throughout generation.
-        private const int FlushIntervalMs = 40; // ~25 fps
+        //
+        // 100 ms (10 fps), NOT faster: flush+redraw are serialized on the UI thread, and the
+        // word-wrapped Editor's repaint costs ~50 ms (climbing with document size). A 40 ms pump
+        // tried ~25 redraws/s × 50 ms = 1.25 s of work per second — it fell behind and the backlog
+        // became multi-second freezes. 10 fps leaves the redraw comfortable headroom; combined with
+        // the scrollback cap (which keeps repaint cheap) the pump stays ahead of the stream.
+        private const int FlushIntervalMs = 100; // 10 fps — must stay >= Editor repaint cost
         private readonly object _pendingLock = new object();
         private readonly List<(string text, Terminal.Gui.Drawing.Attribute attr)> _pending =
             new List<(string, Terminal.Gui.Drawing.Attribute)>();
@@ -232,14 +238,75 @@ namespace DevMind
             TextDocument doc = _outputView.Document;
             if (doc == null)
             {
-                Diag($"[APPEND] SKIP (no document) batch={batch.Length}");
+                Diag($"[FLUSH] SKIP (no document) batch={batch.Length}");
                 return;
             }
 
-            foreach (var (text, attr) in batch)
-                InsertSpan(text, attr, scroll: false);
+            // Coalesce consecutive spans that share an Attribute into one Document.Insert + one
+            // ColorSpan. Streamed prose is all one color, so a 40 ms batch of N tokens collapses to
+            // a single insert and a single span — cutting per-token insert, redraw, and span-list
+            // growth (the cost that flooded the UI during fast code-block bursts). Runs of the same
+            // syntax color in highlighted code merge the same way.
+            int inserts = 0;
+            int i = 0;
+            var run = new StringBuilder();
+            while (i < batch.Length)
+            {
+                Terminal.Gui.Drawing.Attribute attr = batch[i].attr;
+                run.Clear();
+                int j = i;
+                while (j < batch.Length && batch[j].attr.Equals(attr)) { run.Append(batch[j].text); j++; }
+                InsertSpan(run.ToString(), attr, scroll: false);
+                inserts++;
+                i = j;
+            }
 
+            TrimScrollbackIfNeeded(doc);
             _outputView.CaretOffset = doc.TextLength; // one auto-scroll for the whole batch
+            Diag($"[FLUSH] spans={batch.Length} inserts={inserts} total={doc.TextLength}");
+        }
+
+        // Keep the transcript bounded. The Editor's word-wrapped repaint cost grows with total
+        // document length, so an unbounded transcript eventually makes every redraw cost 100+ ms
+        // and the render pump can't keep up (multi-second freezes late in long sessions). When the
+        // document exceeds MaxDocChars, drop the oldest text down to KeepDocChars and rebase the
+        // color spans into the shrunk offset space. Runs on the UI thread inside FlushPending, so
+        // it never races the transformer's reads of _colorSpans. Trims are infrequent (only after
+        // ~40K more chars stream in), so the O(spans) rebase is cheap amortized.
+        private const int MaxDocChars  = 120_000;
+        private const int KeepDocChars = 80_000;
+        private void TrimScrollbackIfNeeded(TextDocument doc)
+        {
+            int len = doc.TextLength;
+            if (len <= MaxDocChars) return;
+
+            int cut = len - KeepDocChars; // remove the front [0, cut)
+            try
+            {
+                doc.Remove(0, cut);
+            }
+            catch (Exception ex)
+            {
+                Diag($"[TRIM] EXCEPTION cut={cut} ex={ex.Message}");
+                return;
+            }
+
+            // Rebase spans: drop those fully before the cut, clamp the one straddling it, shift the
+            // rest down by cut. Mutate the list in place — the transformer holds this same instance.
+            var rebased = new List<ColorSpan>(_colorSpans.Count);
+            foreach (ColorSpan s in _colorSpans)
+            {
+                int end = s.Start + s.Length;
+                if (end <= cut) continue;                 // fully trimmed away
+                int newStart = s.Start - cut;
+                int newLen   = s.Length;
+                if (newStart < 0) { newLen += newStart; newStart = 0; } // straddles the cut
+                if (newLen <= 0) continue;
+                rebased.Add(new ColorSpan(newStart, newLen, s.Attr));
+            }
+            _colorSpans.Clear();
+            _colorSpans.AddRange(rebased);
+            Diag($"[TRIM] cut={cut} newTotal={doc.TextLength} spans={_colorSpans.Count}");
         }
 
         // Shared insert: normalize newlines, splice at document end, record the color span. When
@@ -268,7 +335,8 @@ namespace DevMind
                 doc.Insert(start, text);
                 _colorSpans.Add(new ColorSpan(start, text.Length, attr));
                 if (scroll) _outputView.CaretOffset = doc.TextLength; // auto-scroll to newest line
-                Diag($"[APPEND] len={text.Length} start={start} total={doc.TextLength} spans={_colorSpans.Count}");
+                // No per-insert Diag here: during fast streaming the per-call File.AppendAllText
+                // (~1 ms each) dominated and skewed timing. FlushPending logs one [FLUSH] line/batch.
             }
             catch (Exception ex)
             {
