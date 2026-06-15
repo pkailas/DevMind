@@ -24,6 +24,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Reflection;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -221,6 +222,43 @@ Application.MaximumIterationsPerSecond = 750;
 
             // Add views to window.
             window.Add(outputView, inputBox.View, statusBar.Root);
+
+            // Build-version chip, pinned to the FAR RIGHT of the window's top border
+            // (the title row). Lets the user confirm which binary is running — the git
+            // short-hash in the suffix distinguishes builds. Read from the running .exe's
+            // AssemblyInformationalVersion (git-stamped in Directory.Build.props, e.g.
+            // "1.0.232+cb7a7927"). The border view is accessed the same way TuiInputBox
+            // does (Border?.GetOrCreateView), and right-aligned with Pos.AnchorEnd like
+            // TuiStatusBar's right group; dim gray on black matches the other chrome.
+            string buildVersion = Assembly.GetEntryAssembly()?
+                .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?
+                .InformationalVersion;
+            if (!string.IsNullOrEmpty(buildVersion))
+            {
+                string verText = "v" + buildVersion;
+                View titleBar = window.Border?.GetOrCreateView();
+                if (titleBar != null)
+                {
+                    var verLabel = new Label
+                    {
+                        Text = verText,
+                        // Left edge at (Width - len - 1): text ends one column shy of the
+                        // right corner glyph, which is left intact.
+                        X = Pos.AnchorEnd(verText.Length + 1),
+                        Y = 0,
+                        Width = Dim.Auto(DimAutoStyle.Text, null, null),
+                        Height = 1,
+                        CanFocus = false,
+                    };
+                    verLabel.SetScheme(new Terminal.Gui.Drawing.Scheme(verLabel.GetScheme())
+                    {
+                        Normal = new Terminal.Gui.Drawing.Attribute(
+                            new Terminal.Gui.Drawing.Color(0x88, 0x88, 0x88),
+                            new Terminal.Gui.Drawing.Color(0x00, 0x00, 0x00)),
+                    });
+                    titleBar.Add(verLabel);
+                }
+            }
 
             // Construct callbacks with references to TUI views.
             var callbacks = new TuiLoopCallbacks(llmClient, statusBar, host, inputBox.View);
