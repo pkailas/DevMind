@@ -2905,13 +2905,48 @@ namespace DevMind
 
        private string BuildRequestJson(string modelName, bool forceToolChoiceRequired = false)
         {
-            // Append-only: serialize _conversationHistory exactly as-is.
-            // No phantom injections — the JSON payload is a 1:1 mirror of the list.
+            // System-message normalization (single source of truth for the wire format).
+            //
+            // Some chat templates (e.g. Qwen) require EXACTLY ONE system message and it
+            // MUST be the first element: "System message must be at the beginning."
+            // Several code paths legitimately insert system-role messages mid-history —
+            // [DROPPED] eviction/trim summaries from EvictStaleContext / TrimOldestTurns /
+            // TrimConversationHistory all Insert at index 1. That places a SECOND system
+            // message after position 0 and the server rejects the request with a 500.
+            //
+            // Rather than police every insertion site, normalize here at the single point
+            // where the payload is assembled: collect ALL system content, emit it as one
+            // leading system message, and serialize every other message in original order.
+            // This guarantees a valid array no matter which path added system content.
             var messages = new JArray();
-            int lastIdx   = _conversationHistory.Count - 1;
-            for (int mi = 0; mi <= lastIdx; mi++)
+
+            var systemParts = new System.Collections.Generic.List<string>();
+            var nonSystem   = new System.Collections.Generic.List<ChatMessage>();
+            foreach (var m in _conversationHistory)
             {
-                var msg = _conversationHistory[mi];
+                if (m.Role == "system")
+                {
+                    if (!string.IsNullOrEmpty(m.Content))
+                        systemParts.Add(m.Content);
+                }
+                else
+                {
+                    nonSystem.Add(m);
+                }
+            }
+
+            // Exactly one system message, at index 0. Merge any later system content
+            // (drop summaries, etc.) into the single leading message so nothing is lost.
+            messages.Add(new JObject
+            {
+                ["role"]    = "system",
+                ["content"] = systemParts.Count > 0
+                    ? string.Join("\n\n", systemParts)
+                    : GetSystemPrompt()
+            });
+
+            foreach (var msg in nonSystem)
+            {
                 var msgObj = new JObject
                 {
                     ["role"]    = msg.Role,
