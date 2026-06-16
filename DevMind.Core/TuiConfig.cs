@@ -37,6 +37,15 @@ namespace DevMind
         [JsonPropertyName("contextLimitPercent")]
         public int ContextLimitPercent { get; set; } = -1;
 
+        /// <summary>When true, completed turns are captured as JSONL training data.</summary>
+        [JsonPropertyName("trainingLogEnabled")]
+        public bool TrainingLogEnabled { get; set; } = false;
+
+        /// <summary>Folder for training-log JSONL files. Blank falls back to
+        /// <c>training_logs</c> beside the executable.</summary>
+        [JsonPropertyName("trainingLogFolder")]
+        public string TrainingLogFolder { get; set; } = "";
+
         private static string ConfigPath => Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             ConfigDirName, ConfigFileName);
@@ -72,6 +81,13 @@ namespace DevMind
                 if (root.TryGetProperty("contextLimitPercent", out var clp) && clp.ValueKind == JsonValueKind.Number
                     && clp.TryGetInt32(out int clpVal))
                     config.ContextLimitPercent = clpVal;
+
+                if (root.TryGetProperty("trainingLogEnabled", out var tle)
+                    && (tle.ValueKind == JsonValueKind.True || tle.ValueKind == JsonValueKind.False))
+                    config.TrainingLogEnabled = tle.GetBoolean();
+
+                if (root.TryGetProperty("trainingLogFolder", out var tlf) && tlf.ValueKind == JsonValueKind.String)
+                    config.TrainingLogFolder = tlf.GetString() ?? "";
             }
             catch
             {

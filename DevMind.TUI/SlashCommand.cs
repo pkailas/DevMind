@@ -103,6 +103,23 @@ namespace DevMind
         /// <summary>Opens an interactive directory-only picker starting at the given path and
         /// returns the chosen directory, or null if the user cancelled (or no picker is wired).</summary>
         public Func<string, string> BrowseForDirectory { get; set; }
+
+        // -- Training log ---------------------------------------------------------
+
+        /// <summary>Whether training-turn capture is currently enabled.</summary>
+        public bool TrainingLogEnabled { get; set; }
+
+        /// <summary>The folder training logs actually land in (resolved, never blank).</summary>
+        public string TrainingLogFolder { get; set; } = "";
+
+        /// <summary>Last-write time (UTC) of the newest training log file, or null if none yet.</summary>
+        public DateTime? TrainingLogLastWriteUtc { get; set; }
+
+        /// <summary>Enable/disable capture live and persist the choice to config.</summary>
+        public Action<bool> SetTrainingLogEnabled { get; set; }
+
+        /// <summary>Retarget the log folder live and persist it to config.</summary>
+        public Action<string> SetTrainingLogFolder { get; set; }
     }
 
    /// <summary>
@@ -349,6 +366,11 @@ namespace DevMind
                     IsError = false,
                 }));
 
+            RegisterCommand("/training-log",
+                "Show training-log status (enabled/folder/last write), or toggle it",
+                "/training-log [on|off|folder <path>]",
+                TrainingLogHandler);
+
             RegisterCommand("/training-delete-last",
                 "Delete the training log for the current session",
                 "/training-delete-last",
@@ -550,6 +572,75 @@ namespace DevMind
             {
                 Message = value > 0 ? $"Context limit set to {value}%" : "Context limit disabled",
             });
+        }
+
+        // -- /training-log [on|off|folder <path>] ---------------------------------
+        // No-args status is the high-value path: one glance confirms capture is enabled,
+        // where it writes, and that a file was actually written recently (the guard against
+        // silently-not-logging). on/off persists to config so it survives restart.
+        static Task<CommandResult> TrainingLogHandler(string[] args, CommandContext ctx)
+        {
+            if (args.Length == 0)
+            {
+                var sb = new System.Text.StringBuilder();
+                sb.AppendLine($"Training log: {(ctx.TrainingLogEnabled ? "ON" : "off")}");
+                sb.AppendLine($"  Folder: {ctx.TrainingLogFolder}");
+                if (ctx.TrainingLogLastWriteUtc is DateTime last)
+                {
+                    string ago = FormatAgo(DateTime.UtcNow - last);
+                    sb.Append($"  Last write: {last.ToLocalTime():yyyy-MM-dd HH:mm:ss} ({ago} ago)");
+                }
+                else
+                {
+                    sb.Append("  Last write: never — no training_*.jsonl in folder yet");
+                }
+                return Task.FromResult(new CommandResult { Message = sb.ToString() });
+            }
+
+            string sub = args[0].Trim().ToLowerInvariant();
+
+            if (sub == "on" || sub == "off")
+            {
+                if (ctx.SetTrainingLogEnabled == null)
+                    return Task.FromResult(new CommandResult { Message = "Training-log control is not available.", IsError = true });
+
+                bool enable = sub == "on";
+                ctx.SetTrainingLogEnabled(enable);
+                return Task.FromResult(new CommandResult
+                {
+                    Message = enable
+                        ? $"Training log ON — capturing to {ctx.TrainingLogFolder}"
+                        : "Training log off.",
+                });
+            }
+
+            if (sub == "folder")
+            {
+                if (args.Length < 2)
+                    return Task.FromResult(new CommandResult { Message = "Usage: /training-log folder <path>", IsError = true });
+                if (ctx.SetTrainingLogFolder == null)
+                    return Task.FromResult(new CommandResult { Message = "Training-log control is not available.", IsError = true });
+
+                string path = string.Join(" ", args.Skip(1));
+                ctx.SetTrainingLogFolder(path);
+                return Task.FromResult(new CommandResult { Message = $"Training log folder set: {path}" });
+            }
+
+            return Task.FromResult(new CommandResult
+            {
+                Message = "Usage: /training-log [on|off|folder <path>]   (no args: show status)",
+                IsError = true,
+            });
+        }
+
+        // Compact "time ago" for the training-log status line.
+        static string FormatAgo(TimeSpan d)
+        {
+            if (d < TimeSpan.Zero) d = TimeSpan.Zero;
+            if (d.TotalSeconds < 60) return $"{(int)d.TotalSeconds}s";
+            if (d.TotalMinutes < 60) return $"{(int)d.TotalMinutes}m";
+            if (d.TotalHours   < 24) return $"{(int)d.TotalHours}h";
+            return $"{(int)d.TotalDays}d";
         }
 
         // -- /system_prompt --------------------------------------------------------

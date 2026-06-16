@@ -44,6 +44,18 @@ namespace DevMind
         /// <summary>Generation wall time in milliseconds from the last response's server timings (predicted_ms). 0 until first response.</summary>
         double LastGeneratedMs { get; }
 
+        /// <summary>Prompt-token count from the last response's server timings (prompt_n). 0 until first response.</summary>
+        int LastPromptTokens { get; }
+
+        /// <summary>1-based index of the current user turn (incremented by <see cref="LlmClient.IncrementTurn"/>).</summary>
+        int CurrentTurn { get; }
+
+        /// <summary>The active system prompt (first message in conversation history), or null when none.</summary>
+        string SystemPromptContent { get; }
+
+        /// <summary>The most recent micro-compaction summary, or null when none has occurred.</summary>
+        string LastCompactionSummary { get; }
+
         /// <summary>Estimates total history token usage from conversation message lengths.</summary>
         int EstimateHistoryTokens();
 
