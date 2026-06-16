@@ -263,7 +263,12 @@ Application.MaximumIterationsPerSecond = 750;
             // Construct callbacks with references to TUI views.
             var callbacks = new TuiLoopCallbacks(llmClient, statusBar, host, inputBox.View);
             var state = new LoopState();
-            var driver = new LoopDriver(llmClient, host, callbacks, options, state);
+            // Training-turn capture: Core owns the WHEN/call; the host supplies the logger from
+            // config. Session id resolves at write time (so /new rolls to a fresh file); a blank
+            // folder falls back to training_logs/ beside the exe.
+            var trainingLogger = new JsonlTrainingLogger(
+                SessionId.Get, _config.TrainingLogEnabled, _config.TrainingLogFolder);
+            var driver = new LoopDriver(llmClient, host, callbacks, options, state, trainingLogger);
 
             // Word wrap is set directly at construction (WordWrap = true). Unlike TextView
             // 2.4.4 — whose wrap setter at viewport width 0 degenerated the wrap map and forced
@@ -542,6 +547,22 @@ Application.MaximumIterationsPerSecond = 750;
                             };
                             app.Run(dlg);
                             return dlg.Canceled || string.IsNullOrEmpty(dlg.Path) ? null : dlg.Path;
+                        },
+                        // Training log — status snapshot + live/persisted toggles.
+                        TrainingLogEnabled = trainingLogger.Enabled,
+                        TrainingLogFolder = trainingLogger.ResolvedFolder,
+                        TrainingLogLastWriteUtc = trainingLogger.GetLastWriteUtc(),
+                        SetTrainingLogEnabled = (on) =>
+                        {
+                            trainingLogger.Enabled = on;      // live, this session
+                            _config.TrainingLogEnabled = on;  // persist across restart
+                            _config.Save();
+                        },
+                        SetTrainingLogFolder = (path) =>
+                        {
+                            trainingLogger.Folder = path;     // live, this session
+                            _config.TrainingLogFolder = path;
+                            _config.Save();
                         },
                     };
 
@@ -828,7 +849,7 @@ Application.MaximumIterationsPerSecond = 750;
                 LoopIterationResult iter;
                 try
                 {
-                    iter = await driver.ProcessIterationAsync(responseBuffer.ToString(),
+                    iter = await driver.ProcessIterationAsync(currentPrompt, responseBuffer.ToString(),
                         ResolveBuildCommand(options), cts.Token);
                 }
               catch (OperationCanceledException)

@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -22,6 +23,7 @@ namespace DevMind
         private readonly ILoopCallbacks _callbacks;
         private readonly ILlmOptions _options;
         private readonly LoopState _state;
+        private readonly ITrainingLogger _trainingLogger;
 
        // Same heuristic as the extension constant — gives slack for legitimate
         // progressive debugging cycles without masking genuine stuck loops.
@@ -82,13 +84,15 @@ namespace DevMind
             IAgenticHost agenticHost,
             ILoopCallbacks callbacks,
             ILlmOptions options,
-            LoopState state)
+            LoopState state,
+            ITrainingLogger trainingLogger = null)
         {
-            _llmClient   = llmClient;
-            _agenticHost = agenticHost;
-            _callbacks   = callbacks;
-            _options     = options;
-            _state       = state;
+            _llmClient      = llmClient;
+            _agenticHost    = agenticHost;
+            _callbacks      = callbacks;
+            _options        = options;
+            _state          = state;
+            _trainingLogger = trainingLogger;
         }
 
         /// <summary>
@@ -111,10 +115,14 @@ namespace DevMind
         /// Processes one iteration of the agentic pipeline for the given LLM response.
         /// Must be called on the main thread (VS Dispatcher / JoinableTaskFactory).
         /// </summary>
+        /// <param name="userMessage">The user/contextual message that was sent for this iteration
+        /// (the original input on iteration 1, the contextual re-trigger prompt thereafter).
+        /// Recorded as <c>user_message</c> in the training log.</param>
         /// <param name="assistantResponse">Full LLM response (thinking-stripped, from responseBuffer).</param>
         /// <param name="buildCommand">Build command for this project, passed to ToolCallMapper.</param>
         /// <param name="ct">Token from the extension's CancellationTokenSource.</param>
         public async Task<LoopIterationResult> ProcessIterationAsync(
+            string userMessage,
             string assistantResponse,
             string buildCommand,
             CancellationToken ct)
@@ -198,7 +206,7 @@ namespace DevMind
                 {
                     _agenticHost.AppendOutput("[AGENTIC] Task complete.\n", OutputColor.Success);
                     _state.AgenticDepth = 0;
-                    return MakeTerminal(assistantResponse, outcome, result, lastToolCalls);
+                    return MakeTerminal(userMessage, assistantResponse, outcome, result, lastToolCalls);
                 }
 
                 // Run/exec command succeeded — treat as task complete
@@ -208,7 +216,7 @@ namespace DevMind
                 {
                     _agenticHost.AppendOutput("[AGENTIC] Run/exec command succeeded — treating as task complete.\n", OutputColor.Success);
                     _state.AgenticDepth = 0;
-                    return MakeTerminal(assistantResponse, outcome, result, lastToolCalls);
+                    return MakeTerminal(userMessage, assistantResponse, outcome, result, lastToolCalls);
                 }
 
                 // Consecutive-error abort — same tool failing without resolution
@@ -229,7 +237,7 @@ namespace DevMind
                     _state.ConsecutiveErrorToolName = null;
                     _state.ConsecutiveErrorCount    = 0;
                     _state.AgenticDepth = 0;
-                    return MakeTerminal(assistantResponse, outcome, result, lastToolCalls);
+                    return MakeTerminal(userMessage, assistantResponse, outcome, result, lastToolCalls);
                 }
 
                 // Depth cap
@@ -247,7 +255,7 @@ namespace DevMind
                         _agenticHost.AppendOutput($"[AGENTIC] Depth cap reached ({_state.AgenticDepth}). Stopping.\n", OutputColor.Dim);
                     }
                     _state.AgenticDepth = 0;
-                    return MakeTerminal(assistantResponse, outcome, result, lastToolCalls);
+                    return MakeTerminal(userMessage, assistantResponse, outcome, result, lastToolCalls);
                 }
 
                 // ── Context-window guard ───────────────────────────────────────────────
@@ -271,7 +279,7 @@ namespace DevMind
                                 $"({_llmClient.LastContextUsed:N0} / {_llmClient.ServerContextSize:N0}).\n",
                                 OutputColor.Dim);
                             _state.AgenticDepth = 0;
-                            return MakeTerminal(assistantResponse, outcome, result, lastToolCalls);
+                            return MakeTerminal(userMessage, assistantResponse, outcome, result, lastToolCalls);
                         }
                         _state.ContextGuardArmed = false; // don't nag until usage drops and climbs again
                     }
@@ -302,6 +310,7 @@ namespace DevMind
                 }
 
                 _state.ShellLoopPending = true;
+                MaybeLogTurn(userMessage, assistantResponse, outcome, result, lastToolCalls);
                 return LoopIterationResult.MakeShouldReTrigger(
                     assistantResponse, outcome, result, lastToolCalls,
                     "Continue with the task.", shouldLog: true);
@@ -380,12 +389,12 @@ namespace DevMind
                     else
                         _agenticHost.AppendOutput("[DIAG] Tool use loop: no tool calls — stopping.\n", OutputColor.Dim);
                 }
-                return MakeTerminal(assistantResponse, outcome, null, null);
+                return MakeTerminal(userMessage, assistantResponse, outcome, null, null);
             }
         }
 
         private LoopIterationResult MakeTerminal(
-            string assistantResponse, ResponseOutcome outcome, ExecutionResult result, List<ToolCallResult> toolCalls)
+            string userMessage, string assistantResponse, ResponseOutcome outcome, ExecutionResult result, List<ToolCallResult> toolCalls)
         {
             if (_options.ShowContextBudget)
             {
@@ -398,7 +407,78 @@ namespace DevMind
                 _agenticHost.AppendOutput($"[CONTEXT] {cbUsed:N0} / {cbCtx:N0} ({cbPct}%)\n", cbColor);
             }
             _state.AgenticDepth = 0;
+            // Terminal results always carry ShouldLogTurn == true (see LoopIterationResult.MakeTerminal).
+            MaybeLogTurn(userMessage, assistantResponse, outcome, result, toolCalls);
             return LoopIterationResult.MakeTerminal(assistantResponse, outcome, result, toolCalls);
+        }
+
+        // ── Training-turn capture ─────────────────────────────────────────────────
+        // Core owns both the WHEN (ShouldLogTurn — every terminal result and the
+        // tool-use re-trigger) and the call. The host supplies the logger (config +
+        // enablement) through the constructor; a null or disabled logger is a no-op.
+
+        private void MaybeLogTurn(
+            string userMessage, string assistantResponse, ResponseOutcome outcome,
+            ExecutionResult result, List<ToolCallResult> toolCalls)
+        {
+            if (_trainingLogger == null || !_trainingLogger.Enabled)
+                return;
+
+            try
+            {
+                _trainingLogger.LogTurn(
+                    BuildTurnData(userMessage, assistantResponse, outcome, result, toolCalls));
+            }
+            catch
+            {
+                // Logging must never break the agentic loop.
+            }
+        }
+
+        private TrainingTurnData BuildTurnData(
+            string userMessage, string assistantResponse, ResponseOutcome outcome,
+            ExecutionResult result, List<ToolCallResult> toolCalls)
+        {
+            bool hasErrors = result?.Errors?.Count > 0
+                || (result?.ShellExitCode.HasValue == true && result.ShellExitCode != 0);
+            bool hasToolCalls = toolCalls?.Count > 0
+                || (outcome?.Blocks?.Any(b => b.Type != BlockType.Text && b.Type != BlockType.Scratchpad) == true);
+
+            int nCtx = _llmClient.ServerContextSize > 0 ? _llmClient.ServerContextSize : _llmClient.MaxPromptTokens;
+            int nPast = _llmClient.LastContextUsed;
+            int pct = nCtx > 0 ? (int)(nPast * 100.0 / nCtx) : 0;
+            double tokPerSec = _llmClient.LastGeneratedMs > 0
+                ? _llmClient.LastGeneratedTokens * 1000.0 / _llmClient.LastGeneratedMs
+                : 0;
+
+            return new TrainingTurnData
+            {
+                TurnNumber = _llmClient.CurrentTurn,
+                SystemPrompt = _llmClient.SystemPromptContent,
+                UserMessage = userMessage,
+                AssistantResponse = assistantResponse,
+                ToolCalls = JsonlTrainingLogger.ExtractToolCalls(outcome?.Blocks),
+                ToolResults = JsonlTrainingLogger.ExtractToolResults(result),
+                SummaryContext = _llmClient.LastCompactionSummary,
+                Metrics = new MetricsEntry
+                {
+                    NPast = nPast,
+                    NCtx = nCtx,
+                    PredictedTokens = _llmClient.LastGeneratedTokens,
+                    PromptTokens = _llmClient.LastPromptTokens,
+                    TokPerSec = Math.Round(tokPerSec, 1),
+                    Iteration = _state.AgenticDepth,
+                    ContextPercent = pct
+                },
+                Outcome = JsonlTrainingLogger.ClassifyOutcome(
+                    outcome?.IsDone == true,
+                    hasErrors,
+                    outcome?.HasReadRequests == true,
+                    outcome?.HasPatches == true,
+                    outcome?.HasFileCreation == true,
+                    outcome?.HasShellCommands == true,
+                    hasToolCalls)
+            };
         }
     }
 }

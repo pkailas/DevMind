@@ -121,6 +121,7 @@ The model communicates actions through directives in its response:
 | `/dir [path]` | Show or change working directory (persisted) |
 | `/depth-cap [N]` | Show or set agentic depth cap (1-200, persisted) |
 | `/context-limit [N\|off]` | Show or set the context-window % (1-99) at which the loop pauses to ask before continuing (persisted; default 78) |
+| `/training-log [on\|off\|folder <path>]` | Show training-log status (enabled, folder, last-write time), toggle capture (persisted), or retarget the folder |
 | `/system_prompt` | Display the assembled system prompt |
 | `/history` | List past sessions from history |
 | `/resume <n>` | Resume a past session |

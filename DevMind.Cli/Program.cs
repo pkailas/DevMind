@@ -213,7 +213,7 @@ namespace DevMind
                 LoopIterationResult iter;
                 try
                 {
-                    iter = await driver.ProcessIterationAsync(responseBuffer.ToString(),
+                    iter = await driver.ProcessIterationAsync(currentPrompt, responseBuffer.ToString(),
                         ResolveBuildCommand(options), cts.Token);
                 }
                 catch (OperationCanceledException)
