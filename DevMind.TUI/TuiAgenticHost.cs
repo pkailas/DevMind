@@ -222,9 +222,9 @@ namespace DevMind
                 _pending.Add((text, attr));
         }
 
-        // Drain the whole pending backlog into the document in one UI-thread pass: a batch of
-        // inserts followed by exactly one auto-scroll — not one Invoke + redraw per token. Cheap
-        // when idle (lock + count check). MUST run on the UI thread (invoked by the render pump).
+        // Drain the whole pending backlog into the document in ONE UI-thread pass: a single
+        // Document.Insert followed by exactly one auto-scroll. MUST run on the UI thread (invoked by
+        // the render pump). Cheap when idle (lock + count check).
         private void FlushPending()
         {
             (string text, Terminal.Gui.Drawing.Attribute attr)[] batch;
@@ -242,39 +242,126 @@ namespace DevMind
                 return;
             }
 
-            // Coalesce consecutive spans that share an Attribute into one Document.Insert + one
-            // ColorSpan. Streamed prose is all one color, so a 40 ms batch of N tokens collapses to
-            // a single insert and a single span — cutting per-token insert, redraw, and span-list
-            // growth (the cost that flooded the UI during fast code-block bursts). Runs of the same
-            // syntax color in highlighted code merge the same way.
-            int inserts = 0;
+            // Lever A — one Document.Insert per flush, not one per color run. Each Document.Insert
+            // under WordWrap triggers a full-document re-wrap in the Editor (no incremental-wrap
+            // API), so inserting once per color RUN multiplied that O(doc) cost by the number of
+            // runs — the reason syntax-highlighted code (many colors/line) froze worst. Instead we
+            // concatenate the entire drained batch into ONE string and record each color run as an
+            // offset SUB-RANGE of that single insert: exactly one re-wrap per flush regardless of
+            // how many colors the batch contains. Consecutive same-Attribute spans still coalesce
+            // into one ColorSpan (keeps the span list small). The coloring path is UNCHANGED — the
+            // transformer simply reads sub-offsets of one insert instead of one-insert-per-span.
+            //
+            // Per-run newline normalization is applied before measuring each run's length, so the
+            // recorded sub-offsets match the normalized text that actually lands in the document
+            // (identical to the old per-run InsertSpan normalization). Spans are committed to
+            // _colorSpans only after a successful insert, so a throwing insert can never leave the
+            // span list pointing past the document end.
+            int start = doc.TextLength;
+            var combined = new StringBuilder();
+            var pendingSpans = new List<ColorSpan>();
             int i = 0;
-            var run = new StringBuilder();
             while (i < batch.Length)
             {
                 Terminal.Gui.Drawing.Attribute attr = batch[i].attr;
-                run.Clear();
+                int runStart = start + combined.Length;
+                int runLen = 0;
                 int j = i;
-                while (j < batch.Length && batch[j].attr.Equals(attr)) { run.Append(batch[j].text); j++; }
-                InsertSpan(run.ToString(), attr, scroll: false);
-                inserts++;
+                while (j < batch.Length && batch[j].attr.Equals(attr))
+                {
+                    string piece = NormalizeNewlines(batch[j].text);
+                    combined.Append(piece);
+                    runLen += piece.Length;
+                    j++;
+                }
+                if (runLen > 0) pendingSpans.Add(new ColorSpan(runStart, runLen, attr));
                 i = j;
             }
 
+            if (combined.Length == 0)
+            {
+                Diag($"[FLUSH] spans={batch.Length} empty-after-normalize");
+                return;
+            }
+
+            try
+            {
+                doc.Insert(start, combined.ToString());
+            }
+            catch (Exception ex)
+            {
+                // Keep the app alive — an append failure must never take down the UI loop.
+                Diag($"[FLUSH] INSERT EXCEPTION len={combined.Length} ex={ex}");
+                return;
+            }
+            _colorSpans.AddRange(pendingSpans);
+
             TrimScrollbackIfNeeded(doc);
             _outputView.CaretOffset = doc.TextLength; // one auto-scroll for the whole batch
-            Diag($"[FLUSH] spans={batch.Length} inserts={inserts} total={doc.TextLength}");
+            Diag($"[FLUSH] spans={batch.Length} runs={pendingSpans.Count} insert=1 total={doc.TextLength}");
         }
 
-        // Keep the transcript bounded. The Editor's word-wrapped repaint cost grows with total
-        // document length, so an unbounded transcript eventually makes every redraw cost 100+ ms
-        // and the render pump can't keep up (multi-second freezes late in long sessions). When the
-        // document exceeds MaxDocChars, drop the oldest text down to KeepDocChars and rebase the
-        // color spans into the shrunk offset space. Runs on the UI thread inside FlushPending, so
-        // it never races the transformer's reads of _colorSpans. Trims are infrequent (only after
-        // ~40K more chars stream in), so the O(spans) rebase is cheap amortized.
-        private const int MaxDocChars  = 120_000;
-        private const int KeepDocChars = 80_000;
+        // Normalize line endings to the document's '\n' basis — a stray '\r' would render as a
+        // visible glyph and skew color-span offsets. Fast path: skip the allocations when clean.
+        private static string NormalizeNewlines(string text)
+            => text.IndexOf('\r') < 0 ? text : text.Replace("\r\n", "\n").Replace("\r", "\n");
+
+        // Keep the transcript bounded. Each Document.Insert under WordWrap triggers a FULL-document
+        // re-wrap in the Editor (O(doc length); there is no incremental-wrap API — verified by
+        // decompilation), so an unbounded transcript makes every flush's re-wrap cost climb without
+        // limit and the render pump falls behind (multi-second freezes late in long sessions). When
+        // the document exceeds MaxDocChars, drop the oldest text down to KeepDocChars and rebase the
+        // color spans into the shrunk offset space. Runs on the UI thread inside FlushPending, so it
+        // never races the transformer's reads of _colorSpans. Trims are infrequent (only after
+        // MaxDocChars-KeepDocChars more chars stream in), so the O(spans) rebase is cheap amortized.
+        //
+        // The cap is sourced once at startup from DEVMIND_SCROLLBACK_CAP (chars). Default 64000.
+        // Smaller caps keep each re-wrap cheaper (more responsive) at the cost of less retained
+        // scrollback; a floor of 16000 prevents trim thrashing. KeepDocChars trims to 75% of the
+        // cap. (Lever B of the freeze fix; Lever A is the single-insert batching in FlushPending.)
+        private const int ScrollbackCapDefault = 64_000;
+        private const int ScrollbackCapFloor   = 16_000;
+        private static readonly int MaxDocChars;
+        private static readonly int KeepDocChars;
+        private static readonly string _scrollbackCapDescription;
+
+        /// <summary>One-line description of the effective scrollback cap and its source, for the
+        /// startup banner — e.g. "scrollback cap: 64000 chars (default)" or
+        /// "scrollback cap: 96000 chars (DEVMIND_SCROLLBACK_CAP)".</summary>
+        public static string ScrollbackCapDescription => _scrollbackCapDescription;
+
+        // Resolve the scrollback cap once (env read is not per-flush). Defensive parse: unset /
+        // non-numeric / non-positive → default; below the floor → clamp up and note it.
+        static TuiAgenticHost()
+        {
+            string raw = Environment.GetEnvironmentVariable("DEVMIND_SCROLLBACK_CAP");
+            int cap;
+            string source;
+            if (int.TryParse((raw ?? string.Empty).Trim(), out int parsed) && parsed > 0)
+            {
+                if (parsed < ScrollbackCapFloor)
+                {
+                    cap = ScrollbackCapFloor;
+                    source = $"DEVMIND_SCROLLBACK_CAP={parsed} clamped up to floor {ScrollbackCapFloor}";
+                }
+                else
+                {
+                    cap = parsed;
+                    source = "DEVMIND_SCROLLBACK_CAP";
+                }
+            }
+            else
+            {
+                cap = ScrollbackCapDefault;
+                source = "default";
+            }
+
+            MaxDocChars  = cap;
+            KeepDocChars = (int)Math.Round(cap * 0.75);
+            _scrollbackCapDescription = $"scrollback cap: {cap} chars ({source})";
+            Diag($"[INIT] {_scrollbackCapDescription} keep={KeepDocChars}");
+        }
+
         private void TrimScrollbackIfNeeded(TextDocument doc)
         {
             int len = doc.TextLength;
@@ -316,7 +403,7 @@ namespace DevMind
         {
             // Normalize line endings — the document is '\n'-based; a stray '\r' would render
             // as a visible glyph and skew offsets.
-            text = text.Replace("\r\n", "\n").Replace("\r", "\n");
+            text = NormalizeNewlines(text);
             if (text.Length == 0) return;
 
             TextDocument doc = _outputView.Document;

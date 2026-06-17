@@ -334,8 +334,9 @@ Application.MaximumIterationsPerSecond = 750;
             // directly) - TuiAgenticHost tracks the logical append position for color
             // stamping, and a bypassing insert would desync it.
             host.AppendOutputLocal(
-                $"DevMind TUI  ·  {options.EndpointUrl}  ·  {options.WorkingDirectory}\n\n",
+                $"DevMind TUI  ·  {options.EndpointUrl}  ·  {options.WorkingDirectory}\n",
                 OutputColor.Dim);
+            host.AppendOutputLocal($"{TuiAgenticHost.ScrollbackCapDescription}\n\n", OutputColor.Dim);
 
             // Focus the input field. Setting focus before the loop runs is unreliable in
             // Terminal.Gui v2 (layout/focus is resolved during app.Run), so also re-assert it
