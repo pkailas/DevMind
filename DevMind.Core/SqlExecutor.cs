@@ -187,16 +187,16 @@ namespace DevMind
 
             // Header + separator. The separator mirrors the header cell layout: each column gets a
             // dashed segment of (content width + 2 padding spaces), bracketed by pipes -> |---|---|.
-            var header = new StringBuilder();
+          var header = new StringBuilder();
             var separator = new StringBuilder();
             header.Append("| ");
-            separator.Append("|");
+            separator.Append("| ");
             for (int i = 0; i < columns.Count; i++)
             {
                 var cell = columns[i].PadRight(widths[i]);
                 header.Append(cell).Append(" | ");
-                separator.Append(new string('-', widths[i] + 2)).Append('|');
-            }
+                separator.Append(new string('-', widths[i] + 2)).Append(" | ");
+            }
             sb.AppendLine(header.ToString());
             sb.AppendLine(separator.ToString());
 
