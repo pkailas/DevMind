@@ -10,6 +10,7 @@ using System.Data;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.Json;
 using Microsoft.Data.SqlClient;
 
 namespace DevMind
@@ -190,6 +191,133 @@ namespace DevMind
                 sb.AppendLine($"{totalRows} row{(totalRows == 1 ? "" : "s")}.");
 
             return sb.ToString();
+        }
+
+        /// <summary>
+        /// Resolves the connection string to use, in precedence order:
+        ///   1. <paramref name="explicitConnectionString"/> — used verbatim (overrides everything);
+        ///   2. named connection <paramref name="connectionName"/> from <paramref name="namedConnections"/>
+        ///      (devmind.json sqlConnections). When no name is given: DefaultConnection, then the first usable entry;
+        ///   3. appsettings*.json in <paramref name="workingDirectory"/> (ConnectionStrings:DefaultConnection, then the first found).
+        /// Returns <c>null</c> and sets <paramref name="error"/> — naming all three sources it tried — when none resolve.
+        /// The returned string may carry a SQL-auth password; callers MUST run it through
+        /// <see cref="MaskConnectionString"/> before logging or echoing, and must never persist it.
+        /// </summary>
+        public static string ResolveConnectionString(
+            string explicitConnectionString,
+            string connectionName,
+            IReadOnlyDictionary<string, string> namedConnections,
+            string workingDirectory,
+            out string error)
+        {
+            error = null;
+
+            // 1. Explicit inline connection string — highest precedence, used as-is.
+            if (!string.IsNullOrWhiteSpace(explicitConnectionString))
+                return explicitConnectionString;
+
+            // 2. Named connection from devmind.json sqlConnections (a specific name was requested).
+            if (!string.IsNullOrWhiteSpace(connectionName))
+            {
+                if (namedConnections != null
+                    && namedConnections.TryGetValue(connectionName, out var named)
+                    && !string.IsNullOrWhiteSpace(named))
+                    return named;
+
+                // Named connection requested but not found — fail rather than silently falling back.
+                error =
+                    "No connection string available. Tried, in order: " +
+                    "(1) explicit connection_string [not provided]; " +
+                    $"(2) named connection '{connectionName}' in devmind.json sqlConnections [not found]; " +
+                    "(3) appsettings*.json in the working directory [skipped — a specific connection_name was requested]. " +
+                    "Add the named connection to devmind.json sqlConnections, pass connection_string inline, or omit connection_name to use a default.";
+                return null;
+            }
+
+            // 2b. No name given — DefaultConnection, then the first usable entry, from named connections.
+            if (namedConnections != null && namedConnections.Count > 0)
+            {
+                if (namedConnections.TryGetValue("DefaultConnection", out var defConn) && !string.IsNullOrWhiteSpace(defConn))
+                    return defConn;
+
+                foreach (var kvp in namedConnections)
+                    if (!string.IsNullOrWhiteSpace(kvp.Value))
+                        return kvp.Value;
+            }
+
+            // 3. appsettings*.json in the working directory.
+            var fromAppSettings = TryResolveFromAppSettings(workingDirectory);
+            if (!string.IsNullOrWhiteSpace(fromAppSettings))
+                return fromAppSettings;
+
+            // 4. Nothing resolved — name all three sources tried so the failure is diagnosable.
+            var namedState = (namedConnections == null || namedConnections.Count == 0)
+                ? "none configured"
+                : "no usable entry (no DefaultConnection or non-empty value)";
+            var appSettingsState = string.IsNullOrEmpty(workingDirectory)
+                ? "no working directory"
+                : "no appsettings*.json with a ConnectionStrings entry";
+            error =
+                "No connection string available. Tried, in order: " +
+                "(1) explicit connection_string [not provided]; " +
+                $"(2) named connections in devmind.json sqlConnections [{namedState}]; " +
+                $"(3) appsettings*.json in the working directory [{appSettingsState}]. " +
+                "Provide connection_string inline, add a connection to devmind.json sqlConnections, " +
+                "or place an appsettings.json with ConnectionStrings:DefaultConnection in the working directory.";
+            return null;
+        }
+
+        /// <summary>
+        /// Reads a connection string from appsettings.Development.json / appsettings.json in
+        /// <paramref name="workingDirectory"/> (ConnectionStrings:DefaultConnection, then the first entry).
+        /// Returns <c>null</c> when nothing usable is found. Malformed config files are skipped.
+        /// </summary>
+        private static string TryResolveFromAppSettings(string workingDirectory)
+        {
+            if (string.IsNullOrEmpty(workingDirectory))
+                return null;
+
+            var configFiles = new[] { "appsettings.Development.json", "appsettings.json" };
+            foreach (var configFile in configFiles)
+            {
+                var path = Path.Combine(workingDirectory, configFile);
+                if (!File.Exists(path)) continue;
+
+                try
+                {
+                    var json = File.ReadAllText(path);
+                    using var doc = JsonDocument.Parse(json);
+                    var root = doc.RootElement;
+
+                    if (root.TryGetProperty("ConnectionStrings", out var csSection)
+                        && csSection.ValueKind == JsonValueKind.Object)
+                    {
+                        // Try "DefaultConnection" first.
+                        if (csSection.TryGetProperty("DefaultConnection", out var dc)
+                            && dc.ValueKind == JsonValueKind.String)
+                        {
+                            var v = dc.GetString();
+                            if (!string.IsNullOrWhiteSpace(v)) return v;
+                        }
+
+                        // Fall back to the first non-empty connection string.
+                        foreach (var prop in csSection.EnumerateObject())
+                        {
+                            if (prop.Value.ValueKind == JsonValueKind.String)
+                            {
+                                var v = prop.Value.GetString();
+                                if (!string.IsNullOrWhiteSpace(v)) return v;
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                    // Silently skip malformed configs.
+                }
+            }
+
+            return null;
         }
 
         /// <summary>

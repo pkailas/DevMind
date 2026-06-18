@@ -392,20 +392,25 @@ namespace DevMind
             return await WebTools.WebFetchAsync(url, CancellationToken);
         }
 
-        async Task<string> IAgenticHost.RunSqlAsync(string query, string connectionString, bool allowWrite,
+        async Task<string> IAgenticHost.RunSqlAsync(string query, string connectionString, string connectionName, bool allowWrite,
             int maxRows, int commandTimeout)
         {
-            // Resolve connection string if not provided
-            if (string.IsNullOrWhiteSpace(connectionString))
+            // Resolve by precedence (explicit -> named -> cwd appsettings). The console skin has no
+            // named-connection store, so only explicit + appsettings apply here.
+            var workingDir = ((IAgenticHost)this).GetWorkingDirectory();
+            var resolved = SqlExecutor.ResolveConnectionString(
+                connectionString, connectionName, namedConnections: null, workingDir, out var resolveError);
+            if (resolved == null)
             {
-                connectionString = ResolveDefaultConnectionString();
+                AppendOutput($"[SQL ERROR] {resolveError}\n", OutputColor.Error);
+                return $"[ERROR] {resolveError}";
             }
 
             // Mask for logging (never echo the real connection string)
-            var masked = SqlExecutor.MaskConnectionString(connectionString);
+            var masked = SqlExecutor.MaskConnectionString(resolved);
             AppendOutput($"[SQL] executing query (connection: {masked})\n", OutputColor.Dim);
 
-            var result = SqlExecutor.ExecuteQuery(query, connectionString, allowWrite, maxRows, commandTimeout);
+            var result = SqlExecutor.ExecuteQuery(query, resolved, allowWrite, maxRows, commandTimeout);
 
             // Write to file if output is very large
             if (result.Length > 4000)
@@ -421,50 +426,7 @@ namespace DevMind
             return result;
         }
 
-       private string ResolveDefaultConnectionString()
-        {
-            var workingDir = ((IAgenticHost)this).GetWorkingDirectory();
-            if (string.IsNullOrEmpty(workingDir))
-                return null;
-
-            // Try appsettings.Development.json first, then appsettings.json
-            var configFiles = new[] { "appsettings.Development.json", "appsettings.json" };
-            foreach (var configFile in configFiles)
-            {
-                var path = Path.Combine(workingDir, configFile);
-                if (!File.Exists(path)) continue;
-
-                try
-                {
-                    var json = File.ReadAllText(path);
-                    using var doc = System.Text.Json.JsonDocument.Parse(json);
-                    var root = doc.RootElement;
-
-                    // Look for "ConnectionStrings" section
-                    if (root.TryGetProperty("ConnectionStrings", out var csSection))
-                    {
-                        // Try "DefaultConnection" first
-                        if (csSection.TryGetProperty("DefaultConnection", out var dc) && dc.ValueKind == System.Text.Json.JsonValueKind.String)
-                            return dc.GetString();
-
-                        // Fall back to first connection string
-                        foreach (var prop in csSection.EnumerateObject())
-                        {
-                            if (prop.Value.ValueKind == System.Text.Json.JsonValueKind.String)
-                                return prop.Value.GetString();
-                        }
-                    }
-                }
-                catch
-                {
-                    // Silently skip malformed configs
-                }
-            }
-
-            return null;
-        }
-
-        Task<bool> IAgenticHost.ConfirmContinueAsync(string message)
+        Task<bool> IAgenticHost.ConfirmContinueAsync(string message)
         {
             // Console prompt: 'c'/'y' (or empty) continues; anything else stops. A
             // non-interactive run (no console input) continues so it doesn't hang.

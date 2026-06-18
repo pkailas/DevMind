@@ -221,9 +221,11 @@ namespace DevMind
         /// <summary>
         /// Executes a SQL query and returns formatted results as a text table.
         /// Read-only guard enforced (SELECT/WITH only) unless allowWrite=true.
-        /// Connection string is never logged or echoed.
+        /// The connection is resolved by precedence: explicit <paramref name="connectionString"/>,
+        /// then named <paramref name="connectionName"/> (devmind.json sqlConnections), then cwd appsettings.
+        /// The connection string is never logged, echoed, or persisted.
         /// </summary>
-        Task<string> RunSqlAsync(string query, string connectionString, bool allowWrite,
+        Task<string> RunSqlAsync(string query, string connectionString, string connectionName, bool allowWrite,
             int maxRows, int commandTimeout);
     }
-}
+}

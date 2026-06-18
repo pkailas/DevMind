@@ -270,6 +270,7 @@ namespace DevMind
                         {
                             Type = BlockType.RunSql,
                             SqlQuery = GetArg(tc, "query"),
+                            SqlConnString = GetArg(tc, "connection_string"),
                             SqlConnName = GetArg(tc, "connection_name"),
                             SqlAllowWrite = GetBoolArg(tc, "allow_write"),
                             SqlMaxRows = maxRowsVal > 0 ? maxRowsVal : 100,
@@ -277,7 +278,7 @@ namespace DevMind
                         };
                     }
 
-                default:
+                default:
                     // Unknown tool — emit as text so it's visible in output
                     return new ResponseBlock
                     {
