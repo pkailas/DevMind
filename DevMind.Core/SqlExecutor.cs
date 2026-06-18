@@ -65,16 +65,30 @@ namespace DevMind
                 if (!upper.StartsWith("SELECT") && !upper.StartsWith("WITH"))
                     return "[ERROR] Read-only mode: only SELECT statements are allowed.";
 
-                // Check for write keywords
+               // Check for write keywords anywhere in the full statement (not just leading keyword).
+                // Scan the entire uppercased query for whole-word DML keywords.
                 foreach (var kw in _writeKeywords)
                 {
-                    // Check for EXEC/sp_executesql
-                    if (kw == "EXEC" && (upper.Contains("EXEC ") || upper.Contains("EXECUTE ") || upper.Contains("SP_EXECUTESQL")))
-                        return "[ERROR] Read-only mode: EXEC/EXECUTE/SP_EXECUTESQL is not allowed.";
-
-                    // Check for SELECT...INTO
-                    if (kw == "INSERT" && upper.Contains("SELECT") && upper.Contains("INTO"))
-                        return "[ERROR] Read-only mode: SELECT...INTO is not allowed.";
+                    // EXEC/sp_executesql: check for EXEC/EXECUTE/SP_EXECUTESQL as whole words
+                    if (kw == "EXEC")
+                    {
+                        if (System.Text.RegularExpressions.Regex.IsMatch(upper, @"\bEXEC\b") ||
+                            System.Text.RegularExpressions.Regex.IsMatch(upper, @"\bEXECUTE\b") ||
+                            System.Text.RegularExpressions.Regex.IsMatch(upper, @"\bSP_EXECUTESQL\b"))
+                            return "[ERROR] Read-only mode: EXEC/EXECUTE/SP_EXECUTESQL is not allowed.";
+                    }
+                    // SELECT...INTO
+                    else if (kw == "INSERT")
+                    {
+                        if (upper.Contains("SELECT") && upper.Contains("INTO"))
+                            return "[ERROR] Read-only mode: SELECT...INTO is not allowed.";
+                    }
+                    // All other write keywords: whole-word match anywhere in the statement
+                    else
+                    {
+                        if (System.Text.RegularExpressions.Regex.IsMatch(upper, $@"\b{kw}\b"))
+                            return "[ERROR] Read-only mode: only SELECT statements are allowed.";
+                    }
                 }
             }
 
