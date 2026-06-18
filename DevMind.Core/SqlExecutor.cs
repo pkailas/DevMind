@@ -90,35 +90,43 @@ namespace DevMind
                     var columnNames = new List<string>();
                     int totalRows = 0;
 
-                    using var reader = command.ExecuteReader();
-                    for (int i = 0; i < reader.FieldCount; i++)
-                        columnNames.Add(reader.GetName(i));
-
-                    while (reader.Read())
+                    // Materialize all rows into memory, then close the reader BEFORE the rollback.
+                    // A SqlDataReader left open on the connection blocks transaction.Rollback()
+                    // ("There is already an open DataReader associated with this Connection..."),
+                    // so the reader must be disposed first. The scoped using closes it at the end
+                    // of this block — do NOT widen it to `using var` (which would defer disposal
+                    // past the rollback), and do NOT enable MARS to mask the lifecycle.
+                    using (var reader = command.ExecuteReader())
                     {
-                        if (maxRows > 0 && rows.Count >= maxRows)
-                        {
-                            totalRows++; // count truncated rows
-                            // skip remaining
-                            while (reader.Read()) totalRows++;
-                            break;
-                        }
-                        totalRows++;
-                        var row = new List<string>();
                         for (int i = 0; i < reader.FieldCount; i++)
-                        {
-                            var val = reader.IsDBNull(i) ? "(null)" : reader.GetValue(i)?.ToString() ?? "(null)";
-                            // Cap cell width at 80 chars
-                            if (val.Length > 80) val = val.Substring(0, 77) + "...";
-                            row.Add(val);
-                        }
-                        rows.Add(row);
-                    }
+                            columnNames.Add(reader.GetName(i));
 
-                    // Rollback transaction (always, since we're read-only)
+                        while (reader.Read())
+                        {
+                            if (maxRows > 0 && rows.Count >= maxRows)
+                            {
+                                totalRows++; // count truncated rows
+                                // skip remaining
+                                while (reader.Read()) totalRows++;
+                                break;
+                            }
+                            totalRows++;
+                            var row = new List<string>();
+                            for (int i = 0; i < reader.FieldCount; i++)
+                            {
+                                var val = reader.IsDBNull(i) ? "(null)" : reader.GetValue(i)?.ToString() ?? "(null)";
+                                // Cap cell width at 80 chars
+                                if (val.Length > 80) val = val.Substring(0, 77) + "...";
+                                row.Add(val);
+                            }
+                            rows.Add(row);
+                        }
+                    } // reader closed/disposed here, before the rollback below
+
+                    // Rollback transaction (always, since we're read-only) — reader is now closed.
                     transaction.Rollback();
 
-                    // Format as text table
+                    // Format as text table (rows already materialized in memory)
                     return FormatTable(columnNames, rows, totalRows, maxRows);
                 }
                 catch
