@@ -879,14 +879,19 @@ namespace DevMind
             return await WebTools.WebFetchAsync(url, CancellationToken);
         }
 
+        // Last connection that opened successfully this session — sticky reuse so the model
+        // doesn't have to re-supply the connection on every stateless run_sql call. Session-scoped
+        // (instance field), never a process-static, so it can't leak across DM sessions.
+        private string _lastSuccessfulSqlConnectionString;
+
         async Task<string> IAgenticHost.RunSqlAsync(string query, string connectionString, string connectionName, bool allowWrite,
             int maxRows, int commandTimeout)
         {
-            // Resolve by precedence (explicit -> named devmind.json sqlConnections -> cwd appsettings).
+            // Resolve by precedence (explicit -> named -> session sticky -> cwd appsettings).
             var workingDir = ((IAgenticHost)this).GetWorkingDirectory();
             var namedConnections = TuiConfig.Load().SqlConnections;
             var resolved = SqlExecutor.ResolveConnectionString(
-                connectionString, connectionName, namedConnections, workingDir, out var resolveError);
+                connectionString, connectionName, namedConnections, _lastSuccessfulSqlConnectionString, workingDir, out var resolveError);
             if (resolved == null)
             {
                 AppendOutputLocal($"[SQL ERROR] {resolveError}\n", OutputColor.Error);
@@ -897,7 +902,9 @@ namespace DevMind
             var masked = SqlExecutor.MaskConnectionString(resolved);
             AppendOutputLocal($"[SQL] executing query (connection: {masked})\n", OutputColor.Dim);
 
-            var result = SqlExecutor.ExecuteQuery(query, resolved, allowWrite, maxRows, commandTimeout);
+            var result = SqlExecutor.ExecuteQuery(query, resolved, allowWrite, maxRows, commandTimeout, out var connectionOpened);
+            if (connectionOpened)
+                _lastSuccessfulSqlConnectionString = resolved; // cache the known-good connection for this session
 
             // Write to file if output is very large
             if (result.Length > 4000)

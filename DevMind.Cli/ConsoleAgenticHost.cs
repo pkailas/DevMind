@@ -392,14 +392,18 @@ namespace DevMind
             return await WebTools.WebFetchAsync(url, CancellationToken);
         }
 
+        // Last connection that opened successfully this session — sticky reuse so a stateless
+        // run_sql call need not re-supply the connection. Session-scoped (instance field), not static.
+        private string _lastSuccessfulSqlConnectionString;
+
         async Task<string> IAgenticHost.RunSqlAsync(string query, string connectionString, string connectionName, bool allowWrite,
             int maxRows, int commandTimeout)
         {
-            // Resolve by precedence (explicit -> named -> cwd appsettings). The console skin has no
-            // named-connection store, so only explicit + appsettings apply here.
+            // Resolve by precedence (explicit -> named -> session sticky -> cwd appsettings). The console
+            // skin has no named-connection store, so only explicit, session sticky, and appsettings apply.
             var workingDir = ((IAgenticHost)this).GetWorkingDirectory();
             var resolved = SqlExecutor.ResolveConnectionString(
-                connectionString, connectionName, namedConnections: null, workingDir, out var resolveError);
+                connectionString, connectionName, namedConnections: null, _lastSuccessfulSqlConnectionString, workingDir, out var resolveError);
             if (resolved == null)
             {
                 AppendOutput($"[SQL ERROR] {resolveError}\n", OutputColor.Error);
@@ -410,7 +414,9 @@ namespace DevMind
             var masked = SqlExecutor.MaskConnectionString(resolved);
             AppendOutput($"[SQL] executing query (connection: {masked})\n", OutputColor.Dim);
 
-            var result = SqlExecutor.ExecuteQuery(query, resolved, allowWrite, maxRows, commandTimeout);
+            var result = SqlExecutor.ExecuteQuery(query, resolved, allowWrite, maxRows, commandTimeout, out var connectionOpened);
+            if (connectionOpened)
+                _lastSuccessfulSqlConnectionString = resolved; // cache the known-good connection for this session
 
             // Write to file if output is very large
             if (result.Length > 4000)
