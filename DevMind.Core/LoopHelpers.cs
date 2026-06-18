@@ -178,6 +178,21 @@ namespace DevMind
                         return "[Fetched content not available]";
                     }
 
+                case "run_sql":
+                    {
+                        // AgenticExecutor stores the rendered table / file-spill message / error text
+                        // under the literal "run_sql" key. Hand that back as the tool_result so the
+                        // model actually receives the rows (mirrors run_shell returning ShellOutput),
+                        // instead of the generic "[Executed]" that made it think queries returned nothing.
+                        if (result.ToolResultContents != null &&
+                            result.ToolResultContents.TryGetValue("run_sql", out string sqlContent) &&
+                            !string.IsNullOrEmpty(sqlContent))
+                            return sqlContent;
+                        if (result.Errors != null && result.Errors.Count > 0)
+                            return $"[SQL failed: {string.Join("; ", result.Errors)}]";
+                        return "[SQL result not available]";
+                    }
+
                 default:
                     return "[Executed]";
             }
