@@ -582,17 +582,12 @@ namespace DevMind
                     case BlockType.RunSql:
                         try
                         {
-                            // Resolve connection string name from config if provided
-                            string connName = block.SqlConnName;
-                            string connectionString = null;
-                            if (!string.IsNullOrEmpty(connName))
-                            {
-                                // Look up named connection (host resolves this)
-                                connectionString = connName; // host will resolve
-                            }
+                            // Connection is resolved in the host/SqlExecutor by precedence:
+                            // explicit connection string -> named connection -> cwd appsettings.
                             string sqlResult = await _host.RunSqlAsync(
                                 block.SqlQuery,
-                                connectionString,
+                                block.SqlConnString,
+                                block.SqlConnName,
                                 block.SqlAllowWrite,
                                 block.SqlMaxRows,
                                 block.SqlCommandTimeout);
@@ -605,7 +600,7 @@ namespace DevMind
                         }
                         break;
 
-                    // Text, Done — already handled during streaming or by resolver
+                    // Text, Done — already handled during streaming or by resolver
                     default:
                         break;
                 }
