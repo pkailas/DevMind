@@ -873,14 +873,86 @@ namespace DevMind
             return await WebTools.WebSearchAsync(query, maxResults, CancellationToken);
         }
 
-        async Task<string> IAgenticHost.WebFetchAsync(string url)
+      async Task<string> IAgenticHost.WebFetchAsync(string url)
         {
             AppendOutputLocal($"[WEB] fetch: {url}\n", OutputColor.Dim);
             return await WebTools.WebFetchAsync(url, CancellationToken);
         }
 
+        async Task<string> IAgenticHost.RunSqlAsync(string query, string connectionString, bool allowWrite,
+            int maxRows, int commandTimeout)
+        {
+            // Resolve connection string if not provided
+            if (string.IsNullOrWhiteSpace(connectionString))
+            {
+                connectionString = ResolveDefaultConnectionString();
+            }
+
+            // Mask for logging (never echo the real connection string)
+            var masked = SqlExecutor.MaskConnectionString(connectionString);
+            AppendOutputLocal($"[SQL] executing query (connection: {masked})\n", OutputColor.Dim);
+
+            var result = SqlExecutor.ExecuteQuery(query, connectionString, allowWrite, maxRows, commandTimeout);
+
+            // Write to file if output is very large
+            if (result.Length > 4000)
+            {
+                var outputDir = Path.Combine(Path.GetTempPath(), "devmind");
+                Directory.CreateDirectory(outputDir);
+                var outputPath = Path.Combine(outputDir, "dm_sql_output.txt");
+                File.WriteAllText(outputPath, result);
+                result = $"[SQL] Result too large ({result.Length} chars). Written to: {outputPath}\n{result.Substring(0, Math.Min(200, result.Length))}...\n[See file for full output]";
+            }
+
+            AppendOutputLocal($"[SQL] {result}\n", OutputColor.Success);
+            return result;
+        }
+
+        private string ResolveDefaultConnectionString()
+        {
+            var workingDir = ((IAgenticHost)this).GetWorkingDirectory();
+            if (string.IsNullOrEmpty(workingDir))
+                return null;
+
+            // Try appsettings.Development.json first, then appsettings.json
+            var configFiles = new[] { "appsettings.Development.json", "appsettings.json" };
+            foreach (var configFile in configFiles)
+            {
+                var path = Path.Combine(workingDir, configFile);
+                if (!File.Exists(path)) continue;
+
+                try
+                {
+                    var json = File.ReadAllText(path);
+                    using var doc = System.Text.Json.JsonDocument.Parse(json);
+                    var root = doc.RootElement;
+
+                    // Look for "ConnectionStrings" section
+                    if (root.TryGetProperty("ConnectionStrings", out var csSection))
+                    {
+                        // Try "DefaultConnection" first
+                        if (csSection.TryGetProperty("DefaultConnection", out var dc) && dc.ValueKind == System.Text.Json.JsonValueKind.String)
+                            return dc.GetString();
+
+                        // Fall back to first connection string
+                        foreach (var prop in csSection.EnumerateObject())
+                        {
+                            if (prop.Value.ValueKind == System.Text.Json.JsonValueKind.String)
+                                return prop.Value.GetString();
+                        }
+                    }
+                }
+                catch
+                {
+                    // Silently skip malformed configs
+                }
+            }
+
+            return null;
+        }
+
         /// <summary>Resolves an LSP tool's filename argument to an existing full path, or null.</summary>
-        private string ResolveLspPath(string filename)
+        private string ResolveLspPath(string filename)
         {
             if (string.IsNullOrWhiteSpace(filename)) return null;
             return FindFile(SafeGetFileName(filename), filename.Replace('\\', '/'));

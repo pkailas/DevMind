@@ -30,6 +30,11 @@ namespace DevMind
         public int  LspCharacter { get; set; }        // for GoToDefinition/FindReferences/Hover — 1-based column
         public int  MaxResults   { get; set; }        // for FindSymbol/WebSearch — result cap (0 = default)
         public string Language   { get; set; }        // for FindSymbol — "csharp" (default) or "typescript"
-        public string Url        { get; set; }        // for WebFetch — URL to fetch
+       public string Url        { get; set; }        // for WebFetch — URL to fetch
+        public string SqlQuery   { get; set; }        // for RunSql — SQL statement
+        public string SqlConnName { get; set; }       // for RunSql — connection string name/key
+        public bool   SqlAllowWrite { get; set; }     // for RunSql — override read-only guard
+        public int    SqlMaxRows { get; set; }        // for RunSql — row limit (0 = default 100)
+        public int    SqlCommandTimeout { get; set; } // for RunSql — command timeout in seconds (0 = default 30)
     }
 }

@@ -259,12 +259,28 @@ namespace DevMind
                 Required("query", "string", "Search query string."),
                 Optional("max_results", "integer", "Maximum number of results to return (default 10, max 20).")));
 
-            tools.Add(MakeTool("web_fetch",
+           tools.Add(MakeTool("web_fetch",
                 "Fetch a URL and return its content as clean text. HTML is stripped to readable text. " +
                 "Use for reading documentation pages, GitHub files, API references, or vendor support articles.",
                 Required("url", "string", "URL to fetch.")));
 
-            return tools;
+            // ── run_sql ────────────────────────────────────────────────────
+            tools.Add(MakeTool("run_sql",
+                "Execute a read-only SQL query against a database. " +
+                "Only SELECT statements are allowed by default. " +
+                "Results are returned as a compact text table. " +
+                "If the query returns more rows than maxRows, only the first maxRows are shown " +
+                "with a 'showing X of N' note. " +
+                "Connection string is resolved from appsettings.json (DefaultConnection key) " +
+                "or from named connections in devmind.json config. " +
+                "The connection string is never logged or echoed.",
+                Required("query", "string", "SQL SELECT statement to execute (read-only)."),
+                Optional("connection_name", "string", "Connection string name/key. Blank uses DefaultConnection from appsettings.json."),
+                Optional("max_rows", "integer", "Maximum rows to return (default 100)."),
+                Optional("command_timeout", "integer", "Command timeout in seconds (default 30)."),
+                Optional("allow_write", "boolean", "Allow non-SELECT statements (default false — read-only).")));
+
+            return tools;
         }
 
         // ── Helpers ──────────────────────────────────────────────────────────

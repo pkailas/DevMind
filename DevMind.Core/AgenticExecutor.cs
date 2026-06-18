@@ -565,7 +565,7 @@ namespace DevMind
                         }
                         break;
 
-                    case BlockType.WebFetch:
+                   case BlockType.WebFetch:
                         try
                         {
                             string fetchContent = await _host.WebFetchAsync(block.Url);
@@ -579,7 +579,33 @@ namespace DevMind
                         }
                         break;
 
-                    // Text, Done — already handled during streaming or by resolver
+                    case BlockType.RunSql:
+                        try
+                        {
+                            // Resolve connection string name from config if provided
+                            string connName = block.SqlConnName;
+                            string connectionString = null;
+                            if (!string.IsNullOrEmpty(connName))
+                            {
+                                // Look up named connection (host resolves this)
+                                connectionString = connName; // host will resolve
+                            }
+                            string sqlResult = await _host.RunSqlAsync(
+                                block.SqlQuery,
+                                connectionString,
+                                block.SqlAllowWrite,
+                                block.SqlMaxRows,
+                                block.SqlCommandTimeout);
+                            result.ToolResultContents["run_sql"] = sqlResult;
+                        }
+                        catch (Exception ex)
+                        {
+                            result.Errors.Add(ex.Message);
+                            _host.AppendOutput($"[SQL ERROR] {ex.Message}\n", OutputColor.Error);
+                        }
+                        break;
+
+                    // Text, Done — already handled during streaming or by resolver
                     default:
                         break;
                 }

@@ -5,10 +5,11 @@
 // Atomic write-back (write to .tmp then rename).
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
+using System.Text.Json.Serialization;
 
 namespace DevMind
 {
@@ -41,12 +42,17 @@ namespace DevMind
         [JsonPropertyName("trainingLogEnabled")]
         public bool TrainingLogEnabled { get; set; } = false;
 
-        /// <summary>Folder for training-log JSONL files. Blank falls back to
+       /// <summary>Folder for training-log JSONL files. Blank falls back to
         /// <c>training_logs</c> beside the executable.</summary>
         [JsonPropertyName("trainingLogFolder")]
         public string TrainingLogFolder { get; set; } = "";
 
-        private static string ConfigPath => Path.Combine(
+        /// <summary>Named SQL connection strings. Keys are connection names, values are connection strings.
+        /// Stored securely — never logged or echoed.</summary>
+        [JsonPropertyName("sqlConnections")]
+        public Dictionary<string, string> SqlConnections { get; set; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        private static string ConfigPath => Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             ConfigDirName, ConfigFileName);
 
@@ -86,10 +92,19 @@ namespace DevMind
                     && (tle.ValueKind == JsonValueKind.True || tle.ValueKind == JsonValueKind.False))
                     config.TrainingLogEnabled = tle.GetBoolean();
 
-                if (root.TryGetProperty("trainingLogFolder", out var tlf) && tlf.ValueKind == JsonValueKind.String)
+              if (root.TryGetProperty("trainingLogFolder", out var tlf) && tlf.ValueKind == JsonValueKind.String)
                     config.TrainingLogFolder = tlf.GetString() ?? "";
+
+                if (root.TryGetProperty("sqlConnections", out var sc) && sc.ValueKind == JsonValueKind.Object)
+                {
+                    foreach (var prop in sc.EnumerateObject())
+                    {
+                        if (prop.Value.ValueKind == JsonValueKind.String)
+                            config.SqlConnections[prop.Name] = prop.Value.GetString() ?? "";
+                    }
+                }
             }
-            catch
+            catch
             {
                 // Silently ignore parse errors — return defaults.
             }
