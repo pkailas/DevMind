@@ -38,8 +38,13 @@ namespace DevMind
             string connectionString,
             bool allowWrite,
             int maxRows,
-            int commandTimeout)
+            int commandTimeout,
+            out bool connectionOpened)
         {
+            // Reports whether the connection actually opened, so the caller can cache a
+            // known-good connection for the session even if the query itself later errors.
+            connectionOpened = false;
+
             if (string.IsNullOrWhiteSpace(query))
                 return "[ERROR] Empty query.";
 
@@ -77,6 +82,7 @@ namespace DevMind
             {
                 using var connection = new SqlConnection(connectionString);
                 connection.Open();
+                connectionOpened = true; // connection is good — caller may cache it for the session
 
                 using var transaction = connection.BeginTransaction();
                 try
@@ -165,16 +171,17 @@ namespace DevMind
                 for (int i = 0; i < row.Count && i < columns.Count; i++)
                     widths[i] = Math.Max(widths[i], row[i].Length);
 
-            // Header
+            // Header + separator. The separator mirrors the header cell layout: each column gets a
+            // dashed segment of (content width + 2 padding spaces), bracketed by pipes -> |---|---|.
             var header = new StringBuilder();
             var separator = new StringBuilder();
             header.Append("| ");
-            separator.Append("|-");
+            separator.Append("|");
             for (int i = 0; i < columns.Count; i++)
             {
                 var cell = columns[i].PadRight(widths[i]);
                 header.Append(cell).Append(" | ");
-                separator.Append(new string('-', widths[i] + 2)).Append("-");
+                separator.Append(new string('-', widths[i] + 2)).Append('|');
             }
             sb.AppendLine(header.ToString());
             sb.AppendLine(separator.ToString());
@@ -205,9 +212,10 @@ namespace DevMind
         /// Resolves the connection string to use, in precedence order:
         ///   1. <paramref name="explicitConnectionString"/> — used verbatim (overrides everything);
         ///   2. named connection <paramref name="connectionName"/> from <paramref name="namedConnections"/>
-        ///      (devmind.json sqlConnections). When no name is given: DefaultConnection, then the first usable entry;
-        ///   3. appsettings*.json in <paramref name="workingDirectory"/> (ConnectionStrings:DefaultConnection, then the first found).
-        /// Returns <c>null</c> and sets <paramref name="error"/> — naming all three sources it tried — when none resolve.
+        ///      (devmind.json sqlConnections). When no name is given: DefaultConnection, then "default", then the first usable entry;
+        ///   3. <paramref name="sessionConnectionString"/> — the last connection that opened successfully this session (sticky reuse);
+        ///   4. appsettings*.json in <paramref name="workingDirectory"/> (ConnectionStrings:DefaultConnection, then the first found).
+        /// Returns <c>null</c> and sets <paramref name="error"/> — naming the sources it tried — when none resolve.
         /// The returned string may carry a SQL-auth password; callers MUST run it through
         /// <see cref="MaskConnectionString"/> before logging or echoing, and must never persist it.
         /// </summary>
@@ -215,6 +223,7 @@ namespace DevMind
             string explicitConnectionString,
             string connectionName,
             IReadOnlyDictionary<string, string> namedConnections,
+            string sessionConnectionString,
             string workingDirectory,
             out string error)
         {
@@ -242,26 +251,34 @@ namespace DevMind
                 return null;
             }
 
-            // 2b. No name given — DefaultConnection, then the first usable entry, from named connections.
+            // 2b. No name given — DefaultConnection, then "default", then the first usable entry,
+            //     from named connections. ("default" gives a cross-session reuse hook in devmind.json.)
             if (namedConnections != null && namedConnections.Count > 0)
             {
                 if (namedConnections.TryGetValue("DefaultConnection", out var defConn) && !string.IsNullOrWhiteSpace(defConn))
                     return defConn;
+
+                if (namedConnections.TryGetValue("default", out var defConn2) && !string.IsNullOrWhiteSpace(defConn2))
+                    return defConn2;
 
                 foreach (var kvp in namedConnections)
                     if (!string.IsNullOrWhiteSpace(kvp.Value))
                         return kvp.Value;
             }
 
-            // 3. appsettings*.json in the working directory.
+            // 3. Session sticky connection — the last connection that opened successfully this session.
+            if (!string.IsNullOrWhiteSpace(sessionConnectionString))
+                return sessionConnectionString;
+
+            // 4. appsettings*.json in the working directory.
             var fromAppSettings = TryResolveFromAppSettings(workingDirectory);
             if (!string.IsNullOrWhiteSpace(fromAppSettings))
                 return fromAppSettings;
 
-            // 4. Nothing resolved — name all three sources tried so the failure is diagnosable.
+            // 5. Nothing resolved — name every source tried so the failure is diagnosable.
             var namedState = (namedConnections == null || namedConnections.Count == 0)
                 ? "none configured"
-                : "no usable entry (no DefaultConnection or non-empty value)";
+                : "no usable entry (no DefaultConnection/default or non-empty value)";
             var appSettingsState = string.IsNullOrEmpty(workingDirectory)
                 ? "no working directory"
                 : "no appsettings*.json with a ConnectionStrings entry";
@@ -269,7 +286,8 @@ namespace DevMind
                 "No connection string available. Tried, in order: " +
                 "(1) explicit connection_string [not provided]; " +
                 $"(2) named connections in devmind.json sqlConnections [{namedState}]; " +
-                $"(3) appsettings*.json in the working directory [{appSettingsState}]. " +
+                "(3) session sticky connection [none cached yet — run one query with a connection first]; " +
+                $"(4) appsettings*.json in the working directory [{appSettingsState}]. " +
                 "Provide connection_string inline, add a connection to devmind.json sqlConnections, " +
                 "or place an appsettings.json with ConnectionStrings:DefaultConnection in the working directory.";
             return null;
