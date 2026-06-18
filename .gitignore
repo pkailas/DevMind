@@ -31,3 +31,7 @@ CodeReviewBenchmarkWithBugs/
 # Self-contained publish staging + any loose executables (never commit binaries)
 .publish-*/
 *.exe
+
+# Runtime artifacts
+dist/*.pdb
+dist/training_logs/
