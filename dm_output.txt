@@ -1,0 +1,211 @@
+﻿================================================================================
+A. BuildCombinedSystemPrompt — Definition and Call Sites
+================================================================================
+
+--- DEFINITION 1: DevMind.Cli/Program.cs:282 ---
+
+    static string BuildCombinedSystemPrompt(CliOptions options, string devMindContext, string scratchpad = "")
+     {
+         // projectNamespace is null in CLI context — no VS project loaded.
+         string llmDirective = LoopHelpers.BuildToolUsePrompt(
+             buildCommand: ResolveBuildCommand(options), projectNamespace: null);
+
+         string combined = $"{options.SystemPrompt}\n\n{llmDirective}";
+
+         if (!string.IsNullOrEmpty(devMindContext))
+            combined += $"\n\n--- Project Context (AGENTS.md) ---\n{devMindContext}\n---";
+
+         // Best-effort memory index injection (same as extension)
+         try
+         {
+             var memMgr = new MemoryManager(options.WorkingDirectory);
+             string memoryIndex = memMgr.LoadIndex();
+             if (!string.IsNullOrWhiteSpace(memoryIndex))
+                 combined += $"\n\n--- Session Memory (MEMORY.md) ---\n{memoryIndex}\n---";
+         }
+         catch { }
+
+         // Scratchpad — model's cross-turn state tracking.
+         // Injected into the system prompt so it survives context compaction.
+         if (!string.IsNullOrEmpty(scratchpad))
+             combined += $"\n\n--- CURRENT SCRATCHPAD ---\n{scratchpad}\n---";
+
+         return combined;
+     }
+
+--- DEFINITION 2: DevMind.TUI/Program.cs:824 ---
+
+    static string BuildCombinedSystemPrompt(TuiOptions options, string devMindContext, string behavioralRules, string scratchpad = "")
+     {
+         string llmDirective = LoopHelpers.BuildToolUsePrompt(
+             buildCommand: ResolveBuildCommand(options),
+             projectNamespace: null);
+
+         var sb = new StringBuilder();
+         sb.Append(options.SystemPrompt);
+         sb.Append("\n\n");
+         sb.Append(llmDirective);
+
+         // Behavioral rules — after base prompt, before project context.
+         if (!string.IsNullOrEmpty(behavioralRules))
+         {
+             sb.Append("\n\n--- BEHAVIORAL RULES ---\n");
+             sb.Append(behavioralRules);
+             sb.Append("\n---");
+         }
+
+         if (!string.IsNullOrEmpty(devMindContext))
+         {
+             sb.Append("\n\n--- PROJECT CONTEXT ---\n");
+             sb.Append(devMindContext);
+             sb.Append("\n---");
+         }
+
+         try
+         {
+             var memMgr = new MemoryManager(options.WorkingDirectory);
+             string memoryIndex = memMgr.LoadIndex();
+             if (!string.IsNullOrWhiteSpace(memoryIndex))
+             {
+                 sb.Append("\n\n--- Session Memory (MEMORY.md) ---\n");
+                 sb.Append(memoryIndex);
+                 sb.Append("\n---");
+             }
+         }
+         catch { }
+
+         // Scratchpad — model's cross-turn state tracking.
+         // Injected into the system prompt so it survives context compaction.
+         if (!string.IsNullOrEmpty(scratchpad))
+         {
+             sb.Append("\n\n--- CURRENT SCRATCHPAD ---\n");
+             sb.Append(scratchpad);
+             sb.Append("\n---");
+         }
+
+         return sb.ToString();
+     }
+
+--- CALL SITES ---
+
+DevMind.Cli/Program.cs:48
+  "string combinedSystemPrompt = BuildCombinedSystemPrompt(options, devMindContext);"
+
+DevMind.Cli/Program.cs:99
+  "callbacks, () => BuildCombinedSystemPrompt(options, devMindContext, host.TaskScratchpad), cts);"
+
+DevMind.TUI/Program.cs:278
+  "string combinedSystemPrompt = BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules, host.TaskScratchpad);"
+
+DevMind.TUI/Program.cs:400
+  "SystemPrompt = llmClient.SystemPromptContent ?? BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules, host.TaskScratchpad),"
+
+DevMind.TUI/Program.cs:427
+  "return BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules, host.TaskScratchpad);"
+
+DevMind.TUI/Program.cs:487
+  "callbacks, () => BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules, host.TaskScratchpad), cts, app,"
+
+DevMind.TUI/Program.cs:521
+  "callbacks, () => BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules, host.TaskScratchpad), cts, app,"
+
+================================================================================
+B. How the Real System Message Gets Seeded into Conversation History
+================================================================================
+
+--- LlmClient Constructor (DevMind.Core/LlmClient.cs:249-252) ---
+
+     _conversationHistory = new List<ChatMessage>
+     {
+         new ChatMessage("system", GetSystemPrompt())
+     };
+
+--- GetSystemPrompt() (DevMind.Core/LlmClient.cs:1121-1125) ---
+
+     private string GetSystemPrompt()
+     {
+         string prompt = _options.SystemPrompt;
+         return string.IsNullOrWhiteSpace(prompt) ? DefaultSystemPrompt : prompt;
+     }
+
+--- ClearHistory() (DevMind.Core/LlmClient.cs:1033-1034) ---
+
+         _conversationHistory.Clear();
+         _conversationHistory.Add(new ChatMessage("system", GetSystemPrompt()));
+
+--- UpdateSystemPrompt() (DevMind.Core/LlmClient.cs:1127-1144) ---
+
+     private void UpdateSystemPrompt(string combinedSystemPrompt = null)
+     {
+         string prompt = !string.IsNullOrEmpty(combinedSystemPrompt)
+             ? combinedSystemPrompt
+             : GetSystemPrompt();
+         if (_conversationHistory.Count > 0 && _conversationHistory[0].Role == "system")
+         {
+             // Skip replacement if the prompt text is identical — preserves the KV cache prefix.
+             if (string.Equals(_conversationHistory[0].Content, prompt, StringComparison.Ordinal))
+                 return;
+
+             _conversationHistory[0] = new ChatMessage("system", prompt);
+         }
+         else
+         {
+             _conversationHistory.Insert(0, new ChatMessage("system", prompt));
+         }
+     }
+
+--- UpdateSystemPrompt called from SendMessageAsync (DevMind.Core/LlmClient.cs:572) ---
+
+     UpdateSystemPrompt(combinedSystemPrompt);
+
+--- SendMessageAsync signature (DevMind.Core/LlmClient.cs:540-548) ---
+
+    public async Task SendMessageAsync(
+         string userMessage,
+         Action<string> onToken,
+         Action onComplete,
+         Action<Exception> onError,
+         bool deferCompression = false,
+         string combinedSystemPrompt = null,
+         CancellationToken cancellationToken = default,
+         bool forceToolChoiceRequired = false)
+
+--- SystemPromptContent property (DevMind.Core/LlmClient.cs:1002) ---
+
+     public string SystemPromptContent => _conversationHistory.Count > 0 ? _conversationHistory[0].Content : null;
+
+================================================================================
+C. Classification of Each BuildCombinedSystemPrompt Call Site
+================================================================================
+
+DevMind.Cli/Program.cs:48 — "display-only"
+  Surrounding line: "string combinedSystemPrompt = BuildCombinedSystemPrompt(options, devMindContext);"
+  (Assigned to a local variable; not passed to LlmClient in this code path.)
+
+DevMind.Cli/Program.cs:99 — "seeds the LLM system message"
+  Surrounding line: "callbacks, () => BuildCombinedSystemPrompt(options, devMindContext, host.TaskScratchpad), cts);"
+  (Passed as a lambda to RunTurnAsync, which passes it to LlmClient.SendMessageAsync as combinedSystemPrompt parameter.)
+
+DevMind.TUI/Program.cs:278 — "display-only"
+  Surrounding line: "string combinedSystemPrompt = BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules, host.TaskScratchpad);"
+  (Assigned to a local variable; not passed to LlmClient in this code path.)
+
+DevMind.TUI/Program.cs:400 — "seeds the LLM system message"
+  Surrounding line: "SystemPrompt = llmClient.SystemPromptContent ?? BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules, host.TaskScratchpad),"
+  (Assigned to CommandContext.SystemPrompt, used by /system_prompt slash command display and potentially for reseeding.)
+
+DevMind.TUI/Program.cs:427 — "seeds the LLM system message"
+  Surrounding line: "return BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules, host.TaskScratchpad);"
+  (Returned from CommandContext.RebuildSystemPrompt lambda — used to rebuild system prompt after behavioral rules change.)
+
+DevMind.TUI/Program.cs:487 — "seeds the LLM system message"
+  Surrounding line: "callbacks, () => BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules, host.TaskScratchpad), cts, app,"
+  (Passed as a lambda to RunTurnAsync, which passes it to LlmClient.SendMessageAsync as combinedSystemPrompt parameter.)
+
+DevMind.TUI/Program.cs:521 — "seeds the LLM system message"
+  Surrounding line: "callbacks, () => BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules, host.TaskScratchpad), cts, app,"
+  (Passed as a lambda to RunTurnAsync, which passes it to LlmClient.SendMessageAsync as combinedSystemPrompt parameter.)
+
+================================================================================
+END OF OUTPUT
+================================================================================

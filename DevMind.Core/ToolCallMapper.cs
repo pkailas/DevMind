@@ -255,14 +255,29 @@ namespace DevMind
                         MaxResults = GetIntArg(tc, "max_results")
                     };
 
-                case "web_fetch":
+               case "web_fetch":
                     return new ResponseBlock
                     {
                         Type = BlockType.WebFetch,
                         Url = GetArg(tc, "url")
                     };
 
-                default:
+                case "run_sql":
+                    {
+                        int maxRowsVal = GetIntArg(tc, "max_rows");
+                        int timeoutVal = GetIntArg(tc, "command_timeout");
+                        return new ResponseBlock
+                        {
+                            Type = BlockType.RunSql,
+                            SqlQuery = GetArg(tc, "query"),
+                            SqlConnName = GetArg(tc, "connection_name"),
+                            SqlAllowWrite = GetBoolArg(tc, "allow_write"),
+                            SqlMaxRows = maxRowsVal > 0 ? maxRowsVal : 100,
+                            SqlCommandTimeout = timeoutVal > 0 ? timeoutVal : 30
+                        };
+                    }
+
+                default:
                     // Unknown tool — emit as text so it's visible in output
                     return new ResponseBlock
                     {
