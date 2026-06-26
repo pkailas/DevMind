@@ -675,29 +675,6 @@ Application.MaximumIterationsPerSecond = 750;
             // does not reliably wake the parked Windows input-wait, but an AddTimeout does.
             host.StartRenderPump(app);
 
-            // Maximized-launch size fix. When the terminal starts maximized, the console driver can
-            // read a stale (smaller) size at Init, so the Dim.Fill() layout fills only part of the
-            // window until a manual unmaximize→maximize forces a resize. Re-assert the real terminal
-            // size once, just after the loop starts, to do that automatically. One-shot, and a no-op
-            // when the size already matches (non-maximized, or correctly detected at Init).
-            app.AddTimeout(TimeSpan.FromMilliseconds(100), () =>
-            {
-                try
-                {
-                    var drv = app.Driver;
-                    int w = Console.WindowWidth;
-                    int h = Console.WindowHeight;
-                    if (drv != null && w > 0 && h > 0 && (w != drv.Cols || h != drv.Rows))
-                    {
-                        TuiAgenticHost.Diag($"[STARTUP] size re-assert {drv.Cols}x{drv.Rows} -> {w}x{h}");
-                        drv.SetScreenSize(w, h);
-                        app.LayoutAndDraw();
-                    }
-                }
-                catch (Exception ex) { TuiAgenticHost.Diag($"[STARTUP] size re-assert ex={ex.Message}"); }
-                return false; // one-shot
-            });
-
             // Run the application.
             app.Run(window);
 
