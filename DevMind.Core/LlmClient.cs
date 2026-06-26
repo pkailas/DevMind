@@ -1135,6 +1135,11 @@ namespace DevMind
                     }
                 }
 
+                // Guarantee history holds only valid-JSON tool-call arguments so a malformed
+                // stream (truncated/duplicated fragments, or an Ollama-native object) can't
+                // poison later replays to vLLM. See SanitizeToolCallArguments.
+                rawToolCalls = SanitizeToolCallArguments(rawToolCalls);
+
                 _conversationHistory.Add(new ChatMessage("assistant", fullResponse.ToString(),
                     _currentTurn, toolCalls: rawToolCalls));
 
@@ -3107,10 +3112,14 @@ namespace DevMind
                     ["content"] = msg.Content
                 };
 
-                // Assistant messages with tool_calls must include the tool_calls array
+                // Assistant messages with tool_calls must include the tool_calls array.
+                // Sanitize the arguments to valid compact JSON strings first: vLLM 0.22.1
+                // re-parses each arguments value with json.loads() and returns a 400
+                // (JSONDecodeError) on a truncated/duplicated/empty/object value, which then
+                // poisons every subsequent turn in the conversation. See SanitizeToolCallArguments.
                 if (msg.Role == "assistant" && msg.ToolCalls != null)
                 {
-                    msgObj["tool_calls"] = msg.ToolCalls;
+                    msgObj["tool_calls"] = SanitizeToolCallArguments(msg.ToolCalls);
                 }
 
                 // Tool result messages must include tool_call_id
@@ -3585,6 +3594,54 @@ namespace DevMind
                 result.Add(tc);
             }
             return result.Count > 0 ? result : null;
+        }
+
+        /// <summary>
+        /// Ensures every tool call's <c>function.arguments</c> is a valid, compact JSON
+        /// <b>string</b> before it is stored in history or replayed to the server.
+        /// </summary>
+        /// <remarks>
+        /// vLLM 0.22.1 (and the OpenAI spec) require <c>arguments</c> to be a JSON string that the
+        /// server re-parses with <c>json.loads()</c>. A truncated or duplicated stream, an empty
+        /// string, or an Ollama-native object value all trigger a 400 JSONDecodeError in vLLM's
+        /// <c>_postprocess_messages</c> — and because the offending assistant message stays in
+        /// history, it makes every following turn fail until the conversation is cleared. We coerce:
+        /// valid string → kept (re-serialized compact); object/array → compact JSON string;
+        /// empty/null/malformed → <c>"{}"</c>. The input is not mutated; a new array is returned.
+        /// </remarks>
+        private static JArray SanitizeToolCallArguments(JArray toolCalls)
+        {
+            if (toolCalls == null) return null;
+
+            var clone = (JArray)toolCalls.DeepClone();
+            foreach (var tc in clone)
+            {
+                if (tc["function"] is not JObject fn) continue;
+
+                string normalized = "{}";
+                var argsToken = fn["arguments"];
+                if (argsToken != null)
+                {
+                    if (argsToken.Type == JTokenType.Object || argsToken.Type == JTokenType.Array)
+                    {
+                        // Ollama-native object/array — re-serialize as a compact JSON string.
+                        normalized = argsToken.ToString(Formatting.None);
+                    }
+                    else
+                    {
+                        string raw = argsToken.ToString();
+                        if (!string.IsNullOrWhiteSpace(raw))
+                        {
+                            try { normalized = JToken.Parse(raw).ToString(Formatting.None); }
+                            catch { normalized = "{}"; } // truncated/duplicated/invalid → safe empty object
+                        }
+                    }
+                }
+
+                fn["arguments"] = normalized;
+            }
+
+            return clone;
         }
 
         /// <summary>
