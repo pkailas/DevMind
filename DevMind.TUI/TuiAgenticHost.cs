@@ -44,7 +44,7 @@ namespace DevMind
     /// All file/shell/patch/memory logic cribbed verbatim from ConsoleAgenticHost.
     /// AppendOutput routes to a Terminal.Gui.Editor.Editor via IApplication.Invoke.
     /// </summary>
-    public sealed class TuiAgenticHost : IAgenticHost
+    public sealed partial class TuiAgenticHost : IAgenticHost
     {
         // ── Fields ───────────────────────────────────────────────────────────────
 
@@ -166,6 +166,8 @@ namespace DevMind
            _taskReadFiles.Clear();
             _taskScratchpad = "";
             _pendingConflict = null;
+            CleanupDap();
+            _pendingBreaks.Reset();
         }
 
         // ── IAgenticHost.AppendOutput ─────────────────────────────────────────────

@@ -568,6 +568,8 @@ Application.MaximumIterationsPerSecond = 750;
                         },
                         // Merge conflict resolution (/resolve).
                         ResolveConflict = (choice) => host.ResolvePendingConflict(choice),
+                        // DAP debugging (/debug).
+                        DebugCommand = (dargs) => host.HandleDebugCommandAsync(dargs),
                     };
 
                    CommandResult result = await SlashCommand.Dispatch(input, cmdCtx);

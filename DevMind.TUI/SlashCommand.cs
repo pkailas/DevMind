@@ -127,6 +127,13 @@ namespace DevMind
         /// (accept_proposed|accept_current|cancel). Returns a status message.
         /// Null when no conflict machinery is wired into the host.</summary>
         public Func<string, string> ResolveConflict { get; set; }
+
+        // -- Debugging (DAP / netcoredbg) -----------------------------------------
+
+        /// <summary>Run a /debug subcommand (args after "/debug"). Returns an
+        /// immediate status line; breakpoint hits and debuggee output stream
+        /// asynchronously through AppendOutput. Null when no host wires it.</summary>
+        public Func<string[], Task<string>> DebugCommand { get; set; }
     }
 
    /// <summary>
@@ -391,6 +398,11 @@ namespace DevMind
                 "Resolve a pending merge conflict (accept proposed/current, or cancel)",
                 "/resolve accept_proposed|accept_current|cancel",
                 ResolveHandler);
+
+            RegisterCommand("/debug",
+                "Debug via netcoredbg (launch/attach, breakpoints, stepping, inspect/eval)",
+                "/debug launch <proj> | attach <pid|name> | break [clear] <file> <line> | continue | step | stepin | stepout | inspect <var> | stack | eval <expr> | detach | stop",
+                DebugHandler);
         }
 
         // -- /new ------------------------------------------------------------------
@@ -836,6 +848,29 @@ namespace DevMind
             string message = ctx.ResolveConflict(choice);
             bool isError = message != null && message.StartsWith("[MERGE ERROR]", StringComparison.Ordinal);
             return Task.FromResult(new CommandResult { Message = message ?? string.Empty, IsError = isError });
+        }
+
+        // -- /debug ... ------------------------------------------------------------
+        // Thin pass-through to the host's DAP orchestration. The host returns an
+        // immediate status line; live debug output streams via AppendOutput.
+        static async Task<CommandResult> DebugHandler(string[] args, CommandContext ctx)
+        {
+            if (ctx.DebugCommand == null)
+                return new CommandResult { Message = "Debugging is not available in this host.", IsError = true };
+
+            if (args.Length == 0)
+                return new CommandResult
+                {
+                    Message = "Usage: /debug launch|attach|break|continue|step|stepin|stepout|inspect|stack|eval|detach|stop",
+                    IsError = true,
+                };
+
+            string message = await ctx.DebugCommand(args);
+            bool isError = message != null &&
+                (message.StartsWith("Usage:", StringComparison.Ordinal) ||
+                 message.StartsWith("[DEBUG ERROR]", StringComparison.Ordinal) ||
+                 message.IndexOf("not available", StringComparison.OrdinalIgnoreCase) >= 0);
+            return new CommandResult { Message = message ?? string.Empty, IsError = isError };
         }
     }
 }
