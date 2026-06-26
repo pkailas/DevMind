@@ -1055,14 +1055,11 @@ namespace DevMind
                     // tool_call chunks, where a content-delta count would sit at 0.
                     ParseLiveUsage(data);
 
-                    // vLLM: stamp the first chunk for wall-clock tok/s and fold each chunk's
-                    // usage.prompt_tokens into LastContextUsed (vLLM's analogue of n_past).
-                    // ik_llama.cpp paths are untouched — they finalize from server timings below.
+                    // vLLM: fold each chunk's usage.prompt_tokens into LastContextUsed (vLLM's
+                    // analogue of n_past). ik_llama.cpp paths are untouched — they finalize from
+                    // server timings below. (Wall-clock tok/s is stamped at the first token below.)
                     if (ServerType == LlmServerType.Vllm)
-                    {
-                        if (_streamStartMs == 0) _streamStartMs = Environment.TickCount64;
                         ParseVllmUsage(data);
-                    }
 
                     // Reasoning tokens arrive on delta.reasoning_content; visible tokens on
                     // delta.content. Re-synthesize <think>…</think> boundaries so ThinkFilter
@@ -1085,6 +1082,13 @@ namespace DevMind
                         fullResponse.Append(token);
                         onToken(token);
                     }
+
+                    // vLLM wall-clock tok/s: stamp the FIRST chunk that actually yields a token
+                    // (content or reasoning), mirroring _firstTokenMs in OnStreamToken. Starting
+                    // the clock here (not on the first raw SSE line) excludes prefill/TTFT from the
+                    // tok/s denominator, which otherwise drags the rate far below true decode speed.
+                    if (ServerType == LlmServerType.Vllm && _streamStartMs == 0 && (reasoning != null || token != null))
+                        _streamStartMs = Environment.TickCount64;
 
                     // Accumulate streamed tool_calls deltas
                     AccumulateToolCallDelta(data, toolCallArgBuilders, toolCallMeta);
