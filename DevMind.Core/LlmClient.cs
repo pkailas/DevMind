@@ -437,9 +437,19 @@ namespace DevMind
                 ? _baseUrl.Substring(0, _baseUrl.Length - 3)
                 : _baseUrl;
 
-            // Auto-detect a vLLM backend before anything else, so the streaming paths use the
-            // vLLM timing/context branch even when context size is manually overridden below.
-            await DetectServerTypeAsync(serverRoot).ConfigureAwait(false);
+            // Server-type resolution (before anything else, so streaming/detection branch on the
+            // right backend even when context size is manually overridden below):
+            //   1. DEVMIND_SERVER_TYPE env override wins outright.
+            //   2. Otherwise probe /v1/models to auto-detect a vLLM backend.
+            if (TryGetServerTypeOverride(out LlmServerType forcedType))
+            {
+                ServerType = forcedType;
+                Debug.WriteLine($"[DevMind] Server type forced via DEVMIND_SERVER_TYPE: {forcedType}");
+            }
+            else
+            {
+                await DetectServerTypeAsync(serverRoot).ConfigureAwait(false);
+            }
 
             int manual = _options.ManualContextSize;
             if (manual > 0)
@@ -569,6 +579,32 @@ namespace DevMind
                 }
             }
             return 0;
+        }
+
+        /// <summary>
+        /// Reads the <c>DEVMIND_SERVER_TYPE</c> environment override
+        /// (<c>vllm</c> | <c>llama</c> | <c>lmstudio</c> | <c>custom</c>, case-insensitive).
+        /// Returns <c>true</c> with the mapped <see cref="LlmServerType"/> when set to a recognized
+        /// value — taking precedence over startup auto-detection. Returns <c>false</c> when unset,
+        /// blank, or unrecognized, in which case auto-detection runs instead. Follows the existing
+        /// <c>DEVMIND_ENDPOINT</c> / <c>DEVMIND_API_KEY</c> env convention.
+        /// </summary>
+        private bool TryGetServerTypeOverride(out LlmServerType serverType)
+        {
+            serverType = default;
+            string raw = Environment.GetEnvironmentVariable("DEVMIND_SERVER_TYPE")?.Trim().ToLowerInvariant();
+            if (string.IsNullOrEmpty(raw)) return false;
+            switch (raw)
+            {
+                case "vllm":     serverType = LlmServerType.Vllm;        return true;
+                case "llama":    serverType = LlmServerType.LlamaServer; return true;
+                case "lmstudio": serverType = LlmServerType.LmStudio;    return true;
+                case "custom":   serverType = LlmServerType.Custom;      return true;
+                default:
+                    Debug.WriteLine($"[DevMind] DEVMIND_SERVER_TYPE='{raw}' not recognized " +
+                        "(use vllm|llama|lmstudio|custom) — falling back to auto-detection.");
+                    return false;
+            }
         }
 
         /// <summary>

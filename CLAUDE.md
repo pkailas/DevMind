@@ -45,6 +45,7 @@ dotnet run --project DevMind.Cli -- --dir <repo> --endpoint <llm-endpoint>
 |----------|---------|
 | `DEVMIND_ENDPOINT` | LLM endpoint URL (overrides default) |
 | `DEVMIND_API_KEY` | API key (overrides default) |
+| `DEVMIND_SERVER_TYPE` | Force backend type (`vllm`/`llama`/`lmstudio`/`custom`); overrides startup auto-detection |
 | `DEVMIND_HISTORY_*` | History store configuration (SqlServer/Sqlite/Null) |
 | `DEVMIND_BUILD_COMMAND` | Explicit build command for `run_build` (overrides auto-detection) |
 | `DEVMIND_TUI_VERBOSE` | Show the full firehose in the TUI transcript (disables the quiet filter that hides `[CONTEXT]`/`[TOOL_USE]`/`[LLM]`/`[AGENTIC] Iteration` churn) |
