@@ -3128,6 +3128,21 @@ namespace DevMind
                 ["stream"] = true
             };
 
+            // vLLM omits the streaming usage object unless explicitly requested. Without this,
+            // ParseLiveUsage/ParseVllmUsage/FinalizeVllmTimings receive no usage and the tok/s +
+            // in/out token counts never populate on the vLLM path. include_usage alone only emits
+            // usage on the terminal chunk (OpenAI semantics); continuous_usage_stats (a vLLM
+            // extension) attaches usage to EVERY chunk so the live counter advances during
+            // generation instead of falling back to the SSE delta count.
+            if (ServerType == LlmServerType.Vllm)
+            {
+                request["stream_options"] = new JObject
+                {
+                    ["include_usage"] = true,
+                    ["continuous_usage_stats"] = true
+                };
+            }
+
             if (!_options.ShowLlmThinking)
             {
                 request["thinking"] = new JObject { ["type"] = "disabled" };
