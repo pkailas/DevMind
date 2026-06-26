@@ -14,8 +14,9 @@
 //   dotnet run --project DevMind.TUI -- --endpoint http://127.0.0.1:1234/v1 --api-key lm-studio
 //
 // Environment variables (same as CLI):
-//   DEVMIND_ENDPOINT  — LLM endpoint URL (overrides default)
-//   DEVMIND_API_KEY   — API key (overrides default)
+//   DEVMIND_ENDPOINT     — LLM endpoint URL (overrides default)
+//   DEVMIND_API_KEY      — API key (overrides default)
+//   DEVMIND_SERVER_TYPE  — force backend (vllm|llama|lmstudio|custom); overrides auto-detection
 
 // Suppress obsolete warnings for Terminal.Gui v2 legacy APIs.
 #pragma warning disable CS0618
