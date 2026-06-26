@@ -210,6 +210,28 @@ namespace DevMind
         public int LiveGeneratedTokens { get; private set; }
         public int LivePromptTokens { get; private set; }
 
+        // ── Effective server type (configured, overridable by startup auto-detection) ──
+        private LlmServerType? _serverTypeOverride;
+
+        /// <summary>
+        /// Effective LLM server type. Defaults to the configured <see cref="ILlmOptions.ServerType"/>
+        /// but startup auto-detection may override it (e.g. vLLM, identified via /v1/models
+        /// <c>owned_by == "vllm"</c>). Read this — not <c>_options.ServerType</c> — wherever the
+        /// streaming/detection paths need to branch on the backend.
+        /// </summary>
+        public LlmServerType ServerType
+        {
+            get => _serverTypeOverride ?? _options.ServerType;
+            private set => _serverTypeOverride = value;
+        }
+
+        // ── vLLM wall-clock generation timing ───────────────────────────────
+        // vLLM (unlike ik_llama.cpp) does not report server-side timings; we measure
+        // tok/s on the client by stamping the first SSE chunk (Environment.TickCount64,
+        // monotonic ms) and dividing usage.completion_tokens by the elapsed wall time on
+        // the terminal chunk. 0 = not yet stamped for the in-flight stream.
+        private long _streamStartMs;
+
         // ── Predictive context growth tracking ──────────────────────────────
         private readonly List<int> _contextDeltas = new List<int>();
         private int _previousContextUsed;
@@ -411,6 +433,14 @@ namespace DevMind
         /// </summary>
         public async Task DetectContextSizeAsync()
         {
+            string serverRoot = _baseUrl.EndsWith("/v1", StringComparison.OrdinalIgnoreCase)
+                ? _baseUrl.Substring(0, _baseUrl.Length - 3)
+                : _baseUrl;
+
+            // Auto-detect a vLLM backend before anything else, so the streaming paths use the
+            // vLLM timing/context branch even when context size is manually overridden below.
+            await DetectServerTypeAsync(serverRoot).ConfigureAwait(false);
+
             int manual = _options.ManualContextSize;
             if (manual > 0)
             {
@@ -425,11 +455,7 @@ namespace DevMind
             if (_options.ShowDebugOutput)
                 _pendingDebugLog.Add($"\n[DEBUG] DetectContextSizeAsync() — auto-detecting context size (no manual override)\n");
 
-            LlmServerType serverType = _options.ServerType;
-
-            string serverRoot = _baseUrl.EndsWith("/v1", StringComparison.OrdinalIgnoreCase)
-                ? _baseUrl.Substring(0, _baseUrl.Length - 3)
-                : _baseUrl;
+            LlmServerType serverType = ServerType;
 
             try
             {
@@ -448,6 +474,12 @@ namespace DevMind
                         url = serverRoot + "/api/v0/models";
                         Debug.WriteLine($"[DevMind] Context detection: server=LM Studio, endpoint={url}");
                         detected = await DetectFromLmStudioModelsAsync(url).ConfigureAwait(false);
+                        break;
+
+                    case LlmServerType.Vllm:
+                        url = serverRoot + "/v1/models";
+                        Debug.WriteLine($"[DevMind] Context detection: server=vLLM, endpoint={url}");
+                        detected = await DetectFromVllmModelsAsync(url).ConfigureAwait(false);
                         break;
 
                     case LlmServerType.Custom:
@@ -513,6 +545,64 @@ namespace DevMind
                 }
             }
             return 0;
+        }
+
+        /// <summary>
+        /// Reads max_model_len from vLLM's GET /v1/models. vLLM tags each served model with
+        /// <c>owned_by == "vllm"</c>; when the first model carries that tag, its
+        /// <c>max_model_len</c> is the context window. Returns 0 if the tag is absent or the
+        /// field is missing, so the caller falls back to the default context size.
+        /// </summary>
+        private async Task<int> DetectFromVllmModelsAsync(string url)
+        {
+            var response = await _httpClient.GetAsync(url).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode) return 0;
+            var content = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            var data = JObject.Parse(content);
+            if (data?["data"] is JArray models && models.Count > 0)
+            {
+                var first = models[0] as JObject;
+                if (first?["owned_by"]?.ToString() == "vllm")
+                {
+                    int? ctx = first["max_model_len"]?.Value<int>();
+                    if (ctx.HasValue && ctx.Value > 0) return ctx.Value;
+                }
+            }
+            return 0;
+        }
+
+        /// <summary>
+        /// Auto-detects a vLLM backend by probing GET /v1/models and checking for any model
+        /// with <c>owned_by == "vllm"</c>. On a match, sets <see cref="ServerType"/> to
+        /// <see cref="LlmServerType.Vllm"/>. Best-effort: leaves the configured server type
+        /// untouched on any HTTP/parse failure so non-vLLM backends are unaffected.
+        /// </summary>
+        private async Task DetectServerTypeAsync(string serverRoot)
+        {
+            try
+            {
+                string url = serverRoot + "/v1/models";
+                var response = await _httpClient.GetAsync(url).ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode) return;
+                var content = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                var data = JObject.Parse(content);
+                if (data?["data"] is JArray models)
+                {
+                    foreach (var model in models)
+                    {
+                        if ((model as JObject)?["owned_by"]?.ToString() == "vllm")
+                        {
+                            ServerType = LlmServerType.Vllm;
+                            Debug.WriteLine("[DevMind] Server type auto-detected: vLLM (owned_by=vllm)");
+                            return;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[DevMind] Server type auto-detect skipped ({ex.GetType().Name}: {ex.Message})");
+            }
         }
 
         /// <summary>
@@ -843,6 +933,9 @@ namespace DevMind
                 LiveGeneratedTokens = 0;
                 LivePromptTokens = 0;
 
+                // vLLM wall-clock timing — stamped on the first SSE chunk below (0 = unstamped).
+                _streamStartMs = 0;
+
                 // Accumulate tool calls across SSE delta chunks.
                 // llama-server streams tool_calls incrementally:
                 //   chunk 1: id, name, arguments="" (start)
@@ -918,6 +1011,15 @@ namespace DevMind
                     // tool_call chunks, where a content-delta count would sit at 0.
                     ParseLiveUsage(data);
 
+                    // vLLM: stamp the first chunk for wall-clock tok/s and fold each chunk's
+                    // usage.prompt_tokens into LastContextUsed (vLLM's analogue of n_past).
+                    // ik_llama.cpp paths are untouched — they finalize from server timings below.
+                    if (ServerType == LlmServerType.Vllm)
+                    {
+                        if (_streamStartMs == 0) _streamStartMs = Environment.TickCount64;
+                        ParseVllmUsage(data);
+                    }
+
                     // Reasoning tokens arrive on delta.reasoning_content; visible tokens on
                     // delta.content. Re-synthesize <think>…</think> boundaries so ThinkFilter
                     // and the live token counter (onToken) see reasoning exactly as they would
@@ -954,7 +1056,11 @@ namespace DevMind
                     onToken($"\n[DIAG-TOOLS] Accumulated {accumulatedToolCalls?.Count ?? 0} tool call(s)\n");
 
                 // ── Parse server timings from lastDataLine ────────────────────
-                ParseTimings(lastDataLine);
+                // vLLM reports no server-side timings — finalize tok/s from wall-clock instead.
+                if (ServerType == LlmServerType.Vllm)
+                    FinalizeVllmTimings(lastDataLine);
+                else
+                    ParseTimings(lastDataLine);
 
                 // Emit visible status if model responded with tool calls but no content
                 if (accumulatedToolCalls != null && accumulatedToolCalls.Count > 0 && string.IsNullOrWhiteSpace(fullResponse.ToString()))
@@ -3091,6 +3197,80 @@ namespace DevMind
             catch
             {
                 // Timings missing or malformed — leave previous values unchanged
+            }
+        }
+
+        /// <summary>
+        /// vLLM context tracking: folds <c>usage.prompt_tokens</c> from a streamed chunk into
+        /// <see cref="LastContextUsed"/> (vLLM's analogue of llama-server's n_past) and anchors
+        /// the hybrid estimator to the current history length. No-op when the chunk carries no
+        /// usage object — vLLM emits usage only on the terminal chunk by default.
+        /// </summary>
+        private void ParseVllmUsage(string json)
+        {
+            try
+            {
+                var usage = JObject.Parse(json)?["usage"];
+                if (usage == null) return;
+                int prompt = usage["prompt_tokens"]?.Value<int>() ?? 0;
+                if (prompt > 0)
+                {
+                    LastContextUsed = prompt;
+                    _lastServerCountIndex = _conversationHistory.Count;
+
+                    // Track context growth deltas for the predictive threshold, mirroring the
+                    // n_past path in ParseTimings.
+                    LastContextDelta = (_previousContextUsed > 0 && prompt > _previousContextUsed) ? prompt - _previousContextUsed : 0;
+                    if (LastContextDelta > 0)
+                    {
+                        _contextDeltas.Add(LastContextDelta);
+                        if (_contextDeltas.Count > 5) _contextDeltas.RemoveAt(0);
+                    }
+                    _previousContextUsed = prompt;
+                }
+            }
+            catch
+            {
+                // Malformed/partial chunk — keep the last good context count.
+            }
+        }
+
+        /// <summary>
+        /// Finalizes vLLM generation timing from the terminal SSE chunk. vLLM reports no
+        /// server-side timings, so tok/s is computed on the client:
+        /// <c>usage.completion_tokens / elapsed_ms * 1000</c>, where elapsed is the wall-clock
+        /// span from the first chunk (<see cref="_streamStartMs"/>). Stores the raw token count
+        /// and elapsed milliseconds in <see cref="LastGeneratedTokens"/> / <see cref="LastGeneratedMs"/>
+        /// (the status line derives tok/s from those, exactly as for ik_llama.cpp), and records
+        /// final <c>usage.prompt_tokens</c> into <see cref="LastContextUsed"/>.
+        /// </summary>
+        private void FinalizeVllmTimings(string lastData)
+        {
+            if (string.IsNullOrEmpty(lastData)) return;
+            try
+            {
+                var usage = JObject.Parse(lastData)?["usage"];
+                if (usage == null) return;
+
+                int completion = usage["completion_tokens"]?.Value<int>() ?? 0;
+                int prompt = usage["prompt_tokens"]?.Value<int>() ?? 0;
+                long elapsedMs = _streamStartMs > 0 ? Environment.TickCount64 - _streamStartMs : 0;
+
+                if (completion > 0)
+                {
+                    LastGeneratedTokens = completion;
+                    if (completion > LiveGeneratedTokens) LiveGeneratedTokens = completion;
+                }
+                if (elapsedMs > 0) LastGeneratedMs = elapsedMs;
+                if (prompt > 0)
+                {
+                    LastContextUsed = prompt;
+                    _lastServerCountIndex = _conversationHistory.Count;
+                }
+            }
+            catch
+            {
+                // Timings missing or malformed — leave previous values unchanged.
             }
         }
 
