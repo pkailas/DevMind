@@ -14,6 +14,8 @@ namespace DevMind
         LlamaServer,
         [Description("LM Studio")]
         LmStudio,
+        [Description("vLLM")]
+        Vllm,
         [Description("Custom")]
         Custom
     }
