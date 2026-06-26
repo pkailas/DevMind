@@ -570,6 +570,8 @@ Application.MaximumIterationsPerSecond = 750;
                         ResolveConflict = (choice) => host.ResolvePendingConflict(choice),
                         // DAP debugging (/debug).
                         DebugCommand = (dargs) => host.HandleDebugCommandAsync(dargs),
+                        // UI-only screen clear (/cls).
+                        ClearScreen = () => host.ClearOutputView(),
                     };
 
                    CommandResult result = await SlashCommand.Dispatch(input, cmdCtx);
