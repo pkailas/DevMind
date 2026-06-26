@@ -120,6 +120,13 @@ namespace DevMind
 
         /// <summary>Retarget the log folder live and persist it to config.</summary>
         public Action<string> SetTrainingLogFolder { get; set; }
+
+        // -- Merge conflict resolution --------------------------------------------
+
+        /// <summary>Resolve a pending three-way-merge conflict
+        /// (accept_proposed|accept_current|cancel). Returns a status message.
+        /// Null when no conflict machinery is wired into the host.</summary>
+        public Func<string, string> ResolveConflict { get; set; }
     }
 
    /// <summary>
@@ -379,6 +386,11 @@ namespace DevMind
                     Message = "/training-delete-last: not yet implemented in TUI.",
                     IsError = false,
                 }));
+
+            RegisterCommand("/resolve",
+                "Resolve a pending merge conflict (accept proposed/current, or cancel)",
+                "/resolve accept_proposed|accept_current|cancel",
+                ResolveHandler);
         }
 
         // -- /new ------------------------------------------------------------------
@@ -791,6 +803,39 @@ namespace DevMind
             {
                 return new CommandResult { Message = $"Failed to set title: {ex.Message}", IsError = true };
             }
+        }
+
+        // -- /resolve accept_proposed|accept_current|cancel ------------------------
+        // Resolves a pending three-way-merge conflict surfaced when a write was
+        // blocked. The host performs the action and returns a status string, which
+        // the dispatcher renders — keeping a single output path like every command.
+        static Task<CommandResult> ResolveHandler(string[] args, CommandContext ctx)
+        {
+            if (ctx.ResolveConflict == null)
+                return Task.FromResult(new CommandResult
+                {
+                    Message = "Conflict resolution is not available in this host.",
+                    IsError = true,
+                });
+
+            if (args.Length == 0)
+                return Task.FromResult(new CommandResult
+                {
+                    Message = "Usage: /resolve accept_proposed | accept_current | cancel",
+                    IsError = true,
+                });
+
+            string choice = args[0].Trim().ToLowerInvariant();
+            if (choice != "accept_proposed" && choice != "accept_current" && choice != "cancel")
+                return Task.FromResult(new CommandResult
+                {
+                    Message = "Usage: /resolve accept_proposed | accept_current | cancel",
+                    IsError = true,
+                });
+
+            string message = ctx.ResolveConflict(choice);
+            bool isError = message != null && message.StartsWith("[MERGE ERROR]", StringComparison.Ordinal);
+            return Task.FromResult(new CommandResult { Message = message ?? string.Empty, IsError = isError });
         }
     }
 }

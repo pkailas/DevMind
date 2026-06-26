@@ -88,6 +88,23 @@ namespace DevMind
                     continue;
                 }
 
+                // /resolve — resolve pending merge conflict
+                if (input.StartsWith("/resolve", StringComparison.OrdinalIgnoreCase))
+                {
+                    string[] parts = input.Trim().Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
+                    if (parts.Length < 2)
+                    {
+                        Console.WriteLine("[MERGE] Usage: /resolve accept_proposed | accept_current | cancel");
+                        continue;
+                    }
+                    string choice = parts[1].ToLowerInvariant();
+                    // ResolvePendingConflict is a method on ConsoleAgenticHost wired below
+                    var resolveResult = host.ResolvePendingConflict(choice);
+                    if (resolveResult != null)
+                        Console.WriteLine(resolveResult);
+                    continue;
+                }
+
                 // Direct PATCH routing — equivalent to the extension's input.StartsWith("PATCH ") check.
                 if (input.StartsWith("PATCH ", StringComparison.OrdinalIgnoreCase))
                 {
