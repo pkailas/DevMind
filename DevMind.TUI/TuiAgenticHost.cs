@@ -304,6 +304,12 @@ namespace DevMind
 
             TrimScrollbackIfNeeded(doc);
             _outputView.CaretOffset = doc.TextLength; // one auto-scroll for the whole batch
+            // The output view is read-only and unfocusable, so its undo history is dead weight:
+            // doc.Insert (above) and doc.Remove (in the trim) each push an undo entry, so the
+            // UndoStack grows unbounded across a session — the one piece of render state the
+            // scrollback cap does NOT bound. Clear it every flush (negligible cost) so it stays
+            // at zero permanently; /cls (ClearOutputView) does the same on demand.
+            try { doc.UndoStack?.ClearAll(); } catch { /* best effort — never break the UI loop */ }
             Diag($"[FLUSH] spans={batch.Length} runs={pendingSpans.Count} insert=1 total={doc.TextLength}");
         }
 
@@ -436,6 +442,45 @@ namespace DevMind
                 // Keep the app alive — an append failure must never take down the UI loop.
                 Diag($"[APPEND] EXCEPTION len={text.Length} ex={ex}");
             }
+        }
+
+        // ── /cls — UI-only screen clear ───────────────────────────────────────────
+        // Resets the output view's render state without touching conversation history,
+        // context, or session (those live in LlmClient / the caches, not the view).
+        // Beyond cosmetics this recovers input responsiveness in long sessions: every
+        // append triggers a WordWrap re-wrap that is O(document length), and the document
+        // UndoStack grows with every append. The transcript text and _colorSpans are
+        // already bounded by the scrollback cap, but the UndoStack is NOT — so we clear
+        // all three here. Runs on the UI thread (app.Invoke) so it never races the color
+        // transformer's reads of _colorSpans.
+        internal void ClearOutputView()
+        {
+            var app = _outputView.App;
+
+            void DoClear()
+            {
+                lock (_pendingLock) _pending.Clear();   // drop queued, not-yet-rendered spans
+
+                TextDocument doc = _outputView.Document;
+                if (doc != null && doc.TextLength > 0)
+                {
+                    try { doc.Remove(0, doc.TextLength); }   // clear text → scrollback to 0
+                    catch (Exception ex) { Diag($"[CLS] remove ex={ex.Message}"); }
+                }
+                _colorSpans.Clear();                          // reset accumulated color spans
+
+                // One-line confirmation so the cleared view isn't ambiguous.
+                InsertSpan("[screen cleared — conversation and context preserved]\n",
+                    ResolveAttribute(OutputColor.Dim), scroll: true);
+
+                // Reset the document undo history — the one piece of render state the
+                // scrollback cap does not bound (cleared after the re-seed so it stays empty).
+                try { doc?.UndoStack?.ClearAll(); } catch (Exception ex) { Diag($"[CLS] undo ex={ex.Message}"); }
+
+                app?.LayoutAndDraw();   // Terminal.Gui v2 equivalent of a forced Refresh
+            }
+
+            if (app != null) app.Invoke(DoClear); else DoClear();
         }
 
         // ── IAgenticHost.ConfirmContinueAsync ─────────────────────────────────────

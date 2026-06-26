@@ -134,6 +134,12 @@ namespace DevMind
         /// immediate status line; breakpoint hits and debuggee output stream
         /// asynchronously through AppendOutput. Null when no host wires it.</summary>
         public Func<string[], Task<string>> DebugCommand { get; set; }
+
+        // -- UI: clear screen (/cls) ----------------------------------------------
+
+        /// <summary>Clear the output view only — no effect on conversation, context,
+        /// or session state. Null when no host wires it.</summary>
+        public Action ClearScreen { get; set; }
     }
 
    /// <summary>
@@ -403,6 +409,11 @@ namespace DevMind
                 "Debug via netcoredbg (launch/attach, breakpoints, stepping, inspect/eval)",
                 "/debug launch <proj> | attach <pid|name> | break [clear] <file> <line> | continue | step | stepin | stepout | inspect <var> | stack | eval <expr> | detach | stop",
                 DebugHandler);
+
+            RegisterCommand("/cls",
+                "Clear the screen only — keeps conversation, context, and session (UI reset)",
+                "/cls",
+                ClsHandler);
         }
 
         // -- /new ------------------------------------------------------------------
@@ -871,6 +882,17 @@ namespace DevMind
                  message.StartsWith("[DEBUG ERROR]", StringComparison.Ordinal) ||
                  message.IndexOf("not available", StringComparison.OrdinalIgnoreCase) >= 0);
             return new CommandResult { Message = message ?? string.Empty, IsError = isError };
+        }
+
+        // -- /cls ------------------------------------------------------------------
+        // UI-only screen clear. Distinct from /clear, which resets the conversation.
+        // The host re-seeds a one-line confirmation, so this returns no message.
+        static Task<CommandResult> ClsHandler(string[] args, CommandContext ctx)
+        {
+            if (ctx.ClearScreen == null)
+                return Task.FromResult(new CommandResult { Message = "Clear is not available in this host.", IsError = true });
+            ctx.ClearScreen();
+            return Task.FromResult(new CommandResult { Message = string.Empty });
         }
     }
 }
