@@ -61,6 +61,11 @@ namespace DevMind
             _statusBar = statusBar;
             _host      = host;
             _inputView = inputView;
+
+            // Detection resolves mid-send (before any response); refresh the meter then so the
+            // total appears without waiting for the first turn to complete.
+            if (llmClient is LlmClient concrete)
+                concrete.ContextSizeDetected += RefreshContextMeter;
         }
 
         // ── ILoopCallbacks ────────────────────────────────────────────────────────

@@ -201,6 +201,10 @@ namespace DevMind
         public double LastGeneratedMs { get; private set; }
         public int LastContextUsed { get; private set; }   // n_past
         public int ServerContextSize { get; private set; } // n_ctx
+
+        /// <summary>Raised once context-size detection has resolved for the first message,
+        /// so a UI skin can refresh its context meter without waiting for a response.</summary>
+        public event Action ContextSizeDetected;
         public int LastContextDelta { get; private set; }  // n_past growth since previous response
 
         // ── Live running usage for the in-progress response (per-chunk usage.*) ───
@@ -456,6 +460,7 @@ namespace DevMind
             {
                 _contextSize = manual;
                 _budget = new ContextBudget(_contextSize);
+                ServerContextSize = _contextSize;          // surface to the status bar
                 Debug.WriteLine($"[DevMind] Using manual context size: {_contextSize}");
                 if (_options.ShowDebugOutput)
                     _pendingDebugLog.Add($"\n[DEBUG] DetectContextSizeAsync() — manual context override: {_contextSize:N0} tokens\n");
@@ -512,6 +517,7 @@ namespace DevMind
                 {
                     _contextSize = detected;
                     _budget = new ContextBudget(_contextSize);
+                    ServerContextSize = detected;          // surface to the status bar
                     Debug.WriteLine($"[DevMind] Context detection: n_ctx={_contextSize}");
                 }
                 else
@@ -686,6 +692,7 @@ namespace DevMind
             // If detection is still in-flight (common on the first message after launch),
             // wait up to 5 seconds. If it times out or the send is cancelled first,
             // proceed with the fallback default and log a warning token.
+            bool awaitedDetection = _contextDetectionTask != null;
             if (_contextDetectionTask != null && !_contextDetectionTask.IsCompleted)
             {
                 await Task.WhenAny(_contextDetectionTask, Task.Delay(5000, cancellationToken)).ConfigureAwait(false);
@@ -693,6 +700,7 @@ namespace DevMind
                     onToken($"\n[CONTEXT] Warning: context-size detection timed out — using fallback {_contextSize:N0} tokens.\n");
             }
             _contextDetectionTask = null; // clear after first message; re-set on next Configure()
+            if (awaitedDetection) ContextSizeDetected?.Invoke(); // refresh the meter without waiting for a response
 
             // Flush buffered debug messages from Configure/DetectContextSize/ApplyHttpClientSettings.
             if (_pendingDebugLog.Count > 0)
@@ -3298,6 +3306,9 @@ namespace DevMind
                     if (completion > LiveGeneratedTokens) LiveGeneratedTokens = completion;
                 }
                 if (elapsedMs > 0) LastGeneratedMs = elapsedMs;
+                // vLLM omits n_ctx from usage; ensure the meter total is populated from the
+                // detected window (ParseTimings sets ServerContextSize from timings.n_ctx).
+                if (ServerContextSize <= 0 && _contextSize > 0) ServerContextSize = _contextSize;
                 if (prompt > 0)
                 {
                     LastContextUsed = prompt;
