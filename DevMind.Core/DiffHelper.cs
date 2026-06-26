@@ -17,9 +17,35 @@ namespace DevMind
         private const int MaxOutput  = 200;
         private const long LcsSizeLimit = 2_000_000L; // m*n threshold for LCS vs. positional diff
 
+        /// <summary>
+        /// Delegates to <see cref="DiffRenderer"/> (DiffPlex) for diff rendering.
+        /// Kept for backward compatibility with existing callers (patch preview).
+        /// </summary>
         public static string GenerateUnifiedDiff(string filename, string[] oldLines, string[] newLines)
         {
-            var edits = ComputeEditScript(oldLines, newLines);
+            // Fast path: identical → no allocation
+            if (oldLines.Length == newLines.Length)
+            {
+                bool identical = true;
+                for (int i = 0; i < oldLines.Length; i++)
+                {
+                    if (!string.Equals(oldLines[i], newLines[i], System.StringComparison.Ordinal))
+                    { identical = false; break; }
+                }
+                if (identical)
+                    return $"DIFF: No changes detected in {filename}.";
+            }
+
+            // Use DiffPlex via DiffRenderer for all diff rendering
+            return DiffRenderer.RenderUnifiedDiff(filename, oldLines, newLines, MaxOutput);
+        }
+
+        // Original hand-rolled diff removed — all callers now route through DiffRenderer (DiffPlex).
+        // ComputeEditScript / ComputePositionalEditScript kept only if needed elsewhere.
+        [System.Obsolete("Use GenerateUnifiedDiff(string filename, string[] oldLines, string[] newLines)")]
+        private static string GenerateUnifiedDiffLegacy(string filename, string[] oldLines, string[] newLines)
+        {
+            var edits = ComputeEditScript(oldLines, newLines);
 
             var sb = new StringBuilder();
             sb.AppendLine($"--- {filename} (original)");

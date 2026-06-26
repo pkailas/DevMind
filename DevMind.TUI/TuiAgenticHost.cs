@@ -72,6 +72,9 @@ namespace DevMind
         // Injected into the system prompt each turn by Program.cs.
         private string _taskScratchpad = "";
 
+        // Pending merge conflict state — stored so /resolve can handle it without blocking input.
+        private PendingConflictState _pendingConflict;
+
         // The Editor that receives all output. Rope-backed document, append-only.
         private readonly GuiEditor _outputView;
 
@@ -162,6 +165,7 @@ namespace DevMind
             _fileCache.InvalidateAll();
            _taskReadFiles.Clear();
             _taskScratchpad = "";
+            _pendingConflict = null;
         }
 
         // ── IAgenticHost.AppendOutput ─────────────────────────────────────────────
@@ -614,6 +618,13 @@ namespace DevMind
                 _taskReadFiles.Add(fileNameOnly);
             }
 
+            // Block if a conflict is pending
+            if (_pendingConflict != null)
+            {
+                AppendOutputLocal($"[MERGE CONFLICT] Cannot write to \"{fileNameOnly}\" — pending conflict on \"{_pendingConflict.FilePath}\" must be resolved first. Use /resolve accept_proposed, /resolve accept_current, or /resolve cancel.\n", OutputColor.Error);
+                return null;
+            }
+
             string fileContent = fromToolCall ? content : PatchEngine.StripOuterCodeFence(content);
 
             try
@@ -622,9 +633,59 @@ namespace DevMind
                 string dir = Path.GetDirectoryName(fullPath);
                 if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                     Directory.CreateDirectory(dir);
-                File.WriteAllText(fullPath, fileContent);
-                int lineCount = fileContent.Split('\n').Length;
-                AppendOutputLocal($"[FILE] Saved {fileNameOnly} ({lineCount} lines)\n", OutputColor.Success);
+
+                // New file — no merge gate needed
+                if (!File.Exists(fullPath))
+                {
+                    File.WriteAllText(fullPath, fileContent);
+                    _fileCache.Store(fileNameOnly, fileContent);
+                    int newFileLines = fileContent.Split('\n').Length;
+                    AppendOutputLocal($"[FILE] Saved {fileNameOnly} ({newFileLines} lines)\n", OutputColor.Success);
+                    return fullPath;
+                }
+
+                // Existing file — run three-way merge gate
+                string currentText = File.ReadAllText(fullPath);
+                string baseText = _fileCache.GetFull(fileNameOnly);
+
+                MergeCheckResult merge = ThreeWayMergeCheck.CheckAndMerge(baseText, fileContent, currentText);
+
+                if (merge.UsedFallback)
+                {
+                    Trace.Event("merge_fallback", $"TUI SaveFileAsync: two-way fallback for \"{fileNameOnly}\" — no base cache entry. Overwrite detection only.");
+                }
+
+                if (merge.HasConflicts)
+                {
+                    _pendingConflict = new PendingConflictState
+                    {
+                        FilePath = fullPath,
+                        BaseContent = baseText ?? string.Empty,
+                        ProposedContent = fileContent,
+                        CurrentContent = currentText,
+                        MergeResult = merge,
+                        UsedFallback = merge.UsedFallback
+                    };
+
+                    AppendOutputLocal($"\n[MERGE CONFLICT] Write to \"{fileNameOnly}\" blocked by merge conflict.\n", OutputColor.Error);
+                    for (int i = 0; i < merge.Conflicts.Count; i++)
+                    {
+                        var c = merge.Conflicts[i];
+                        AppendOutputLocal($"  Conflict #{i + 1} at line {c.LineNumber}:\n", OutputColor.Warning);
+                        AppendOutputLocal($"    Base:      {ThreeWayMergeCheck.Truncate(c.BaseText, 60)}\n", OutputColor.Dim);
+                        AppendOutputLocal($"    Proposed:  {ThreeWayMergeCheck.Truncate(c.ProposedText, 60)}\n", OutputColor.Success);
+                        AppendOutputLocal($"    Current:   {ThreeWayMergeCheck.Truncate(c.CurrentText, 60)}\n", OutputColor.Error);
+                    }
+                    AppendOutputLocal($"  Resolution: type /resolve accept_proposed, /resolve accept_current, or /resolve cancel\n\n", OutputColor.Warning);
+                    return null;
+                }
+
+                // No conflicts — write the merged text
+                string finalContent = merge.MergedText;
+                File.WriteAllText(fullPath, finalContent);
+                _fileCache.Store(fileNameOnly, finalContent);
+                int savedLines = finalContent.Split('\n').Length;
+                AppendOutputLocal($"[FILE] Saved {fileNameOnly} ({savedLines} lines){(merge.UsedFallback ? " [two-way fallback]" : "")}\n", OutputColor.Success);
                 return fullPath;
             }
             catch (Exception ex)
@@ -651,28 +712,74 @@ namespace DevMind
                 _taskReadFiles.Add(fileNameOnly);
             }
 
+            // Block if a conflict is pending
+            if (_pendingConflict != null)
+            {
+                AppendOutputLocal($"[MERGE CONFLICT] Cannot append to \"{fileNameOnly}\" — pending conflict on \"{_pendingConflict.FilePath}\" must be resolved first. Use /resolve accept_proposed, /resolve accept_current, or /resolve cancel.\n", OutputColor.Error);
+                return null;
+            }
+
             try
             {
                 string resolvedPath = FindFile(fileNameOnly, fileName.Replace('\\', '/'))
                     ?? Path.Combine(_shellRunner.WorkingDirectory, fileName);
 
-                if (File.Exists(resolvedPath))
-                {
-                    string existing = File.ReadAllText(resolvedPath);
-                    string separator = existing.Length > 0 && !existing.EndsWith("\n", StringComparison.Ordinal) ? "\n" : "";
-                    File.WriteAllText(resolvedPath, existing + separator + content);
-                    AppendOutputLocal($"[APPEND] Appended to {fileNameOnly}\n", OutputColor.Success);
-                }
-                else
+                // New file — no merge gate needed
+                if (!File.Exists(resolvedPath))
                 {
                     string dir = Path.GetDirectoryName(resolvedPath);
                     if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                         Directory.CreateDirectory(dir);
                     File.WriteAllText(resolvedPath, content);
+                    _fileCache.Store(fileNameOnly, content);
                     AppendOutputLocal($"[APPEND] Created {fileNameOnly}\n", OutputColor.Success);
+                    return resolvedPath;
                 }
 
-                _fileCache.Invalidate(fileNameOnly);
+                // Existing file — always re-read from disk and refresh cache (requirement #3)
+                string currentText = File.ReadAllText(resolvedPath);
+                _fileCache.Store(fileNameOnly, currentText);
+
+                string separator = currentText.Length > 0 && !currentText.EndsWith("\n", StringComparison.Ordinal) ? "\n" : "";
+                string proposedText = currentText + separator + content;
+
+                string baseText = _fileCache.GetFull(fileNameOnly);
+
+                MergeCheckResult merge = ThreeWayMergeCheck.CheckAndMerge(baseText, proposedText, currentText);
+
+                if (merge.UsedFallback)
+                {
+                    Trace.Event("merge_fallback", $"TUI AppendFileAsync: two-way fallback for \"{fileNameOnly}\" — overwrite detection only.");
+                }
+
+                if (merge.HasConflicts)
+                {
+                    _pendingConflict = new PendingConflictState
+                    {
+                        FilePath = resolvedPath,
+                        BaseContent = baseText ?? string.Empty,
+                        ProposedContent = proposedText,
+                        CurrentContent = currentText,
+                        MergeResult = merge,
+                        UsedFallback = merge.UsedFallback
+                    };
+
+                    AppendOutputLocal($"\n[MERGE CONFLICT] Append to \"{fileNameOnly}\" blocked by merge conflict.\n", OutputColor.Error);
+                    for (int i = 0; i < merge.Conflicts.Count; i++)
+                    {
+                        var c = merge.Conflicts[i];
+                        AppendOutputLocal($"  Conflict #{i + 1} at line {c.LineNumber}:\n", OutputColor.Warning);
+                        AppendOutputLocal($"    Base:      {ThreeWayMergeCheck.Truncate(c.BaseText, 60)}\n", OutputColor.Dim);
+                        AppendOutputLocal($"    Proposed:  {ThreeWayMergeCheck.Truncate(c.ProposedText, 60)}\n", OutputColor.Success);
+                        AppendOutputLocal($"    Current:   {ThreeWayMergeCheck.Truncate(c.CurrentText, 60)}\n", OutputColor.Error);
+                    }
+                    AppendOutputLocal($"  Resolution: type /resolve accept_proposed, /resolve accept_current, or /resolve cancel\n\n", OutputColor.Warning);
+                    return null;
+                }
+
+                File.WriteAllText(resolvedPath, merge.MergedText);
+                _fileCache.Store(fileNameOnly, merge.MergedText);
+                AppendOutputLocal($"[APPEND] Appended to {fileNameOnly}{(merge.UsedFallback ? " [two-way fallback]" : "")}\n", OutputColor.Success);
                 return resolvedPath;
             }
             catch (Exception ex)
@@ -1303,6 +1410,51 @@ namespace DevMind
         {
             try
             {
+                // Block if a conflict is pending
+                if (_pendingConflict != null)
+                {
+                    AppendOutputLocal($"[MERGE CONFLICT] Cannot apply patch — pending conflict on \"{_pendingConflict.FilePath}\" must be resolved first. Use /resolve accept_proposed, /resolve accept_current, or /resolve cancel.\n", OutputColor.Error);
+                    return Task.FromResult<string>(null);
+                }
+
+                string fileNameOnly = SafeGetFileName(resolved.FullPath);
+                string currentText = File.ReadAllText(resolved.FullPath);
+                string baseText = _fileCache.GetFull(fileNameOnly);
+                string proposedText = ComputePatchedContent(resolved);
+
+                MergeCheckResult merge = ThreeWayMergeCheck.CheckAndMerge(baseText, proposedText, currentText);
+
+                if (merge.UsedFallback)
+                {
+                    Trace.Event("merge_fallback", $"TUI ApplyResolvedPatchAsync: two-way fallback for \"{fileNameOnly}\" — overwrite detection only.");
+                }
+
+                if (merge.HasConflicts)
+                {
+                    _pendingConflict = new PendingConflictState
+                    {
+                        FilePath = resolved.FullPath,
+                        BaseContent = baseText ?? string.Empty,
+                        ProposedContent = proposedText,
+                        CurrentContent = currentText,
+                        MergeResult = merge,
+                        UsedFallback = merge.UsedFallback
+                    };
+
+                    AppendOutputLocal($"\n[MERGE CONFLICT] Patch to \"{fileNameOnly}\" blocked by merge conflict.\n", OutputColor.Error);
+                    for (int i = 0; i < merge.Conflicts.Count; i++)
+                    {
+                        var c = merge.Conflicts[i];
+                        AppendOutputLocal($"  Conflict #{i + 1} at line {c.LineNumber}:\n", OutputColor.Warning);
+                        AppendOutputLocal($"    Base:      {ThreeWayMergeCheck.Truncate(c.BaseText, 60)}\n", OutputColor.Dim);
+                        AppendOutputLocal($"    Proposed:  {ThreeWayMergeCheck.Truncate(c.ProposedText, 60)}\n", OutputColor.Success);
+                        AppendOutputLocal($"    Current:   {ThreeWayMergeCheck.Truncate(c.CurrentText, 60)}\n", OutputColor.Error);
+                    }
+                    AppendOutputLocal($"  Resolution: type /resolve accept_proposed, /resolve accept_current, or /resolve cancel\n\n", OutputColor.Warning);
+                    return Task.FromResult<string>(null);
+                }
+
+                // No conflicts — apply patch to disk
                 string backupDir = Path.Combine(Path.GetTempPath(), "DevMind");
                 var result = PatchEngine.ApplyPatch(resolved, backupDir);
 
@@ -1326,15 +1478,14 @@ namespace DevMind
                     _patchBackupStack.Push((resolved.FullPath, result.BackupPath));
                 }
 
-                _fileCache.Store(SafeGetFileName(resolved.FullPath), result.UpdatedContent);
+                _fileCache.Store(fileNameOnly, result.UpdatedContent);
 
                 int undosAvailable = _patchBackupStack.Count;
-                AppendOutputLocal($"[PATCH] Applied to {resolved.FullPath} (undo depth: {undosAvailable})\n",
+                AppendOutputLocal($"[PATCH] Applied to {resolved.FullPath} (undo depth: {undosAvailable}){(merge.UsedFallback ? " [two-way fallback]" : "")}\n",
                     OutputColor.Success);
 
-                // Show what changed as a colored unified diff (− removed / + added), so the
-                // edit is visible instead of just a confirmation line.
-                AppendPatchDiff(resolved.OriginalContent, result.UpdatedContent, SafeGetFileName(resolved.FullPath));
+                // Show what changed as a colored unified diff
+                AppendPatchDiff(resolved.OriginalContent, result.UpdatedContent, fileNameOnly);
 
                 return Task.FromResult(resolved.FullPath);
             }
@@ -1343,6 +1494,49 @@ namespace DevMind
                 AppendOutputLocal($"[PATCH] Error: {ex.Message}\n", OutputColor.Error);
                 return Task.FromResult<string>(null);
             }
+        }
+
+        /// <summary>
+        /// Resolves a pending merge conflict. Call from /resolve slash command handler.
+        /// </summary>
+        public string ResolvePendingConflict(string choice)
+        {
+            if (_pendingConflict == null)
+                return "[MERGE] No pending conflict to resolve.";
+
+            var pc = _pendingConflict;
+
+            if (choice == "cancel")
+            {
+                _pendingConflict = null;
+                return "[MERGE] Conflict cancelled — pending patch discarded.";
+            }
+
+            if (choice == "accept_proposed")
+            {
+                try
+                {
+                    File.WriteAllText(pc.FilePath, pc.ProposedContent);
+                    string fileNameOnly = SafeGetFileName(pc.FilePath);
+                    _fileCache.Store(fileNameOnly, pc.ProposedContent);
+                    _pendingConflict = null;
+                    // Output is rendered once by the /resolve dispatcher from the returned message.
+                    return $"[MERGE] Accepted proposed content for {fileNameOnly}";
+                }
+                catch (Exception ex)
+                {
+                    return $"[MERGE ERROR] Failed to write: {ex.Message}";
+                }
+            }
+
+            if (choice == "accept_current")
+            {
+                _pendingConflict = null;
+                // Output is rendered once by the /resolve dispatcher from the returned message.
+                return $"[MERGE] Kept current content — change discarded.";
+            }
+
+            return "[MERGE] Unknown choice. Usage: /resolve accept_proposed | accept_current | cancel";
         }
 
         // Render a unified diff with per-line color: − removed (red), + added (green),

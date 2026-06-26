@@ -566,6 +566,8 @@ Application.MaximumIterationsPerSecond = 750;
                             _config.TrainingLogFolder = path;
                             _config.Save();
                         },
+                        // Merge conflict resolution (/resolve).
+                        ResolveConflict = (choice) => host.ResolvePendingConflict(choice),
                     };
 
                    CommandResult result = await SlashCommand.Dispatch(input, cmdCtx);
