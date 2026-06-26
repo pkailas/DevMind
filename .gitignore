@@ -32,6 +32,10 @@ CodeReviewBenchmarkWithBugs/
 .publish-*/
 *.exe
 
-# Runtime artifacts
-dist/*.pdb
-dist/training_logs/
+# Compiled output — never commit binaries
+publish/
+
+# dist build/runtime output — keep ONLY the launcher + deploy script, ignore the rest
+dist/*
+!dist/devmind.cmd
+!dist/deploy-devmind.ps1
