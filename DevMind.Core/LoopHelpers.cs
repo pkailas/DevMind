@@ -211,10 +211,12 @@ namespace DevMind
             sb.Append("- Content search across files: find_in_files\n");
             sb.Append("- Content search in a known file: grep_file\n");
             sb.Append("- Reading a file: read_file (large files return an outline first; use start_line/end_line for targeted reads)\n");
+            sb.Append("- Comparing two files or versions: diff_file\n");
             sb.Append("- Editing an existing file: patch_file\n");
             sb.Append("- Creating a new file: create_file\n");
             sb.Append("- Running build: run_build\n");
             sb.Append("- Running tests: run_tests\n");
+            sb.Append("- Debugging (DAP via netcoredbg): debug (launch/attach, breakpoints, stepping, inspect/eval; also via the /debug slash command)\n");
             sb.Append("- Tracking state: scratchpad\n");
             sb.Append("- Saving cross-session knowledge: save_memory / recall_memory / list_memory_topics\n");
             sb.Append("- Code intelligence (semantic): get_diagnostics (errors without a build), go_to_definition, find_references, hover, find_symbol (solution-wide symbol search)\n");
