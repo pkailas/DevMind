@@ -12,6 +12,11 @@
     <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
     <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.1" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.8" />
+    <!-- Pin the patched native SQLite binary (NU1903 / GHSA-2m69-gcr7-jv3q). Microsoft.Data.Sqlite
+         10.0.8 pulls in SQLitePCLRaw.lib.e_sqlite3 2.1.11 transitively; 3.50.3 is the patched build.
+         lib.e_sqlite3 is the native-only package (no managed surface), so it overrides cleanly while
+         the managed bundle/core/provider stay at 2.1.11. -->
+    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="3.50.3" />
   </ItemGroup>
 
 </Project>
