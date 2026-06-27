@@ -1,6 +1,8 @@
 // File: ResponseBlock.cs  v1.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
+using System.Collections.Generic;
+
 namespace DevMind
 {
     public class ResponseBlock
@@ -37,5 +39,7 @@ namespace DevMind
         public bool   SqlAllowWrite { get; set; }     // for RunSql — override read-only guard
         public int    SqlMaxRows { get; set; }        // for RunSql — row limit (0 = default 100)
         public int    SqlCommandTimeout { get; set; } // for RunSql — command timeout in seconds (0 = default 30)
+        public string DebugCommand { get; set; }                          // for Debug — DAP subcommand (launch, attach, break, continue, step, inspect, eval, ...)
+        public IReadOnlyDictionary<string, string> DebugArgs { get; set; } // for Debug — command-specific args (project, pid_or_name, file, line, variable, expression)
     }
 }

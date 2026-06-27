@@ -227,5 +227,15 @@ namespace DevMind
         /// </summary>
         Task<string> RunSqlAsync(string query, string connectionString, string connectionName, bool allowWrite,
             int maxRows, int commandTimeout);
+
+        /// <summary>
+        /// Runs one DAP debugging operation via netcoredbg — launch/attach, break/clear_breaks,
+        /// continue/step/stepin/stepout, inspect/stack/eval, detach/stop — mirroring the /debug
+        /// slash command and sharing its debug session. <paramref name="command"/> is the operation;
+        /// <paramref name="args"/> carries command-specific values (project, pid_or_name, file, line,
+        /// variable, expression). Returns a status/result line for the model. Hosts without a
+        /// debugger (e.g. the console skin) return an explanatory error string.
+        /// </summary>
+        Task<string> RunDebugAsync(string command, IReadOnlyDictionary<string, string> args);
     }
 }

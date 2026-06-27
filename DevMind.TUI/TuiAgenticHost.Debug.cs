@@ -6,6 +6,7 @@
 // Lives in the TUI skin so DevMind.Core stays UI-agnostic.
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -29,7 +30,7 @@ namespace DevMind
         public async Task<string> HandleDebugCommandAsync(string[] args)
         {
             if (args == null || args.Length == 0)
-                return "Usage: /debug launch|attach|break|continue|step|stepin|stepout|inspect|stack|eval|detach|stop ...";
+                return "Usage: /debug launch|attach|break|clear_breaks|continue|step|stepin|stepout|inspect|stack|eval|detach|stop ...";
 
             string sub = args[0].Trim().ToLowerInvariant();
             try
@@ -39,6 +40,7 @@ namespace DevMind
                     case "launch": return await DebugLaunchAsync(args);
                     case "attach": return await DebugAttachAsync(args);
                     case "break": return await DebugBreakAsync(args);
+                    case "clear_breaks": return await DebugClearBreaksAsync();
                     case "continue": return await DebugResumeAsync("continue");
                     case "step": return await DebugResumeAsync("step");
                     case "stepin": return await DebugResumeAsync("stepin");
@@ -54,6 +56,39 @@ namespace DevMind
             catch (Exception ex)
             {
                 return $"[DEBUG ERROR] {ex.Message}";
+            }
+        }
+
+        /// <summary>
+        /// Entry point for the agentic <c>debug</c> tool. Translates the structured
+        /// (command, args) tool shape into the same argv the /debug slash dispatcher uses,
+        /// then delegates to <see cref="HandleDebugCommandAsync"/> — so the tool and the slash
+        /// command share one DAP session and one code path (no duplicated adapter logic).
+        /// </summary>
+        async Task<string> IAgenticHost.RunDebugAsync(string command, IReadOnlyDictionary<string, string> args)
+        {
+            return await HandleDebugCommandAsync(BuildDebugArgv(command, args));
+        }
+
+        /// <summary>
+        /// Maps the tool's (command, args-object) into the positional argv that
+        /// <see cref="HandleDebugCommandAsync"/> expects from the slash command.
+        /// </summary>
+        private static string[] BuildDebugArgv(string command, IReadOnlyDictionary<string, string> args)
+        {
+            string cmd = (command ?? "").Trim();
+            string Arg(string key) =>
+                args != null && args.TryGetValue(key, out string v) ? v : "";
+
+            switch (cmd.ToLowerInvariant())
+            {
+                case "launch":  return new[] { "launch", Arg("project") };
+                case "attach":  return new[] { "attach", Arg("pid_or_name") };
+                case "break":   return new[] { "break", Arg("file"), Arg("line") };
+                case "inspect": return new[] { "inspect", Arg("variable") };
+                case "eval":    return new[] { "eval", Arg("expression") };
+                // clear_breaks, continue, step, stepin, stepout, stack, detach, stop need no args.
+                default:        return new[] { cmd };
             }
         }
 
@@ -144,6 +179,25 @@ namespace DevMind
             _pendingBreaks.AddBreakpoint(file, line);
             if (active) await d.SetBreakpointAsync(file, line);
             return $"Breakpoint set: {Path.GetFileName(file)}:{line}" + (active ? "" : " (applies on launch/attach)");
+        }
+
+        private async Task<string> DebugClearBreaksAsync()
+        {
+            var d = _dap;
+            bool active = d != null && d.IsActive;
+
+            int count = 0;
+            // Snapshot to lists so removal doesn't mutate the collection mid-iteration.
+            foreach (string file in _pendingBreaks.GetBreakpointFiles().ToList())
+            {
+                foreach (int ln in _pendingBreaks.GetBreakpoints(file).ToList())
+                {
+                    if (active) await d.ClearBreakpointAsync(file, ln);
+                    _pendingBreaks.RemoveBreakpoint(file, ln);
+                    count++;
+                }
+            }
+            return count == 0 ? "No breakpoints to clear." : $"Cleared {count} breakpoint(s).";
         }
 
         // -- execution control ----------------------------------------------------
