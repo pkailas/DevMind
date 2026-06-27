@@ -1038,6 +1038,39 @@ namespace DevMind
         // (instance field), never a process-static, so it can't leak across DM sessions.
         private string _lastSuccessfulSqlConnectionString;
 
+        /// <summary>The LLM's nearline cache, wired from Program.cs — used by recall_cache. May be null.</summary>
+        public NearlineCache NearlineCache { get; set; }
+
+        /// <summary>Max characters of a recalled result returned to the model (mirrors the history cap).</summary>
+        private const int MaxRecallChars = 50_000;
+
+        async Task<string> IAgenticHost.RecallCacheAsync(string handle)
+        {
+            await Task.CompletedTask; // keep signature async; cache access is synchronous
+
+            if (NearlineCache == null)
+                return "[recall_cache] nearline cache is not available in this host.";
+            if (string.IsNullOrWhiteSpace(handle))
+                return "[recall_cache] no handle provided. Pass a handle like \"nl-7\".";
+
+            string key = NearlineCache.GetKeyForHandle(handle);
+            if (key == null)
+                return $"[recall_cache] unknown handle '{handle}'. It may be from a previous session or never existed.";
+
+            string content = NearlineCache.Retrieve(key);
+            if (content == null)
+                return $"[recall_cache] content for handle '{handle}' is no longer available (evicted or unreadable).";
+
+            if (content.Length > MaxRecallChars)
+            {
+                int originalLength = content.Length;
+                content = content.Substring(0, MaxRecallChars) + $"\n[truncated — {originalLength} chars]";
+            }
+
+            AppendOutputLocal($"[RECALL] {handle} → {key} ({content.Length} chars)\n", OutputColor.Dim);
+            return content;
+        }
+
         async Task<string> IAgenticHost.RunSqlAsync(string query, string connectionString, string connectionName, bool allowWrite,
             int maxRows, int commandTimeout)
         {

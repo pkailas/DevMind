@@ -237,5 +237,13 @@ namespace DevMind
         /// debugger (e.g. the console skin) return an explanatory error string.
         /// </summary>
         Task<string> RunDebugAsync(string command, IReadOnlyDictionary<string, string> args);
+
+        /// <summary>
+        /// Retrieves the full content of a compacted tool result by its nearline cache handle
+        /// (e.g. "nl-7"). Resolves the handle to a key and reads it from the nearline cache,
+        /// applying the per-tool-result size cap. Returns an explanatory error string when the
+        /// handle is unknown, the content is no longer available, or the host has no cache.
+        /// </summary>
+        Task<string> RecallCacheAsync(string handle);
     }
 }

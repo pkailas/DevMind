@@ -303,6 +303,13 @@ namespace DevMind
                         };
                     }
 
+                case "recall_cache":
+                    return new ResponseBlock
+                    {
+                        Type = BlockType.RecallCache,
+                        RecallCacheCommand = GetArg(tc, "handle")
+                    };
+
                 default:
                     // Unknown tool — emit as text so it's visible in output
                     return new ResponseBlock

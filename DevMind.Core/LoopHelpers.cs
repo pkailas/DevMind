@@ -193,6 +193,17 @@ namespace DevMind
                         return "[SQL result not available]";
                     }
 
+                case "recall_cache":
+                    {
+                        if (result.ToolResultContents != null &&
+                            result.ToolResultContents.TryGetValue("recall_cache", out string recallContent) &&
+                            !string.IsNullOrEmpty(recallContent))
+                            return recallContent;
+                        if (result.Errors != null && result.Errors.Count > 0)
+                            return $"[Recall failed: {string.Join("; ", result.Errors)}]";
+                        return "[Recall result not available]";
+                    }
+
                 case "debug":
                     {
                         // AgenticExecutor stores the debug status/output line under the "debug" key.

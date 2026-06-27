@@ -41,5 +41,6 @@ namespace DevMind
         public int    SqlCommandTimeout { get; set; } // for RunSql — command timeout in seconds (0 = default 30)
         public string DebugCommand { get; set; }                          // for Debug — DAP subcommand (launch, attach, break, continue, step, inspect, eval, ...)
         public IReadOnlyDictionary<string, string> DebugArgs { get; set; } // for Debug — command-specific args (project, pid_or_name, file, line, variable, expression)
+        public string RecallCacheCommand { get; set; }                    // for RecallCache — the nearline cache handle to recall (e.g. "nl-7")
     }
 }

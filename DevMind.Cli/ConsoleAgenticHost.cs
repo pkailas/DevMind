@@ -615,6 +615,13 @@ namespace DevMind
             return Task.FromResult($"[ERROR] {msg}");
         }
 
+        Task<string> IAgenticHost.RecallCacheAsync(string handle)
+        {
+            const string msg = "recall_cache not supported in console mode.";
+            AppendOutput($"[RECALL] {msg}\n", OutputColor.Warning);
+            return Task.FromResult($"[ERROR] {msg}");
+        }
+
         Task<bool> IAgenticHost.ConfirmContinueAsync(string message)
         {
             // Console prompt: 'c'/'y' (or empty) continues; anything else stops. A
