@@ -284,10 +284,89 @@ namespace DevMind
                 Optional("command_timeout", "integer", "Command timeout in seconds (default 30)."),
                 Optional("allow_write", "boolean", "Allow non-SELECT statements (default false — read-only).")));
 
+            // ── debug ────────────────────────────────────────────────────────
+            // Hand-built (not MakeTool) because it needs an enum command plus a nested
+            // command-specific args object — shapes the flat Required/Optional helpers can't express.
+            tools.Add(MakeDebugTool());
+
             return tools;
         }
 
         // ── Helpers ──────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Builds the <c>debug</c> tool: an enum <c>command</c> plus an optional nested
+        /// <c>args</c> object whose fields depend on the command. Mirrors the /debug slash command.
+        /// </summary>
+        private static JObject MakeDebugTool()
+        {
+            var argsProperties = new JObject
+            {
+                ["project"]     = PropSchema("string",  "launch: path to the .csproj/.fsproj (or its directory) to build and launch under the debugger."),
+                ["pid_or_name"] = PropSchema("string",  "attach: process id (e.g. \"40948\") or process name (e.g. \"MyApp\") to attach to."),
+                ["file"]        = PropSchema("string",  "break: absolute source file path for the breakpoint."),
+                ["line"]        = PropSchema("integer", "break: 1-based line number for the breakpoint."),
+                ["variable"]    = PropSchema("string",  "inspect: name of the variable to inspect in the current stopped frame."),
+                ["expression"]  = PropSchema("string",  "eval: expression to evaluate in the current stopped frame.")
+            };
+
+            var argsSchema = new JObject
+            {
+                ["type"] = "object",
+                ["description"] = "Command-specific arguments. launch: {project}. attach: {pid_or_name}. " +
+                    "break: {file, line}. inspect: {variable}. eval: {expression}. " +
+                    "continue/step/stepin/stepout/stack/clear_breaks/detach/stop take no args.",
+                ["properties"] = argsProperties,
+                ["additionalProperties"] = false
+            };
+
+            var commandSchema = new JObject
+            {
+                ["type"] = "string",
+                ["enum"] = new JArray("launch", "attach", "break", "clear_breaks", "continue", "step",
+                    "stepin", "stepout", "inspect", "stack", "eval", "detach", "stop"),
+                ["description"] = "The debug operation to perform."
+            };
+
+            var parameters = new JObject
+            {
+                ["type"] = "object",
+                ["properties"] = new JObject
+                {
+                    ["command"] = commandSchema,
+                    ["args"] = argsSchema
+                },
+                ["required"] = new JArray("command"),
+                ["additionalProperties"] = false
+            };
+
+            return new JObject
+            {
+                ["type"] = "function",
+                ["function"] = new JObject
+                {
+                    ["name"] = "debug",
+                    ["description"] =
+                        "Drive an interactive DAP debugging session via netcoredbg — the same engine as the /debug slash command. " +
+                        "Launch a project or attach to a running process, set/clear breakpoints, control execution " +
+                        "(continue/step/stepin/stepout), and inspect program state (stack, inspect a variable, eval an expression) " +
+                        "while stopped. Breakpoint hits and debuggee output stream to the transcript. " +
+                        "Commands: launch {project}; attach {pid_or_name}; break {file, line}; clear_breaks; continue; step; " +
+                        "stepin; stepout; inspect {variable}; stack; eval {expression}; detach; stop. " +
+                        "Set breakpoints before launch/attach; inspect/stack/eval require the debuggee to be stopped at a breakpoint or step.",
+                    ["parameters"] = parameters
+                }
+            };
+        }
+
+        private static JObject PropSchema(string type, string description)
+        {
+            return new JObject
+            {
+                ["type"] = type,
+                ["description"] = description
+            };
+        }
 
         private static JObject MakeTool(string name, string description, params JProperty[] properties)
         {

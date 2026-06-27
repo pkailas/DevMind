@@ -600,6 +600,21 @@ namespace DevMind
                         }
                         break;
 
+                    case BlockType.Debug:
+                        try
+                        {
+                            // Delegates to the host's DAP integration (same engine as the /debug
+                            // slash command). Result is the status/output line handed back to the model.
+                            string debugResult = await _host.RunDebugAsync(block.DebugCommand, block.DebugArgs);
+                            result.ToolResultContents["debug"] = debugResult;
+                        }
+                        catch (Exception ex)
+                        {
+                            result.Errors.Add(ex.Message);
+                            _host.AppendOutput($"[DEBUG ERROR] {ex.Message}\n", OutputColor.Error);
+                        }
+                        break;
+
                     // Text, Done — already handled during streaming or by resolver
                     default:
                         break;

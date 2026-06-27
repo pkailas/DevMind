@@ -606,6 +606,15 @@ namespace DevMind
             return result;
         }
 
+        Task<string> IAgenticHost.RunDebugAsync(string command, IReadOnlyDictionary<string, string> args)
+        {
+            // DAP debugging is wired into the TUI host only (it drives a netcoredbg session and
+            // streams stop/output events to the transcript). The console skin has no debugger.
+            const string msg = "The debug tool is only available in the DevMind TUI, not the console skin.";
+            AppendOutput($"[DEBUG] {msg}\n", OutputColor.Warning);
+            return Task.FromResult($"[ERROR] {msg}");
+        }
+
         Task<bool> IAgenticHost.ConfirmContinueAsync(string message)
         {
             // Console prompt: 'c'/'y' (or empty) continues; anything else stops. A

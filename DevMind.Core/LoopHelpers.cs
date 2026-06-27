@@ -193,6 +193,20 @@ namespace DevMind
                         return "[SQL result not available]";
                     }
 
+                case "debug":
+                    {
+                        // AgenticExecutor stores the debug status/output line under the "debug" key.
+                        // Hand it back as the tool_result so the model sees the breakpoint/stack/eval
+                        // output instead of a generic "[Executed]".
+                        if (result.ToolResultContents != null &&
+                            result.ToolResultContents.TryGetValue("debug", out string debugContent) &&
+                            !string.IsNullOrEmpty(debugContent))
+                            return debugContent;
+                        if (result.Errors != null && result.Errors.Count > 0)
+                            return $"[Debug failed: {string.Join("; ", result.Errors)}]";
+                        return "[Debug result not available]";
+                    }
+
                 default:
                     return "[Executed]";
             }
@@ -216,6 +230,7 @@ namespace DevMind
             sb.Append("- Creating a new file: create_file\n");
             sb.Append("- Running build: run_build\n");
             sb.Append("- Running tests: run_tests\n");
+            sb.Append("- Interactive debugging (DAP via netcoredbg): debug — command launch|attach|break|clear_breaks|continue|step|stepin|stepout|inspect|stack|eval|detach|stop, with command-specific args (also the /debug slash command)\n");
             sb.Append("- Tracking state: scratchpad\n");
             sb.Append("- Saving cross-session knowledge: save_memory / recall_memory / list_memory_topics\n");
             sb.Append("- Code intelligence (semantic): get_diagnostics (errors without a build), go_to_definition, find_references, hover, find_symbol (solution-wide symbol search)\n");

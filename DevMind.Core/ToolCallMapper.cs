@@ -3,6 +3,7 @@
 
 using System.Collections.Generic;
 using System.Text;
+using Newtonsoft.Json.Linq;
 
 namespace DevMind
 {
@@ -275,6 +276,30 @@ namespace DevMind
                             SqlAllowWrite = GetBoolArg(tc, "allow_write"),
                             SqlMaxRows = maxRowsVal > 0 ? maxRowsVal : 100,
                             SqlCommandTimeout = timeoutVal > 0 ? timeoutVal : 30
+                        };
+                    }
+
+                case "debug":
+                    {
+                        // The `args` tool parameter is a nested object; LlmClient flattens it into
+                        // Arguments["args"] as its JSON string (prop.Value.ToString()). Re-parse it
+                        // into a flat command-arg map the host can translate into /debug argv.
+                        var dbgArgs = new Dictionary<string, string>();
+                        string argsJson = GetArg(tc, "args");
+                        if (!string.IsNullOrWhiteSpace(argsJson))
+                        {
+                            try
+                            {
+                                foreach (var p in JObject.Parse(argsJson).Properties())
+                                    dbgArgs[p.Name] = p.Value?.ToString() ?? "";
+                            }
+                            catch { /* malformed args object — proceed with empty args */ }
+                        }
+                        return new ResponseBlock
+                        {
+                            Type = BlockType.Debug,
+                            DebugCommand = GetArg(tc, "command"),
+                            DebugArgs = dbgArgs
                         };
                     }
 
