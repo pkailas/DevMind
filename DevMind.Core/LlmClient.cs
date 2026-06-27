@@ -413,7 +413,7 @@ namespace DevMind
             {
                 try
                 {
-                    var probe = await _httpClient.GetAsync(probeUrl, cts.Token).ConfigureAwait(false);
+                    using var probe = await _httpClient.GetAsync(probeUrl, cts.Token).ConfigureAwait(false);
                     // Any HTTP response (even 404) means the TCP connection is alive.
                     return;
                 }
@@ -534,7 +534,7 @@ namespace DevMind
         /// <summary>Reads n_ctx from llama-server's GET /props → default_generation_settings.n_ctx.</summary>
         private async Task<int> DetectFromLlamaPropsAsync(string url)
         {
-            var response = await _httpClient.GetAsync(url).ConfigureAwait(false);
+            using var response = await _httpClient.GetAsync(url).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode) return 0;
             var content = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
             var data = JObject.Parse(content);
@@ -544,7 +544,7 @@ namespace DevMind
         /// <summary>Reads loaded_context_length from LM Studio's GET /api/v0/models for the loaded model.</summary>
         private async Task<int> DetectFromLmStudioModelsAsync(string url)
         {
-            var response = await _httpClient.GetAsync(url).ConfigureAwait(false);
+            using var response = await _httpClient.GetAsync(url).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode) return 0;
             var content = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
             var data = JObject.Parse(content);
@@ -571,7 +571,7 @@ namespace DevMind
         /// </summary>
         private async Task<int> DetectFromVllmModelsAsync(string url)
         {
-            var response = await _httpClient.GetAsync(url).ConfigureAwait(false);
+            using var response = await _httpClient.GetAsync(url).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode) return 0;
             var content = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
             var data = JObject.Parse(content);
@@ -624,7 +624,7 @@ namespace DevMind
             try
             {
                 string url = serverRoot + "/v1/models";
-                var response = await _httpClient.GetAsync(url).ConfigureAwait(false);
+                using var response = await _httpClient.GetAsync(url).ConfigureAwait(false);
                 if (!response.IsSuccessStatusCode) return;
                 var content = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
                 var data = JObject.Parse(content);
@@ -653,7 +653,7 @@ namespace DevMind
         /// </summary>
         private async Task<int> DetectFromCustomEndpointAsync(string url)
         {
-            var response = await _httpClient.GetAsync(url).ConfigureAwait(false);
+            using var response = await _httpClient.GetAsync(url).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode) return 0;
             var content = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
             var data = JObject.Parse(content);
@@ -933,7 +933,7 @@ namespace DevMind
 
             try
             {
-                var response = await _httpClient.SendAsync(
+                using var response = await _httpClient.SendAsync(
                     request,
                     HttpCompletionOption.ResponseHeadersRead,
                     cancellationToken).ConfigureAwait(false);
@@ -1176,7 +1176,7 @@ namespace DevMind
             try
             {
                 string url = _baseUrl + "/models";
-                var response = await _httpClient.GetAsync(url).ConfigureAwait(false);
+                using var response = await _httpClient.GetAsync(url).ConfigureAwait(false);
                 return response.IsSuccessStatusCode;
             }
             catch
@@ -2196,33 +2196,40 @@ namespace DevMind
                     bool retried = false;
                     var response = await _httpClient.PostAsync(
                         _baseUrl + "/chat/completions", httpContent, cts.Token).ConfigureAwait(false);
-
-                    if (!response.IsSuccessStatusCode)
+                    try
                     {
-                        // Single retry with delay — server may need a moment after releasing the slot
-                        if (!retried)
+                        if (!response.IsSuccessStatusCode)
                         {
-                            retried = true;
-                            await Task.Delay(250, cts.Token).ConfigureAwait(false);
-                            response = await _httpClient.PostAsync(
-                                _baseUrl + "/chat/completions", httpContent, cts.Token).ConfigureAwait(false);
-                            if (!response.IsSuccessStatusCode)
+                            // Single retry with delay — server may need a moment after releasing the slot
+                            if (!retried)
                             {
-                                _lastSummaryError = $"HTTP {(int)response.StatusCode} {response.ReasonPhrase} (after retry)";
+                                retried = true;
+                                await Task.Delay(250, cts.Token).ConfigureAwait(false);
+                                response.Dispose(); // release the failed first response before reassigning
+                                response = await _httpClient.PostAsync(
+                                    _baseUrl + "/chat/completions", httpContent, cts.Token).ConfigureAwait(false);
+                                if (!response.IsSuccessStatusCode)
+                                {
+                                    _lastSummaryError = $"HTTP {(int)response.StatusCode} {response.ReasonPhrase} (after retry)";
+                                    return null;
+                                }
+                            }
+                            else
+                            {
+                                _lastSummaryError = $"HTTP {(int)response.StatusCode} {response.ReasonPhrase}";
                                 return null;
                             }
                         }
-                        else
-                        {
-                            _lastSummaryError = $"HTTP {(int)response.StatusCode} {response.ReasonPhrase}";
-                            return null;
-                        }
-                    }
 
-                    string responseBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-                    var json = JObject.Parse(responseBody);
-                    string summary = json["choices"]?[0]?["message"]?["content"]?.ToString();
-                    return string.IsNullOrWhiteSpace(summary) ? null : summary;
+                        string responseBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                        var json = JObject.Parse(responseBody);
+                        string summary = json["choices"]?[0]?["message"]?["content"]?.ToString();
+                        return string.IsNullOrWhiteSpace(summary) ? null : summary;
+                    }
+                    finally
+                    {
+                        response.Dispose(); // dispose the final response on every exit path
+                    }
                 }
             }
             catch (Exception ex)
@@ -3706,12 +3713,27 @@ namespace DevMind
         }
 
         /// <summary>
+        /// Maximum characters of a single tool result stored verbatim in conversation history.
+        /// Oversized results (large file reads, SQL tables, web fetches) are truncated to bound
+        /// per-turn history growth; the model can re-read via the nearline cache / a targeted tool.
+        /// </summary>
+        private const int MaxToolResultChars = 50_000;
+
+        /// <summary>
         /// Appends a tool result message to conversation history.
         /// Called by the onComplete handler after executing each tool call.
         /// </summary>
         public void AddToolResultMessage(string toolCallId, string content)
         {
-            _conversationHistory.Add(new ChatMessage("tool", content ?? "",
+            string stored = content ?? "";
+            if (stored.Length > MaxToolResultChars)
+            {
+                int originalLength = stored.Length;
+                stored = stored.Substring(0, MaxToolResultChars)
+                    + $"\n[truncated — {originalLength} chars]";
+            }
+
+            _conversationHistory.Add(new ChatMessage("tool", stored,
                 _currentTurn, toolCallId: toolCallId));
         }
     }
