@@ -277,6 +277,10 @@ namespace DevMind
             sb.Append("After read_file, find_in_files, or grep_file returns content, act on it in the same overall task. Never call only read-style tools and stop without progress.\n");
             sb.Append("Every turn during a code-change task must include at least one mutating tool call (patch_file, create_file, run_build, run_tests, run_shell) unless you are answering a question that requires no code change.\n");
 
+            sb.Append("\n## Scratchpad Discipline\n");
+            sb.Append("During any multi-step agentic task, update the scratchpad at every major decision point with: current goal, key decisions made so far, next planned step, and any open questions. Do this before and after each significant tool call sequence. The scratchpad is your memory across compaction — treat it as the source of truth for task state.\n");
+            sb.Append("Before any context compaction or when context usage exceeds 70%, write a compact task checkpoint to the scratchpad summarizing: what you were asked to do, what is done, what remains, and any critical constraints discovered.\n");
+
             if (!string.IsNullOrEmpty(projectNamespace))
                 sb.Append($"\n## Namespace\nWhen creating new files, use the namespace '{projectNamespace}'.");
 
