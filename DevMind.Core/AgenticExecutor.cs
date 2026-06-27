@@ -615,6 +615,19 @@ namespace DevMind
                         }
                         break;
 
+                    case BlockType.RecallCache:
+                        try
+                        {
+                            string recalled = await _host.RecallCacheAsync(block.RecallCacheCommand);
+                            result.ToolResultContents["recall_cache"] = recalled;
+                        }
+                        catch (Exception ex)
+                        {
+                            result.Errors.Add(ex.Message);
+                            _host.AppendOutput($"[RECALL ERROR] {ex.Message}\n", OutputColor.Error);
+                        }
+                        break;
+
                     // Text, Done — already handled during streaming or by resolver
                     default:
                         break;

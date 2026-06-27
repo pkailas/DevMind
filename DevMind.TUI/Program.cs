@@ -216,6 +216,7 @@ Application.MaximumIterationsPerSecond = 750;
 
             // Construct the host first — the status bar needs its LSP availability.
             var host = new TuiAgenticHost(options.WorkingDirectory, outputView, () => cts.Cancel());
+            host.NearlineCache = llmClient.NearlineCache; // for the recall_cache tool
 
             // Status bar: composed-Labels row — state + hints left, LSP chip + context meter right.
             var (lspEnabled, lspLanguages) = host.GetLspStatus();

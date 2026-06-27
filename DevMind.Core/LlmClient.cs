@@ -1901,8 +1901,8 @@ namespace DevMind
                 string c = msg.Content;
                 int origLen = c.Length;
                 string cacheKey = $"tool:{msg.ToolCallId ?? i.ToString()}";
-                string breadcrumb = BuildToolResultBreadcrumb(c, origLen);
-                NearlineCache.Store(cacheKey, c, breadcrumb);
+                string handle = NearlineCache.Store(cacheKey, c, BuildToolResultBreadcrumb(c, origLen, null));
+                string breadcrumb = BuildToolResultBreadcrumb(c, origLen, handle);
                 trimmedOriginals.Add(msg);
                 if (msg.Turn < minTrimTurn) minTrimTurn = msg.Turn;
                 if (msg.Turn > maxTrimTurn) maxTrimTurn = msg.Turn;
@@ -1978,9 +1978,8 @@ namespace DevMind
                     if (msg.Role == "tool")
                     {
                         string cacheKey = $"tool:{msg.ToolCallId ?? i.ToString()}";
-                        string breadcrumb = BuildToolResultBreadcrumb(msg.Content, origLen);
-                        NearlineCache.Store(cacheKey, msg.Content, breadcrumb);
-                        replacement = breadcrumb;
+                        string handle = NearlineCache.Store(cacheKey, msg.Content, BuildToolResultBreadcrumb(msg.Content, origLen, null));
+                        replacement = BuildToolResultBreadcrumb(msg.Content, origLen, handle);
                     }
                     else if (msg.Role == "user" && msg.Content.IndexOf("[READ:", StringComparison.Ordinal) >= 0)
                     {
@@ -2244,8 +2243,11 @@ namespace DevMind
         /// <summary>
         /// Builds a semantic breadcrumb for a trimmed tool result based on content type.
         /// </summary>
-        private static string BuildToolResultBreadcrumb(string content, int origLen)
+        private static string BuildToolResultBreadcrumb(string content, int origLen, string handle)
         {
+            // When a handle is supplied, embed it so the model can recall this entry via recall_cache.
+            string tag = string.IsNullOrEmpty(handle) ? "[cached" : $"[cached:{handle}";
+
             // read_file results — look for filename and line count
             if (content.IndexOf("[READ:", StringComparison.Ordinal) >= 0)
             {
@@ -2257,7 +2259,7 @@ namespace DevMind
                 int lineCount = 0;
                 for (int j = 0; j < content.Length; j++)
                     if (content[j] == '\n') lineCount++;
-                return $"[cached — {filename}, {lineCount} lines]";
+                return $"{tag} — {filename}, {lineCount} lines]";
             }
 
             // Build results
@@ -2273,14 +2275,14 @@ namespace DevMind
                     if (numStart < wIdx && int.TryParse(content.Substring(numStart, wIdx - numStart).Trim(), out int w))
                         warnings = w;
                 }
-                return $"[cached — build succeeded, {warnings} warnings]";
+                return $"{tag} — build succeeded, {warnings} warnings]";
             }
 
             // Shell results — look for exit code
             if (content.IndexOf("exit code", StringComparison.OrdinalIgnoreCase) >= 0
                 || content.IndexOf("[SHELL", StringComparison.OrdinalIgnoreCase) >= 0)
             {
-                return $"[cached — shell output, {origLen} chars]";
+                return $"{tag} — shell output, {origLen} chars]";
             }
 
             // Grep/find results — look for match pattern
@@ -2288,18 +2290,18 @@ namespace DevMind
                 || content.IndexOf("GREP:", StringComparison.OrdinalIgnoreCase) >= 0
                 || content.IndexOf("FIND:", StringComparison.OrdinalIgnoreCase) >= 0)
             {
-                return $"[cached — search results, {origLen} chars]";
+                return $"{tag} — search results, {origLen} chars]";
             }
 
             // Test results
             if (content.IndexOf("TEST RESULTS", StringComparison.OrdinalIgnoreCase) >= 0)
             {
                 bool passed = content.IndexOf("failed", StringComparison.OrdinalIgnoreCase) < 0;
-                return $"[cached — tests {(passed ? "passed" : "failed")}]";
+                return $"{tag} — tests {(passed ? "passed" : "failed")}]";
             }
 
             // Fallback
-            return $"[cached — {origLen} chars]";
+            return $"{tag} — {origLen} chars]";
         }
 
         /// <summary>
@@ -2325,7 +2327,8 @@ namespace DevMind
                 if (!string.IsNullOrWhiteSpace(filename) && blockContent.Length > 0)
                 {
                     string cacheKey = $"read:{filename}";
-                    NearlineCache.Store(cacheKey, blockContent, $"[cached — {filename}]");
+                    // Case A excluded: [READ:] file blocks keep a handle-less breadcrumb (re-read via read_file).
+                    _ = NearlineCache.Store(cacheKey, blockContent, $"[cached — {filename}]");
                 }
 
                 pos = blockEnd;

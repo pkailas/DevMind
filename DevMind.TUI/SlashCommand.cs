@@ -713,6 +713,7 @@ namespace DevMind
             sb.AppendLine($"In-memory entries: {s.MemoryEntries} / 50");
             sb.AppendLine($"Disk entries: {s.DiskEntries} / 1000");
             sb.AppendLine($"Disk usage: {diskMb:F1} MB / 500 MB");
+            sb.AppendLine($"Handle index: {s.HandleEntries} entries");
             sb.Append($"Session stats: {s.MemoryHits} memory hits, {s.DiskHits} disk hits, " +
                 $"{s.EvictionsToDisk} spilled to disk, {s.DiskEvictions} disk evictions, {s.DiskWriteFailures} write failures");
 

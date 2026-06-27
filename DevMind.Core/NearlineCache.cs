@@ -31,6 +31,12 @@ namespace DevMind
         private readonly Dictionary<string, DiskEntry> _disk =
             new Dictionary<string, DiskEntry>(StringComparer.OrdinalIgnoreCase);
 
+        // Maps a short, model-referenceable handle ("nl-N") to the cache key it was minted for, so
+        // the model can recall a compacted entry by its breadcrumb handle via the recall_cache tool.
+        private readonly Dictionary<string, string> _handleToKey =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private long _handleCounter; // monotonic; "nl-{N}" starts at 1 per session
+
         private long _useCounter;   // monotonic stamp source for memory-tier LRU
         private long _diskBytes;    // running sum of spilled file sizes
         private string _sessionDir; // captured on first spill so Clear() deletes the right folder
@@ -44,17 +50,20 @@ namespace DevMind
 
         /// <summary>Snapshot of cache gauges and cumulative counters for diagnostics and /cache.</summary>
         public NearlineCacheStats CacheStats => new NearlineCacheStats(
-            _memory.Count, _disk.Count, _diskBytes,
+            _memory.Count, _disk.Count, _diskBytes, _handleToKey.Count,
             _memoryHits, _diskHits, _evictionsToDisk, _diskEvictions, _diskWriteFailures);
 
         /// <summary>
         /// Stores content under the given key, replacing any existing entry. New entries land in
         /// the memory tier; if that exceeds the cap, the least-recently-used entry spills to disk.
+        /// Mints a short handle ("nl-N") for the entry, records it in the handle index, and returns
+        /// it so the caller can embed it in the breadcrumb for later recall via recall_cache.
         /// </summary>
         /// <param name="key">Cache key (e.g. "tool:{toolCallId}", "read:{filename}", "shell:{turn}").</param>
         /// <param name="content">The original content being trimmed from context.</param>
         /// <param name="breadcrumb">The compact replacement string left in context.</param>
-        public void Store(string key, string content, string breadcrumb)
+        /// <returns>The minted handle (e.g. "nl-7").</returns>
+        public string Store(string key, string content, string breadcrumb)
         {
             // Re-store supersedes any prior disk copy of the same key.
             if (_disk.TryGetValue(key, out var stale))
@@ -68,8 +77,21 @@ namespace DevMind
                 LastUse = ++_useCounter
             };
 
+            string handle = "nl-" + (++_handleCounter);
+            _handleToKey[handle] = key;
+
             if (_memory.Count > MaxMemoryEntries)
                 EvictLruToDisk();
+
+            return handle;
+        }
+
+        /// <summary>Resolves a breadcrumb handle ("nl-N") to its cache key, or null if unknown.</summary>
+        public string GetKeyForHandle(string handle)
+        {
+            if (handle != null && _handleToKey.TryGetValue(handle, out string key))
+                return key;
+            return null;
         }
 
         /// <summary>
@@ -118,6 +140,8 @@ namespace DevMind
         {
             _memory.Clear();
             _disk.Clear();
+            _handleToKey.Clear();
+            _handleCounter = 0;
             _diskBytes = 0;
             _useCounter = 0;
             _memoryHits = 0;
@@ -351,6 +375,7 @@ namespace DevMind
         int MemoryEntries,
         int DiskEntries,
         long DiskBytes,
+        int HandleEntries,
         long MemoryHits,
         long DiskHits,
         long EvictionsToDisk,
