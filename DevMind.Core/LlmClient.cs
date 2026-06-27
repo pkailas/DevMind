@@ -3152,7 +3152,21 @@ namespace DevMind
                 };
             }
 
-            if (!_options.ShowLlmThinking)
+            if (ServerType == LlmServerType.Vllm)
+            {
+                // vLLM/Qwen3 toggle reasoning via the chat template, not the Anthropic-style
+                // {"thinking": {"type": "disabled"}} object (which vLLM ignores). enable_thinking
+                // rides in chat_template_kwargs; when thinking is on, cap the reasoning budget.
+                request["chat_template_kwargs"] = new JObject
+                {
+                    ["enable_thinking"] = _options.ShowLlmThinking
+                };
+                if (_options.ShowLlmThinking)
+                {
+                    request["thinking_token_budget"] = 2048;
+                }
+            }
+            else if (!_options.ShowLlmThinking)
             {
                 request["thinking"] = new JObject { ["type"] = "disabled" };
             }
