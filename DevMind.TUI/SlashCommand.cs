@@ -140,6 +140,12 @@ namespace DevMind
         /// <summary>Clear the output view only — no effect on conversation, context,
         /// or session state. Null when no host wires it.</summary>
         public Action ClearScreen { get; set; }
+
+        // -- Nearline cache (/cache) ----------------------------------------------
+
+        /// <summary>The LLM's nearline cache (trimmed tool results), for the /cache command.
+        /// Null when no host wires it.</summary>
+        public NearlineCache NearlineCache { get; set; }
     }
 
    /// <summary>
@@ -310,6 +316,11 @@ namespace DevMind
                 "Display the assembled system prompt",
                 "/system_prompt",
                 SystemPromptHandler);
+
+            RegisterCommand("/cache",
+                "Show nearline cache stats (in-memory + disk tiers, session counters)",
+                "/cache",
+                CacheHandler);
 
            RegisterCommand("/help",
                 "Show this list",
@@ -686,6 +697,26 @@ namespace DevMind
             string top = "--- Current System Prompt ---";
             string bot = "-----------------------------";
             return Task.FromResult(new CommandResult { Message = $"{top}\n{prompt}\n{bot}" });
+        }
+
+        // -- /cache ----------------------------------------------------------------
+
+        static Task<CommandResult> CacheHandler(string[] args, CommandContext ctx)
+        {
+            if (ctx.NearlineCache == null)
+                return Task.FromResult(new CommandResult { Message = "Nearline cache not available.", IsError = true });
+
+            var s = ctx.NearlineCache.CacheStats;
+            double diskMb = s.DiskBytes / (1024.0 * 1024.0);
+
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine($"In-memory entries: {s.MemoryEntries} / 50");
+            sb.AppendLine($"Disk entries: {s.DiskEntries} / 1000");
+            sb.AppendLine($"Disk usage: {diskMb:F1} MB / 500 MB");
+            sb.Append($"Session stats: {s.MemoryHits} memory hits, {s.DiskHits} disk hits, " +
+                $"{s.EvictionsToDisk} spilled to disk, {s.DiskEvictions} disk evictions, {s.DiskWriteFailures} write failures");
+
+            return Task.FromResult(new CommandResult { Message = sb.ToString() });
         }
 
         // -- /help -----------------------------------------------------------------

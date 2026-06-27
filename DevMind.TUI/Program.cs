@@ -509,6 +509,8 @@ Application.MaximumIterationsPerSecond = 750;
                         SessionId = SessionId.Get(),
                         MachineName = SessionId.GetMachineName(),
                        PrependMessages = (roles, contents) => llmClient.PrependMessages(roles, contents),
+                        // Nearline cache (for the /cache command).
+                        NearlineCache = llmClient.NearlineCache,
                         // Behavioral rules.
                         BehavioralRules = _config.BehavioralRules,
                         SetBehavioralRules = (rules) =>
@@ -674,6 +676,24 @@ Application.MaximumIterationsPerSecond = 750;
             // spinner animating and text flowing during a turn — a background thread's App.Invoke
             // does not reliably wake the parked Windows input-wait, but an AddTimeout does.
             host.StartRenderPump(app);
+
+            // Fire-and-forget: prune nearline spill folders left by previous runs whose session is
+            // not resumable from history. Runs off the startup path so it never blocks the UI.
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var keep = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        SessionId.Get() // never touch the current session's folder
+                    };
+                    var sessions = await historyStore.ListSessionsAsync(SessionId.GetMachineName());
+                    foreach (var s in sessions)
+                        keep.Add(s.SessionId);
+                    NearlineCache.CleanupOrphaned(keep);
+                }
+                catch { /* best-effort cleanup — must never affect startup */ }
+            });
 
             // Run the application.
             app.Run(window);

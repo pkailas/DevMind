@@ -2053,7 +2053,8 @@ namespace DevMind
             if (showDebug)
             {
                 System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] MicroCompact: {trimmed} trimmed, {savedChars} chars saved, finalPct={finalPct}%, threshold={threshold}%, watermark={_microCompactWatermark}%");
-                logMsg += $"[DIAG] MicroCompact: trimmed {trimmed} messages, cache holds {NearlineCache.Count} entries ({NearlineCache.EstimatedTokens} est. tokens), stale-tagged {staleIndices.Count}\n";
+                var ncs = NearlineCache.CacheStats;
+                logMsg += $"[DIAG] MicroCompact: trimmed {trimmed} messages, cache mem={ncs.MemoryEntries} disk={ncs.DiskEntries} ({ncs.DiskBytes / (1024 * 1024)}MB), hits mem={ncs.MemoryHits}/disk={ncs.DiskHits}, spilled={ncs.EvictionsToDisk}, diskEvict={ncs.DiskEvictions}, writeFail={ncs.DiskWriteFailures}, stale-tagged {staleIndices.Count}\n";
             }
 
             // Reset stale server data — history changed, n_past is no longer valid
