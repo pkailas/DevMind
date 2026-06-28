@@ -56,6 +56,12 @@ internal sealed class DevMindTools
 {
     private readonly McpServices _svc;
 
+    // Single shared HttpClient for the whole process — creating one per request leaks sockets
+    // (connections linger in TIME_WAIT and can exhaust ephemeral ports under load). Its Timeout is
+    // left infinite because it is process-wide; per-call deadlines are applied via a linked
+    // CancellationTokenSource at each call site instead.
+    private static readonly HttpClient _http = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
+
     public DevMindTools(McpServices svc) => _svc = svc;
 
     // ── Phase A ──────────────────────────────────────────────────────────────
@@ -1480,42 +1486,46 @@ internal sealed class DevMindTools
                     ? baseUrl.TrimEnd('/')
                     : $"{baseUrl.TrimEnd('/')}/{path.TrimStart('/')}";
 
-                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(timeoutSecs) };
-                HttpResponseMessage response;
+                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeoutCts.CancelAfter(TimeSpan.FromSeconds(timeoutSecs));
 
+                HttpResponseMessage response;
                 if (httpMethod == "GET" || httpMethod == "DELETE")
                 {
-                    var request = new HttpRequestMessage(
+                    using var request = new HttpRequestMessage(
                         httpMethod == "GET" ? HttpMethod.Get : HttpMethod.Delete, url);
-                    response = await http.SendAsync(request, cancellationToken);
+                    response = await _http.SendAsync(request, timeoutCts.Token);
                 }
                 else
                 {
-                    var content = new StringContent(
+                    using var content = new StringContent(
                         body ?? "{}", Encoding.UTF8, "application/json");
                     response = httpMethod == "POST"
-                        ? await http.PostAsync(url, content, cancellationToken)
-                        : await http.PutAsync(url, content, cancellationToken);
+                        ? await _http.PostAsync(url, content, timeoutCts.Token)
+                        : await _http.PutAsync(url, content, timeoutCts.Token);
                 }
 
-                string responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
-
-                // Pretty-print JSON if possible.
-                try
+                using (response)
                 {
-                    using var doc = JsonDocument.Parse(responseBody);
-                    responseBody = JsonSerializer.Serialize(doc.RootElement,
-                        new JsonSerializerOptions { WriteIndented = true });
+                    string responseBody = await response.Content.ReadAsStringAsync(timeoutCts.Token);
+
+                    // Pretty-print JSON if possible.
+                    try
+                    {
+                        using var doc = JsonDocument.Parse(responseBody);
+                        responseBody = JsonSerializer.Serialize(doc.RootElement,
+                            new JsonSerializerOptions { WriteIndented = true });
+                    }
+                    catch { }
+
+                    // Cap output.
+                    const int Cap = 4000;
+                    bool capped = responseBody.Length > Cap;
+                    string output = capped ? responseBody.Substring(0, Cap) : responseBody;
+
+                    return $"[http_request] {httpMethod} {url} → {(int)response.StatusCode} {response.StatusCode}\n\n{output}" +
+                           (capped ? $"\n\n[truncated at {Cap} chars]" : "");
                 }
-                catch { }
-
-                // Cap output.
-                const int Cap = 4000;
-                bool capped = responseBody.Length > Cap;
-                string output = capped ? responseBody.Substring(0, Cap) : responseBody;
-
-                return $"[http_request] {httpMethod} {url} → {(int)response.StatusCode} {response.StatusCode}\n\n{output}" +
-                       (capped ? $"\n\n[truncated at {Cap} chars]" : "");
             }
             catch (Exception ex)
             {

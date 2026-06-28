@@ -130,7 +130,14 @@ namespace DevMind
             // imperceptible, negligible idle CPU (an idle iteration draws nothing), and well clear
             // of the sub-millisecond range where the loop's `delay.Milliseconds > 0` guard would
             // collapse into a CPU-pinning busy spin.
-Application.MaximumIterationsPerSecond = 750;
+            //
+            // 200 (not the previous 750) is the documented sweet spot above: the main loop runs an
+            // UNCONDITIONAL Task.Delay(...).Wait() every iteration, so each iteration allocates a Task
+            // + timer registration inside Terminal.Gui. At 750/s that is ~5.4M allocations over a 2-hour
+            // idle session feeding the framework's loop; 200/s cuts that ~3.75× while keeping the floor
+            // at ~5 ms — already below the threshold of perceptible per-keystroke lag. Going lower
+            // (30–60 Hz) would reintroduce the ~40 ms input lag this cap was raised to fix.
+            Application.MaximumIterationsPerSecond = 200;
 
             // Paste-pipeline diagnostics (inert unless DEVMIND_TUI_DIAG is set).
             // Three rungs of the bracketed-paste ladder, outermost first:

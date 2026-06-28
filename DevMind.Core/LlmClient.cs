@@ -137,10 +137,28 @@ namespace DevMind
         internal string _lastSummaryError;
 
         /// <summary>
-        /// Persistent store of all compaction summaries generated this session.
-        /// Used by GenerateSummaryAsync to build cumulative context across compactions.
+        /// Rolling store of the most recent compaction summaries generated this session
+        /// (capped at <see cref="MaxCompactionSummaries"/>). Used by GenerateSummaryAsync to build
+        /// cumulative context across compactions. Capped so it cannot grow unbounded over a long
+        /// session in either heap or per-request token usage — see <see cref="AddCompactionSummary"/>.
         /// </summary>
         private readonly List<string> _compactionSummaries = new List<string>();
+
+        /// <summary>Maximum number of compaction summaries retained; oldest are dropped past this.</summary>
+        private const int MaxCompactionSummaries = 5;
+
+        /// <summary>
+        /// Appends a compaction summary, dropping the oldest entries so at most
+        /// <see cref="MaxCompactionSummaries"/> are retained. All read sites iterate this list,
+        /// so the cap is honored everywhere the summaries are concatenated into prompts/context.
+        /// </summary>
+        private void AddCompactionSummary(string summary)
+        {
+            if (string.IsNullOrEmpty(summary)) return;
+            _compactionSummaries.Add(summary);
+            while (_compactionSummaries.Count > MaxCompactionSummaries)
+                _compactionSummaries.RemoveAt(0);
+        }
 
         /// <summary>
         /// The user's original task prompt, captured on the first non-continuation user message.
@@ -161,6 +179,23 @@ namespace DevMind
         /// Persists across brainwashes.
         /// </summary>
         private readonly List<string> _completedFiles = new List<string>();
+
+        /// <summary>Maximum number of completed-file names retained; oldest are dropped past this.</summary>
+        private const int MaxCompletedFiles = 50;
+
+        /// <summary>
+        /// Cumulative count of messages evicted by <see cref="EvictStaleContext"/> this session.
+        /// Surfaced through a SINGLE rolling [DROPPED] marker rather than one pinned system entry
+        /// per evicting turn (which previously grew the history floor unbounded). Reset on /new and
+        /// brainwash.
+        /// </summary>
+        private int _droppedMessageCount;
+
+        /// <summary>Most recent eviction snippets shown in the rolling [DROPPED] marker (bounded).</summary>
+        private readonly List<string> _recentDropSnippets = new List<string>();
+
+        /// <summary>Maximum eviction snippets kept in the rolling [DROPPED] marker.</summary>
+        private const int MaxDropSnippets = 12;
 
         private static readonly Regex _completedFileHeaderPattern =
             new Regex(@"^##\s+(?:File:\s*)?(.+\.(?:vb|cs|vbproj|csproj|xaml|json|xml|md|txt))",
@@ -1217,6 +1252,11 @@ namespace DevMind
                 if (!_completedFiles.Contains(fileName))
                     _completedFiles.Add(fileName);
             }
+
+            // Cap the list so it cannot grow unbounded over a long session (it is also inlined into
+            // brainwash/summary prompts). Drop the oldest entries past the cap.
+            while (_completedFiles.Count > MaxCompletedFiles)
+                _completedFiles.RemoveAt(0);
         }
 
         /// <summary>
@@ -1240,6 +1280,8 @@ namespace DevMind
             _lastCompactionTurn = 0;
             _compactionSummaries.Clear();
             _completedFiles.Clear();
+            _droppedMessageCount = 0;
+            _recentDropSnippets.Clear();
             if (!preserveScratchpad)
             {
                 _taskScratchpad = "";
@@ -1466,10 +1508,21 @@ namespace DevMind
                         _conversationHistory.RemoveAt(idx);
                 }
 
-                // Insert drop summary so the model knows what happened
+                // Maintain a SINGLE rolling [DROPPED] marker so the model knows what happened.
+                // Previously a new pinned system entry was inserted on every evicting turn; because
+                // IsPinnedMessage protects all system messages, those accrued one-per-turn and could
+                // never be reclaimed. Now we drop the prior marker and re-insert one updated entry
+                // carrying a cumulative count plus a bounded tail of recent snippets.
                 if (dropSummaryParts.Count > 0)
                 {
-                    string summary = $"[DROPPED] {dropped} message(s) evicted: {string.Join(", ", dropSummaryParts)}";
+                    _droppedMessageCount += dropped;
+                    _recentDropSnippets.AddRange(dropSummaryParts);
+                    while (_recentDropSnippets.Count > MaxDropSnippets)
+                        _recentDropSnippets.RemoveAt(0);
+
+                    RemoveRollingDropMarker();
+                    string summary = $"[DROPPED] {_droppedMessageCount} message(s) evicted this session "
+                        + $"(recent: {string.Join(", ", _recentDropSnippets)})";
                     _conversationHistory.Insert(1, new ChatMessage("system", summary));
                 }
             }
@@ -1503,6 +1556,22 @@ namespace DevMind
             if (c.IndexOf("[DevMind.md]", StringComparison.Ordinal) >= 0) return true;
 
             return false;
+        }
+
+        /// <summary>
+        /// Removes the rolling [DROPPED] eviction marker(s) from history so a single updated marker
+        /// can be re-inserted. These are system messages (pinned, so the age-based eviction loop never
+        /// touches them) — this is the only path that reclaims them.
+        /// </summary>
+        private void RemoveRollingDropMarker()
+        {
+            for (int i = _conversationHistory.Count - 1; i >= 1; i--)
+            {
+                var m = _conversationHistory[i];
+                if (m.Role == "system" && m.Content != null
+                    && m.Content.StartsWith("[DROPPED]", StringComparison.Ordinal))
+                    _conversationHistory.RemoveAt(i);
+            }
         }
 
         // ── Tier 1: MicroCompact ─────────────────────────────────────────────
@@ -1703,7 +1772,7 @@ namespace DevMind
 
             string summary = await GenerateSummaryAsync(toSummarize).ConfigureAwait(false);
             if (!string.IsNullOrEmpty(summary))
-                _compactionSummaries.Add(summary);
+                AddCompactionSummary(summary);
 
             // Step 2: Build the cumulative context block
             var contextBlock = new StringBuilder();
@@ -1765,7 +1834,11 @@ namespace DevMind
             _recentCompactionCount = 0;
             _lastCompactionTurn = 0;
             _microCompactWatermark = 0;
-            // Do NOT clear _compactionSummaries — they persist across brainwashes
+            // The rolling [DROPPED] marker is wiped by the _conversationHistory.Clear() above; reset
+            // its counters so the cumulative count restarts with the fresh synthetic history.
+            _droppedMessageCount = 0;
+            _recentDropSnippets.Clear();
+            // Do NOT clear _compactionSummaries — they persist across brainwashes (capped, see AddCompactionSummary)
             // Do NOT clear NearlineCache — cached file content is still valid
             // Do NOT clear _originalTaskPrompt — it anchors the synthetic conversation
 
@@ -2030,7 +2103,7 @@ namespace DevMind
                         : $"{minTrimTurn}-{maxTrimTurn}";
                     string summaryContent = $"[CONTEXT SUMMARY — Turns {turnRange}]\n{summary}\n[END SUMMARY]";
                     _conversationHistory.Insert(insertIdx, new ChatMessage("user", summaryContent, 0));
-                    _compactionSummaries.Add(summary);
+                    AddCompactionSummary(summary);
                     summaryLogExtra = $"[CONTEXT] Summary generated ({summary.Length / 4} tokens, {sw.Elapsed.TotalSeconds:F1}s)\n";
                     if (showDebug)
                     {
