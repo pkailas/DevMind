@@ -57,6 +57,13 @@ namespace DevMind
         private readonly Dictionary<string, string> _fileSnapshots =
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
+        // LRU bookkeeping for _fileSnapshots: each entry holds a whole file's original content, so the
+        // map is capped to bound memory. Oldest-accessed entry is evicted past the cap.
+        private const int MaxFileSnapshots = 20;
+        private readonly Dictionary<string, long> _fileSnapshotUse =
+            new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        private long _fileSnapshotUseCounter;
+
        private MemoryManager _memoryManager;
 
         // Shared Core facade for the five LSP tools — gating and error wrapping live there.
@@ -162,6 +169,8 @@ namespace DevMind
         {
             _filesRead.Clear();
             _fileSnapshots.Clear();
+            _fileSnapshotUse.Clear();
+            _fileSnapshotUseCounter = 0;
             _fileCache.InvalidateAll();
            _taskReadFiles.Clear();
             _taskScratchpad = "";
@@ -1403,6 +1412,7 @@ namespace DevMind
             }
 
             string original = _fileSnapshots[resolvedPath];
+            _fileSnapshotUse[resolvedPath] = ++_fileSnapshotUseCounter; // touch for LRU
             string current;
             try { current = File.ReadAllText(resolvedPath); }
             catch (Exception ex) { return Task.FromResult($"DIFF: error reading {filename} — {ex.Message}"); }
@@ -1877,9 +1887,37 @@ namespace DevMind
 
         private void CaptureFileSnapshot(string fullPath)
         {
-            if (_fileSnapshots.ContainsKey(fullPath)) return;
-            try { _fileSnapshots[fullPath] = File.ReadAllText(fullPath); }
+            // Snapshot is the ORIGINAL pre-edit content — never overwrite an existing one, just touch
+            // its LRU stamp so it is not evicted ahead of colder entries.
+            if (_fileSnapshots.ContainsKey(fullPath))
+            {
+                _fileSnapshotUse[fullPath] = ++_fileSnapshotUseCounter;
+                return;
+            }
+            try
+            {
+                string content = File.ReadAllText(fullPath);
+                if (_fileSnapshots.Count >= MaxFileSnapshots)
+                    EvictLruFileSnapshot();
+                _fileSnapshots[fullPath] = content;
+                _fileSnapshotUse[fullPath] = ++_fileSnapshotUseCounter;
+            }
             catch { }
+        }
+
+        private void EvictLruFileSnapshot()
+        {
+            string lru = null;
+            long min = long.MaxValue;
+            foreach (var kvp in _fileSnapshotUse)
+            {
+                if (kvp.Value < min) { min = kvp.Value; lru = kvp.Key; }
+            }
+            if (lru != null)
+            {
+                _fileSnapshots.Remove(lru);
+                _fileSnapshotUse.Remove(lru);
+            }
         }
 
         private static string SafeGetFileName(string path)

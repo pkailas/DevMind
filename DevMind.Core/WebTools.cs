@@ -26,6 +26,19 @@ namespace DevMind
     /// </summary>
     public static class WebTools
     {
+        // Single shared HttpClient for the whole process — creating one per request leaks
+        // sockets (connections linger in TIME_WAIT and can exhaust ephemeral ports under load).
+        // Its Timeout is left infinite because it is process-wide; per-call deadlines are applied
+        // via a linked CancellationTokenSource in each method instead.
+        private static readonly HttpClient _http = CreateSharedHttpClient();
+
+        private static HttpClient CreateSharedHttpClient()
+        {
+            var http = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
+            http.DefaultRequestHeaders.Add("User-Agent", "DevMind/1.0");
+            return http;
+        }
+
         /// <summary>
         /// Search the web via the local SearXNG instance. Returns a ranked list of
         /// results with title, URL, and snippet, capped at 20.
@@ -40,10 +53,10 @@ namespace DevMind
                     ?? "http://vard-nas:8180";
                 string url = $"{searxngUrl.TrimEnd('/')}/search?q={Uri.EscapeDataString(query)}&format=json&language=en&safesearch=0";
 
-                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
-                http.DefaultRequestHeaders.Add("User-Agent", "DevMind/1.0");
-                var response = await http.GetAsync(url, cancellationToken).ConfigureAwait(false);
-                string json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeoutCts.CancelAfter(TimeSpan.FromSeconds(15));
+                using var response = await _http.GetAsync(url, timeoutCts.Token).ConfigureAwait(false);
+                string json = await response.Content.ReadAsStringAsync(timeoutCts.Token).ConfigureAwait(false);
 
                 // Surface the actual HTTP status on non-200 responses.
                 if (!response.IsSuccessStatusCode)
@@ -111,14 +124,15 @@ namespace DevMind
                     ?? "http://vard-nas:8181";
                 string endpoint = $"{fetcherUrl.TrimEnd('/')}/fetch";
 
-                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(45) };
-                var payload = new StringContent(
+                using var payload = new StringContent(
                     JsonSerializer.Serialize(new { url }),
                     Encoding.UTF8,
                     "application/json");
 
-                var response = await http.PostAsync(endpoint, payload, cancellationToken).ConfigureAwait(false);
-                string json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeoutCts.CancelAfter(TimeSpan.FromSeconds(45));
+                using var response = await _http.PostAsync(endpoint, payload, timeoutCts.Token).ConfigureAwait(false);
+                string json = await response.Content.ReadAsStringAsync(timeoutCts.Token).ConfigureAwait(false);
 
                 // Surface the fetcher actual HTTP status code on non-200 responses.
                 if (!response.IsSuccessStatusCode)

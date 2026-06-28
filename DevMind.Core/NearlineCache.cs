@@ -72,6 +72,11 @@ namespace DevMind
                 _disk.Remove(key);
             }
 
+            // Re-store also supersedes any prior handle(s) for this key: the old breadcrumb that
+            // referenced them has been replaced, so they can never be recalled again. Purging here
+            // keeps _handleToKey bounded to one live handle per key instead of growing on every Store.
+            PurgeHandlesForKey(key);
+
             _memory[key] = new NearlineCacheEntry(key, content, breadcrumb, DateTime.UtcNow)
             {
                 LastUse = ++_useCounter
@@ -122,6 +127,7 @@ namespace DevMind
                     _diskBytes -= disk.SizeBytes;
                     if (_diskBytes < 0) _diskBytes = 0;
                     _disk.Remove(key);
+                    PurgeHandlesForKey(key); // key is now gone from both tiers — drop its dead handle(s)
                     return null;
                 }
             }
@@ -198,6 +204,25 @@ namespace DevMind
 
         // ── internals ────────────────────────────────────────────────────────
 
+        /// <summary>
+        /// Removes every handle that maps to <paramref name="key"/>. Called when a key is superseded
+        /// or evicted from both tiers so the handle index stays bounded to live entries rather than
+        /// growing one entry per Store() for the life of the session.
+        /// </summary>
+        private void PurgeHandlesForKey(string key)
+        {
+            if (_handleToKey.Count == 0) return;
+            List<string> dead = null;
+            foreach (var kvp in _handleToKey)
+            {
+                if (string.Equals(kvp.Value, key, StringComparison.OrdinalIgnoreCase))
+                    (dead ??= new List<string>()).Add(kvp.Key);
+            }
+            if (dead != null)
+                foreach (string handle in dead)
+                    _handleToKey.Remove(handle);
+        }
+
         private void EvictLruToDisk()
         {
             string lruKey = null;
@@ -261,6 +286,7 @@ namespace DevMind
 
                 DeleteDiskFile(_disk[oldestKey]);
                 _disk.Remove(oldestKey);
+                PurgeHandlesForKey(oldestKey); // evicted from both tiers — drop its dead handle(s)
                 _diskEvictions++;
             }
         }
