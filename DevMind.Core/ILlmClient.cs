@@ -41,6 +41,12 @@ namespace DevMind
         /// chunk's <c>usage.prompt_tokens</c>. 0 when the server does not report usage.</summary>
         int LivePromptTokens { get; }
 
+        /// <summary>Server-true live generation rate (tokens/second) for the in-progress response,
+        /// read from llama-server's per-chunk <c>timings.predicted_per_second</c> (request must set
+        /// <c>timings_per_token</c>). Spec-decode aware. 0 when the server reports no per-chunk
+        /// timings (e.g. vLLM), so callers fall back to a client wall-clock rate.</summary>
+        double LiveTokensPerSecond { get; }
+
         /// <summary>Generation wall time in milliseconds from the last response's server timings (predicted_ms). 0 until first response.</summary>
         double LastGeneratedMs { get; }
 
