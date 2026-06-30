@@ -51,6 +51,7 @@ namespace DevMind
         private int  _tickCount;
         private bool _generating;                        // false = thinking phase
         private int  _streamedTokens;                    // this ITERATION (reset per iteration)
+
         private long _firstTokenMs = -1;                 // turn-clock ms at first token of this iteration
         private int  _thinkingDepth;
         private int  _thinkingMaxDepth;
@@ -254,7 +255,13 @@ namespace DevMind
                 // Live tok/s on the far-right rate chip — updates every tick during
                 // generation and persists after EndTurn (which finalizes it to the
                 // server-true rate), so there's always a tok/s readout to glance at.
-                if (outTok > 0 && genSecs > 0)
+                // Prefer llama-server's per-chunk timings.predicted_per_second (spec-decode
+                // aware — the client wall-clock division undercounts 5-12x with spec decode);
+                // fall back to outTok/genSecs only when the server reports no per-chunk rate.
+                double serverRate = _llmClient.LiveTokensPerSecond;
+                if (serverRate > 0)
+                    _statusBar.SetTokRate(serverRate);
+                else if (outTok > 0 && genSecs > 0)
                     _statusBar.SetTokRate(outTok / genSecs);
             }
 

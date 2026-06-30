@@ -249,6 +249,16 @@ namespace DevMind
         public int LiveGeneratedTokens { get; private set; }
         public int LivePromptTokens { get; private set; }
 
+        /// <summary>
+        /// Server-true cumulative generation rate (tokens/second) from the in-progress response,
+        /// read from llama-server's per-chunk <c>timings.predicted_per_second</c> when the request
+        /// sets <c>timings_per_token</c>. This is the authoritative live tok/s — it accounts for
+        /// speculative decoding, which chunk-counting on the client undercounts 5-12x. 0 when the
+        /// server reports no per-chunk timings (e.g. vLLM), so the TUI falls back to wall-clock.
+        /// Reset per send; guarded against the first-token divide-by-near-zero garbage.
+        /// </summary>
+        public double LiveTokensPerSecond { get; private set; }
+
         // ── Effective server type (configured, overridable by startup auto-detection) ──
         private LlmServerType? _serverTypeOverride;
 
@@ -1011,6 +1021,7 @@ namespace DevMind
                 // usage.completion_tokens / usage.prompt_tokens (see ParseLiveUsage).
                 LiveGeneratedTokens = 0;
                 LivePromptTokens = 0;
+                LiveTokensPerSecond = 0;
 
                 // vLLM wall-clock timing — stamped on the first SSE chunk below (0 = unstamped).
                 _streamStartMs = 0;
@@ -3235,6 +3246,16 @@ namespace DevMind
                     ["continuous_usage_stats"] = true
                 };
             }
+            else if (ServerType == LlmServerType.LlamaServer)
+            {
+                // llama-server emits a per-chunk `timings` block (predicted_n / predicted_per_second)
+                // only when the request asks for it. This is the authoritative live tok/s source:
+                // predicted_n is the true running token count and predicted_per_second the cumulative
+                // rate — both account for speculative decoding, which the client-side chunk count
+                // undercounts 5-12x. LlamaServer-only: vLLM ignores this field (it uses
+                // stream_options.continuous_usage_stats above instead).
+                request["timings_per_token"] = true;
+            }
 
             if (ServerType == LlmServerType.Vllm)
             {
@@ -3488,7 +3509,31 @@ namespace DevMind
         {
             try
             {
-                var usage = JObject.Parse(json)?["usage"];
+                var obj = JObject.Parse(json);
+
+                // ── Per-chunk server-true timings (llama-server, timings_per_token=true) ──
+                // When present, timings.predicted_n is the authoritative running token count and
+                // timings.predicted_per_second the cumulative generation rate. Both reflect the
+                // true (spec-decode-aware) speed, so prefer them over usage.completion_tokens and
+                // the client wall-clock division. Absent on vLLM — that path keeps using usage.
+                var timings = obj?["timings"];
+                if (timings != null)
+                {
+                    int predictedN = timings["predicted_n"]?.Value<int>() ?? 0;
+                    double predictedMs = timings["predicted_ms"]?.Value<double>() ?? 0;
+                    double predictedPerSec = timings["predicted_per_second"]?.Value<double>() ?? 0;
+
+                    // Server-true running count — monotonic by construction.
+                    if (predictedN > LiveGeneratedTokens) LiveGeneratedTokens = predictedN;
+
+                    // Divide-by-near-zero guard: on the first token predicted_n is 1 and
+                    // predicted_ms is ~0, so the server reports a garbage rate (e.g. 1000000.0).
+                    // Only trust predicted_per_second once there are >1 tokens over >=1ms.
+                    if (predictedPerSec > 0 && predictedN > 1 && predictedMs >= 1.0)
+                        LiveTokensPerSecond = predictedPerSec;
+                }
+
+                var usage = obj?["usage"];
                 if (usage == null) return;
 
                 int completion = usage["completion_tokens"]?.Value<int>() ?? 0;

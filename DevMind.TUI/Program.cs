@@ -837,12 +837,12 @@ namespace DevMind
                     });
                     return;
                 }
-               finally
-                {
-                    if (!timerStopped) callbacks.StopThinkingTimer();
-                    // Release any buffered code block / held prose (terminated or not).
-                    codeStreamer.Flush();
-                }
+                finally
+                 {
+                     if (!timerStopped) callbacks.StopThinkingTimer();
+                     // Release any buffered code block / held prose (terminated or not).
+                     codeStreamer.Flush();
+                 }
 
                 // Save this turn to history (user message + assistant response).
                 if (historyStore != null && !cts.Token.IsCancellationRequested)
