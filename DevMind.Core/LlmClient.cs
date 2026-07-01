@@ -3347,13 +3347,19 @@ namespace DevMind
                 }
 
                 int promptN = timings["prompt_n"]?.Value<int>() ?? 0;
+                int cacheN = timings["cache_n"]?.Value<int>() ?? 0;
                 double promptMs = timings["prompt_ms"]?.Value<double>() ?? 0;
                 int predictedN = timings["predicted_n"]?.Value<int>() ?? 0;
                 double predictedMs = timings["predicted_ms"]?.Value<double>() ?? 0;
                 int nCtx = timings["n_ctx"]?.Value<int>() ?? 0;
                 int nPast = timings["n_past"]?.Value<int>() ?? 0;
 
-                if (promptN > 0) LastPromptTokens = promptN;
+                // Full prompt = freshly-evaluated (prompt_n) + KV-cache-reused (cache_n); this
+                // equals usage.prompt_tokens. prompt_n alone undercounts on cache hits (agentic
+                // resubmits), so use the sum for both the finalized and live "in" counts.
+                int promptTotal = promptN + cacheN;
+                if (promptTotal > 0) LastPromptTokens = promptTotal;
+                if (promptTotal > LivePromptTokens) LivePromptTokens = promptTotal;
                 if (promptMs > 0) LastPromptMs = promptMs;
                 if (predictedN > 0) LastGeneratedTokens = predictedN;
                 // Finalize the live counter to the authoritative server count, so the displayed
@@ -3531,6 +3537,18 @@ namespace DevMind
                     // Only trust predicted_per_second once there are >1 tokens over >=1ms.
                     if (predictedPerSec > 0 && predictedN > 1 && predictedMs >= 1.0)
                         LiveTokensPerSecond = predictedPerSec;
+
+                    // Live prompt ("in") count. llama-server emits usage.prompt_tokens only in the
+                    // terminal chunk, so the in-counter would otherwise sit at 0 for the whole
+                    // stream; the timings block carries the prompt size on EVERY chunk. Use
+                    // prompt_n + cache_n: prompt_n is only the freshly-evaluated tokens and cache_n
+                    // the KV-cache-reused ones, and their sum equals usage.prompt_tokens (the full
+                    // prompt). DevMind's agentic resubmits reuse the cache heavily, so prompt_n
+                    // alone would badly undercount "in".
+                    int promptN = timings["prompt_n"]?.Value<int>() ?? 0;
+                    int cacheN = timings["cache_n"]?.Value<int>() ?? 0;
+                    int promptTotal = promptN + cacheN;
+                    if (promptTotal > LivePromptTokens) LivePromptTokens = promptTotal;
                 }
 
                 var usage = obj?["usage"];
