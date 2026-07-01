@@ -228,42 +228,50 @@ namespace DevMind
                 ? $"round {round}/{_thinkingMaxDepth}"
                 : $"round {round}";
 
+            // Server-true live token counts populate during BOTH the thinking and generating
+            // phases — llama-server's per-chunk timings (and vLLM usage) advance on reasoning
+            // and tool_call chunks, not just visible content. Compute them here and render them
+            // regardless of the Thinking/Generating label, so reasoning-heavy turns (hidden
+            // <think>) and tool-call-only turns still show tok/s instead of a blank rate.
+            // Prefer the server's running usage count; fall back to the content-delta count for
+            // endpoints that don't report per-chunk usage.
+            int serverLive = _llmClient.LiveGeneratedTokens;
+            int outTok = serverLive > 0 ? serverLive : Volatile.Read(ref _streamedTokens);
+            int inTok  = _llmClient.LivePromptTokens; // prompt tokens for this round (server usage)
+            long firstMs = Interlocked.Read(ref _firstTokenMs);
+            double genSecs = firstMs >= 0
+                ? Math.Max(0.1, (_turnClock.ElapsedMilliseconds - firstMs) / 1000.0)
+                : 0;
+            // DevMindShell parity: show input/output split rather than a single count.
+            string tokPart = (inTok > 0 || outTok > 0)
+                ? $", {inTok:N0} in / {outTok:N0} out"
+                : string.Empty;
+
+            // Keep the Thinking/Generating label distinction; only the numeric readout is
+            // ungated (the tokPart suffix now shows in both states).
             if (!generating)
             {
-                _statusBar.SetState($"{frame} Thinking... ({elapsed}, {rounds})",
+                _statusBar.SetState($"{frame} Thinking... ({elapsed}, {rounds}{tokPart})",
                     StatusState.Thinking);
             }
             else
             {
-                // Prefer the server's running usage count (advances on content, reasoning, AND
-                // tool_call chunks); fall back to the content-delta count for endpoints that
-                // don't report per-chunk usage.
-                int serverLive = _llmClient.LiveGeneratedTokens;
-                int outTok = serverLive > 0 ? serverLive : Volatile.Read(ref _streamedTokens);
-                int inTok  = _llmClient.LivePromptTokens; // prompt tokens for this round (server usage)
-                long firstMs = Interlocked.Read(ref _firstTokenMs);
-                double genSecs = firstMs >= 0
-                    ? Math.Max(0.1, (_turnClock.ElapsedMilliseconds - firstMs) / 1000.0)
-                    : 0;
-                // DevMindShell parity: show input/output split rather than a single count.
-                string tokPart = (inTok > 0 || outTok > 0)
-                    ? $", {inTok:N0} in / {outTok:N0} out"
-                    : string.Empty;
                 _statusBar.SetState($"{frame} Generating... ({elapsed}, {rounds}{tokPart})",
                     StatusState.Busy);
-
-                // Live tok/s on the far-right rate chip — updates every tick during
-                // generation and persists after EndTurn (which finalizes it to the
-                // server-true rate), so there's always a tok/s readout to glance at.
-                // Prefer llama-server's per-chunk timings.predicted_per_second (spec-decode
-                // aware — the client wall-clock division undercounts 5-12x with spec decode);
-                // fall back to outTok/genSecs only when the server reports no per-chunk rate.
-                double serverRate = _llmClient.LiveTokensPerSecond;
-                if (serverRate > 0)
-                    _statusBar.SetTokRate(serverRate);
-                else if (outTok > 0 && genSecs > 0)
-                    _statusBar.SetTokRate(outTok / genSecs);
             }
+
+            // Live tok/s on the far-right rate chip — updates every tick and persists after
+            // EndTurn (which finalizes it to the server-true rate), so there's always a tok/s
+            // readout to glance at. Prefer llama-server's per-chunk timings.predicted_per_second
+            // (spec-decode aware — the client wall-clock division undercounts 5-12x with spec
+            // decode); fall back to outTok/genSecs only when the server reports no per-chunk
+            // rate. Rendered in both phases so the rate shows during hidden reasoning and
+            // tool-call-only turns, not just visible output.
+            double serverRate = _llmClient.LiveTokensPerSecond;
+            if (serverRate > 0)
+                _statusBar.SetTokRate(serverRate);
+            else if (outTok > 0 && genSecs > 0)
+                _statusBar.SetTokRate(outTok / genSecs);
 
             // Live context meter at ~3 Hz: per-iteration server anchor + tokens
             // streamed this iteration. Resyncs to pure server truth at each
@@ -271,9 +279,9 @@ namespace DevMind
             if (tick % 3 == 0)
             {
                 var (anchor, total) = GetContextMetrics();
-                int serverLive = _llmClient.LiveGeneratedTokens;
-                int live = serverLive > 0 ? serverLive : Volatile.Read(ref _streamedTokens);
-                _statusBar.SetContextMeter(anchor + live, total);
+                // outTok (computed above) already resolves to server-true LiveGeneratedTokens,
+                // or the streamed-delta fallback when the server reports no per-chunk usage.
+                _statusBar.SetContextMeter(anchor + outTok, total);
             }
         }
 
