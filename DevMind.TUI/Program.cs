@@ -734,6 +734,30 @@ namespace DevMind
             bool firstIteration = true;
             bool forceToolChoiceRequired = false; // Layer 2 narration-retry flag
 
+            // A DevMind-internal status/diagnostic line ([CONTEXT], [LLM], [TOOL_USE], [DIAG…],
+            // [DROPPED], [SQUEEZED], …) emitted through onToken. The engine injects these — some
+            // BEFORE the model streams a single token — so they must not count as model output or
+            // flip the thinking→generating phase (that flipped "Thinking…" to "Generating…" ~50ms
+            // into the turn, before any reasoning, making "Thinking…" effectively invisible).
+            // Matches a leading all-caps bracket tag; mixed-case model brackets (e.g. "[Fact]")
+            // are intentionally NOT matched, so real model content still counts.
+            static bool IsInternalStatusLine(string token)
+            {
+                if (string.IsNullOrEmpty(token)) return false;
+                int i = 0;
+                while (i < token.Length && char.IsWhiteSpace(token[i])) i++;
+                if (i >= token.Length || token[i] != '[') return false;
+                i++;
+                if (i >= token.Length || !char.IsUpper(token[i])) return false;
+                for (; i < token.Length; i++)
+                {
+                    char c = token[i];
+                    if (c == ']') return true;
+                    if (!(char.IsUpper(c) || char.IsDigit(c) || c == '_' || c == '-' || c == ' ')) return false;
+                }
+                return false;
+            }
+
             while (true)
             {
                 if (cts.Token.IsCancellationRequested) return;
@@ -766,10 +790,17 @@ namespace DevMind
                     forceToolChoiceRequired: forceToolChoiceRequired,
                     onToken: token =>
                     {
+                        // DevMind injects its own status/diagnostic lines ([CONTEXT], [LLM],
+                        // [TOOL_USE], [DIAG…], [DROPPED], …) through this same callback — some
+                        // BEFORE the model streams a single token. They must not be counted as
+                        // output, nor flip the thinking→generating phase. Only real model tokens
+                        // drive the counter and the transition.
+                        bool isStatus = IsInternalStatusLine(token);
+
                         // Feed the live token counter (drives the status bar's "N tok ·
-                        // X tok/s" suffix). One SSE token per call; counts thinking and
+                        // X tok/s" suffix) for real model tokens only; counts thinking and
                         // visible alike, matching the engine's LastGeneratedTokens.
-                        callbacks.OnStreamToken();
+                        if (!isStatus) callbacks.OnStreamToken();
 
                         string visible = thinkFilter.Process(token, options.ShowLlmThinking,
                             out string thinkText);
@@ -784,7 +815,10 @@ namespace DevMind
 
                         if (string.IsNullOrEmpty(visible)) return;
 
-                        if (!timerStopped) { callbacks.StopThinkingTimer(); timerStopped = true; }
+                        // Real visible model content marks the start of generation; DevMind's own
+                        // status lines flow through here too but must not flip the phase (so the
+                        // "Thinking…" state now renders during prompt-processing + hidden reasoning).
+                        if (!isStatus && !timerStopped) { callbacks.StopThinkingTimer(); timerStopped = true; }
 
                         responseBuffer.Append(visible);
 
