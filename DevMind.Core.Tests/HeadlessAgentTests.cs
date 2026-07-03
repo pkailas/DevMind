@@ -100,6 +100,51 @@ namespace DevMind.Core.Tests
         }
 
         [Fact]
+        public async Task Session_SecondTurn_CarriesFirstTurnConversation()
+        {
+            using var server = new FakeSseServer();
+            // Turn 1: create a file, then task_done.
+            server.SseQueue.Add(FakeSseServer.BuildToolCallSse("create_file",
+                "{\"filename\":\"alpha.txt\",\"content\":\"alpha content\"}"));
+            server.SseQueue.Add(FakeSseServer.BuildToolCallSse("task_done",
+                "{\"summary\":\"Wrote alpha.txt.\"}"));
+            // Turn 2 (continuation): immediately done.
+            server.SseQueue.Add(FakeSseServer.BuildToolCallSse("task_done",
+                "{\"summary\":\"Nothing left to do.\"}"));
+
+            string? prior = Environment.GetEnvironmentVariable("DEVMIND_SERVER_TYPE");
+            Environment.SetEnvironmentVariable("DEVMIND_SERVER_TYPE", "llama");
+            try
+            {
+                using var console = new ConsoleGuard();
+                using var session = new HeadlessSession(Options(), server.BaseUrl, apiKey: null!,
+                    workingDirectory: _dir, buildCommand: "dotnet build");
+
+                var first = await session.RunTurnAsync("Create alpha.txt with some content.");
+                Assert.Null(first.Error);
+                Assert.Equal("Wrote alpha.txt.", first.Answer);
+                Assert.Single(first.Actions, a => a.Kind == "save");
+
+                var second = await session.RunTurnAsync("continue");
+                Assert.Null(second.Error);
+                Assert.Equal("Nothing left to do.", second.Answer);
+                Assert.Empty(second.Actions); // journal is per-turn
+
+                // The continuation request must carry the FIRST turn's conversation:
+                // its prompt, its tool activity, and the bare "continue" itself.
+                Assert.Equal(3, server.RequestBodies.Count);
+                string continuationRequest = server.RequestBodies[2];
+                Assert.Contains("alpha.txt", continuationRequest);
+                Assert.Contains("continue", continuationRequest);
+                Assert.Equal("", console.Captured);
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("DEVMIND_SERVER_TYPE", prior);
+            }
+        }
+
+        [Fact]
         public async Task RunAsync_ModelToolCallsForever_StopsAtDepthCap()
         {
             using var server = new FakeSseServer { RepeatLastWhenExhausted = true };

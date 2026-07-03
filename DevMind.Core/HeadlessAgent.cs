@@ -1,14 +1,15 @@
-// File: HeadlessAgent.cs  v1.0
+// File: HeadlessAgent.cs  v2.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
-// One-shot headless agentic runner — the engine behind DevMind.McpServer's
-// devmind_task_* tools (Claude Code delegating whole coding tasks to the local
-// model). Wires LlmClient + BufferedAgenticHost (auto-approving, no console) +
-// LoopDriver, seeds a single prompt, iterates the tool loop to completion or the
-// depth cap, and returns a structured result: the final answer, the host's action
-// journal (audit trail), and a transcript. Mirrors DevMind.Cli's RunTurnAsync with
-// every console interaction removed. NOTHING here may write to Console — in the MCP
-// process stdout is the JSON-RPC wire.
+// Headless agentic runner — the engine behind DevMind.McpServer's devmind_task_*
+// tools (Claude Code / Claude Desktop delegating whole coding tasks to the local
+// model). v2 splits the former one-shot RunAsync into a resumable HeadlessSession:
+// the conversation (LlmClient history, host caches, scratchpad) survives between
+// turns, so devmind_task_continue can reopen a finished job with full context —
+// a bare "continue" picks up exactly where a depth-capped run stopped, no
+// re-briefing needed. HeadlessAgent.RunAsync remains as the one-shot wrapper
+// (create session → one turn → dispose). NOTHING here may write to Console — in
+// the MCP process stdout is the JSON-RPC wire.
 
 using System;
 using System.Collections.Generic;
@@ -44,12 +45,12 @@ namespace DevMind
         public int    AgenticContextLimitPercent { get; set; } = 78;
     }
 
-    /// <summary>Outcome of one headless agentic task.</summary>
+    /// <summary>Outcome of one headless agentic turn (task or continuation).</summary>
     public sealed class HeadlessAgentResult
     {
         /// <summary>The model's final visible message (think tokens filtered).</summary>
         public string Answer { get; set; } = "";
-        /// <summary>Audit trail of every mutating host action.</summary>
+        /// <summary>Audit trail of every mutating host action THIS turn.</summary>
         public IReadOnlyList<HostAction> Actions { get; set; } = Array.Empty<HostAction>();
         public int Iterations { get; set; }
         public double ElapsedSeconds { get; set; }
@@ -61,109 +62,103 @@ namespace DevMind
         public string TranscriptPath { get; set; }
     }
 
-    /// <summary>One-shot headless agentic loop over the local model.</summary>
-    public static class HeadlessAgent
+    /// <summary>
+    /// A resumable headless agent conversation. Construct once per delegated task;
+    /// call <see cref="RunTurnAsync"/> for the initial prompt and again for each
+    /// continuation — LlmClient history, file caches, and the scratchpad persist
+    /// across turns (LlmClient's compaction machinery manages the window). Dispose
+    /// when the conversation is retired.
+    /// </summary>
+    public sealed class HeadlessSession : IDisposable
     {
-        /// <summary>
-        /// Behavioral rails appended to every headless system prompt. The commit rule is
-        /// conditional (see <c>allowCommit</c>); the rest keeps a delegated agent inside
-        /// its sandbox and prevents it stalling on questions nobody will answer.
-        /// </summary>
-        internal const string HeadlessAddendum =
-            "\n\n--- HEADLESS DELEGATION RULES ---\n" +
-            "You are running unattended on behalf of another agent. There is no human to ask:\n" +
-            "never ask clarifying questions — make the most reasonable choice and note the\n" +
-            "assumption in your final answer. Operate ONLY within the working directory, and\n" +
-            "always refer to files by paths RELATIVE to it — absolute paths outside the\n" +
-            "working directory are blocked. Do NOT spend iterations verifying the full build\n" +
-            "or wrestling shell timeouts to do so — the job runner builds the project itself\n" +
-            "after you finish and reports the result to the caller; use the run_build tool\n" +
-            "only for a quick compile check when you genuinely need one mid-task. Do not\n" +
-            "write scratch/output files into the repository — describe results in your\n" +
-            "answer instead. When the task is complete, call task_done with a concise\n" +
-            "summary of what you changed and why.\n";
+        private readonly HeadlessOptions _options;
+        private readonly LlmClient _llmClient;
+        private readonly BufferedAgenticHost _host;
+        private readonly HeadlessLoopCallbacks _callbacks;
+        private readonly LoopState _state;
+        private readonly LoopDriver _driver;
+        private readonly string _workingDirectory;
+        private readonly string _resolvedBuildCommand;
+        private readonly bool _allowCommit;
 
-        internal const string NoCommitRule =
-            "Do NOT run git commit, git push, or any other git command that rewrites history\n" +
-            "or publishes changes — the delegating agent handles version control.\n";
+        // The CTS of the turn currently executing — the host's cancel-turn callback
+        // (patch preview 'q', etc.) must always target the ACTIVE turn.
+        private CancellationTokenSource _currentTurnCts;
+        private bool _disposed;
 
-        /// <summary>
-        /// Runs one agentic task to completion. Never throws for task-level failures —
-        /// errors are reported in the result. <paramref name="progress"/> receives every
-        /// transcript chunk as it happens (model text and tool activity), for live tails.
-        /// </summary>
-        public static async Task<HeadlessAgentResult> RunAsync(
-            string prompt,
+        /// <summary>UTC time the last turn finished — idle-expiry input for session owners.</summary>
+        public DateTime LastActivityUtc { get; private set; } = DateTime.UtcNow;
+
+        public HeadlessSession(
             HeadlessOptions options,
             string endpointUrl,
             string apiKey,
             string workingDirectory,
             string buildCommand = null,
-            bool allowCommit = false,
-            string transcriptPath = null,
-            Action<string> progress = null,
-            CancellationToken ct = default)
+            bool allowCommit = false)
         {
-            var result = new HeadlessAgentResult();
-            var transcript = new StringBuilder();
-            var transcriptLock = new object();
-            var sw = Stopwatch.StartNew();
+            _options = options;
+            _workingDirectory = workingDirectory;
+            _allowCommit = allowCommit;
 
-            void Emit(string text)
-            {
-                if (string.IsNullOrEmpty(text)) return;
-                lock (transcriptLock) transcript.Append(text);
-                try { progress?.Invoke(text); } catch { /* progress is best-effort */ }
-            }
+            _llmClient = new LlmClient(options);
+            _llmClient.Configure(endpointUrl, apiKey);
 
-            using var runCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            using var llmClient = new LlmClient(options);
-            llmClient.Configure(endpointUrl, apiKey);
-
-            var host = new BufferedAgenticHost(workingDirectory,
-                cancelTurn: () => runCts.Cancel(),
-                outputSink: (text, _) => Emit(text))
+            _host = new BufferedAgenticHost(workingDirectory,
+                cancelTurn: () => _currentTurnCts?.Cancel(),
+                outputSink: (text, _) => EmitToTurn(text))
             {
                 // Local models sometimes hallucinate absolute paths (/home/user/…);
                 // headless writes are hard-confined to the working directory.
                 RestrictWritesToWorkingDirectory = true,
             };
-            var callbacks = new HeadlessLoopCallbacks(llmClient);
-            var state = new LoopState();
-            var driver = new LoopDriver(llmClient, host, callbacks, options, state);
+            _callbacks = new HeadlessLoopCallbacks(_llmClient);
+            _state = new LoopState();
+            _driver = new LoopDriver(_llmClient, _host, _callbacks, options, _state);
 
-            string resolvedBuildCommand = !string.IsNullOrWhiteSpace(buildCommand)
+            _resolvedBuildCommand = !string.IsNullOrWhiteSpace(buildCommand)
                 ? buildCommand
                 : BuildCommandResolver.Resolve(workingDirectory, _ => { });
+        }
 
-            string BuildSystemPrompt()
-            {
-                string llmDirective = LoopHelpers.BuildToolUsePrompt(resolvedBuildCommand, projectNamespace: null);
-                string combined = $"{options.SystemPrompt}\n\n{llmDirective}";
+        // Per-turn transcript sink (reset each turn so each job's transcript file
+        // holds exactly that turn's activity).
+        private StringBuilder _turnTranscript;
+        private readonly object _transcriptLock = new object();
+        private Action<string> _turnProgress;
 
-                string context = LoadAgentsContext(workingDirectory);
-                if (!string.IsNullOrEmpty(context))
-                    combined += $"\n\n--- Project Context (AGENTS.md) ---\n{context}\n---";
+        private void EmitToTurn(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return;
+            lock (_transcriptLock) _turnTranscript?.Append(text);
+            try { _turnProgress?.Invoke(text); } catch { /* progress is best-effort */ }
+        }
 
-                try
-                {
-                    string memoryIndex = new MemoryManager(workingDirectory).LoadIndex();
-                    if (!string.IsNullOrWhiteSpace(memoryIndex))
-                        combined += $"\n\n--- Session Memory (MEMORY.md) ---\n{memoryIndex}\n---";
-                }
-                catch { /* memory is best-effort */ }
+        /// <summary>
+        /// Runs one agentic turn: the initial task prompt, or a continuation
+        /// ("continue", a refinement, a follow-up). Never throws for task-level
+        /// failures — errors are reported in the result. Turns must not overlap.
+        /// </summary>
+        public async Task<HeadlessAgentResult> RunTurnAsync(
+            string prompt,
+            string transcriptPath = null,
+            Action<string> progress = null,
+            CancellationToken ct = default)
+        {
+            var result = new HeadlessAgentResult();
+            var sw = Stopwatch.StartNew();
 
-                if (!string.IsNullOrEmpty(host.TaskScratchpad))
-                    combined += $"\n\n--- CURRENT SCRATCHPAD ---\n{host.TaskScratchpad}\n---";
+            lock (_transcriptLock) _turnTranscript = new StringBuilder();
+            _turnProgress = progress;
 
-                combined += HeadlessAddendum;
-                if (!allowCommit)
-                    combined += NoCommitRule;
-                return combined;
-            }
+            using var runCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            _currentTurnCts = runCts;
 
-            state.ResetForUserTurn();
-            host.ResetTaskContext();
+            // Per-turn resets: write guard set, iteration depth. Conversation history,
+            // file caches, and the scratchpad deliberately persist across turns.
+            _state.ResetForUserTurn();
+            _host.ResetTaskContext();
+            _host.ClearActions(); // result.Actions is THIS turn's journal
 
             var thinkFilter = new ThinkFilter();
             string currentPrompt = prompt;
@@ -180,8 +175,8 @@ namespace DevMind
                         break;
                     }
 
-                    llmClient.IncrementTurn();
-                    host.CancellationToken = runCts.Token;
+                    _llmClient.IncrementTurn();
+                    _host.CancellationToken = runCts.Token;
 
                     if (!firstIteration) thinkFilter.Reset();
                     firstIteration = false;
@@ -195,18 +190,18 @@ namespace DevMind
                     // would hang forever after cancellation.
                     using var cancelReg = runCts.Token.Register(() => tcs.TrySetCanceled(runCts.Token));
 
-                    await llmClient.SendMessageAsync(
+                    await _llmClient.SendMessageAsync(
                         currentPrompt,
                         onToken: token =>
                         {
                             string visible = thinkFilter.Process(token, showThinking: false, out _);
                             if (string.IsNullOrEmpty(visible)) return;
                             responseBuffer.Append(visible);
-                            Emit(visible);
+                            EmitToTurn(visible);
                         },
                         onComplete: () => tcs.TrySetResult(true),
                         onError: ex => tcs.TrySetException(ex),
-                        deferCompression: state.ShellLoopPending,
+                        deferCompression: _state.ShellLoopPending,
                         combinedSystemPrompt: BuildSystemPrompt(),
                         cancellationToken: runCts.Token).ConfigureAwait(false);
 
@@ -222,7 +217,7 @@ namespace DevMind
                     catch (Exception ex)
                     {
                         result.Error = ex.Message;
-                        Emit($"\n[HEADLESS ERROR] {ex.Message}\n");
+                        EmitToTurn($"\n[HEADLESS ERROR] {ex.Message}\n");
                         break;
                     }
 
@@ -231,8 +226,8 @@ namespace DevMind
                     LoopIterationResult iter;
                     try
                     {
-                        iter = await driver.ProcessIterationAsync(currentPrompt, lastResponse,
-                            resolvedBuildCommand, runCts.Token).ConfigureAwait(false);
+                        iter = await _driver.ProcessIterationAsync(currentPrompt, lastResponse,
+                            _resolvedBuildCommand, runCts.Token).ConfigureAwait(false);
                     }
                     catch (OperationCanceledException)
                     {
@@ -260,32 +255,35 @@ namespace DevMind
                         result.Cancelled = true;
                         break;
                     }
-                    currentPrompt = iter.NextContextualMessage ?? callbacks.GetInputText();
-                    callbacks.SetInputText(string.Empty);
+                    currentPrompt = iter.NextContextualMessage ?? _callbacks.GetInputText();
+                    _callbacks.SetInputText(string.Empty);
                 }
             }
             finally
             {
                 sw.Stop();
+                _currentTurnCts = null;
+                _turnProgress = null;
+                LastActivityUtc = DateTime.UtcNow;
             }
 
-            result.Answer = SanitizeAnswer(lastResponse);
-            result.Actions = host.GetActions();
+            result.Answer = HeadlessAgent.SanitizeAnswer(lastResponse);
+            result.Actions = _host.GetActions();
             result.ElapsedSeconds = Math.Round(sw.Elapsed.TotalSeconds, 1);
-            result.HitDepthCap = options.AgenticLoopMaxDepth > 0
-                && result.Iterations >= options.AgenticLoopMaxDepth;
+            result.HitDepthCap = _options.AgenticLoopMaxDepth > 0
+                && result.Iterations >= _options.AgenticLoopMaxDepth;
 
             // A depth-cap exit truncates the model mid-thought; its last message can
             // claim failure that already resolved (or success that didn't). Field
             // evidence: "build still failing" at the cap of a job whose tree built
-            // clean, and a summary cut mid-sentence that read as unresolved. Mark the
-            // answer itself — hit_depth_cap alone was being overlooked by callers.
+            // clean. Mark the answer itself — hit_depth_cap alone was overlooked.
             if (result.HitDepthCap)
             {
                 result.Answer =
-                    $"[INCOMPLETE — iteration cap ({options.AgenticLoopMaxDepth}) reached; the text below is the " +
+                    $"[INCOMPLETE — iteration cap ({_options.AgenticLoopMaxDepth}) reached; the text below is the " +
                     "agent's LAST message, not a completion summary. It may be stale or cut off. Judge the actual " +
-                    "state from the action journal and build_verification, or start a follow-up task to continue.]\n\n"
+                    "state from the action journal and build_verification, or send devmind_task_continue to resume " +
+                    "this conversation where it left off.]\n\n"
                     + result.Answer;
             }
 
@@ -294,8 +292,8 @@ namespace DevMind
                 try
                 {
                     Directory.CreateDirectory(Path.GetDirectoryName(transcriptPath));
-                    lock (transcriptLock)
-                        File.WriteAllText(transcriptPath, transcript.ToString());
+                    lock (_transcriptLock)
+                        File.WriteAllText(transcriptPath, _turnTranscript.ToString());
                     result.TranscriptPath = transcriptPath;
                 }
                 catch { /* transcript is best-effort — never fail the task over it */ }
@@ -304,40 +302,41 @@ namespace DevMind
             return result;
         }
 
-        /// <summary>
-        /// Strips control tokens the local model occasionally leaks into visible text
-        /// (raw &lt;/think&gt; tags and &lt;tool_call&gt;/&lt;function=...&gt; syntax that
-        /// escaped the server-side parser) so they never reach the returned answer.
-        /// </summary>
-        internal static string SanitizeAnswer(string text)
+        /// <summary>Adjusts the per-turn iteration cap for a continuation.</summary>
+        public void SetMaxDepth(int maxDepth) => _options.AgenticLoopMaxDepth = maxDepth;
+
+        private string BuildSystemPrompt()
         {
-            if (string.IsNullOrEmpty(text)) return "";
-            string cleaned = System.Text.RegularExpressions.Regex.Replace(
-                text, @"<tool_call>.*?(</tool_call>|$)", "",
-                System.Text.RegularExpressions.RegexOptions.Singleline);
-            cleaned = System.Text.RegularExpressions.Regex.Replace(
-                cleaned, @"</?think>|<function=[^>]*>|</function>", "");
-            return cleaned.Trim();
+            string llmDirective = LoopHelpers.BuildToolUsePrompt(_resolvedBuildCommand, projectNamespace: null);
+            string combined = $"{_options.SystemPrompt}\n\n{llmDirective}";
+
+            string context = HeadlessAgent.LoadAgentsContext(_workingDirectory);
+            if (!string.IsNullOrEmpty(context))
+                combined += $"\n\n--- Project Context (AGENTS.md) ---\n{context}\n---";
+
+            try
+            {
+                string memoryIndex = new MemoryManager(_workingDirectory).LoadIndex();
+                if (!string.IsNullOrWhiteSpace(memoryIndex))
+                    combined += $"\n\n--- Session Memory (MEMORY.md) ---\n{memoryIndex}\n---";
+            }
+            catch { /* memory is best-effort */ }
+
+            if (!string.IsNullOrEmpty(_host.TaskScratchpad))
+                combined += $"\n\n--- CURRENT SCRATCHPAD ---\n{_host.TaskScratchpad}\n---";
+
+            combined += HeadlessAgent.HeadlessAddendum;
+            if (!_allowCommit)
+                combined += HeadlessAgent.NoCommitRule;
+            return combined;
         }
 
-        /// <summary>AGENTS.md discovery: working directory first, then git root.</summary>
-        private static string LoadAgentsContext(string workingDir)
+        public void Dispose()
         {
-            if (string.IsNullOrEmpty(workingDir)) return null;
-            var searchDirs = new List<string> { workingDir };
-            string gitRoot = ContextEngine.FindGitRoot(workingDir);
-            if (!string.IsNullOrEmpty(gitRoot) &&
-                !string.Equals(gitRoot, workingDir, StringComparison.OrdinalIgnoreCase))
-                searchDirs.Add(gitRoot);
-
-            foreach (string dir in searchDirs)
-            {
-                string path = Path.Combine(dir, "AGENTS.md");
-                if (!File.Exists(path)) continue;
-                try { return File.ReadAllText(path); }
-                catch { }
-            }
-            return null;
+            if (_disposed) return;
+            _disposed = true;
+            try { _currentTurnCts?.Cancel(); } catch { }
+            _llmClient.Dispose();
         }
 
         /// <summary>No-op ILoopCallbacks for headless runs: no status surface, no input
@@ -373,6 +372,90 @@ namespace DevMind
                     : _llmClient.EstimateHistoryTokens();
                 return (used, _llmClient.ServerContextSize);
             }
+        }
+    }
+
+    /// <summary>One-shot convenience wrapper over <see cref="HeadlessSession"/>.</summary>
+    public static class HeadlessAgent
+    {
+        /// <summary>
+        /// Behavioral rails appended to every headless system prompt. The commit rule is
+        /// conditional (see <c>allowCommit</c>); the rest keeps a delegated agent inside
+        /// its sandbox and prevents it stalling on questions nobody will answer.
+        /// </summary>
+        internal const string HeadlessAddendum =
+            "\n\n--- HEADLESS DELEGATION RULES ---\n" +
+            "You are running unattended on behalf of another agent. There is no human to ask:\n" +
+            "never ask clarifying questions — make the most reasonable choice and note the\n" +
+            "assumption in your final answer. Operate ONLY within the working directory, and\n" +
+            "always refer to files by paths RELATIVE to it — absolute paths outside the\n" +
+            "working directory are blocked. Do NOT spend iterations verifying the full build\n" +
+            "or wrestling shell timeouts to do so — the job runner builds the project itself\n" +
+            "after you finish and reports the result to the caller; use the run_build tool\n" +
+            "only for a quick compile check when you genuinely need one mid-task. Do not\n" +
+            "write scratch/output files into the repository — describe results in your\n" +
+            "answer instead. When the task is complete, call task_done with a concise\n" +
+            "summary of what you changed and why.\n";
+
+        internal const string NoCommitRule =
+            "Do NOT run git commit, git push, or any other git command that rewrites history\n" +
+            "or publishes changes — the delegating agent handles version control.\n";
+
+        /// <summary>
+        /// Runs one agentic task to completion in a throwaway session. Never throws for
+        /// task-level failures — errors are reported in the result.
+        /// </summary>
+        public static async Task<HeadlessAgentResult> RunAsync(
+            string prompt,
+            HeadlessOptions options,
+            string endpointUrl,
+            string apiKey,
+            string workingDirectory,
+            string buildCommand = null,
+            bool allowCommit = false,
+            string transcriptPath = null,
+            Action<string> progress = null,
+            CancellationToken ct = default)
+        {
+            using var session = new HeadlessSession(options, endpointUrl, apiKey,
+                workingDirectory, buildCommand, allowCommit);
+            return await session.RunTurnAsync(prompt, transcriptPath, progress, ct).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Strips control tokens the local model occasionally leaks into visible text
+        /// (raw &lt;/think&gt; tags and &lt;tool_call&gt;/&lt;function=...&gt; syntax that
+        /// escaped the server-side parser) so they never reach the returned answer.
+        /// </summary>
+        internal static string SanitizeAnswer(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return "";
+            string cleaned = System.Text.RegularExpressions.Regex.Replace(
+                text, @"<tool_call>.*?(</tool_call>|$)", "",
+                System.Text.RegularExpressions.RegexOptions.Singleline);
+            cleaned = System.Text.RegularExpressions.Regex.Replace(
+                cleaned, @"</?think>|<function=[^>]*>|</function>", "");
+            return cleaned.Trim();
+        }
+
+        /// <summary>AGENTS.md discovery: working directory first, then git root.</summary>
+        internal static string LoadAgentsContext(string workingDir)
+        {
+            if (string.IsNullOrEmpty(workingDir)) return null;
+            var searchDirs = new List<string> { workingDir };
+            string gitRoot = ContextEngine.FindGitRoot(workingDir);
+            if (!string.IsNullOrEmpty(gitRoot) &&
+                !string.Equals(gitRoot, workingDir, StringComparison.OrdinalIgnoreCase))
+                searchDirs.Add(gitRoot);
+
+            foreach (string dir in searchDirs)
+            {
+                string path = Path.Combine(dir, "AGENTS.md");
+                if (!File.Exists(path)) continue;
+                try { return File.ReadAllText(path); }
+                catch { }
+            }
+            return null;
         }
     }
 }
