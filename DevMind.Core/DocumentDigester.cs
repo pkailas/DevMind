@@ -42,10 +42,27 @@ namespace DevMind
             "not visible on the pages.";
 
         private const string ChunkInstruction =
-            "Write dense factual notes capturing the substantive content of these pages: topics, " +
-            "definitions, procedures, configuration items, tables, and important details, citing " +
-            "page numbers. If the pages are covers, tables of contents, or blank, briefly note the " +
-            "document structure they reveal instead. Notes only — no preamble.";
+            "Write concise, dense factual notes (aim for under 500 words) capturing the substantive " +
+            "content of these pages: topics, definitions, procedures, configuration items, and " +
+            "important details, citing page numbers. Summarize code listings and long tables by " +
+            "their purpose, names/signatures, and notable logic — do NOT transcribe them line by " +
+            "line. Never repeat yourself. If the pages are covers, tables of contents, or blank, " +
+            "briefly note the document structure they reveal instead. Notes only — no preamble.";
+
+        /// <summary>
+        /// Hard cap on a single chunk's notes (~5K tokens). Guards against the model
+        /// transcribing code-listing pages instead of summarizing them — observed in the
+        /// field: 5 pages of a development guide produced 135K chars of "notes" and a
+        /// 278s chunk, quintupling the synthesis prompt.
+        /// </summary>
+        internal const int MaxChunkNoteChars = 20_000;
+
+        /// <summary>
+        /// Budget for the combined notes fed to the synthesis call (~50K tokens). When
+        /// exceeded, every note is trimmed to an equal share so the reduce step stays
+        /// well inside the context window regardless of document size.
+        /// </summary>
+        internal const int TotalNotesBudgetChars = 200_000;
 
         /// <summary>
         /// Runs the full digestion. Uses its own LlmClient (fresh conversation per chunk)
@@ -98,14 +115,22 @@ namespace DevMind
                         $"These images are pages {first}-{last} of {pageCount} from the document \"{name}\". " +
                         ChunkInstruction;
                     string note = await AskAsync(client, chunkPrompt, ct).ConfigureAwait(false);
+                    int rawNoteLength = note.Length;
+                    note = TruncateNote(note, MaxChunkNoteChars);
                     notes.Add($"--- Pages {first}-{last} ---\n{note}");
 
                     progress?.Invoke($"[DIGEST] chunk {chunkIndex}/{totalChunks} (pages {first}-{last}) done in " +
-                                     $"{sw.Elapsed.TotalSeconds:F0}s — {note.Length} chars of notes.\n");
+                                     $"{sw.Elapsed.TotalSeconds:F0}s — {rawNoteLength} chars of notes" +
+                                     (note.Length < rawNoteLength
+                                         ? $" (truncated to {MaxChunkNoteChars} — bulk content, likely code listings)"
+                                         : "") + ".\n");
                     lastPage = last;
                 }
 
                 ct.ThrowIfCancellationRequested();
+                if (FitNotesToBudget(notes, TotalNotesBudgetChars))
+                    progress?.Invoke($"[DIGEST] combined notes exceeded the {TotalNotesBudgetChars:N0}-char synthesis " +
+                                     "budget — trimmed each chunk's notes to an equal share.\n");
                 progress?.Invoke($"[DIGEST] synthesizing digest from {notes.Count} chunk note(s)...\n");
 
                 client.ClearHistory();
@@ -154,6 +179,45 @@ namespace DevMind
                 await done.Task.ConfigureAwait(false);
             }
             return StripThink(collected.ToString()).Trim();
+        }
+
+        /// <summary>
+        /// Truncates a runaway note to <paramref name="maxChars"/> with an explicit marker,
+        /// so the synthesis step knows content was dropped rather than silently missing.
+        /// </summary>
+        internal static string TruncateNote(string note, int maxChars)
+        {
+            if (note == null || note.Length <= maxChars)
+                return note;
+            return note.Substring(0, maxChars) +
+                $"\n[... truncated {note.Length - maxChars:N0} of {note.Length:N0} chars — bulk content (likely transcribed code/tables) dropped ...]";
+        }
+
+        /// <summary>
+        /// Trims every note to an equal share when their combined size exceeds the
+        /// synthesis budget (floor 2,000 chars each so short documents keep substance).
+        /// Returns true when trimming was applied.
+        /// </summary>
+        internal static bool FitNotesToBudget(List<string> notes, int budgetChars)
+        {
+            long total = 0;
+            foreach (string note in notes)
+                total += note.Length;
+            if (total <= budgetChars || notes.Count == 0)
+                return false;
+
+            int perNote = Math.Max(2000, budgetChars / notes.Count);
+            bool trimmed = false;
+            for (int i = 0; i < notes.Count; i++)
+            {
+                string fitted = TruncateNote(notes[i], perNote);
+                if (!ReferenceEquals(fitted, notes[i]))
+                {
+                    notes[i] = fitted;
+                    trimmed = true;
+                }
+            }
+            return trimmed;
         }
 
         /// <summary>
