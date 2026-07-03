@@ -1,9 +1,11 @@
 // File: DocumentLibrarian.cs  v1.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
-// The /library feature's orchestrator: RAG over vision-derived page notes.
-//   Ingest — DocumentDigester-style chunk pass (vision notes per page range) on a
-//   private LlmClient, each note embedded (EmbeddingClient) and stored with
+// The /library feature's orchestrator: RAG over vision-derived page notes (PDF)
+// and verbatim text chunks (.md/.txt/.docx).
+//   Ingest — PDFs: DocumentDigester-style chunk pass (vision notes per page range)
+//   on a private LlmClient. Text documents: TextDocumentReader extract + chunk, no
+//   chat-model calls. Each chunk embedded (EmbeddingClient) and stored with
 //   provenance in SQL Server 2025 (LibraryStore, native VECTOR). Embed once.
 //   Query — embed the question, retrieve the nearest chunks across the whole
 //   library, and hand back provenance-labelled excerpts for context injection.
@@ -36,9 +38,10 @@ namespace DevMind
         public const int DefaultTopK = 6;
 
         /// <summary>
-        /// Ingests a PDF: vision notes per chunk (chat endpoint), one embedding per
-        /// chunk (embedding endpoint), stored with page provenance. Re-ingesting the
-        /// same or a changed file replaces the prior rows.
+        /// Ingests a document. PDFs get vision notes per chunk (chat endpoint); text
+        /// documents (.md/.txt/.docx — see TextDocumentReader) skip the chat model and
+        /// embed raw text chunks directly. Either way each chunk gets one embedding and
+        /// provenance rows; re-ingesting the same or a changed file replaces prior rows.
         /// </summary>
         public static async Task<LibraryIngestResult> IngestAsync(
             ILlmOptions options,
@@ -51,6 +54,12 @@ namespace DevMind
             Action<string> progress,
             CancellationToken ct)
         {
+            if (TextDocumentReader.IsTextDocument(pdfPath))
+            {
+                return await IngestTextAsync(
+                    embeddingEndpointUrl, connectionString, pdfPath, progress, ct).ConfigureAwait(false);
+            }
+
             string name = Path.GetFileName(pdfPath);
             string sha256 = ComputeSha256(pdfPath);
             int pageCount = PdfRasterizer.GetPageCount(pdfPath);
@@ -107,6 +116,52 @@ namespace DevMind
             }
         }
 
+        /// <summary>
+        /// Ingests a text-native document (.md/.txt/.docx): extract text, chunk at
+        /// paragraph boundaries, embed each chunk verbatim — no chat-model calls, so
+        /// nothing is lossy and ingest runs at embedding speed. FirstPage/LastPage
+        /// carry the 1-based section (chunk) number.
+        /// </summary>
+        private static async Task<LibraryIngestResult> IngestTextAsync(
+            string embeddingEndpointUrl,
+            string connectionString,
+            string path,
+            Action<string> progress,
+            CancellationToken ct)
+        {
+            string name = Path.GetFileName(path);
+            string sha256 = ComputeSha256(path);
+            string text = TextDocumentReader.ExtractText(path);
+            var chunks = TextDocumentReader.ChunkText(text);
+            if (chunks.Count == 0)
+                throw new InvalidOperationException($"No text extracted from {name} — nothing to ingest.");
+
+            var store = new LibraryStore(connectionString);
+            await store.EnsureSchemaAsync(ct).ConfigureAwait(false);
+
+            progress?.Invoke($"[LIBRARY] Ingesting {name}: {text.Length:N0} chars → {chunks.Count} section(s), " +
+                             "embedded verbatim (no vision pass).\n");
+
+            using (var embedder = new EmbeddingClient(embeddingEndpointUrl))
+            {
+                int documentId = await store.UpsertDocumentAsync(name, path, chunks.Count, sha256, ct)
+                    .ConfigureAwait(false);
+                var swAll = Stopwatch.StartNew();
+                for (int i = 0; i < chunks.Count; i++)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    int section = i + 1;
+                    float[] embedding = await embedder.EmbedAsync(chunks[i], ct).ConfigureAwait(false);
+                    await store.AddChunkAsync(documentId, section, section, chunks[i], embedding, ct)
+                        .ConfigureAwait(false);
+                    progress?.Invoke($"[LIBRARY] section {section}/{chunks.Count} embedded.\n");
+                }
+                progress?.Invoke($"[LIBRARY] {name} ingested in {swAll.Elapsed.TotalSeconds:F0}s — " +
+                                 $"{chunks.Count} section(s) searchable.\n");
+                return new LibraryIngestResult { DocumentId = documentId, Chunks = chunks.Count, Pages = chunks.Count };
+            }
+        }
+
         /// <summary>Embeds the question and returns the nearest library chunks.</summary>
         public static async Task<List<LibraryHit>> QueryAsync(
             string embeddingEndpointUrl,
@@ -130,22 +185,34 @@ namespace DevMind
         public static string BuildAugmentedPrompt(string question, List<LibraryHit> hits)
         {
             var sb = new StringBuilder();
-            sb.AppendLine("Answer the question using the library excerpts below — vision-derived notes " +
-                          "from ingested PDF documents, labelled with document name and page range. " +
-                          "Cite the document and pages you draw from. If the excerpts do not contain " +
-                          "the answer, say so instead of guessing.");
+            sb.AppendLine("Answer the question using the library excerpts below — notes and passages " +
+                          "from ingested documents, labelled with document name and page/section range. " +
+                          "Cite the document and pages or sections you draw from. If the excerpts do not " +
+                          "contain the answer, say so instead of guessing.");
             sb.AppendLine();
             sb.AppendLine("[LIBRARY EXCERPTS]");
             for (int i = 0; i < hits.Count; i++)
             {
                 var h = hits[i];
-                sb.AppendLine($"({i + 1}) {h.DocumentName} — pages {h.FirstPage}-{h.LastPage} (distance {h.Distance:F3}):");
+                sb.AppendLine($"({i + 1}) {h.DocumentName} — {ProvenanceLabel(h)} (distance {h.Distance:F3}):");
                 sb.AppendLine(h.Notes);
                 sb.AppendLine();
             }
             sb.AppendLine("[QUESTION]");
             sb.Append(question);
             return sb.ToString();
+        }
+
+        /// <summary>"pages 3-7" for PDFs; "section 4" for text documents (chunk index).</summary>
+        private static string ProvenanceLabel(LibraryHit h)
+        {
+            bool isPdf = h.DocumentName != null
+                && h.DocumentName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase);
+            if (isPdf)
+                return $"pages {h.FirstPage}-{h.LastPage}";
+            return h.FirstPage == h.LastPage
+                ? $"section {h.FirstPage}"
+                : $"sections {h.FirstPage}-{h.LastPage}";
         }
 
         private static string ComputeSha256(string path)

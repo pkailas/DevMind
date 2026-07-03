@@ -616,7 +616,7 @@ namespace DevMind
                             if (docs.Count == 0)
                             {
                                 host.AppendOutputLocal(
-                                    "Library is empty. Add a document: /library add <path-to-pdf> [p=N]\n", OutputColor.Dim);
+                                    "Library is empty. Add a document: /library add <pdf|md|txt|docx> [p=N]\n", OutputColor.Dim);
                             }
                             else
                             {
@@ -680,13 +680,18 @@ namespace DevMind
                             : Path.IsPathRooted(libPathRaw)
                                 ? libPathRaw
                                 : Path.GetFullPath(Path.Combine(options.WorkingDirectory ?? ".", libPathRaw));
-                        if (libPdf == null || !File.Exists(libPdf)
-                            || !libPdf.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
+                        bool libIsPdf = libPdf != null
+                            && libPdf.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase);
+                        bool libIsText = libPdf != null && TextDocumentReader.IsTextDocument(libPdf);
+                        if (libPdf == null || !File.Exists(libPdf) || !(libIsPdf || libIsText))
                         {
                             host.AppendOutputLocal(
-                                "Usage: /library add <path-to-pdf> [p=N]  — vision-ingests the PDF into the library " +
-                                "(one model call per N pages; needs the chat AND embedding servers running)." +
-                                (libPdf != null ? $"\nNot found or not a PDF: {libPdf}" : "") + "\n", OutputColor.Error);
+                                "Usage: /library add <path> [p=N]  — ingests the document into the library.\n" +
+                                "PDFs are vision-ingested (one model call per N pages; needs the chat AND " +
+                                "embedding servers running). .md/.txt/.docx are text-ingested (embedding " +
+                                "server only)." +
+                                (libPdf != null ? $"\nNot found or unsupported type: {libPdf}" : "") + "\n",
+                                OutputColor.Error);
                             return;
                         }
 
@@ -703,9 +708,12 @@ namespace DevMind
                                     libEmbed, libConn, libPdf, libChunk,
                                     line => host.AppendOutputLocal(line, OutputColor.Dim),
                                     cts.Token);
+                                string libExtent = libIsPdf
+                                    ? $"{ingest.Chunks} chunks, {ingest.Pages} pages"
+                                    : $"{ingest.Chunks} section(s)";
                                 host.AppendOutputLocal(
                                     $"[LIBRARY] Done — {Path.GetFileName(libPdf)} is searchable " +
-                                    $"({ingest.Chunks} chunks, {ingest.Pages} pages). Ask: /library <question>\n",
+                                    $"({libExtent}). Ask: /library <question>\n",
                                     OutputColor.Dim);
                             });
                         }

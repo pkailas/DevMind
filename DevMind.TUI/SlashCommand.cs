@@ -412,8 +412,8 @@ namespace DevMind
             // vector RAG: ingest drives many model turns; questions become augmented turns).
             // Registered here only so /help lists it.
             RegisterCommand("/library",
-                "RAG over ingested PDFs (SQL 2025 vector store): add/list/remove documents, or ask a question against the whole library",
-                "/library [add <pdf> [p=N] | list | remove <id> | <question>]",
+                "RAG over ingested documents (SQL 2025 vector store): add PDFs (vision) or .md/.txt/.docx (text), list/remove, or ask a question against the whole library",
+                "/library [add <pdf|md|txt|docx> [p=N] | list | remove <id> | <question>]",
                 (args, ctx) => Task.FromResult(new CommandResult
                 {
                     Message = "/library is handled by the host input loop — this host has not wired it.",
