@@ -152,6 +152,24 @@ namespace DevMind
                     $"Pages {first}-{last} are out of range — the PDF has {pageCount} page(s).");
             return (first, last);
         }
+
+        /// <summary>
+        /// Computes the next sequential chunk for /image's p=N mode: the caller tracks the
+        /// last page already attached (0 when none) and this returns the following
+        /// <paramref name="chunkSize"/> pages, clamped to the end of the document. Returns
+        /// null when the document is exhausted (cursor at or past the last page) — the
+        /// caller resets its cursor and tells the user.
+        /// </summary>
+        public static (int First, int Last)? NextChunk(int lastAttachedPage, int chunkSize, int pageCount)
+        {
+            if (chunkSize < 1)
+                throw new InvalidOperationException("Chunk size must be at least 1 (use p=5, p=10, ...).");
+
+            int first = Math.Max(1, lastAttachedPage + 1);
+            if (first > pageCount)
+                return null;
+            return (first, Math.Min(first + chunkSize - 1, pageCount));
+        }
     }
 
     /// <summary>

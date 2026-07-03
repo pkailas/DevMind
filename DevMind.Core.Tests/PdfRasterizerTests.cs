@@ -110,6 +110,33 @@ namespace DevMind.Core.Tests
             Assert.False(string.IsNullOrWhiteSpace(ex.Message));
         }
 
+        [Theory]
+        [InlineData(0, 5, 394, 1, 5)]      // fresh document → first chunk
+        [InlineData(5, 5, 394, 6, 10)]     // resumes after last attached page
+        [InlineData(390, 5, 394, 391, 394)] // final chunk clamps to the last page
+        [InlineData(3, 20, 10, 4, 10)]     // chunk larger than remainder clamps
+        public void NextChunk_ReturnsSequentialClampedRanges(
+            int lastAttached, int chunkSize, int pageCount, int expectedFirst, int expectedLast)
+        {
+            var chunk = PdfRasterizer.NextChunk(lastAttached, chunkSize, pageCount);
+            Assert.NotNull(chunk);
+            Assert.Equal((expectedFirst, expectedLast), chunk!.Value);
+        }
+
+        [Theory]
+        [InlineData(394, 5, 394)]  // exactly exhausted
+        [InlineData(400, 5, 394)]  // cursor past the end
+        public void NextChunk_ExhaustedDocument_ReturnsNull(int lastAttached, int chunkSize, int pageCount)
+        {
+            Assert.Null(PdfRasterizer.NextChunk(lastAttached, chunkSize, pageCount));
+        }
+
+        [Fact]
+        public void NextChunk_InvalidChunkSize_Throws()
+        {
+            Assert.Throws<InvalidOperationException>(() => PdfRasterizer.NextChunk(0, 0, 10));
+        }
+
         [Fact]
         public void PngEncoder_CompositesAlphaOverWhite_AndWritesIhdrDims()
         {
