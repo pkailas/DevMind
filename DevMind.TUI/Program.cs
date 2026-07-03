@@ -519,6 +519,9 @@ namespace DevMind
                        PrependMessages = (roles, contents) => llmClient.PrependMessages(roles, contents),
                         // Nearline cache (for the /cache command).
                         NearlineCache = llmClient.NearlineCache,
+                        // Multimodal: /image stages an image on the client; the next
+                        // typed message is sent as multimodal content (text + image).
+                        StagePendingImage = (dataUri) => llmClient.StagePendingImage(dataUri),
                         // Behavioral rules.
                         BehavioralRules = _config.BehavioralRules,
                         SetBehavioralRules = (rules) =>
