@@ -64,6 +64,12 @@ namespace DevMind
         [JsonPropertyName("libraryEmbeddingEndpoint")]
         public string LibraryEmbeddingEndpoint { get; set; } = "http://127.0.0.1:8082/v1";
 
+        /// <summary>When true (default), image file paths typed in a message are
+        /// detected (extension + magic bytes) and auto-attached as multimodal content —
+        /// no /image needed. PDFs always require /image (page-spec decision).</summary>
+        [JsonPropertyName("autoAttachImages")]
+        public bool AutoAttachImages { get; set; } = true;
+
         private static string ConfigPath => Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             ConfigDirName, ConfigFileName);
@@ -106,6 +112,16 @@ namespace DevMind
 
               if (root.TryGetProperty("trainingLogFolder", out var tlf) && tlf.ValueKind == JsonValueKind.String)
                     config.TrainingLogFolder = tlf.GetString() ?? "";
+
+                if (root.TryGetProperty("libraryConnectionString", out var lcs) && lcs.ValueKind == JsonValueKind.String)
+                    config.LibraryConnectionString = lcs.GetString() ?? "";
+
+                if (root.TryGetProperty("libraryEmbeddingEndpoint", out var lee) && lee.ValueKind == JsonValueKind.String)
+                    config.LibraryEmbeddingEndpoint = lee.GetString() ?? "";
+
+                if (root.TryGetProperty("autoAttachImages", out var aai)
+                    && (aai.ValueKind == JsonValueKind.True || aai.ValueKind == JsonValueKind.False))
+                    config.AutoAttachImages = aai.GetBoolean();
 
                 if (root.TryGetProperty("sqlConnections", out var sc) && sc.ValueKind == JsonValueKind.Object)
                 {

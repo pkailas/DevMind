@@ -769,6 +769,32 @@ namespace DevMind
                     }
                 }
 
+                // ── Auto-attach typed image paths ───────────────────────────────
+                // A message mentioning an existing image file (quoted or bare path,
+                // validated by magic bytes) stages it as multimodal content without
+                // an explicit /image. Echoes what it attached so nothing is silent;
+                // config autoAttachImages=false opts out. PDFs stay behind /image.
+                void AutoAttachTypedImages(string text)
+                {
+                    if (!_config.AutoAttachImages)
+                        return;
+                    try
+                    {
+                        foreach (var img in ImagePathScanner.Scan(text, options.WorkingDirectory))
+                        {
+                            llmClient.StagePendingImage(ImagePathScanner.BuildDataUri(img));
+                            host.AppendOutputLocal(
+                                $"[attached: {Path.GetFileName(img.FullPath)} ({img.MimeType}, {img.SizeBytes / 1024.0:F0} KB)]\n",
+                                OutputColor.Dim);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        // Never let attach detection kill the turn — the text still goes out.
+                        host.AppendOutputLocal($"[auto-attach skipped: {ex.Message}]\n", OutputColor.Dim);
+                    }
+                }
+
                 // ── Slash-command dispatch ──────────────────────────────────────
                 // Intercept slash commands at the input boundary so they never
                 // burn model tokens. The dispatcher routes to registered handlers.
@@ -894,6 +920,7 @@ namespace DevMind
                         {
                             // Echo the actual message.
                             host.AppendOutputLocal($"\n> {message}\n", OutputColor.Input);
+                            AutoAttachTypedImages(message);
 
                             // Enable thinking for this turn.
                             bool previousThinking = options.ShowLlmThinking;
@@ -941,6 +968,8 @@ namespace DevMind
                     statusBar.SetReady();
                     return;
                 }
+
+                AutoAttachTypedImages(input);
 
                 // Disable input during agentic processing.
                 inputBox.View.CanFocus = false;
