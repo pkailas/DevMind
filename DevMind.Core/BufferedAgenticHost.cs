@@ -54,6 +54,15 @@ namespace DevMind
         private readonly List<HostAction> _actions = new List<HostAction>();
         private readonly object _actionsLock = new object();
 
+        // Patch-staleness tracking: patches applied per file since the model last READ
+        // it. Field evidence (job-11): four overlapping patches against a stale view
+        // corrupted a file ("Ambiguous FIND — matched at line 305 and line 378"); the
+        // repair job that re-read after every patch applied 17+ cleanly. Enforced only
+        // for headless runs (RestrictWritesToWorkingDirectory).
+        private const int StalePatchThreshold = 3;
+        private readonly Dictionary<string, int> _patchesSinceRead =
+            new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
         private readonly ShellRunner _shellRunner;
         private readonly FileContentCache _fileCache = new FileContentCache();
 
@@ -120,6 +129,43 @@ namespace DevMind
         /// sandboxed — that is the accepted full-auto trust boundary.
         /// </summary>
         public bool RestrictWritesToWorkingDirectory { get; set; }
+
+        /// <summary>
+        /// Headless shell blocklist. Field evidence (job-11): a confused agent ran
+        /// "git show HEAD~1:file | Set-Content file", overwriting a working-tree file
+        /// and destroying two earlier tasks' uncommitted changes; another job taskkilled
+        /// the operator's running API to unblock a build. Recovery-from-git and process
+        /// control are reserved for the human operator in delegated runs.
+        /// </summary>
+        internal static bool IsBlockedHeadlessCommand(string command, out string reason)
+        {
+            reason = null;
+            if (string.IsNullOrWhiteSpace(command)) return false;
+            string c = command.ToLowerInvariant();
+
+            bool has(string s) => c.Contains(s, StringComparison.Ordinal);
+
+            if (has("git restore") || has("git checkout --") || has("git checkout .")
+                || has("git checkout head") || has("git reset --hard") || has("git clean"))
+            {
+                reason = "restores/discards working-tree files from git";
+                return true;
+            }
+
+            if (has("git show") && (has(">") || has("set-content") || has("out-file") || has("| sc ")))
+            {
+                reason = "writes git object content over working-tree files";
+                return true;
+            }
+
+            if (has("taskkill") || has("stop-process") || has("kill -9"))
+            {
+                reason = "kills processes";
+                return true;
+            }
+
+            return false;
+        }
 
         /// <summary>False (and journals the block) when the sandbox is on and
         /// <paramref name="fullPath"/> falls outside the working directory.</summary>
@@ -198,6 +244,17 @@ namespace DevMind
 
        async Task<(int exitCode, string output)> IAgenticHost.RunShellAsync(string command, int? timeoutSeconds)
         {
+            if (RestrictWritesToWorkingDirectory && IsBlockedHeadlessCommand(command, out string blockReason))
+            {
+                RecordAction("blocked", $"shell ({blockReason}): {command}", success: false);
+                AppendOutput($"[SHELL GUARD] Blocked ({blockReason}): {command}\n", OutputColor.Error);
+                return (1,
+                    $"[BLOCKED] This command is not allowed in delegated tasks: {blockReason}. " +
+                    "Do NOT restore files from git history (it can destroy uncommitted work from " +
+                    "earlier tasks) and do NOT kill processes. To fix a broken file, READ its " +
+                    "current content and apply corrective patches instead.");
+            }
+
             AppendOutput($"[SHELL] > {command}\n", OutputColor.Dim);
             var progress = new Progress<ShellOutputLine>(line =>
                 AppendOutput(line.Line + "\n", line.IsError ? OutputColor.Error : OutputColor.Normal));
@@ -771,12 +828,13 @@ namespace DevMind
             int scanStart = startLine.HasValue ? Math.Max(1, startLine.Value) : 1;
             int scanEnd   = endLine.HasValue   ? Math.Min(totalFileLines, endLine.Value) : totalFileLines;
 
+            var matcher = SearchPattern.BuildMatcher(pattern);
             var matches = new List<(int lineNum, string lineText)>();
             for (int lineNum = scanStart; lineNum <= scanEnd; lineNum++)
             {
                 string lineContent = _fileCache.GetLineRange(fileNameOnly, lineNum, lineNum);
                 if (lineContent == null) continue;
-                if (lineContent.IndexOf(pattern, StringComparison.OrdinalIgnoreCase) >= 0)
+                if (matcher(lineContent))
                     matches.Add((lineNum, lineContent));
             }
 
@@ -838,6 +896,7 @@ namespace DevMind
                 return Task.FromResult($"FIND: error enumerating files for {globPattern} — {ex.Message}");
             }
 
+            var findMatcher = SearchPattern.BuildMatcher(pattern);
             var allMatches = new List<(string fileLabel, int lineNum, string lineText)>();
             bool hitCap = false;
 
@@ -865,7 +924,7 @@ namespace DevMind
                 {
                     string lineContent = _fileCache.GetLineRange(fileNameOnly, lineNum, lineNum);
                     if (lineContent == null) continue;
-                    if (lineContent.IndexOf(pattern, StringComparison.OrdinalIgnoreCase) >= 0)
+                    if (findMatcher(lineContent))
                     {
                         allMatches.Add((fileNameOnly, lineNum, lineContent));
                         if (allMatches.Count >= MaxMatches) { hitCap = true; break; }
@@ -1053,6 +1112,27 @@ namespace DevMind
 
         async Task<PatchResolveResult> IAgenticHost.ResolvePatchAsync(string patchContent, bool fromToolCall)
         {
+            // Staleness guard (headless): too many patches since the last read means the
+            // model's view of the file has drifted — the precondition for overlapping-
+            // patch corruption. Thrown (not null) so the exact guidance reaches the
+            // model via the executor's error channel. Deliberately BEFORE the main try.
+            if (RestrictWritesToWorkingDirectory)
+            {
+                string headerLine = (patchContent ?? string.Empty).Split('\n')[0];
+                string guardName = SafeGetFileName(headerLine.Length > 5 ? headerLine.Substring(5).Trim() : "");
+                if (guardName.Length > 0
+                    && _patchesSinceRead.TryGetValue(guardName, out int applied)
+                    && applied >= StalePatchThreshold)
+                {
+                    RecordAction("blocked", $"patch guard: {applied} patches to {guardName} since last read", success: false);
+                    AppendOutput($"[PATCH GUARD] {guardName}: {applied} patches since last read — read required.\n", OutputColor.Warning);
+                    throw new InvalidOperationException(
+                        $"[PATCH GUARD] {applied} patches have already been applied to {guardName} since you last read it — " +
+                        "your view of the file is stale, which is how overlapping patches corrupt files. " +
+                        "READ the affected line range of the file first, then patch against its CURRENT content.");
+                }
+            }
+
             try
             {
                 // Extract filename from "PATCH <filename>" header line
@@ -1201,6 +1281,7 @@ namespace DevMind
                 AppendOutput($"[PATCH] Applied to {resolved.FullPath} (undo depth: {undosAvailable}){(merge.UsedFallback ? " [two-way fallback]" : "")}\n",
                     OutputColor.Success);
                 RecordAction("patch", resolved.FullPath);
+                _patchesSinceRead[fileNameOnly] = _patchesSinceRead.GetValueOrDefault(fileNameOnly) + 1;
                 return Task.FromResult(resolved.FullPath);
             }
             catch (Exception ex)
@@ -1408,6 +1489,7 @@ namespace DevMind
                     }
 
                     _taskReadFiles.Add(fileNameOnly);
+                    _patchesSinceRead.Remove(fileNameOnly); // model refreshed its view
                     int totalLines = _fileCache.GetLineCount(fileNameOnly);
 
                     if (rangeStart > rangeEnd) { int t = rangeStart; rangeStart = rangeEnd; rangeEnd = t; }
@@ -1440,6 +1522,7 @@ namespace DevMind
                 var (content, _enc) = PatchEngine.ReadFilePreservingEncoding(fullPath);
                 _fileCache.Store(fileNameOnly, content);
                 _taskReadFiles.Add(fileNameOnly);
+                _patchesSinceRead.Remove(fileNameOnly); // model refreshed its view
                 int lineCount = content.Split('\n').Length;
 
                 bool alreadyRead = _filesRead.Contains(fileNameOnly);

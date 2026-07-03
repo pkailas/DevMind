@@ -87,7 +87,16 @@ namespace DevMind
 
             // cmd.exe supports && natively; only rewrite for PowerShell.
             if (usePowerShell)
+            {
                 command = command.Replace(" && ", "; ");
+
+                // %VAR% is cmd syntax — PowerShell passes it through literally, and a
+                // live agent's "-p:OutDir=%TEMP%\..." created directories literally
+                // named "%TEMP%" inside the repo. Expand known env vars up front;
+                // unknown %...% sequences are left untouched.
+                if (command.IndexOf('%') >= 0)
+                    command = Environment.ExpandEnvironmentVariables(command);
+            }
 
             string sanitized = SanitizeCommand(command);
             string args = usePowerShell
