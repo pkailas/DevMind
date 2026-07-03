@@ -269,11 +269,25 @@ namespace DevMind
                 sw.Stop();
             }
 
-            result.Answer = lastResponse.Trim();
+            result.Answer = SanitizeAnswer(lastResponse);
             result.Actions = host.GetActions();
             result.ElapsedSeconds = Math.Round(sw.Elapsed.TotalSeconds, 1);
             result.HitDepthCap = options.AgenticLoopMaxDepth > 0
                 && result.Iterations >= options.AgenticLoopMaxDepth;
+
+            // A depth-cap exit truncates the model mid-thought; its last message can
+            // claim failure that already resolved (or success that didn't). Field
+            // evidence: "build still failing" at the cap of a job whose tree built
+            // clean, and a summary cut mid-sentence that read as unresolved. Mark the
+            // answer itself — hit_depth_cap alone was being overlooked by callers.
+            if (result.HitDepthCap)
+            {
+                result.Answer =
+                    $"[INCOMPLETE — iteration cap ({options.AgenticLoopMaxDepth}) reached; the text below is the " +
+                    "agent's LAST message, not a completion summary. It may be stale or cut off. Judge the actual " +
+                    "state from the action journal and build_verification, or start a follow-up task to continue.]\n\n"
+                    + result.Answer;
+            }
 
             if (!string.IsNullOrEmpty(transcriptPath))
             {
@@ -288,6 +302,22 @@ namespace DevMind
             }
 
             return result;
+        }
+
+        /// <summary>
+        /// Strips control tokens the local model occasionally leaks into visible text
+        /// (raw &lt;/think&gt; tags and &lt;tool_call&gt;/&lt;function=...&gt; syntax that
+        /// escaped the server-side parser) so they never reach the returned answer.
+        /// </summary>
+        internal static string SanitizeAnswer(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return "";
+            string cleaned = System.Text.RegularExpressions.Regex.Replace(
+                text, @"<tool_call>.*?(</tool_call>|$)", "",
+                System.Text.RegularExpressions.RegexOptions.Singleline);
+            cleaned = System.Text.RegularExpressions.Regex.Replace(
+                cleaned, @"</?think>|<function=[^>]*>|</function>", "");
+            return cleaned.Trim();
         }
 
         /// <summary>AGENTS.md discovery: working directory first, then git root.</summary>

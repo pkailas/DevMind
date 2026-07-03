@@ -240,11 +240,12 @@ internal sealed class DevMindTools
 
     [McpServerTool(Name = "grep_file")]
     [Description(
-        "Search a single file for lines matching a pattern (case-insensitive substring match). " +
+        "Search a single file for lines matching a pattern (case-insensitive substring; " +
+        "'|' separates OR alternatives; no other regex syntax). " +
         "Returns matching lines with 1-based line numbers, capped at 50 matches. " +
         "Use grep_file to locate code, then read_file with a targeted range, then patch_file.")]
     public async Task<string> GrepFile(
-        [Description("Search pattern (case-insensitive substring match, not regex).")] string pattern,
+        [Description("Search text: case-insensitive substring; '|' separates OR alternatives; no other regex.")] string pattern,
         [Description("Absolute file path.")] string filename,
         [Description("1-based start line to restrict the search window.")] int? start_line = null,
         [Description("1-based end line to restrict the search window.")] int? end_line = null,
@@ -267,12 +268,13 @@ internal sealed class DevMindTools
                 int scanStart  = start_line.HasValue ? Math.Max(1, start_line.Value) : 1;
                 int scanEnd    = end_line.HasValue   ? Math.Min(totalLines, end_line.Value) : totalLines;
 
+                var matcher = SearchPattern.BuildMatcher(pattern);
                 var matches = new List<(int lineNum, string lineText)>();
                 for (int lineNum = scanStart; lineNum <= scanEnd; lineNum++)
                 {
                     string lineContent = _svc.FileCache.GetLineRange(cacheKey, lineNum, lineNum);
                     if (lineContent == null) continue;
-                    if (lineContent.IndexOf(pattern, StringComparison.OrdinalIgnoreCase) >= 0)
+                    if (matcher(lineContent))
                         matches.Add((lineNum, lineContent));
                 }
 
@@ -308,12 +310,13 @@ internal sealed class DevMindTools
         "Returns filename:line:content for each hit, capped at 100 results. " +
         "Use find_in_files when you need to know where something is used across the project. " +
         "Use grep_file when you already know which file to search. " +
-        "IMPORTANT: pattern is a case-insensitive SUBSTRING, not a regex — '|' and other " +
-        "regex metacharacters are matched literally. When the server was launched without " +
+        "Pattern is a case-insensitive SUBSTRING with one extension: '|' separates OR " +
+        "alternatives (e.g. 'PdfGenerated|Exported' matches lines containing either). " +
+        "Other regex syntax is NOT supported. When the server was launched without " +
         "--dir (e.g. by a GUI client like Claude Desktop), you MUST pass root, or the " +
         "search runs against the wrong directory and returns false 'no matches'.")]
     public async Task<string> FindInFiles(
-        [Description("Search text (case-insensitive SUBSTRING — regex is NOT supported; '|' is literal).")] string pattern,
+        [Description("Search text: case-insensitive substring; '|' separates OR alternatives; no other regex.")] string pattern,
         [Description("Glob pattern to match files (e.g., '*.cs', 'Services/*.cs').")] string glob,
         [Description("Absolute directory to search under. Defaults to the server's working directory — pass this explicitly when unsure (GUI-launched servers have no meaningful default).")] string? root = null,
         [Description("1-based start line to restrict the search window within each file.")] int? start_line = null,
@@ -358,6 +361,7 @@ internal sealed class DevMindTools
                     return $"find_in_files: error enumerating files for {glob} — {ex.Message}";
                 }
 
+                var findMatcher = SearchPattern.BuildMatcher(pattern);
                 var allMatches = new List<(string fileLabel, int lineNum, string lineText)>();
                 bool hitCap    = false;
 
@@ -383,7 +387,7 @@ internal sealed class DevMindTools
                     {
                         string lineContent = _svc.FileCache.GetLineRange(cacheKey, lineNum, lineNum);
                         if (lineContent == null) continue;
-                        if (lineContent.IndexOf(pattern, StringComparison.OrdinalIgnoreCase) >= 0)
+                        if (findMatcher(lineContent))
                         {
                             allMatches.Add((fileNameOnly, lineNum, lineContent));
                             if (allMatches.Count >= MaxMatches) { hitCap = true; break; }
@@ -501,6 +505,7 @@ internal sealed class DevMindTools
                 if (topics.Count == 0)
                     return "search_memory: no memory topics found.";
 
+                var memoryMatcher = SearchPattern.BuildMatcher(pattern);
                 var results = new List<(string topic, int lineNum, string lineText)>();
 
                 foreach (var topic in topics)
@@ -512,7 +517,7 @@ internal sealed class DevMindTools
                     var lines = content.Split('\n');
                     for (int i = 0; i < lines.Length; i++)
                     {
-                        if (lines[i].IndexOf(pattern, StringComparison.OrdinalIgnoreCase) >= 0)
+                        if (memoryMatcher(lines[i]))
                             results.Add((topic, i + 1, lines[i].TrimEnd()));
                     }
                 }

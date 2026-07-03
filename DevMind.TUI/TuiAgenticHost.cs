@@ -1329,12 +1329,13 @@ namespace DevMind
             int scanStart = startLine.HasValue ? Math.Max(1, startLine.Value) : 1;
             int scanEnd   = endLine.HasValue   ? Math.Min(totalFileLines, endLine.Value) : totalFileLines;
 
+            var matcher = SearchPattern.BuildMatcher(pattern);
             var matches = new List<(int lineNum, string lineText)>();
             for (int lineNum = scanStart; lineNum <= scanEnd; lineNum++)
             {
                string lineContent = _fileCache.GetLineRange(fileNameOnly, lineNum, lineNum);
                 if (lineContent == null) continue;
-                if (lineContent.IndexOf(pattern, StringComparison.OrdinalIgnoreCase) >= 0)
+                if (matcher(lineContent))
                     matches.Add((lineNum, lineContent));
             }
 
@@ -1396,6 +1397,7 @@ namespace DevMind
                 return Task.FromResult($"FIND: error enumerating files for {globPattern} — {ex.Message}");
             }
 
+            var findMatcher = SearchPattern.BuildMatcher(pattern);
             var allMatches = new List<(string fileLabel, int lineNum, string lineText)>();
             bool hitCap = false;
 
@@ -1424,7 +1426,7 @@ namespace DevMind
                 {
                    string lineContent = _fileCache.GetLineRange(fileNameOnly, lineNum, lineNum);
                     if (lineContent == null) continue;
-                    if (lineContent.IndexOf(pattern, StringComparison.OrdinalIgnoreCase) >= 0)
+                    if (findMatcher(lineContent))
                     {
                         allMatches.Add((fileNameOnly, lineNum, lineContent));
                         if (allMatches.Count >= MaxMatches) { hitCap = true; break; }
