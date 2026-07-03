@@ -38,6 +38,35 @@ namespace DevMind.Core.Tests
         }
 
         [Fact]
+        public void EnrichProcessEnvironment_RestoresPathExtWhenMissing()
+        {
+            // Regression: Desktop-launched MCP server had no PATHEXT — PowerShell then
+            // treats .exe files as documents (detached launch, empty stdout, blank
+            // $LASTEXITCODE), which burned a live delegation's entire depth cap.
+            string? priorPathExt = Environment.GetEnvironmentVariable("PATHEXT");
+            string? priorPath = Environment.GetEnvironmentVariable("PATH");
+            string? priorTimeout = Environment.GetEnvironmentVariable("DEVMIND_SHELL_TIMEOUT");
+            try
+            {
+                Environment.SetEnvironmentVariable("PATHEXT", null);
+                string? changes = DevEnvironment.EnrichProcessEnvironment();
+
+                string? pathExt = Environment.GetEnvironmentVariable("PATHEXT");
+                Assert.NotNull(pathExt);
+                Assert.Contains(".EXE", pathExt);
+                Assert.Contains(".CMD", pathExt);
+                Assert.NotNull(changes);
+                Assert.Contains("PATHEXT", changes);
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("PATHEXT", priorPathExt);
+                Environment.SetEnvironmentVariable("PATH", priorPath);
+                Environment.SetEnvironmentVariable("DEVMIND_SHELL_TIMEOUT", priorTimeout);
+            }
+        }
+
+        [Fact]
         public void EnrichProcessEnvironment_RespectsExistingShellTimeout()
         {
             string? priorTimeout = Environment.GetEnvironmentVariable("DEVMIND_SHELL_TIMEOUT");
