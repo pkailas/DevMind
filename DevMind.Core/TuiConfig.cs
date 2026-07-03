@@ -9,7 +9,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
+using System.Text.Json.Serialization;
 
 namespace DevMind
 {
@@ -51,6 +51,18 @@ namespace DevMind
         /// Stored securely — never logged or echoed.</summary>
         [JsonPropertyName("sqlConnections")]
         public Dictionary<string, string> SqlConnections { get; set; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>SQL Server 2025+ connection string for the /library document store
+        /// (requires the native VECTOR type). Blank disables /library.</summary>
+        [JsonPropertyName("libraryConnectionString")]
+        public string LibraryConnectionString { get; set; } =
+            "Server=WIN-SQL002,14330;Database=DevMindRAG;Integrated Security=true;TrustServerCertificate=true";
+
+        /// <summary>OpenAI-compatible /v1 endpoint of the EMBEDDING llama-server (a second
+        /// instance running an embedding model with --embeddings; see
+        /// llm-launchers\start-qwen3-embedding.bat).</summary>
+        [JsonPropertyName("libraryEmbeddingEndpoint")]
+        public string LibraryEmbeddingEndpoint { get; set; } = "http://127.0.0.1:8082/v1";
 
         private static string ConfigPath => Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
@@ -104,7 +116,7 @@ namespace DevMind
                     }
                 }
             }
-            catch
+            catch
             {
                 // Silently ignore parse errors — return defaults.
             }
