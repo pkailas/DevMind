@@ -157,29 +157,42 @@ namespace DevMind
             // and stamps element.Attribute by document offset during visual-line construction.
             _outputView.LineTransformers.Add(new OffsetColorTransformer(_colorSpans));
 
-            // Scroll lock is driven by explicit wheel intent, not position sampling: during
-            // streaming the render pump snaps to bottom every 100 ms, so a position check
-            // loses the race against one-row wheel notches (the "pin loses to the stream"
-            // bug). This observer runs BEFORE the wheel's scroll command executes
-            // (View.RaiseMouseEvent order), so wheel-down predicts the post-scroll position
-            // with pendingScrollRows: 1 (Editor scrolls one row per notch). Unpinning also
-            // happens on send (ScrollOutputToEnd), /cls, and a flush that finds the view at
-            // the exact bottom. The handler only observes — Handled stays false, so the
+            // Scroll lock, tracked as a pure wheel-notch counter — NO geometry. Two earlier
+            // designs failed against this Editor: position sampling lost the 100 ms-flush
+            // race to one-row wheel notches, and geometry checks read a stale ContentSize
+            // (the Editor recomputes it at draw time, not at insert time), mis-unpinning
+            // mid-read. Each wheel-up notch scrolls one row and increments the counter; each
+            // wheel-down decrements it (with an at-bottom geometry HINT that only ever zeroes
+            // the counter on a down-notch — the benign direction). While the counter is
+            // positive the document is completely frozen (see FlushPending), so nothing can
+            // race. This observer fires before the wheel's scroll command executes
+            // (View.RaiseMouseEvent order) and only observes — Handled stays false, so the
             // Editor's own scrolling is untouched.
             _outputView.MouseEvent += (s, mouse) =>
             {
                 if (mouse.Flags.HasFlag(Terminal.Gui.Input.MouseFlags.WheeledUp))
-                    _scrollPinned = true;
+                {
+                    if (_pinnedScrollRows < int.MaxValue) _pinnedScrollRows++;
+                }
                 else if (mouse.Flags.HasFlag(Terminal.Gui.Input.MouseFlags.WheeledDown)
-                         && IsScrolledToBottom(pendingScrollRows: 1))
-                    _scrollPinned = false;
+                         && _pinnedScrollRows > 0)
+                {
+                    // Notches past the top inflate the counter without moving the view, so a
+                    // pure countdown could leave the user pinned AT the bottom; the at-bottom
+                    // hint (post-scroll, +1 row) zeroes it out in that case.
+                    _pinnedScrollRows--;
+                    if (_pinnedScrollRows <= 0 || IsScrolledToBottom(pendingScrollRows: 1))
+                        _pinnedScrollRows = 0;
+                }
             };
         }
 
-        // Scroll-lock state: true while the user has wheeled up to read scrollback. The
-        // render pump's auto-scroll and the scrollback trim are suspended while pinned.
-        // UI thread only (wheel events, FlushPending, and the input loop all run there).
-        private bool _scrollPinned;
+        // Scroll-lock state: > 0 while the user has wheeled up to read scrollback (the
+        // net count of wheel-up notches). While positive, FlushPending freezes the
+        // document — no inserts, no trims, no caret moves — so the view cannot shift
+        // under the reader; streamed output buffers in _pending meanwhile. UI thread
+        // only (wheel events, FlushPending, and the input loop all run there).
+        private int _pinnedScrollRows;
 
         // ── Context lifecycle helpers ────────────────────────────────────────────
 
@@ -265,6 +278,30 @@ namespace DevMind
         // the render pump). Cheap when idle (lock + count check).
         private void FlushPending()
         {
+            // Scroll lock: while the user is pinned reading scrollback, the document is
+            // FROZEN — no insert (so no re-wrap, no row growth), no trim (a front-trim
+            // would yank the text being read), no caret move (whose EnsureCaretVisible is
+            // the snap-back). The stream keeps buffering in _pending and pours in on
+            // unpin. The backlog is bounded to the scrollback cap: older spans past it
+            // would be trimmed the moment they landed anyway, so drop them here instead
+            // of letting a walked-away-while-pinned session grow without limit.
+            if (_pinnedScrollRows > 0)
+            {
+                lock (_pendingLock)
+                {
+                    int total = 0;
+                    foreach (var p in _pending) total += p.text.Length;
+                    if (total > MaxDocChars)
+                    {
+                        int drop = 0, dropped = 0;
+                        while (dropped < total - KeepDocChars && drop < _pending.Count - 1)
+                            dropped += _pending[drop++].text.Length;
+                        _pending.RemoveRange(0, drop);
+                    }
+                }
+                return;
+            }
+
             (string text, Terminal.Gui.Drawing.Attribute attr)[] batch;
             lock (_pendingLock)
             {
@@ -322,14 +359,6 @@ namespace DevMind
                 return;
             }
 
-            // Scroll lock: follow the stream unless the user has wheeled up (_scrollPinned).
-            // Self-heal: if pinned but the view actually sits at the exact bottom (the
-            // wheel-down predictor can be off by a row at the boundary), resume following.
-            // Sampled BEFORE the insert — the insert itself grows the row count.
-            if (_scrollPinned && IsScrolledToBottom(pendingScrollRows: 0))
-                _scrollPinned = false;
-            bool follow = !_scrollPinned;
-
             try
             {
                 doc.Insert(start, combined.ToString());
@@ -342,19 +371,8 @@ namespace DevMind
             }
             _colorSpans.AddRange(pendingSpans);
 
-            if (follow)
-            {
-                TrimScrollbackIfNeeded(doc);
-                _outputView.CaretOffset = doc.TextLength; // one auto-scroll for the whole batch
-            }
-            else if (doc.TextLength > MaxDocChars * 2)
-            {
-                // While pinned, a front-trim would yank the text being read, so trimming is
-                // deferred — but not forever: past 2× the cap the re-wrap cost per insert
-                // (O(doc), see TrimScrollbackIfNeeded) starts starving the render pump, so
-                // trim anyway and accept the jump. Normal trimming resumes with following.
-                TrimScrollbackIfNeeded(doc);
-            }
+            TrimScrollbackIfNeeded(doc);
+            _outputView.CaretOffset = doc.TextLength; // one auto-scroll for the whole batch
             // The output view is read-only and unfocusable, so its undo history is dead weight:
             // doc.Insert (above) and doc.Remove (in the trim) each push an undo entry, so the
             // UndoStack grows unbounded across a session — the one piece of render state the
@@ -372,9 +390,10 @@ namespace DevMind
         // True when the viewport (shifted by pendingScrollRows, for predicting where a
         // not-yet-executed wheel scroll will land) shows the last visual row.
         // GetContentSize().Height is the Editor's total visual-row count (wrap-map space,
-        // same coordinate system as Viewport.Y — it's what clamps wheel scrolling). The
-        // comparison is EXACT: any tolerance here would erase a one-notch wheel-up pin.
-        // UI thread only.
+        // same coordinate system as Viewport.Y) — but it is recomputed at DRAW time, so it
+        // can be stale between draws. That's why this is only used as a benign HINT (the
+        // wheel-down counter-zeroing in the ctor observer), never as the pin/follow
+        // decision itself. UI thread only.
         private bool IsScrolledToBottom(int pendingScrollRows)
         {
             try
@@ -397,7 +416,7 @@ namespace DevMind
         /// </summary>
         public void ScrollOutputToEnd()
         {
-            _scrollPinned = false;
+            _pinnedScrollRows = 0;
             TextDocument doc = _outputView.Document;
             if (doc != null)
                 _outputView.CaretOffset = doc.TextLength;
@@ -544,7 +563,7 @@ namespace DevMind
 
             void DoClear()
             {
-                _scrollPinned = false;                  // a cleared view has nothing to stay pinned to
+                _pinnedScrollRows = 0;                  // a cleared view has nothing to stay pinned to
                 lock (_pendingLock) _pending.Clear();   // drop queued, not-yet-rendered spans
 
                 TextDocument doc = _outputView.Document;
