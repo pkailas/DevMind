@@ -232,6 +232,30 @@ namespace DevMind
             // Add views to window.
             window.Add(outputView, inputBox.View, statusBar.Root);
 
+            // "Jump to bottom" toast — appears at the bottom-right of the transcript while
+            // the scroll pin is engaged (user wheeled up), mirroring Claude Code's hint.
+            // Added AFTER outputView so it draws on top. Ctrl+End (below) and sending a
+            // message both jump + resume following; the toast hides on the pin-release edge.
+            var jumpToast = new Label
+            {
+                Text = " ▼ scrolled up — Ctrl+End: jump to bottom ",
+                Visible = false,
+            };
+            jumpToast.X = Pos.AnchorEnd(jumpToast.Text.Length + 1);
+            jumpToast.Y = Pos.Top(inputBox.View) - 1;
+            jumpToast.SetScheme(new Terminal.Gui.Drawing.Scheme(jumpToast.GetScheme())
+            {
+                Normal = new Terminal.Gui.Drawing.Attribute(
+                    new Terminal.Gui.Drawing.Color(0x00, 0x00, 0x00),
+                    new Terminal.Gui.Drawing.Color(0xE0, 0xA8, 0x00)), // black on amber
+            });
+            window.Add(jumpToast);
+            host.ScrollPinChanged += pinned =>
+            {
+                jumpToast.Visible = pinned;
+                window.SetNeedsDraw();
+            };
+
             // Build-version chip, pinned to the FAR RIGHT of the window's top border
             // (the title row). Lets the user confirm which binary is running — the git
             // short-hash in the suffix distinguishes builds. Read from the running .exe's
@@ -368,6 +392,17 @@ namespace DevMind
                     key.Handled = true;
                     cts.Cancel();        // ask any running turn to stop
                     app.RequestStop();   // exit the main loop → process returns
+                    return;
+                }
+
+                // ── Ctrl+End — jump to bottom & resume following ────────────────
+                // Releases the scroll pin, clears any stale selection, moves the
+                // caret to the newest line; the frozen backlog flushes on the next
+                // render-pump tick (≤100 ms).
+                if (key.KeyCode == Key.End.WithCtrl.KeyCode)
+                {
+                    key.Handled = true;
+                    host.ScrollOutputToEnd();
                     return;
                 }
 

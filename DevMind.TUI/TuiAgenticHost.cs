@@ -172,7 +172,8 @@ namespace DevMind
             {
                 if (mouse.Flags.HasFlag(Terminal.Gui.Input.MouseFlags.WheeledUp))
                 {
-                    if (_pinnedScrollRows < int.MaxValue) _pinnedScrollRows++;
+                    if (_pinnedScrollRows < int.MaxValue)
+                        SetPinnedScrollRows(_pinnedScrollRows + 1);
                 }
                 else if (mouse.Flags.HasFlag(Terminal.Gui.Input.MouseFlags.WheeledDown)
                          && _pinnedScrollRows > 0)
@@ -180,9 +181,10 @@ namespace DevMind
                     // Notches past the top inflate the counter without moving the view, so a
                     // pure countdown could leave the user pinned AT the bottom; the at-bottom
                     // hint (post-scroll, +1 row) zeroes it out in that case.
-                    _pinnedScrollRows--;
-                    if (_pinnedScrollRows <= 0 || IsScrolledToBottom(pendingScrollRows: 1))
-                        _pinnedScrollRows = 0;
+                    int next = _pinnedScrollRows - 1;
+                    if (next <= 0 || IsScrolledToBottom(pendingScrollRows: 1))
+                        next = 0;
+                    SetPinnedScrollRows(next);
                 }
             };
         }
@@ -193,6 +195,25 @@ namespace DevMind
         // under the reader; streamed output buffers in _pending meanwhile. UI thread
         // only (wheel events, FlushPending, and the input loop all run there).
         private int _pinnedScrollRows;
+
+        /// <summary>
+        /// Raised on the UI thread when the transcript's scroll pin engages (true) or
+        /// releases (false). The host UI uses it to show/hide the "jump to bottom" toast.
+        /// </summary>
+        public event Action<bool> ScrollPinChanged;
+
+        // All pin-state mutations funnel through here so 0↔positive transitions raise
+        // ScrollPinChanged exactly once per edge. UI thread only.
+        private void SetPinnedScrollRows(int value)
+        {
+            bool wasPinned = _pinnedScrollRows > 0;
+            _pinnedScrollRows = value;
+            if (wasPinned != (value > 0))
+            {
+                try { ScrollPinChanged?.Invoke(value > 0); }
+                catch { /* a subscriber failure must never break scrolling */ }
+            }
+        }
 
         // ── Context lifecycle helpers ────────────────────────────────────────────
 
@@ -470,7 +491,7 @@ namespace DevMind
         /// </summary>
         public void ScrollOutputToEnd()
         {
-            _pinnedScrollRows = 0;
+            SetPinnedScrollRows(0);
             _outputView.ClearSelection(); // a stale selection anchor would re-highlight the stream
             TextDocument doc = _outputView.Document;
             if (doc != null)
@@ -618,7 +639,7 @@ namespace DevMind
 
             void DoClear()
             {
-                _pinnedScrollRows = 0;                  // a cleared view has nothing to stay pinned to
+                SetPinnedScrollRows(0);                 // a cleared view has nothing to stay pinned to
                 lock (_pendingLock) _pending.Clear();   // drop queued, not-yet-rendered spans
 
                 TextDocument doc = _outputView.Document;
