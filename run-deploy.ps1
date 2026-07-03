@@ -45,4 +45,27 @@ dotnet publish $proj `
 
 if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed (exit $LASTEXITCODE)" }
 
+# ── MCP server ────────────────────────────────────────────────────────────────
+# Published into dist\mcp (its own folder — the TUI's single-file publish would
+# otherwise clobber shared DLL names). This is the exe MCP clients (Claude Code)
+# are registered against:
+#   claude mcp add --scope user devmind -- <repo>\dist\mcp\DevMind.McpServer.exe
+
+$mcpProj = Join-Path $repo 'DevMind.McpServer\DevMind.McpServer.csproj'
+$mcpDist = Join-Path $dist 'mcp'
+
+Write-Host "`nPublishing DevMind.McpServer ($Configuration / $Runtime) into $mcpDist ..." -ForegroundColor Cyan
+
+dotnet publish $mcpProj `
+    -c $Configuration `
+    -r $Runtime `
+    --self-contained `
+    -p:PublishSingleFile=true `
+    -p:PublishTrimmed=false `
+    -p:IncludeNativeLibrariesForSelfExtract=true `
+    -o $mcpDist
+
+if ($LASTEXITCODE -ne 0) { throw "dotnet publish (McpServer) failed (exit $LASTEXITCODE)" }
+
 Write-Host "`nDeployed to $dist -- 'devmind' / 'dm' on PATH now run this build." -ForegroundColor Green
+Write-Host "MCP server: $mcpDist\DevMind.McpServer.exe" -ForegroundColor Green
