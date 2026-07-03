@@ -455,6 +455,9 @@ namespace DevMind
                 inputBox.Clear();
 
                 // Echo user input (through the host — keeps the stamping tracker in sync).
+                // Sending a message resumes stream-following if the user had scrolled up
+                // (FlushPending's scroll lock) — typing implies wanting to see the reply.
+                host.ScrollOutputToEnd();
                 host.AppendOutputLocal($"\n> {input}\n", OutputColor.Input);
 
                 // ── Reliable exit ───────────────────────────────────────────────
