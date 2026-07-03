@@ -156,7 +156,30 @@ namespace DevMind
             // Register the color transformer. It reads _colorSpans (populated by InsertSpan)
             // and stamps element.Attribute by document offset during visual-line construction.
             _outputView.LineTransformers.Add(new OffsetColorTransformer(_colorSpans));
+
+            // Scroll lock is driven by explicit wheel intent, not position sampling: during
+            // streaming the render pump snaps to bottom every 100 ms, so a position check
+            // loses the race against one-row wheel notches (the "pin loses to the stream"
+            // bug). This observer runs BEFORE the wheel's scroll command executes
+            // (View.RaiseMouseEvent order), so wheel-down predicts the post-scroll position
+            // with pendingScrollRows: 1 (Editor scrolls one row per notch). Unpinning also
+            // happens on send (ScrollOutputToEnd), /cls, and a flush that finds the view at
+            // the exact bottom. The handler only observes — Handled stays false, so the
+            // Editor's own scrolling is untouched.
+            _outputView.MouseEvent += (s, mouse) =>
+            {
+                if (mouse.Flags.HasFlag(Terminal.Gui.Input.MouseFlags.WheeledUp))
+                    _scrollPinned = true;
+                else if (mouse.Flags.HasFlag(Terminal.Gui.Input.MouseFlags.WheeledDown)
+                         && IsScrolledToBottom(pendingScrollRows: 1))
+                    _scrollPinned = false;
+            };
         }
+
+        // Scroll-lock state: true while the user has wheeled up to read scrollback. The
+        // render pump's auto-scroll and the scrollback trim are suspended while pinned.
+        // UI thread only (wheel events, FlushPending, and the input loop all run there).
+        private bool _scrollPinned;
 
         // ── Context lifecycle helpers ────────────────────────────────────────────
 
@@ -299,13 +322,13 @@ namespace DevMind
                 return;
             }
 
-            // Scroll lock: follow the stream only when the user is already at the bottom.
-            // Scrolling up (mouse wheel moves Viewport.Y) pins the view so code on screen
-            // can be read while the turn keeps streaming; scrolling back down — or sending
-            // the next message (ScrollOutputToEnd) — resumes following. Sampled BEFORE the
-            // insert: the insert itself grows the row count, which would read as "not at
-            // bottom" and stall following for everyone.
-            bool follow = IsScrolledToBottom();
+            // Scroll lock: follow the stream unless the user has wheeled up (_scrollPinned).
+            // Self-heal: if pinned but the view actually sits at the exact bottom (the
+            // wheel-down predictor can be off by a row at the boundary), resume following.
+            // Sampled BEFORE the insert — the insert itself grows the row count.
+            if (_scrollPinned && IsScrolledToBottom(pendingScrollRows: 0))
+                _scrollPinned = false;
+            bool follow = !_scrollPinned;
 
             try
             {
@@ -346,17 +369,19 @@ namespace DevMind
         private static string NormalizeNewlines(string text)
             => text.IndexOf('\r') < 0 ? text : text.Replace("\r\n", "\n").Replace("\r", "\n");
 
-        // True when the viewport shows the last visual row. GetContentSize().Height is the
-        // Editor's total visual-row count (wrap-map space, same coordinate system as
-        // Viewport.Y — it's what clamps wheel scrolling). One row of tolerance absorbs
-        // partial-row rounding so a view that LOOKS at-bottom never silently stops
-        // following. UI thread only.
-        private bool IsScrolledToBottom()
+        // True when the viewport (shifted by pendingScrollRows, for predicting where a
+        // not-yet-executed wheel scroll will land) shows the last visual row.
+        // GetContentSize().Height is the Editor's total visual-row count (wrap-map space,
+        // same coordinate system as Viewport.Y — it's what clamps wheel scrolling). The
+        // comparison is EXACT: any tolerance here would erase a one-notch wheel-up pin.
+        // UI thread only.
+        private bool IsScrolledToBottom(int pendingScrollRows)
         {
             try
             {
                 var viewport = _outputView.Viewport;
-                return viewport.Y + viewport.Height >= _outputView.GetContentSize().Height - 1;
+                return viewport.Y + pendingScrollRows + viewport.Height
+                       >= _outputView.GetContentSize().Height;
             }
             catch
             {
@@ -372,6 +397,7 @@ namespace DevMind
         /// </summary>
         public void ScrollOutputToEnd()
         {
+            _scrollPinned = false;
             TextDocument doc = _outputView.Document;
             if (doc != null)
                 _outputView.CaretOffset = doc.TextLength;
@@ -518,6 +544,7 @@ namespace DevMind
 
             void DoClear()
             {
+                _scrollPinned = false;                  // a cleared view has nothing to stay pinned to
                 lock (_pendingLock) _pending.Clear();   // drop queued, not-yet-rendered spans
 
                 TextDocument doc = _outputView.Document;
