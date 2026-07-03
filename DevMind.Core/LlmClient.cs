@@ -214,12 +214,13 @@ namespace DevMind
         private Task _contextDetectionTask; // awaited in SendMessageAsync to ensure accurate budget on first message
 
         /// <summary>
-        /// Image staged by <see cref="StagePendingImage"/> (data: URI or raw base64), consumed
-        /// by the next <see cref="SendMessageAsync"/> whose imageBase64 parameter is null.
-        /// Consumed exactly once via Interlocked.Exchange so a concurrent send cannot attach
-        /// the same image twice.
+        /// Images staged by <see cref="StagePendingImage"/> (data: URIs or raw base64),
+        /// accumulated across calls (e.g. several /image commands, or a rasterized PDF
+        /// page range) and ALL consumed by the next <see cref="SendMessageAsync"/> as
+        /// image_url parts of that one message. Guarded by its own lock so a concurrent
+        /// send cannot attach the same images twice. The list itself is the lock object.
         /// </summary>
-        private string _pendingImageBase64;
+        private readonly List<string> _pendingImages = new List<string>();
 
         /// <summary>
         /// Estimated prompt tokens per image content part, used wherever history size is
@@ -369,16 +370,23 @@ namespace DevMind
         }
 
         /// <summary>
-        /// Stages an image to be attached to the next <see cref="SendMessageAsync"/> call that
-        /// does not supply its own imageBase64 argument. The staged image is consumed exactly
-        /// once (the send after next is text-only again). Staging a second image before the
-        /// next send replaces the first. Pass a data: URI (e.g. data:image/png;base64,...) or
-        /// a raw base64 string — llama-server accepts both in image_url.url.
+        /// Stages an image to be attached to the next <see cref="SendMessageAsync"/> call.
+        /// Staged images ACCUMULATE — call once per image (e.g. each page of a PDF range)
+        /// and the next send carries all of them as image_url parts of that one message,
+        /// consumed exactly once (the send after is text-only again). Pass a data: URI
+        /// (e.g. data:image/png;base64,...) or a raw base64 string — llama-server accepts
+        /// both in image_url.url.
         /// </summary>
-        /// <param name="imageDataUri">The image payload; null/whitespace clears any staged image.</param>
+        /// <param name="imageDataUri">The image payload; null/whitespace clears ALL staged images.</param>
         public void StagePendingImage(string imageDataUri)
         {
-            _pendingImageBase64 = string.IsNullOrWhiteSpace(imageDataUri) ? null : imageDataUri;
+            lock (_pendingImages)
+            {
+                if (string.IsNullOrWhiteSpace(imageDataUri))
+                    _pendingImages.Clear();
+                else
+                    _pendingImages.Add(imageDataUri);
+            }
         }
 
         /// <summary>
@@ -856,27 +864,39 @@ namespace DevMind
                 _originalTaskPrompt = userMessage;
             }
 
-            // Consume any staged image (from /image or StagePendingImage) when the caller
-            // didn't pass one explicitly. Interlocked.Exchange guarantees consume-once even
-            // if two sends race: only one observes the non-null value.
-            if (imageBase64 == null)
+            // Collect this message's images: the explicit imageBase64 argument first, then
+            // everything staged via StagePendingImage (accumulated /image calls, PDF page
+            // ranges). The staged list is drained under its lock so a racing send cannot
+            // attach the same images twice.
+            List<string> images = null;
+            if (imageBase64 != null)
+                images = new List<string> { imageBase64 };
+            lock (_pendingImages)
             {
-                imageBase64 = System.Threading.Interlocked.Exchange(ref _pendingImageBase64, null);
+                if (_pendingImages.Count > 0)
+                {
+                    (images ?? (images = new List<string>(_pendingImages.Count))).AddRange(_pendingImages);
+                    _pendingImages.Clear();
+                }
             }
 
             // Append user message — immutable from this point forward
-            if (imageBase64 != null)
+            if (images != null)
             {
-                // Build multimodal content parts array (OpenAI format)
+                // Build multimodal content parts array (OpenAI format): text part first,
+                // then one image_url part per image, in staging order.
                 var parts = new JArray
                 {
-                    new JObject { ["type"] = "text", ["text"] = userMessage },
-                    new JObject
+                    new JObject { ["type"] = "text", ["text"] = userMessage }
+                };
+                foreach (string image in images)
+                {
+                    parts.Add(new JObject
                     {
                         ["type"] = "image_url",
-                        ["image_url"] = new JObject { ["url"] = imageBase64 }
-                    }
-                };
+                        ["image_url"] = new JObject { ["url"] = image }
+                    });
+                }
                 _conversationHistory.Add(new ChatMessage("user", userMessage, _currentTurn, null, null, parts));
             }
             else

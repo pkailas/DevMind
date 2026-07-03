@@ -391,8 +391,8 @@ namespace DevMind
                 }));
 
             RegisterCommand("/image",
-                "Attach an image — or a rasterized PDF page — to your next message (needs a vision model + mmproj)",
-                "/image <path> [pdf-page]",
+                "Attach an image — or rasterized PDF pages — to your next message (needs a vision model + mmproj)",
+                "/image <path> [page|first-last|all]",
                 ImageHandler);
 
            RegisterCommand("/dir",
@@ -536,19 +536,26 @@ namespace DevMind
             return Task.FromResult(new CommandResult { Message = $"Behavioral rules set ({text.Length} chars)." });
         }
 
-        // -- /image <path> [pdf-page] ------------------------------------------
+        // -- /image <path> [page|first-last|all] --------------------------------
         //
         // Stages an image for the NEXT typed message. Staging (not sending) keeps the
         // "slash commands never burn model tokens" rule: the user attaches, then asks
         // their question as a normal message, and that message goes out as multimodal
         // content. The image travels via LlmClient.StagePendingImage → SendMessageAsync
         // (ContentParts), never through the tool-result path, so no truncation applies.
-        // PDFs are rasterized (one page per /image, default page 1) — vision encoders
-        // consume raster images, and llama-server has no PDF media type.
+        // Staged images ACCUMULATE until the next message, so repeated /image calls —
+        // or a PDF page range — all attach to one message.
+        // PDFs are rasterized (vision encoders consume raster images, and llama-server
+        // has no PDF media type): page spec is a page number, "first-last", or "all".
 
         /// <summary>Max raw image size accepted by /image. Matches llama-server's own
         /// 10 MB cap on remote image downloads; base64 expands this ~1.33× on the wire.</summary>
         const int MaxImageBytes = 10 * 1024 * 1024;
+
+        /// <summary>Max PDF pages attached per /image call. Each rendered page costs
+        /// roughly 2K image tokens on a Qwen3-VL-class encoder, so 20 pages ≈ 40K prompt
+        /// tokens — a sane ceiling that still summarizes most manuals chapter-by-chapter.</summary>
+        const int MaxPdfPagesPerAttach = 20;
 
         static Task<CommandResult> ImageHandler(string[] args, CommandContext ctx)
         {
@@ -562,25 +569,26 @@ namespace DevMind
             if (args.Length == 0)
                 return Task.FromResult(new CommandResult
                 {
-                    Message = "Usage: /image <path> [pdf-page]  (PNG, JPG, JPEG, GIF, WEBP, BMP, or PDF — PDFs attach one rasterized page, default 1)",
+                    Message = "Usage: /image <path> [page|first-last|all]  (PNG, JPG, JPEG, GIF, WEBP, BMP, or PDF — " +
+                              $"PDFs attach rasterized pages, default page 1, max {MaxPdfPagesPerAttach} per call)",
                     IsError = true,
                 });
 
             // Paths may contain spaces — recombine the whitespace-split args. A trailing
-            // integer selects a PDF page: try the full string as a path first, so a file
-            // literally named "scan 2.png" still wins over "scan.pdf page 2" ambiguity.
-            int pdfPage = 1;
+            // page spec ("3", "2-5", "all") selects PDF pages: try the full string as a
+            // path first, so a file literally named "scan 2.png" still wins over
+            // "scan.pdf page 2" ambiguity.
+            string pageSpec = null;
             string raw = string.Join(" ", args).Trim().Trim('"');
             string path = ResolveExistingFile(raw, ctx);
-            if (path == null && args.Length > 1
-                && int.TryParse(args[args.Length - 1], out int pageArg) && pageArg > 0)
+            if (path == null && args.Length > 1 && LooksLikePageSpec(args[args.Length - 1]))
             {
-                string withoutPage = string.Join(" ", args, 0, args.Length - 1).Trim().Trim('"');
-                string candidate = ResolveExistingFile(withoutPage, ctx);
+                string withoutSpec = string.Join(" ", args, 0, args.Length - 1).Trim().Trim('"');
+                string candidate = ResolveExistingFile(withoutSpec, ctx);
                 if (candidate != null)
                 {
                     path = candidate;
-                    pdfPage = pageArg;
+                    pageSpec = args[args.Length - 1];
                 }
             }
 
@@ -593,17 +601,31 @@ namespace DevMind
 
             string ext = Path.GetExtension(path).ToLowerInvariant();
 
-            // ── PDF branch: rasterize one page to PNG, then stage like any image ──
+            // ── PDF branch: rasterize the requested pages, stage each as an image ──
             if (ext == ".pdf")
             {
-                PdfPageImage rendered;
+                System.Collections.Generic.List<PdfPageImage> pages;
+                int first, last;
                 try
                 {
-                    rendered = PdfRasterizer.RenderPageToPng(path, pdfPage);
+                    int pageCount = PdfRasterizer.GetPageCount(path);
+                    (first, last) = PdfRasterizer.ParsePageSpec(pageSpec, pageCount);
+
+                    int requested = last - first + 1;
+                    if (requested > MaxPdfPagesPerAttach)
+                        return Task.FromResult(new CommandResult
+                        {
+                            Message = $"That's {requested} pages — attach at most {MaxPdfPagesPerAttach} per message " +
+                                      $"(e.g. /image \"{Path.GetFileName(path)}\" {first}-{first + MaxPdfPagesPerAttach - 1}). " +
+                                      $"The PDF has {pageCount} page(s).",
+                            IsError = true,
+                        });
+
+                    pages = PdfRasterizer.RenderPagesToPng(path, first, last);
                 }
                 catch (InvalidOperationException ex)
                 {
-                    // Page out of range — message already user-presentable.
+                    // Bad page spec / out of range — message already user-presentable.
                     return Task.FromResult(new CommandResult { Message = ex.Message, IsError = true });
                 }
                 catch (Exception ex)
@@ -615,28 +637,34 @@ namespace DevMind
                     });
                 }
 
-                if (rendered.PngBytes.Length > MaxImageBytes)
-                    return Task.FromResult(new CommandResult
-                    {
-                        Message = $"Rasterized page too large: {rendered.PngBytes.Length / (1024.0 * 1024.0):F1} MB (max 10 MB).",
-                        IsError = true,
-                    });
+                long totalBytes = 0;
+                foreach (var page in pages)
+                {
+                    if (page.PngBytes.Length > MaxImageBytes)
+                        return Task.FromResult(new CommandResult
+                        {
+                            Message = $"A rasterized page is too large: {page.PngBytes.Length / (1024.0 * 1024.0):F1} MB (max 10 MB).",
+                            IsError = true,
+                        });
+                    totalBytes += page.PngBytes.Length;
+                }
 
-                ctx.StagePendingImage(
-                    $"data:image/png;base64,{Convert.ToBase64String(rendered.PngBytes)}");
+                foreach (var page in pages)
+                    ctx.StagePendingImage($"data:image/png;base64,{Convert.ToBase64String(page.PngBytes)}");
 
+                string pageLabel = first == last ? $"page {first}" : $"pages {first}-{last}";
                 return Task.FromResult(new CommandResult
                 {
-                    Message = $"PDF page {pdfPage}/{rendered.PageCount} rasterized and staged: {Path.GetFileName(path)} " +
-                              $"({rendered.Width}×{rendered.Height} PNG, {rendered.PngBytes.Length / 1024.0:F0} KB). " +
-                              "It will be attached to your next message. Requires a vision model with mmproj loaded.",
+                    Message = $"PDF {pageLabel} of {pages[0].PageCount} rasterized and staged: {Path.GetFileName(path)} " +
+                              $"({pages.Count} image(s), {totalBytes / 1024.0:F0} KB total). " +
+                              "All staged images attach to your next message. Requires a vision model with mmproj loaded.",
                 });
             }
 
-            if (pdfPage != 1)
+            if (pageSpec != null)
                 return Task.FromResult(new CommandResult
                 {
-                    Message = "A page number is only supported for PDF files.",
+                    Message = "A page spec is only supported for PDF files.",
                     IsError = true,
                 });
 
@@ -686,6 +714,19 @@ namespace DevMind
                 Message = $"Image staged: {Path.GetFileName(path)} ({mimeType}, {bytes.Length / 1024.0:F0} KB). " +
                           "It will be attached to your next message. Requires a vision model with mmproj loaded.",
             });
+        }
+
+        /// <summary>True when the token could be a /image PDF page spec: a positive
+        /// integer, an integer range "first-last", or "all".</summary>
+        static bool LooksLikePageSpec(string token)
+        {
+            if (string.IsNullOrEmpty(token)) return false;
+            if (token.Equals("all", StringComparison.OrdinalIgnoreCase)) return true;
+            if (int.TryParse(token, out int page)) return page > 0;
+            int dash = token.IndexOf('-');
+            return dash > 0
+                && int.TryParse(token.Substring(0, dash), out int first) && first > 0
+                && int.TryParse(token.Substring(dash + 1), out int last) && last > 0;
         }
 
         /// <summary>Resolves a raw /image argument (absolute, or relative to the working

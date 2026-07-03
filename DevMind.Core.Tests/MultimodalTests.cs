@@ -159,6 +159,49 @@ namespace DevMind.Core.Tests
         }
 
         [Fact]
+        public async Task StagePendingImage_Accumulates_AllImagesAttachToOneMessageInOrder()
+        {
+            using var server = new FakeSseServer();
+            var (client, _) = CreateConfiguredClient(server);
+
+            // Two staged images (e.g. a rasterized PDF page range) → ONE message with
+            // a text part followed by both image parts, in staging order.
+            client.StagePendingImage("data:image/png;base64,PAGEONE");
+            client.StagePendingImage("data:image/png;base64,PAGETWO");
+            await SendAndAwaitAsync(client, "summarize these pages", imageBase64: null);
+            await SendAndAwaitAsync(client, "follow-up (text-only expected)", imageBase64: null);
+
+            var first = JObject.Parse(server.RequestBodies[0]);
+            var user = ((JArray)first["messages"]!).Last(m => (string?)m["role"] == "user");
+            var content = Assert.IsType<JArray>(user["content"]);
+            Assert.Equal(3, content.Count);
+            Assert.Equal("text", (string?)content[0]["type"]);
+            Assert.Equal("data:image/png;base64,PAGEONE", (string?)content[1]["image_url"]?["url"]);
+            Assert.Equal("data:image/png;base64,PAGETWO", (string?)content[2]["image_url"]?["url"]);
+
+            // Both consumed — the follow-up send is flat text again.
+            var second = JObject.Parse(server.RequestBodies[1]);
+            var secondUser = ((JArray)second["messages"]!).Last(m => (string?)m["role"] == "user");
+            Assert.Equal(JTokenType.String, secondUser["content"]!.Type);
+        }
+
+        [Fact]
+        public async Task StagePendingImage_Null_ClearsAllStagedImages()
+        {
+            using var server = new FakeSseServer();
+            var (client, _) = CreateConfiguredClient(server);
+
+            client.StagePendingImage("data:image/png;base64,AAAA");
+            client.StagePendingImage("data:image/png;base64,BBBB");
+            client.StagePendingImage(null); // clear everything staged
+            await SendAndAwaitAsync(client, "should be text-only", imageBase64: null);
+
+            var body = JObject.Parse(server.RequestBodies.Single());
+            var user = ((JArray)body["messages"]!).Last(m => (string?)m["role"] == "user");
+            Assert.Equal(JTokenType.String, user["content"]!.Type);
+        }
+
+        [Fact]
         public async Task StagePendingImage_AttachesToNextSend_AndIsConsumedOnce()
         {
             using var server = new FakeSseServer();

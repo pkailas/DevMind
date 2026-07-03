@@ -68,10 +68,11 @@ namespace DevMind
         /// <summary>Injects a tool result message into conversation history.</summary>
         void AddToolResultMessage(string toolCallId, string content);
 
-        /// <summary>Stages an image (data: URI or raw base64) to be attached to the next
-        /// <see cref="SendMessageAsync"/> call that does not supply its own imageBase64.
-        /// Consumed exactly once; staging again before the next send replaces the previous
-        /// image; null/whitespace clears the staged image. Used by the TUI /image command.</summary>
+        /// <summary>Stages an image (data: URI or raw base64) for the next
+        /// <see cref="SendMessageAsync"/> call. Staged images accumulate — call once per
+        /// image (e.g. each page of a PDF range) and the next send attaches all of them
+        /// to that one message, consumed exactly once. Null/whitespace clears all staged
+        /// images. Used by the TUI /image command.</summary>
         void StagePendingImage(string imageDataUri);
 
        /// <summary>Streams a message to the LLM endpoint, invoking callbacks as tokens arrive.</summary>
