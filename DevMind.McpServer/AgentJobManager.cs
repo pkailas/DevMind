@@ -112,8 +112,14 @@ namespace DevMind.McpServer
         public string EndpointUrl { get; }
         public string ApiKey { get; }
 
-        public AgentJobManager()
+        // Invoked after every job finishes (any outcome). Wired by Program.cs to
+        // invalidate McpServices' session file cache: a task agent may have rewritten
+        // any file, and stale cached content produced false reads/greps in the field.
+        private readonly Action _onJobFinished;
+
+        public AgentJobManager(Action? onJobFinished = null)
         {
+            _onJobFinished = onJobFinished ?? (() => { });
             // DEVMIND_ENDPOINT / DEVMIND_API_KEY is the established env convention
             // (see LlmClient); default is the local llama-server.
             string? endpoint = Environment.GetEnvironmentVariable("DEVMIND_ENDPOINT")?.Trim();
@@ -341,6 +347,7 @@ namespace DevMind.McpServer
                 finally
                 {
                     job.EndedAtUtc = DateTime.UtcNow;
+                    try { _onJobFinished(); } catch { /* never kill the worker */ }
                 }
             }
         }

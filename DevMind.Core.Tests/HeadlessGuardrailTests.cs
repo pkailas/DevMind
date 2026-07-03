@@ -120,6 +120,50 @@ namespace DevMind.Core.Tests
             Assert.Contains("DELTA", File.ReadAllText(file));
         }
 
+        // ── Stale-cache invalidation (out-of-band writes) ─────────────────────
+
+        [Fact]
+        public void InvalidateIfStale_EvictsOnNewerDisk_KeepsFresh_EvictsMissing()
+        {
+            var cache = new FileContentCache();
+            string path = Path.Combine(_dir, "watched.txt");
+            File.WriteAllText(path, "v1");
+
+            cache.Store("watched.txt", "v1");
+            cache.InvalidateIfStale("watched.txt", path);
+            Assert.True(cache.Contains("watched.txt"));          // fresh — kept
+
+            File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddSeconds(5));
+            cache.InvalidateIfStale("watched.txt", path);
+            Assert.False(cache.Contains("watched.txt"));         // disk newer — evicted
+
+            cache.Store("watched.txt", "v2");
+            File.Delete(path);
+            cache.InvalidateIfStale("watched.txt", path);
+            Assert.False(cache.Contains("watched.txt"));         // file gone — evicted
+        }
+
+        [Fact]
+        public async Task Grep_SeesOutOfBandWrite_NotStaleCache()
+        {
+            // Regression: read/grep served session-cached content after a task agent
+            // rewrote the file on disk — false "no matches" for text that existed.
+            var host = new BufferedAgenticHost(_dir);
+            IAgenticHost agenticHost = host;
+
+            string file = Path.Combine(_dir, "shared.txt");
+            File.WriteAllText(file, "original content");
+            Assert.Contains("original", await agenticHost.GrepFileAsync("original", "shared.txt", null, null));
+
+            // Out-of-band rewrite (as a task agent or git would do).
+            File.WriteAllText(file, "replaced by another agent");
+            File.SetLastWriteTimeUtc(file, DateTime.UtcNow.AddSeconds(5));
+
+            string result = await agenticHost.GrepFileAsync("replaced by another agent", "shared.txt", null, null);
+            Assert.Contains("replaced by another agent", result);
+            Assert.DoesNotContain("no matches", result);
+        }
+
         // ── Answer sanitization ───────────────────────────────────────────────
 
         [Theory]

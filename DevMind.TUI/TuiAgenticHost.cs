@@ -1317,6 +1317,7 @@ namespace DevMind
             if (resolvedPath == null || !File.Exists(resolvedPath))
                 return Task.FromResult(BuildFileNotFoundMessage("GREP", filename));
 
+            _fileCache.InvalidateIfStale(fileNameOnly, resolvedPath); // out-of-band writes
             if (!_fileCache.Contains(fileNameOnly))
             {
                 string diskContent;
@@ -1406,6 +1407,7 @@ namespace DevMind
                 if (hitCap) break;
                 string fileNameOnly = SafeGetFileName(filePath);
 
+                _fileCache.InvalidateIfStale(fileNameOnly, filePath); // out-of-band writes
                 if (!_fileCache.Contains(fileNameOnly))
                 {
                     // Never open cloud/OneDrive placeholders (would download), binaries, or
@@ -1646,6 +1648,7 @@ namespace DevMind
                     return null;
                 }
 
+                _fileCache.InvalidateIfStale(fileNameOnly, fullPath); // out-of-band writes
                 if (!_fileCache.Contains(fileNameOnly))
                 {
                     AppendOutputLocal($"[AUTO-READ] Loading {fileNameOnly} before patch...\n", OutputColor.Dim);
@@ -2120,6 +2123,7 @@ namespace DevMind
 
                 if (rangeStart > 0)
                 {
+                    _fileCache.InvalidateIfStale(fileNameOnly, fullPath); // out-of-band writes
                     if (!_fileCache.Contains(fileNameOnly))
                     {
                         var (diskContent, _) = PatchEngine.ReadFilePreservingEncoding(fullPath);

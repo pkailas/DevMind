@@ -371,6 +371,7 @@ internal sealed class DevMindTools
                     string fileNameOnly = Path.GetFileName(filePath);
                     string cacheKey     = Path.GetFullPath(filePath);
 
+                    _svc.FileCache.InvalidateIfStale(cacheKey, cacheKey); // out-of-band writes
                     if (!_svc.FileCache.Contains(cacheKey))
                     {
                         string diskContent;
@@ -1908,6 +1909,11 @@ internal sealed class DevMindTools
         // files in different directories don't collide. fileNameOnly is retained in the
         // signature for call-site compatibility (display) but is not used as the key.
         string cacheKey = Path.GetFullPath(fullPath);
+        // Out-of-band writes (task agents in this same process, git, the user's IDE)
+        // must never be masked by session-cached content — a stale entry evicts here
+        // and re-reads below. Field evidence: read_file/grep_file served pre-task
+        // content after a delegated job rewrote the files.
+        _svc.FileCache.InvalidateIfStale(cacheKey, cacheKey);
         if (_svc.FileCache.Contains(cacheKey)) return;
         try
         {

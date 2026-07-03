@@ -98,12 +98,16 @@ var builder = Host.CreateApplicationBuilder(args);
 builder.Logging.ClearProviders();
 
 // McpServices: session-scoped DI container (one per stdio connection).
-builder.Services.AddSingleton(new McpServices(workingDirectory));
+var mcpServices = new McpServices(workingDirectory);
+builder.Services.AddSingleton(mcpServices);
 
 // AgentJobManager: the devmind_task_* headless-agent job queue (one job at a time,
 // own worker — deliberately NOT routed through McpServices' tool dispatcher, so
-// status/cancel stay responsive while a task runs for minutes).
-builder.Services.AddSingleton(new AgentJobManager());
+// status/cancel stay responsive while a task runs for minutes). A finished job may
+// have rewritten anything, so it drops the session file cache — read_file/grep_file
+// must never serve pre-task content (live false-negative reports).
+builder.Services.AddSingleton(new AgentJobManager(
+    onJobFinished: () => mcpServices.FileCache.InvalidateAll()));
 
 // MCP server: stdio transport + attribute-based tool discovery.
 builder.Services
