@@ -93,11 +93,17 @@ builder.Logging.ClearProviders();
 // McpServices: session-scoped DI container (one per stdio connection).
 builder.Services.AddSingleton(new McpServices(workingDirectory));
 
+// AgentJobManager: the devmind_task_* headless-agent job queue (one job at a time,
+// own worker — deliberately NOT routed through McpServices' tool dispatcher, so
+// status/cancel stay responsive while a task runs for minutes).
+builder.Services.AddSingleton(new AgentJobManager());
+
 // MCP server: stdio transport + attribute-based tool discovery.
 builder.Services
     .AddMcpServer()
     .WithStdioServerTransport()
-    .WithTools<DevMindTools>();
+    .WithTools<DevMindTools>()
+    .WithTools<AgentTaskTools>();
 
 await builder.Build().RunAsync();
 

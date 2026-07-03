@@ -37,6 +37,49 @@ namespace DevMind.Core.Tests
         /// <summary>Text streamed back for every chat POST (default "ok").</summary>
         public string ResponseText { get; set; } = "ok";
 
+        /// <summary>
+        /// Scripted per-request SSE payloads for multi-iteration agentic tests: each chat
+        /// POST consumes the next entry (build with <see cref="BuildTextSse"/> /
+        /// <see cref="BuildToolCallSse"/>). When exhausted, falls back to
+        /// <see cref="ResponseText"/> — or repeats the last entry when
+        /// <see cref="RepeatLastWhenExhausted"/> is set (for depth-cap loops).
+        /// </summary>
+        public List<string> SseQueue { get; } = new();
+        public bool RepeatLastWhenExhausted { get; set; }
+        private int _sseIndex;
+
+        /// <summary>SSE payload for a plain streamed text response.</summary>
+        public static string BuildTextSse(string text)
+        {
+            string escaped = text.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n");
+            return "data: {\"choices\":[{\"delta\":{\"content\":\"" + escaped + "\"}}]}\n\n" +
+                   "data: [DONE]\n\n";
+        }
+
+        /// <summary>SSE payload for a single native tool call (whole call in one delta,
+        /// which LlmClient's incremental accumulator also accepts).</summary>
+        public static string BuildToolCallSse(string toolName, string argumentsJson)
+        {
+            string escapedArgs = argumentsJson.Replace("\\", "\\\\").Replace("\"", "\\\"");
+            return "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\"," +
+                   "\"type\":\"function\",\"function\":{\"name\":\"" + toolName + "\"," +
+                   "\"arguments\":\"" + escapedArgs + "\"}}]}}]}\n\n" +
+                   "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n" +
+                   "data: [DONE]\n\n";
+        }
+
+        private string NextChatSse()
+        {
+            lock (SseQueue)
+            {
+                if (_sseIndex < SseQueue.Count)
+                    return SseQueue[_sseIndex++];
+                if (RepeatLastWhenExhausted && SseQueue.Count > 0)
+                    return SseQueue[SseQueue.Count - 1];
+            }
+            return BuildTextSse(ResponseText);
+        }
+
         public FakeSseServer()
         {
             _listener = new TcpListener(IPAddress.Loopback, 0);
@@ -84,11 +127,7 @@ namespace DevMind.Core.Tests
                     }
                     else if (isChatPost)
                     {
-                        string escaped = ResponseText.Replace("\\", "\\\\").Replace("\"", "\\\"");
-                        string sse =
-                            "data: {\"choices\":[{\"delta\":{\"content\":\"" + escaped + "\"}}]}\n\n" +
-                            "data: [DONE]\n\n";
-                        payload = Encoding.UTF8.GetBytes(sse);
+                        payload = Encoding.UTF8.GetBytes(NextChatSse());
                         contentType = "text/event-stream";
                     }
                     else
