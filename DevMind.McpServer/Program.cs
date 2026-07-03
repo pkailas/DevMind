@@ -49,6 +49,13 @@ for (int i = 0; i < args.Length - 1; i++)
 
 Console.Error.WriteLine($"[McpServer] Starting. Working directory: {workingDirectory}");
 
+// GUI MCP clients (Claude Desktop) launch this process with a minimal PATH — dotnet
+// and dotnet-ef were unresolvable during live delegations. Enrich once; every
+// ShellRunner child (run_shell/run_build/run_tests and headless agents) inherits it.
+string? envChanges = DevMind.DevEnvironment.EnrichProcessEnvironment();
+if (envChanges != null)
+    Console.Error.WriteLine($"[McpServer] Environment enriched: {envChanges}");
+
 // ── Trace startup ─────────────────────────────────────────────────────────────
 
 // Trace.cs reads DEVMIND_TRACE_* env vars on first call; if tracing is
