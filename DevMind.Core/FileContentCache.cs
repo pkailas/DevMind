@@ -63,6 +63,30 @@ namespace DevMind
             _cache.Remove(filename);
         }
 
+        /// <summary>
+        /// Evicts the entry when the on-disk file at <paramref name="sourcePath"/> was
+        /// modified AFTER the entry was stored — the out-of-band-write staleness fix
+        /// (field evidence: task agents rewrote files while the MCP session kept serving
+        /// cached content, producing false grep negatives and stale reads). A missing or
+        /// unreadable file also evicts. Callers' own writes stay fresh: they Store()
+        /// immediately after writing, so the entry is never older than that write.
+        /// </summary>
+        public void InvalidateIfStale(string filename, string sourcePath)
+        {
+            if (string.IsNullOrEmpty(sourcePath)) return;
+            if (!_cache.TryGetValue(filename, out var cached)) return;
+            try
+            {
+                if (!System.IO.File.Exists(sourcePath)
+                    || System.IO.File.GetLastWriteTimeUtc(sourcePath) > cached.StoredAtUtc)
+                    _cache.Remove(filename);
+            }
+            catch
+            {
+                _cache.Remove(filename); // can't verify freshness — a re-read is cheaper than a lie
+            }
+        }
+
         public void InvalidateAll()
         {
             _cache.Clear();
@@ -96,11 +120,16 @@ namespace DevMind
             /// <summary>Last time this entry was stored or read — drives LRU eviction.</summary>
             public DateTime LastAccess { get; private set; }
 
+            /// <summary>When the entry was stored — compared against the source file's
+            /// on-disk mtime by <see cref="InvalidateIfStale"/>.</summary>
+            public DateTime StoredAtUtc { get; }
+
             public CachedFile(string content)
             {
                 Content = content;
                 Lines = content.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
                 LastAccess = DateTime.UtcNow;
+                StoredAtUtc = DateTime.UtcNow;
             }
 
             public void Touch() => LastAccess = DateTime.UtcNow;
