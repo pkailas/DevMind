@@ -32,10 +32,15 @@ namespace DevMind.McpServer
         public int MaxDepth { get; init; }
         public int TimeoutMinutes { get; init; }
         public bool AllowCommit { get; init; }
+        public bool VerifyBuild { get; init; }
 
         public AgentJobState State;
         public HeadlessAgentResult? Result;
         public string? Error;
+
+        /// <summary>Post-run build verification outcome (null when skipped: no file
+        /// changes, no resolvable build command, or verify_build false).</summary>
+        public BuildVerification? Build;
         public DateTime QueuedAtUtc = DateTime.UtcNow;
         public DateTime? StartedAtUtc;
         public DateTime? EndedAtUtc;
@@ -65,6 +70,16 @@ namespace DevMind.McpServer
                 return s.Length <= TailCapChars ? s : s.Substring(s.Length - TailCapChars);
             }
         }
+    }
+
+    /// <summary>Outcome of the job runner's own post-agent build check.</summary>
+    internal sealed class BuildVerification
+    {
+        public required string Command { get; init; }
+        public int ExitCode { get; init; }
+        /// <summary>Last ~2 KB of build output — enough for the error summary.</summary>
+        public required string OutputTail { get; init; }
+        public bool Succeeded => ExitCode == 0;
     }
 
     /// <summary>One-at-a-time headless-agent job queue with bounded result retention.</summary>
@@ -97,7 +112,8 @@ namespace DevMind.McpServer
             _workerTask = Task.Run(WorkerLoopAsync);
         }
 
-        public AgentJob Start(string prompt, string workingDirectory, int maxDepth, int timeoutMinutes, bool allowCommit)
+        public AgentJob Start(string prompt, string workingDirectory, int maxDepth, int timeoutMinutes,
+            bool allowCommit, bool verifyBuild)
         {
             var job = new AgentJob
             {
@@ -107,6 +123,7 @@ namespace DevMind.McpServer
                 MaxDepth = maxDepth,
                 TimeoutMinutes = timeoutMinutes,
                 AllowCommit = allowCommit,
+                VerifyBuild = verifyBuild,
                 State = AgentJobState.Queued,
             };
 
@@ -200,6 +217,13 @@ namespace DevMind.McpServer
                         : result.Error != null ? AgentJobState.Failed
                         : AgentJobState.Done;
                     job.Error = result.Error;
+
+                    // Post-agent build verification: the job runner checks the build so
+                    // agents don't burn iterations fighting shell timeouts/PATH to do it
+                    // themselves (two live delegations lost most of their depth to this).
+                    // Only when the agent actually changed files, and never on cancel.
+                    if (job.VerifyBuild && job.State == AgentJobState.Done && HasFileChanges(result))
+                        job.Build = await VerifyBuildAsync(job).ConfigureAwait(false);
                 }
                 catch (Exception ex)
                 {
@@ -213,6 +237,48 @@ namespace DevMind.McpServer
                 {
                     job.EndedAtUtc = DateTime.UtcNow;
                 }
+            }
+        }
+
+        private static bool HasFileChanges(HeadlessAgentResult result)
+            => result.Actions.Any(a =>
+                a.Kind is "save" or "append" or "patch" or "delete" or "rename");
+
+        /// <summary>Runs the working directory's resolved build command with a
+        /// build-sized timeout. Never throws — a verification failure is data.</summary>
+        private static async Task<BuildVerification?> VerifyBuildAsync(AgentJob job)
+        {
+            const int BuildTimeoutSeconds = 600;
+            const int TailChars = 2_000;
+
+            string command;
+            try
+            {
+                command = BuildCommandResolver.Resolve(job.WorkingDirectory, _ => { });
+            }
+            catch
+            {
+                return null;
+            }
+            if (string.IsNullOrWhiteSpace(command))
+                return null;
+
+            try
+            {
+                var runner = new ShellRunner(job.WorkingDirectory);
+                var (output, exitCode) = await runner.ExecuteAsync(
+                    command, CancellationToken.None, BuildTimeoutSeconds).ConfigureAwait(false);
+                string tail = output.Length <= TailChars ? output : output.Substring(output.Length - TailChars);
+                return new BuildVerification { Command = command, ExitCode = exitCode, OutputTail = tail };
+            }
+            catch (Exception ex)
+            {
+                return new BuildVerification
+                {
+                    Command = command,
+                    ExitCode = -1,
+                    OutputTail = $"build verification crashed: {ex.Message}",
+                };
             }
         }
 

@@ -49,6 +49,7 @@ namespace DevMind.McpServer
             [Description("Max agentic iterations before the agent must stop (default 25).")] int? max_depth = null,
             [Description("Wall-clock kill timeout in minutes (default 30).")] int? timeout_minutes = null,
             [Description("Allow the agent to run git commit (default false — the caller owns version control).")] bool? allow_commit = null,
+            [Description("After the agent finishes, the job runner builds the working_dir itself and attaches build_verification to the result (default true).")] bool? verify_build = null,
             CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(prompt))
@@ -68,7 +69,8 @@ namespace DevMind.McpServer
                 prompt, working_dir,
                 maxDepth: Math.Clamp(max_depth ?? 25, 1, 100),
                 timeoutMinutes: Math.Clamp(timeout_minutes ?? 30, 1, 240),
-                allowCommit: allow_commit ?? false);
+                allowCommit: allow_commit ?? false,
+                verifyBuild: verify_build ?? true);
 
             return JsonSerializer.Serialize(new
             {
@@ -137,6 +139,13 @@ namespace DevMind.McpServer
                 hit_depth_cap = r?.HitDepthCap ?? false,
                 error = job.Error,
                 transcript_path = r?.TranscriptPath,
+                build_verification = job.Build == null ? null : new
+                {
+                    command = job.Build.Command,
+                    succeeded = job.Build.Succeeded,
+                    exit_code = job.Build.ExitCode,
+                    output_tail = job.Build.OutputTail,
+                },
             }, JsonOpts));
         }
 
