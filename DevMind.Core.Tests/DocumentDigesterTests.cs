@@ -91,6 +91,52 @@ namespace DevMind.Core.Tests
             }
         }
 
+        [Fact]
+        public void TruncateNote_ShortNote_ReturnedUnchanged()
+        {
+            string note = "short note";
+            Assert.Same(note, DocumentDigester.TruncateNote(note, 100));
+        }
+
+        [Fact]
+        public void TruncateNote_RunawayNote_CappedWithMarker()
+        {
+            // Field case: a code-listing chunk produced 135K chars of "notes".
+            string runaway = new string('x', 135_363);
+            string capped = DocumentDigester.TruncateNote(runaway, DocumentDigester.MaxChunkNoteChars);
+
+            Assert.True(capped.Length < 21_000, $"capped length {capped.Length}");
+            Assert.StartsWith(new string('x', 100), capped);
+            Assert.Contains("truncated", capped);
+            Assert.Contains("115,363", capped); // chars dropped, formatted
+        }
+
+        [Fact]
+        public void FitNotesToBudget_UnderBudget_Untouched()
+        {
+            var notes = new List<string> { new string('a', 100), new string('b', 100) };
+            Assert.False(DocumentDigester.FitNotesToBudget(notes, budgetChars: 1000));
+            Assert.Equal(100, notes[0].Length);
+        }
+
+        [Fact]
+        public void FitNotesToBudget_OverBudget_TrimsEachToEqualShare()
+        {
+            var notes = new List<string>
+            {
+                new string('a', 60_000),
+                new string('b', 60_000),
+                new string('c', 500), // already small — stays intact
+            };
+            Assert.True(DocumentDigester.FitNotesToBudget(notes, budgetChars: 30_000));
+
+            // Per-note share = 30000/3 = 10000 (+ truncation marker).
+            Assert.InRange(notes[0].Length, 10_000, 10_200);
+            Assert.InRange(notes[1].Length, 10_000, 10_200);
+            Assert.Equal(500, notes[2].Length);
+            Assert.Contains("truncated", notes[0]);
+        }
+
         private static JToken LastUserMessage(string requestBody)
         {
             var body = JObject.Parse(requestBody);
