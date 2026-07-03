@@ -87,7 +87,8 @@ namespace DevMind
             string combinedSystemPrompt = null,
             CancellationToken cancellationToken = default,
             bool forceToolChoiceRequired = false,
-            string imageBase64 = null);
+            string imageBase64 = null,
+            int maxTokens = 0);
 
        /// <summary>Resets conversation history to the system prompt only.</summary>
         void ClearHistory(bool preserveScratchpad = false);

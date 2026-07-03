@@ -788,7 +788,8 @@ namespace DevMind
              string combinedSystemPrompt = null,
              CancellationToken cancellationToken = default,
              bool forceToolChoiceRequired = false,
-             string imageBase64 = null)
+             string imageBase64 = null,
+             int maxTokens = 0)
         {
             System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] SendMessageAsync ENTER — userMessage length={userMessage?.Length ?? 0}, deferCompression={deferCompression}");
 
@@ -1061,7 +1062,7 @@ namespace DevMind
             await EnsureConnectionHealthAsync(cancellationToken).ConfigureAwait(false);
 
            string modelName = _options.ModelName;
-            string requestJson = BuildRequestJson(modelName, forceToolChoiceRequired);
+            string requestJson = BuildRequestJson(modelName, forceToolChoiceRequired, maxTokens);
 
             string url = _baseUrl + "/chat/completions";
 
@@ -3286,7 +3287,7 @@ namespace DevMind
             return null;
         }
 
-       private string BuildRequestJson(string modelName, bool forceToolChoiceRequired = false)
+       private string BuildRequestJson(string modelName, bool forceToolChoiceRequired = false, int maxTokens = 0)
         {
             // System-message normalization (single source of truth for the wire format).
             //
@@ -3360,6 +3361,15 @@ namespace DevMind
                 ["messages"] = messages,
                 ["stream"] = true
             };
+
+            // Per-request output ceiling (0 = omit → the server's -n default applies).
+            // Used by bounded workloads like /digest, where an uncapped stochastic
+            // repetition loop can otherwise run to the server's full -n budget (observed:
+            // a 5-page chunk that normally stops at ~1K output tokens looped to ~28K).
+            if (maxTokens > 0)
+            {
+                request["max_tokens"] = maxTokens;
+            }
 
             // vLLM omits the streaming usage object unless explicitly requested. Without this,
             // ParseLiveUsage/ParseVllmUsage/FinalizeVllmTimings receive no usage and the tok/s +
