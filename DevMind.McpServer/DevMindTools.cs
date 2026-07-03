@@ -168,6 +168,7 @@ internal sealed class DevMindTools
     public async Task<string> ListFiles(
         [Description("Glob pattern to match files (e.g., '*.cs', 'Services/*.cs'). Required.")] string glob,
         [Description("If true (default), searches all subdirectories.")] bool recursive = true,
+        [Description("Absolute directory to list under. Defaults to the server's working directory — pass this explicitly when unsure (GUI-launched servers have no meaningful default).")] string? root = null,
         CancellationToken cancellationToken = default)
     {
         return await _svc.EnqueueAsync(async () =>
@@ -176,6 +177,14 @@ internal sealed class DevMindTools
             try
             {
                 string searchDir = _svc.WorkingDirectory;
+                if (!string.IsNullOrWhiteSpace(root))
+                {
+                    if (!Path.IsPathRooted(root))
+                        return $"list_files: root must be an absolute path — got '{root}'.";
+                    if (!Directory.Exists(root))
+                        return $"list_files: root does not exist — {root}";
+                    searchDir = Path.GetFullPath(root);
+                }
 
                 string normalizedGlob = (glob ?? "").Replace('\\', '/');
                 string filePattern    = normalizedGlob;
@@ -298,10 +307,15 @@ internal sealed class DevMindTools
         "Search across multiple files by glob pattern for lines matching a text pattern. " +
         "Returns filename:line:content for each hit, capped at 100 results. " +
         "Use find_in_files when you need to know where something is used across the project. " +
-        "Use grep_file when you already know which file to search.")]
+        "Use grep_file when you already know which file to search. " +
+        "IMPORTANT: pattern is a case-insensitive SUBSTRING, not a regex — '|' and other " +
+        "regex metacharacters are matched literally. When the server was launched without " +
+        "--dir (e.g. by a GUI client like Claude Desktop), you MUST pass root, or the " +
+        "search runs against the wrong directory and returns false 'no matches'.")]
     public async Task<string> FindInFiles(
-        [Description("Search pattern (case-insensitive substring match).")] string pattern,
+        [Description("Search text (case-insensitive SUBSTRING — regex is NOT supported; '|' is literal).")] string pattern,
         [Description("Glob pattern to match files (e.g., '*.cs', 'Services/*.cs').")] string glob,
+        [Description("Absolute directory to search under. Defaults to the server's working directory — pass this explicitly when unsure (GUI-launched servers have no meaningful default).")] string? root = null,
         [Description("1-based start line to restrict the search window within each file.")] int? start_line = null,
         [Description("1-based end line to restrict the search window within each file.")] int? end_line = null,
         CancellationToken cancellationToken = default)
@@ -311,7 +325,15 @@ internal sealed class DevMindTools
             const int MaxMatches = 100;
             try
             {
-                string searchDir      = _svc.WorkingDirectory;
+                string searchDir = _svc.WorkingDirectory;
+                if (!string.IsNullOrWhiteSpace(root))
+                {
+                    if (!Path.IsPathRooted(root))
+                        return $"find_in_files: root must be an absolute path — got '{root}'.";
+                    if (!Directory.Exists(root))
+                        return $"find_in_files: root does not exist — {root}";
+                    searchDir = Path.GetFullPath(root);
+                }
                 string normalizedGlob = glob.Replace('\\', '/');
                 string filePattern    = normalizedGlob;
                 string effectiveRoot  = searchDir;
