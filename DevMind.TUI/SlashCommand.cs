@@ -391,8 +391,8 @@ namespace DevMind
                 }));
 
             RegisterCommand("/image",
-                "Attach an image — or rasterized PDF pages — to your next message (needs a vision model + mmproj)",
-                "/image <path> [page|first-last|all]",
+                "Attach an image — or rasterized PDF pages — to your next message (needs a vision model + mmproj); p=N chunks through the document N pages at a time",
+                "/image <path> [page|first-last|all|p=N]",
                 ImageHandler);
 
            RegisterCommand("/dir",
@@ -557,6 +557,16 @@ namespace DevMind
         /// tokens — a sane ceiling that still summarizes most manuals chapter-by-chapter.</summary>
         const int MaxPdfPagesPerAttach = 20;
 
+        /// <summary>
+        /// Per-document reading cursor for /image's p=N chunk mode: full path → last page
+        /// attached this session. Every PDF attach (explicit range or chunk) advances it,
+        /// so "/image doc.pdf 1-5" followed by "/image doc.pdf p=5" continues at page 6.
+        /// Session-lifetime by design — a document's reading position is orthogonal to
+        /// conversation resets. Dispatch is single-threaded, so a plain Dictionary is fine.
+        /// </summary>
+        static readonly Dictionary<string, int> _pdfCursors =
+            new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
         static Task<CommandResult> ImageHandler(string[] args, CommandContext ctx)
         {
             if (ctx.StagePendingImage == null)
@@ -569,8 +579,9 @@ namespace DevMind
             if (args.Length == 0)
                 return Task.FromResult(new CommandResult
                 {
-                    Message = "Usage: /image <path> [page|first-last|all]  (PNG, JPG, JPEG, GIF, WEBP, BMP, or PDF — " +
-                              $"PDFs attach rasterized pages, default page 1, max {MaxPdfPagesPerAttach} per call)",
+                    Message = "Usage: /image <path> [page|first-last|all|p=N]  (PNG, JPG, JPEG, GIF, WEBP, BMP, or PDF — " +
+                              $"PDFs attach rasterized pages, default page 1, max {MaxPdfPagesPerAttach} per call; " +
+                              "p=N attaches the next N unread pages each time you repeat the command)",
                     IsError = true,
                 });
 
@@ -606,20 +617,50 @@ namespace DevMind
             {
                 System.Collections.Generic.List<PdfPageImage> pages;
                 int first, last;
+                bool chunkMode = false;
                 try
                 {
                     int pageCount = PdfRasterizer.GetPageCount(path);
-                    (first, last) = PdfRasterizer.ParsePageSpec(pageSpec, pageCount);
 
-                    int requested = last - first + 1;
-                    if (requested > MaxPdfPagesPerAttach)
-                        return Task.FromResult(new CommandResult
+                    if (TryParseChunkSpec(pageSpec, out int chunkSize))
+                    {
+                        // p=N: attach the next N unread pages, resuming from this
+                        // session's cursor for the document.
+                        chunkMode = true;
+                        if (chunkSize > MaxPdfPagesPerAttach)
+                            return Task.FromResult(new CommandResult
+                            {
+                                Message = $"Chunk size {chunkSize} exceeds the {MaxPdfPagesPerAttach}-page-per-message cap.",
+                                IsError = true,
+                            });
+
+                        _pdfCursors.TryGetValue(path, out int lastAttached);
+                        var chunk = PdfRasterizer.NextChunk(lastAttached, chunkSize, pageCount);
+                        if (chunk == null)
                         {
-                            Message = $"That's {requested} pages — attach at most {MaxPdfPagesPerAttach} per message " +
-                                      $"(e.g. /image \"{Path.GetFileName(path)}\" {first}-{first + MaxPdfPagesPerAttach - 1}). " +
-                                      $"The PDF has {pageCount} page(s).",
-                            IsError = true,
-                        });
+                            _pdfCursors.Remove(path);
+                            return Task.FromResult(new CommandResult
+                            {
+                                Message = $"All {pageCount} pages of {Path.GetFileName(path)} have already been attached. " +
+                                          "Cursor reset — run the command again to start over from page 1.",
+                            });
+                        }
+                        (first, last) = chunk.Value;
+                    }
+                    else
+                    {
+                        (first, last) = PdfRasterizer.ParsePageSpec(pageSpec, pageCount);
+
+                        int requested = last - first + 1;
+                        if (requested > MaxPdfPagesPerAttach)
+                            return Task.FromResult(new CommandResult
+                            {
+                                Message = $"That's {requested} pages — attach at most {MaxPdfPagesPerAttach} per message " +
+                                          $"(e.g. /image \"{Path.GetFileName(path)}\" {first}-{first + MaxPdfPagesPerAttach - 1}, " +
+                                          $"or chunk through with p=5). The PDF has {pageCount} page(s).",
+                                IsError = true,
+                            });
+                    }
 
                     pages = PdfRasterizer.RenderPagesToPng(path, first, last);
                 }
@@ -652,12 +693,23 @@ namespace DevMind
                 foreach (var page in pages)
                     ctx.StagePendingImage($"data:image/png;base64,{Convert.ToBase64String(page.PngBytes)}");
 
+                // Every PDF attach advances the reading cursor, so explicit ranges and
+                // p=N chunks compose ("1-5" then "p=5" continues at page 6).
+                _pdfCursors[path] = last;
+
                 string pageLabel = first == last ? $"page {first}" : $"pages {first}-{last}";
+                string chunkHint = "";
+                if (chunkMode)
+                {
+                    chunkHint = last >= pages[0].PageCount
+                        ? " That was the final chunk — the cursor resets on the next run."
+                        : $" Next run continues at page {last + 1}.";
+                }
                 return Task.FromResult(new CommandResult
                 {
                     Message = $"PDF {pageLabel} of {pages[0].PageCount} rasterized and staged: {Path.GetFileName(path)} " +
                               $"({pages.Count} image(s), {totalBytes / 1024.0:F0} KB total). " +
-                              "All staged images attach to your next message. Requires a vision model with mmproj loaded.",
+                              "All staged images attach to your next message." + chunkHint,
                 });
             }
 
@@ -717,16 +769,28 @@ namespace DevMind
         }
 
         /// <summary>True when the token could be a /image PDF page spec: a positive
-        /// integer, an integer range "first-last", or "all".</summary>
+        /// integer, an integer range "first-last", "all", or a chunk spec "p=N".</summary>
         static bool LooksLikePageSpec(string token)
         {
             if (string.IsNullOrEmpty(token)) return false;
             if (token.Equals("all", StringComparison.OrdinalIgnoreCase)) return true;
+            if (TryParseChunkSpec(token, out _)) return true;
             if (int.TryParse(token, out int page)) return page > 0;
             int dash = token.IndexOf('-');
             return dash > 0
                 && int.TryParse(token.Substring(0, dash), out int first) && first > 0
                 && int.TryParse(token.Substring(dash + 1), out int last) && last > 0;
+        }
+
+        /// <summary>Parses a chunk spec "p=N" (case-insensitive, N ≥ 1) for /image's
+        /// sequential-chunk mode.</summary>
+        static bool TryParseChunkSpec(string spec, out int chunkSize)
+        {
+            chunkSize = 0;
+            if (spec == null || spec.Length < 3) return false;
+            if (spec[0] != 'p' && spec[0] != 'P') return false;
+            if (spec[1] != '=') return false;
+            return int.TryParse(spec.Substring(2), out chunkSize) && chunkSize > 0;
         }
 
         /// <summary>Resolves a raw /image argument (absolute, or relative to the working
