@@ -28,6 +28,10 @@ namespace DevMind.Core.Tests
         private readonly Task _acceptLoop;
 
         public List<string> RequestBodies { get; } = new();
+
+        /// <summary>Bodies of POSTs to /embeddings (kept separate from chat bodies).</summary>
+        public List<string> EmbeddingRequestBodies { get; } = new();
+
         public string BaseUrl { get; }
 
         /// <summary>Text streamed back for every chat POST (default "ok").</summary>
@@ -56,19 +60,29 @@ namespace DevMind.Core.Tests
                 {
                     var request = await ReadRequestAsync(stream);
                     if (request == null) continue;
-                    var (method, body) = request.Value;
+                    var (method, path, body) = request.Value;
 
+                    bool isEmbedding = method == "POST" && path.Contains("/embeddings");
                     // Record only the chat POSTs under test — the client also sends
                     // health/models GET probes, which must not pollute assertions.
-                    bool isChatPost = method == "POST" && body.Length > 0;
+                    bool isChatPost = method == "POST" && !isEmbedding && body.Length > 0;
                     if (isChatPost)
                     {
                         lock (RequestBodies) RequestBodies.Add(body);
                     }
+                    if (isEmbedding)
+                    {
+                        lock (EmbeddingRequestBodies) EmbeddingRequestBodies.Add(body);
+                    }
 
                     byte[] payload;
                     string contentType;
-                    if (isChatPost)
+                    if (isEmbedding)
+                    {
+                        payload = Encoding.UTF8.GetBytes(BuildEmbeddingResponse(body));
+                        contentType = "application/json";
+                    }
+                    else if (isChatPost)
                     {
                         string escaped = ResponseText.Replace("\\", "\\\\").Replace("\"", "\\\"");
                         string sse =
@@ -94,7 +108,28 @@ namespace DevMind.Core.Tests
             }
         }
 
-        private static async Task<(string method, string body)?> ReadRequestAsync(NetworkStream stream)
+        /// <summary>
+        /// Deterministic text-dependent pseudo-embedding (4096 dims, from the SHA-256 of
+        /// the request body): identical inputs embed identically (cosine distance 0),
+        /// different inputs differ — enough for retrieval-ranking assertions without a
+        /// real embedding model.
+        /// </summary>
+        private static string BuildEmbeddingResponse(string requestBody)
+        {
+            byte[] hash = System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(requestBody));
+            var sb = new StringBuilder("{\"data\":[{\"embedding\":[");
+            for (int i = 0; i < 4096; i++)
+            {
+                if (i > 0) sb.Append(',');
+                // Map hash bytes cyclically into [-0.5, 0.5).
+                sb.Append(((hash[i % hash.Length] + i) % 256 / 256.0 - 0.5)
+                    .ToString("G6", System.Globalization.CultureInfo.InvariantCulture));
+            }
+            sb.Append("]}]}");
+            return sb.ToString();
+        }
+
+        private static async Task<(string method, string path, string body)?> ReadRequestAsync(NetworkStream stream)
         {
             // Read until end of headers.
             var headerBuf = new MemoryStream();
@@ -115,14 +150,16 @@ namespace DevMind.Core.Tests
 
             string headerText = Encoding.ASCII.GetString(headerBuf.ToArray());
             string[] headerLines = headerText.Split("\r\n");
-            string method = headerLines[0].Split(' ')[0]; // "POST /v1/chat/completions HTTP/1.1"
+            string[] requestLine = headerLines[0].Split(' '); // "POST /v1/chat/completions HTTP/1.1"
+            string method = requestLine[0];
+            string path = requestLine.Length > 1 ? requestLine[1] : "";
             int contentLength = 0;
             foreach (string line in headerLines)
             {
                 if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
                     contentLength = int.Parse(line.Substring(15).Trim());
             }
-            if (contentLength == 0) return (method, string.Empty);
+            if (contentLength == 0) return (method, path, string.Empty);
 
             var bodyBytes = new byte[contentLength];
             int read = 0;
@@ -132,7 +169,7 @@ namespace DevMind.Core.Tests
                 if (n == 0) break;
                 read += n;
             }
-            return (method, Encoding.UTF8.GetString(bodyBytes, 0, read));
+            return (method, path, Encoding.UTF8.GetString(bodyBytes, 0, read));
         }
 
         public void Dispose()

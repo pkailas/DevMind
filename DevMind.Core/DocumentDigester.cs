@@ -36,12 +36,12 @@ namespace DevMind
     /// </summary>
     public static class DocumentDigester
     {
-        private const string DigestSystemPrompt =
+        internal const string DigestSystemPrompt =
             "You are a meticulous document analyst. You read document page images and produce " +
             "accurate, dense, well-organized notes and digests. Never invent content that is " +
             "not visible on the pages.";
 
-        private const string ChunkInstruction =
+        internal const string ChunkInstruction =
             "Write concise, dense factual notes (aim for under 500 words) capturing the substantive " +
             "content of these pages: topics, definitions, procedures, configuration items, and " +
             "important details, citing page numbers. Summarize code listings and long tables by " +
@@ -174,7 +174,7 @@ namespace DevMind
         /// either callback, so cancellation is propagated by cancelling the completion
         /// source directly.
         /// </summary>
-        private static async Task<string> AskAsync(LlmClient client, string prompt, int maxTokens, CancellationToken ct)
+        internal static async Task<string> AskAsync(LlmClient client, string prompt, int maxTokens, CancellationToken ct)
         {
             var collected = new StringBuilder();
             var done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);

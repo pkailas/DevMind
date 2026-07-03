@@ -586,6 +586,181 @@ namespace DevMind
                     return;
                 }
 
+                // ── /library — host-driven RAG over ingested PDFs ───────────────
+                // add: long-running vision ingest (agentic-turn pattern, like /digest).
+                // list/remove: quick DB round trips. A bare question retrieves the
+                // nearest chunks and REWRITES the input so it falls through to a
+                // normal model turn with the excerpts injected.
+                if (input.StartsWith("/library", StringComparison.OrdinalIgnoreCase))
+                {
+                    string libConn = _config.LibraryConnectionString;
+                    string libEmbed = _config.LibraryEmbeddingEndpoint;
+                    if (string.IsNullOrWhiteSpace(libConn) || string.IsNullOrWhiteSpace(libEmbed))
+                    {
+                        host.AppendOutputLocal(
+                            "/library is not configured — set libraryConnectionString (SQL Server 2025+) and " +
+                            "libraryEmbeddingEndpoint in devmind.json.\n", OutputColor.Error);
+                        return;
+                    }
+
+                    string libArgs = input.Length > 8 ? input.Substring(8).Trim() : "";
+
+                    // ── /library  (list) ─────────────────────────────────────
+                    if (libArgs.Length == 0 || libArgs.Equals("list", StringComparison.OrdinalIgnoreCase))
+                    {
+                        try
+                        {
+                            var store = new LibraryStore(libConn);
+                            await store.EnsureSchemaAsync(cts.Token);
+                            var docs = await store.ListDocumentsAsync(cts.Token);
+                            if (docs.Count == 0)
+                            {
+                                host.AppendOutputLocal(
+                                    "Library is empty. Add a document: /library add <path-to-pdf> [p=N]\n", OutputColor.Dim);
+                            }
+                            else
+                            {
+                                var sb = new System.Text.StringBuilder("Library documents:\n");
+                                foreach (var d in docs)
+                                    sb.AppendLine($"  [{d.Id}] {d.Name} — {d.Pages} pages, {d.ChunkCount} chunks, ingested {d.IngestedAtUtc:yyyy-MM-dd HH:mm}Z");
+                                sb.AppendLine("Ask a question with: /library <question>   Remove with: /library remove <id>");
+                                host.AppendOutputLocal(sb.ToString(), OutputColor.Dim);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            host.AppendOutputLocal($"/library failed: {ex.Message}\n", OutputColor.Error);
+                        }
+                        return;
+                    }
+
+                    // ── /library remove <id> ─────────────────────────────────
+                    if (libArgs.StartsWith("remove ", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string idArg = libArgs.Substring(7).Trim();
+                        if (!int.TryParse(idArg, out int docId))
+                        {
+                            host.AppendOutputLocal("Usage: /library remove <id>   (ids from /library list)\n", OutputColor.Error);
+                            return;
+                        }
+                        try
+                        {
+                            bool removed = await new LibraryStore(libConn).RemoveDocumentAsync(docId, cts.Token);
+                            host.AppendOutputLocal(removed
+                                ? $"Removed document {docId} and its chunks.\n"
+                                : $"No document with id {docId}.\n", removed ? OutputColor.Dim : OutputColor.Error);
+                        }
+                        catch (Exception ex)
+                        {
+                            host.AppendOutputLocal($"/library remove failed: {ex.Message}\n", OutputColor.Error);
+                        }
+                        return;
+                    }
+
+                    // ── /library add <path> [p=N] ────────────────────────────
+                    if (libArgs.StartsWith("add ", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string addArgs = libArgs.Substring(4).Trim();
+                        int libChunk = 5;
+                        string libPathRaw = addArgs;
+                        string[] libToks = addArgs.Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
+                        if (libToks.Length >= 2)
+                        {
+                            string lastTok = libToks[libToks.Length - 1];
+                            if (lastTok.StartsWith("p=", StringComparison.OrdinalIgnoreCase)
+                                && int.TryParse(lastTok.Substring(2), out int lz) && lz > 0)
+                            {
+                                libChunk = lz;
+                                libPathRaw = string.Join(" ", libToks, 0, libToks.Length - 1);
+                            }
+                        }
+                        libPathRaw = libPathRaw.Trim().Trim('"');
+                        string libPdf = string.IsNullOrEmpty(libPathRaw)
+                            ? null
+                            : Path.IsPathRooted(libPathRaw)
+                                ? libPathRaw
+                                : Path.GetFullPath(Path.Combine(options.WorkingDirectory ?? ".", libPathRaw));
+                        if (libPdf == null || !File.Exists(libPdf)
+                            || !libPdf.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
+                        {
+                            host.AppendOutputLocal(
+                                "Usage: /library add <path-to-pdf> [p=N]  — vision-ingests the PDF into the library " +
+                                "(one model call per N pages; needs the chat AND embedding servers running)." +
+                                (libPdf != null ? $"\nNot found or not a PDF: {libPdf}" : "") + "\n", OutputColor.Error);
+                            return;
+                        }
+
+                        inputBox.View.CanFocus = false;
+                        inputBox.SetActive(false);
+                        statusBar.SetBusy("Ingesting...");
+                        _isTurnRunning = true;
+                        try
+                        {
+                            await Task.Run(async () =>
+                            {
+                                var ingest = await DocumentLibrarian.IngestAsync(
+                                    options, options.EndpointUrl, options.ApiKey,
+                                    libEmbed, libConn, libPdf, libChunk,
+                                    line => host.AppendOutputLocal(line, OutputColor.Dim),
+                                    cts.Token);
+                                host.AppendOutputLocal(
+                                    $"[LIBRARY] Done — {Path.GetFileName(libPdf)} is searchable " +
+                                    $"({ingest.Chunks} chunks, {ingest.Pages} pages). Ask: /library <question>\n",
+                                    OutputColor.Dim);
+                            });
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            host.AppendOutputLocal("\n[LIBRARY] Ingest cancelled.\n", OutputColor.Error);
+                        }
+                        catch (Exception ex)
+                        {
+                            host.AppendOutputLocal(
+                                $"\n[LIBRARY] Ingest failed: {ex.Message}\n" +
+                                "Is the embedding server running? Start it with llm-launchers\\start-qwen3-embedding.bat\n",
+                                OutputColor.Error);
+                        }
+                        finally
+                        {
+                            _isTurnRunning = false;
+                            inputBox.View.CanFocus = true;
+                            inputBox.SetActive(true);
+                            inputBox.View.SetFocus();
+                            statusBar.SetReady();
+                        }
+                        return;
+                    }
+
+                    // ── /library <question> — retrieve, then fall through to a turn ──
+                    try
+                    {
+                        statusBar.SetBusy("Searching library...");
+                        var hits = await DocumentLibrarian.QueryAsync(
+                            libEmbed, libConn, libArgs, DocumentLibrarian.DefaultTopK, cts.Token);
+                        if (hits.Count == 0)
+                        {
+                            host.AppendOutputLocal(
+                                "Library returned no matches (is it empty? /library list).\n", OutputColor.Error);
+                            statusBar.SetReady();
+                            return;
+                        }
+                        host.AppendOutputLocal(
+                            $"[LIBRARY] {hits.Count} excerpt(s) retrieved — answering...\n", OutputColor.Dim);
+                        // Rewrite the input and FALL THROUGH: the augmented prompt no longer
+                        // starts with '/', so it flows into the normal agentic turn below.
+                        input = DocumentLibrarian.BuildAugmentedPrompt(libArgs, hits);
+                    }
+                    catch (Exception ex)
+                    {
+                        host.AppendOutputLocal(
+                            $"/library query failed: {ex.Message}\n" +
+                            "Is the embedding server running? Start it with llm-launchers\\start-qwen3-embedding.bat\n",
+                            OutputColor.Error);
+                        statusBar.SetReady();
+                        return;
+                    }
+                }
+
                 // ── Slash-command dispatch ──────────────────────────────────────
                 // Intercept slash commands at the input boundary so they never
                 // burn model tokens. The dispatcher routes to registered handlers.
