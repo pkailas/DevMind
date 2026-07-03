@@ -299,6 +299,14 @@ namespace DevMind
                 return;
             }
 
+            // Scroll lock: follow the stream only when the user is already at the bottom.
+            // Scrolling up (mouse wheel moves Viewport.Y) pins the view so code on screen
+            // can be read while the turn keeps streaming; scrolling back down — or sending
+            // the next message (ScrollOutputToEnd) — resumes following. Sampled BEFORE the
+            // insert: the insert itself grows the row count, which would read as "not at
+            // bottom" and stall following for everyone.
+            bool follow = IsScrolledToBottom();
+
             try
             {
                 doc.Insert(start, combined.ToString());
@@ -311,8 +319,19 @@ namespace DevMind
             }
             _colorSpans.AddRange(pendingSpans);
 
-            TrimScrollbackIfNeeded(doc);
-            _outputView.CaretOffset = doc.TextLength; // one auto-scroll for the whole batch
+            if (follow)
+            {
+                TrimScrollbackIfNeeded(doc);
+                _outputView.CaretOffset = doc.TextLength; // one auto-scroll for the whole batch
+            }
+            else if (doc.TextLength > MaxDocChars * 2)
+            {
+                // While pinned, a front-trim would yank the text being read, so trimming is
+                // deferred — but not forever: past 2× the cap the re-wrap cost per insert
+                // (O(doc), see TrimScrollbackIfNeeded) starts starving the render pump, so
+                // trim anyway and accept the jump. Normal trimming resumes with following.
+                TrimScrollbackIfNeeded(doc);
+            }
             // The output view is read-only and unfocusable, so its undo history is dead weight:
             // doc.Insert (above) and doc.Remove (in the trim) each push an undo entry, so the
             // UndoStack grows unbounded across a session — the one piece of render state the
@@ -326,6 +345,37 @@ namespace DevMind
         // visible glyph and skew color-span offsets. Fast path: skip the allocations when clean.
         private static string NormalizeNewlines(string text)
             => text.IndexOf('\r') < 0 ? text : text.Replace("\r\n", "\n").Replace("\r", "\n");
+
+        // True when the viewport shows the last visual row. GetContentSize().Height is the
+        // Editor's total visual-row count (wrap-map space, same coordinate system as
+        // Viewport.Y — it's what clamps wheel scrolling). One row of tolerance absorbs
+        // partial-row rounding so a view that LOOKS at-bottom never silently stops
+        // following. UI thread only.
+        private bool IsScrolledToBottom()
+        {
+            try
+            {
+                var viewport = _outputView.Viewport;
+                return viewport.Y + viewport.Height >= _outputView.GetContentSize().Height - 1;
+            }
+            catch
+            {
+                return true; // detection must never break following
+            }
+        }
+
+        /// <summary>
+        /// Jumps the output view to the newest line and resumes stream-following (the
+        /// scroll lock in FlushPending pins the view while the user reads scrollback).
+        /// Called by the host input loop when a new message is sent — typing implies
+        /// wanting to see the reply. UI thread only.
+        /// </summary>
+        public void ScrollOutputToEnd()
+        {
+            TextDocument doc = _outputView.Document;
+            if (doc != null)
+                _outputView.CaretOffset = doc.TextLength;
+        }
 
         // Keep the transcript bounded. Each Document.Insert under WordWrap triggers a FULL-document
         // re-wrap in the Editor (O(doc length); there is no incremental-wrap API — verified by
