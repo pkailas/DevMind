@@ -41,6 +41,17 @@ namespace DevMind.McpServer
         /// <summary>Post-run build verification outcome (null when skipped: no file
         /// changes, no resolvable build command, or verify_build false).</summary>
         public BuildVerification? Build;
+
+        /// <summary>The live conversation, retained after completion so
+        /// devmind_task_continue can resume it. Transferred to the continuation job
+        /// (this becomes null); disposed on idle expiry, eviction, or shutdown.</summary>
+        public HeadlessSession? Session;
+
+        /// <summary>Set when this job is a continuation of an earlier one.</summary>
+        public string? ParentJobId { get; init; }
+
+        /// <summary>Set when a later job continued this one (its session moved there).</summary>
+        public string? ContinuedByJobId;
         public DateTime QueuedAtUtc = DateTime.UtcNow;
         public DateTime? StartedAtUtc;
         public DateTime? EndedAtUtc;
@@ -127,10 +138,94 @@ namespace DevMind.McpServer
                 State = AgentJobState.Queued,
             };
 
+            Register(job);
+            _queue.Writer.TryWrite(job);
+            return job;
+        }
+
+        /// <summary>
+        /// Resumes a finished job's conversation as a new job: the session (LlmClient
+        /// history, caches, scratchpad) transfers to the continuation, so a bare
+        /// "continue" picks up exactly where the parent stopped. Returns null with a
+        /// user-presentable error when the parent cannot be continued.
+        /// </summary>
+        public AgentJob? Continue(string parentJobId, string prompt, int maxDepth, int timeoutMinutes,
+            bool verifyBuild, out string error)
+        {
+            error = null!;
+            AgentJob parent;
+            HeadlessSession session;
+
+            lock (_lock)
+            {
+                if (!_jobs.TryGetValue(parentJobId, out parent!))
+                {
+                    error = $"Unknown job_id: {parentJobId}.";
+                    return null;
+                }
+                if (parent.State is AgentJobState.Queued or AgentJobState.Running)
+                {
+                    error = $"Job {parentJobId} is still {parent.State.ToString().ToLowerInvariant()} — wait for it to finish before continuing.";
+                    return null;
+                }
+                if (parent.ContinuedByJobId != null)
+                {
+                    error = $"Job {parentJobId} was already continued by {parent.ContinuedByJobId} — continue THAT job instead (a conversation is a chain; always continue its newest link).";
+                    return null;
+                }
+                if (parent.Session == null)
+                {
+                    error = $"Job {parentJobId}'s conversation is no longer available (expired, evicted, or the job predates continuation support). Start a fresh task with a continuation brief instead.";
+                    return null;
+                }
+
+                // Transfer session ownership to the continuation.
+                session = parent.Session;
+                parent.Session = null;
+            }
+
+            var job = new AgentJob
+            {
+                Id = $"job-{Interlocked.Increment(ref _nextId)}",
+                Prompt = prompt,
+                WorkingDirectory = parent.WorkingDirectory,
+                MaxDepth = maxDepth,
+                TimeoutMinutes = timeoutMinutes,
+                AllowCommit = parent.AllowCommit,
+                VerifyBuild = verifyBuild,
+                State = AgentJobState.Queued,
+                ParentJobId = parentJobId,
+                Session = session,
+            };
+            parent.ContinuedByJobId = job.Id;
+
+            Register(job);
+            _queue.Writer.TryWrite(job);
+            return job;
+        }
+
+        /// <summary>Session idle expiry: a conversation untouched this long is disposed
+        /// (the KV of a dead conversation is pure memory cost).</summary>
+        private static readonly TimeSpan SessionIdleExpiry = TimeSpan.FromMinutes(60);
+
+        private void Register(AgentJob job)
+        {
             lock (_lock)
             {
                 _jobs[job.Id] = job;
                 _jobOrder.Add(job.Id);
+
+                // Expire idle sessions (best-effort, piggybacked on job creation).
+                foreach (var j in _jobs.Values)
+                {
+                    if (j.Session != null
+                        && j.State is AgentJobState.Done or AgentJobState.Failed or AgentJobState.Cancelled
+                        && DateTime.UtcNow - j.Session.LastActivityUtc > SessionIdleExpiry)
+                    {
+                        try { j.Session.Dispose(); } catch { }
+                        j.Session = null;
+                    }
+                }
 
                 // Evict oldest FINISHED jobs past the retention cap (never evict live ones).
                 while (_jobOrder.Count > RetainedJobs)
@@ -138,13 +233,11 @@ namespace DevMind.McpServer
                     string? evictId = _jobOrder.FirstOrDefault(id =>
                         _jobs[id].State is AgentJobState.Done or AgentJobState.Failed or AgentJobState.Cancelled);
                     if (evictId == null) break;
+                    try { _jobs[evictId].Session?.Dispose(); } catch { }
                     _jobOrder.Remove(evictId);
                     _jobs.Remove(evictId);
                 }
             }
-
-            _queue.Writer.TryWrite(job);
-            return job;
         }
 
         public AgentJob? Get(string jobId)
@@ -202,12 +295,24 @@ namespace DevMind.McpServer
 
                 try
                 {
-                    var options = new HeadlessOptions { AgenticLoopMaxDepth = job.MaxDepth };
-                    var result = await HeadlessAgent.RunAsync(
-                        job.Prompt, options, EndpointUrl, ApiKey,
-                        job.WorkingDirectory,
-                        buildCommand: null,
-                        allowCommit: job.AllowCommit,
+                    // Fresh task → new session; continuation → the parent's session
+                    // (conversation intact). Sessions are RETAINED on the job after the
+                    // turn so devmind_task_continue can resume them.
+                    HeadlessSession? session = job.Session;
+                    if (session == null)
+                    {
+                        var options = new HeadlessOptions { AgenticLoopMaxDepth = job.MaxDepth };
+                        session = new HeadlessSession(options, EndpointUrl, ApiKey,
+                            job.WorkingDirectory, buildCommand: null, allowCommit: job.AllowCommit);
+                        job.Session = session;
+                    }
+                    else
+                    {
+                        session.SetMaxDepth(job.MaxDepth);
+                    }
+
+                    var result = await session.RunTurnAsync(
+                        job.Prompt,
                         transcriptPath: transcriptPath,
                         progress: job.AppendTail,
                         ct: job.Cts.Token).ConfigureAwait(false);
@@ -289,7 +394,11 @@ namespace DevMind.McpServer
             lock (_lock)
             {
                 foreach (var job in _jobs.Values)
+                {
                     job.Cts.Cancel();
+                    try { job.Session?.Dispose(); } catch { }
+                    job.Session = null;
+                }
             }
             try { _workerTask.Wait(TimeSpan.FromSeconds(2)); } catch { }
             _shutdownCts.Dispose();

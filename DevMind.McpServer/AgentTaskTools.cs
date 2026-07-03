@@ -42,7 +42,10 @@ namespace DevMind.McpServer
             "shell/build/test commands, and iterates until done. Returns a job_id immediately — poll " +
             "devmind_task_status, then fetch devmind_task_result. Jobs run one at a time. Write the " +
             "prompt like a task brief for a junior developer: include the goal, relevant file paths, " +
-            "and how to verify success. Do not edit files under working_dir while the job runs.")]
+            "and how to verify success. Do not edit files under working_dir while the job runs. " +
+            "Estimate max_depth to the task size (verify ~25, single-file feature ~40, cross-cutting " +
+            "~60) — hitting the cap is cheap to recover: devmind_task_continue resumes the " +
+            "conversation where it stopped.")]
         public async Task<string> TaskStart(
             [Description("The task brief: goal, relevant files, constraints, and how to verify success.")] string prompt,
             [Description("Absolute path of the directory the agent operates in (its sandbox).")] string working_dir,
@@ -79,6 +82,47 @@ namespace DevMind.McpServer
                 queue_position = _jobs.QueuePosition(job),
                 endpoint = _jobs.EndpointUrl,
                 hint = "Poll devmind_task_status with this job_id; fetch devmind_task_result when done.",
+            }, JsonOpts);
+        }
+
+        [McpServerTool(Name = "devmind_task_continue")]
+        [Description(
+            "Resume a FINISHED DevMind task's conversation — the agent keeps its full context " +
+            "(everything it read, did, and concluded), so a bare 'continue' picks up exactly " +
+            "where it left off. Use this when a task hit its iteration cap, or to send follow-up " +
+            "instructions ('now also fix the failing test'). Returns a NEW job_id to poll. " +
+            "A conversation is a chain: always continue its NEWEST job_id. Conversations expire " +
+            "after ~60 minutes idle — after that, start a fresh task with a continuation brief.")]
+        public async Task<string> TaskContinue(
+            [Description("The job_id of the finished task to resume (the newest in its chain).")] string job_id,
+            [Description("Instruction for the resumed agent. Default: 'Continue the task from where you left off.'")] string? prompt = null,
+            [Description("Max agentic iterations for this continuation (default 25).")] int? max_depth = null,
+            [Description("Wall-clock kill timeout in minutes (default 30).")] int? timeout_minutes = null,
+            [Description("Run build verification after this turn (default true).")] bool? verify_build = null,
+            CancellationToken cancellationToken = default)
+        {
+            string? health = await ProbeModelServerAsync(cancellationToken).ConfigureAwait(false);
+            if (health != null)
+                return Err(health);
+
+            var job = _jobs.Continue(
+                job_id,
+                string.IsNullOrWhiteSpace(prompt) ? "Continue the task from where you left off." : prompt,
+                maxDepth: Math.Clamp(max_depth ?? 25, 1, 100),
+                timeoutMinutes: Math.Clamp(timeout_minutes ?? 30, 1, 240),
+                verifyBuild: verify_build ?? true,
+                out string error);
+
+            if (job == null)
+                return Err(error);
+
+            return JsonSerializer.Serialize(new
+            {
+                job_id = job.Id,
+                parent_job_id = job_id,
+                state = "queued",
+                queue_position = _jobs.QueuePosition(job),
+                hint = "Poll devmind_task_status with the NEW job_id; the conversation context carried over.",
             }, JsonOpts);
         }
 
@@ -139,6 +183,9 @@ namespace DevMind.McpServer
                 hit_depth_cap = r?.HitDepthCap ?? false,
                 error = job.Error,
                 transcript_path = r?.TranscriptPath,
+                parent_job_id = job.ParentJobId,
+                continued_by = job.ContinuedByJobId,
+                can_continue = job.Session != null && job.ContinuedByJobId == null,
                 build_verification = job.Build == null ? null : new
                 {
                     command = job.Build.Command,
