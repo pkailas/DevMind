@@ -59,6 +59,16 @@ namespace DevMind.Core.Tests
                 Assert.Contains(progressLines, l => l.Contains("chunk 1/2"));
                 Assert.Contains(progressLines, l => l.Contains("chunk 2/2"));
                 Assert.Contains(progressLines, l => l.Contains("synthesizing"));
+
+                // Runaway guard: every chunk request carries the chunk output ceiling,
+                // the synthesis request its larger one. Without these an uncapped
+                // repetition loop runs to the server's -n budget (observed: 28K tokens).
+                Assert.Equal(DocumentDigester.ChunkMaxTokens,
+                    (int)JObject.Parse(server.RequestBodies[0])["max_tokens"]!);
+                Assert.Equal(DocumentDigester.ChunkMaxTokens,
+                    (int)JObject.Parse(server.RequestBodies[1])["max_tokens"]!);
+                Assert.Equal(DocumentDigester.SynthesisMaxTokens,
+                    (int)JObject.Parse(server.RequestBodies[2])["max_tokens"]!);
             }
             finally
             {
@@ -161,6 +171,22 @@ namespace DevMind.Core.Tests
             int occurrences = (cleaned.Length - cleaned.Replace(" and so on, and so on", "").Length)
                 / " and so on, and so on".Length;
             Assert.True(occurrences <= 1, $"phrase survived {occurrences} times");
+        }
+
+        [Fact]
+        public void TrimDegenerateTail_ParagraphLengthLoop_Collapsed()
+        {
+            // Field case 2: the model looped a whole sentence/paragraph (~150 chars) —
+            // beyond the original 64-char period window, so 113K chars slipped through.
+            string paragraph = "The RAP ArchiveLink URL Generator exposes SAP's internal ArchiveLink " +
+                               "capability as a modern OData service for external consumers to request upload URLs. ";
+            string text = "## Notes\nReal content here.\n" + string.Concat(Enumerable.Repeat(paragraph, 30));
+
+            string cleaned = DocumentDigester.TrimDegenerateTail(text);
+
+            int occurrences = (cleaned.Length - cleaned.Replace(paragraph, "").Length) / paragraph.Length;
+            Assert.True(occurrences <= 1, $"paragraph survived {occurrences} times");
+            Assert.StartsWith("## Notes", cleaned);
         }
 
         [Fact]

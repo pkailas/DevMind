@@ -65,6 +65,21 @@ namespace DevMind
         internal const int TotalNotesBudgetChars = 200_000;
 
         /// <summary>
+        /// Per-request output ceiling for chunk-note calls (covers reasoning + notes;
+        /// healthy chunks measure ~2K reasoning + ~1K note tokens). This is the REAL
+        /// runaway guard: an uncapped stochastic repetition loop otherwise runs to the
+        /// server's -n budget — observed in the field, a 5-page chunk that normally
+        /// stops at ~1K output tokens looped to ~28K (282s instead of ~40s). A/B testing
+        /// showed the loop is temp-dice, not prompt- or sampling-config-caused, so the
+        /// only reliable fix is bounding the damage.
+        /// </summary>
+        internal const int ChunkMaxTokens = 4096;
+
+        /// <summary>Output ceiling for the synthesis call (longer deliberation + a full
+        /// Markdown digest need more headroom than a chunk note).</summary>
+        internal const int SynthesisMaxTokens = 8192;
+
+        /// <summary>
         /// Runs the full digestion. Uses its own LlmClient (fresh conversation per chunk)
         /// against the same endpoint, so the caller's conversation history is untouched.
         /// Progress lines stream through <paramref name="progress"/>; cancellation aborts
@@ -114,7 +129,7 @@ namespace DevMind
                     string chunkPrompt =
                         $"These images are pages {first}-{last} of {pageCount} from the document \"{name}\". " +
                         ChunkInstruction;
-                    string note = await AskAsync(client, chunkPrompt, ct).ConfigureAwait(false);
+                    string note = await AskAsync(client, chunkPrompt, ChunkMaxTokens, ct).ConfigureAwait(false);
                     int rawNoteLength = note.Length;
                     note = TruncateNote(note, MaxChunkNoteChars);
                     notes.Add($"--- Pages {first}-{last} ---\n{note}");
@@ -141,7 +156,7 @@ namespace DevMind
                     "sections and what each covers, key concepts/procedures/configuration items, and notable " +
                     "specifics worth remembering. Comprehensive but non-repetitive.\n\n" +
                     string.Join("\n\n", notes);
-                string digest = await AskAsync(client, synthesisPrompt, ct).ConfigureAwait(false);
+                string digest = await AskAsync(client, synthesisPrompt, SynthesisMaxTokens, ct).ConfigureAwait(false);
 
                 progress?.Invoke($"[DIGEST] finished in {swAll.Elapsed.TotalMinutes:F1} min.\n");
                 return new DigestResult
@@ -159,7 +174,7 @@ namespace DevMind
         /// either callback, so cancellation is propagated by cancelling the completion
         /// source directly.
         /// </summary>
-        private static async Task<string> AskAsync(LlmClient client, string prompt, CancellationToken ct)
+        private static async Task<string> AskAsync(LlmClient client, string prompt, int maxTokens, CancellationToken ct)
         {
             var collected = new StringBuilder();
             var done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -175,7 +190,8 @@ namespace DevMind
                     onComplete: () => done.TrySetResult(true),
                     onError: ex => done.TrySetException(ex),
                     combinedSystemPrompt: DigestSystemPrompt,
-                    cancellationToken: ct).ConfigureAwait(false);
+                    cancellationToken: ct,
+                    maxTokens: maxTokens).ConfigureAwait(false);
                 await done.Task.ConfigureAwait(false);
             }
             return TrimDegenerateTail(StripThink(collected.ToString()).Trim());
@@ -199,9 +215,11 @@ namespace DevMind
                 return text;
             string trimmed = text.TrimEnd();
 
-            // Pass 1: collapse a periodic tail to a single occurrence.
+            // Pass 1: collapse a periodic tail to a single occurrence. Period up to 400
+            // chars — field data showed models loop whole sentences/paragraphs, not just
+            // short symbol cycles (a 64-char window missed a 113K-char paraphrase loop).
             int bestCut = -1;
-            for (int period = 1; period <= 64 && period * 2 <= trimmed.Length; period++)
+            for (int period = 1; period <= 400 && period * 2 <= trimmed.Length; period++)
             {
                 int repeats = 1;
                 int end = trimmed.Length;
