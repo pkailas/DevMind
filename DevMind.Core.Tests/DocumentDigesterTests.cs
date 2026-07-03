@@ -137,6 +137,47 @@ namespace DevMind.Core.Tests
             Assert.Contains("truncated", notes[0]);
         }
 
+        [Fact]
+        public void TrimDegenerateTail_EmojiFlood_RemovedEntirely()
+        {
+            // The field case: a good digest followed by thousands of chars of a
+            // cycling emoji sequence (no stop token emitted).
+            string digest = "## Key Takeaway\nThis is a stateless OData V4 service.";
+            string flood = string.Concat(Enumerable.Repeat("🌐🔗⚙️✅📦📈🔍📖🛠️💡🎯📌🔖🗂️📜🔍📊🛡️🔐", 120));
+
+            string cleaned = DocumentDigester.TrimDegenerateTail(digest + " " + flood);
+
+            Assert.Equal(digest, cleaned);
+        }
+
+        [Fact]
+        public void TrimDegenerateTail_RepeatingTextTail_CollapsedToOneOccurrence()
+        {
+            string text = "The service returns a URL." + string.Concat(Enumerable.Repeat(" and so on, and so on", 20));
+            string cleaned = DocumentDigester.TrimDegenerateTail(text);
+
+            Assert.StartsWith("The service returns a URL.", cleaned);
+            // At most one occurrence of the repeated phrase survives.
+            int occurrences = (cleaned.Length - cleaned.Replace(" and so on, and so on", "").Length)
+                / " and so on, and so on".Length;
+            Assert.True(occurrences <= 1, $"phrase survived {occurrences} times");
+        }
+
+        [Fact]
+        public void TrimDegenerateTail_CleanText_Unchanged()
+        {
+            string text = "A perfectly normal digest with a conclusion.";
+            Assert.Same(text, DocumentDigester.TrimDegenerateTail(text));
+        }
+
+        [Fact]
+        public void TrimDegenerateTail_LegitimateTrailingEmoji_Kept()
+        {
+            // A couple of trailing emoji are normal model style — only walls get stripped.
+            string text = "Deployment complete 🎯";
+            Assert.Equal(text, DocumentDigester.TrimDegenerateTail(text));
+        }
+
         private static JToken LastUserMessage(string requestBody)
         {
             var body = JObject.Parse(requestBody);

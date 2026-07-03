@@ -178,7 +178,72 @@ namespace DevMind
                     cancellationToken: ct).ConfigureAwait(false);
                 await done.Task.ConfigureAwait(false);
             }
-            return StripThink(collected.ToString()).Trim();
+            return TrimDegenerateTail(StripThink(collected.ToString()).Trim());
+        }
+
+        /// <summary>
+        /// Removes degenerate repetition tails from model output. Local models sometimes
+        /// fail to emit a stop token after long structured output and tail-spin into a
+        /// repeating sequence (observed in the field: thousands of chars of a cycling
+        /// emoji string after an otherwise-good digest). Left in place, the tail pollutes
+        /// the saved digest AND the conversation injection, which then conditions the
+        /// model to reproduce the pattern in follow-up answers. Two passes:
+        ///   1. Periodic-tail collapse — a suffix pattern (period ≤ 64 chars) repeated
+        ///      ≥ 4 consecutive times covering ≥ 24 chars is collapsed to one occurrence.
+        ///   2. Symbol-spew strip — a trailing run of &gt; 16 emoji/symbol chars is removed
+        ///      (legit prose never ends in a wall of symbols; a single trailing 🎯 stays).
+        /// </summary>
+        internal static string TrimDegenerateTail(string text)
+        {
+            if (string.IsNullOrEmpty(text))
+                return text;
+            string trimmed = text.TrimEnd();
+
+            // Pass 1: collapse a periodic tail to a single occurrence.
+            int bestCut = -1;
+            for (int period = 1; period <= 64 && period * 2 <= trimmed.Length; period++)
+            {
+                int repeats = 1;
+                int end = trimmed.Length;
+                while (end - period * (repeats + 1) >= 0
+                       && string.CompareOrdinal(trimmed, end - period * (repeats + 1), trimmed, end - period, period) == 0)
+                    repeats++;
+                if (repeats >= 4 && period * repeats >= 24)
+                {
+                    int cut = trimmed.Length - period * (repeats - 1); // keep ONE occurrence
+                    if (bestCut < 0 || cut < bestCut)
+                        bestCut = cut;
+                }
+            }
+            if (bestCut >= 0)
+                trimmed = trimmed.Substring(0, bestCut).TrimEnd();
+
+            // Pass 2: strip a trailing wall of symbols/emoji (surrogates, symbols,
+            // variation selectors, combining marks) longer than 16 non-space chars.
+            int start = trimmed.Length;
+            while (start > 0)
+            {
+                char c = trimmed[start - 1];
+                var cat = System.Globalization.CharUnicodeInfo.GetUnicodeCategory(c);
+                bool symbolic =
+                    cat == System.Globalization.UnicodeCategory.OtherSymbol
+                    || cat == System.Globalization.UnicodeCategory.Surrogate
+                    || cat == System.Globalization.UnicodeCategory.NonSpacingMark
+                    || cat == System.Globalization.UnicodeCategory.EnclosingMark
+                    || cat == System.Globalization.UnicodeCategory.Format
+                    || c == '️';
+                if (!symbolic && !char.IsWhiteSpace(c))
+                    break;
+                start--;
+            }
+            int symbolCount = 0;
+            for (int j = start; j < trimmed.Length; j++)
+                if (!char.IsWhiteSpace(trimmed[j]))
+                    symbolCount++;
+            if (symbolCount > 16)
+                trimmed = trimmed.Substring(0, start).TrimEnd();
+
+            return trimmed.Length == text.Length ? text : trimmed;
         }
 
         /// <summary>
