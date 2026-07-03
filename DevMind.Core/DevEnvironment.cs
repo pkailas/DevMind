@@ -54,6 +54,29 @@ namespace DevMind
                 notes.Append($"DEVMIND_SHELL_TIMEOUT = {DefaultShellTimeoutSeconds}; ");
             }
 
+            // PATHEXT is how PowerShell decides a file is EXECUTABLE. Claude Desktop
+            // launches MCP servers without it, and PowerShell then classifies .exe files
+            // as DOCUMENTS: "& dotnet.exe" opens detached (the flashing console windows),
+            // stdout is lost, $LASTEXITCODE stays blank — a live delegation burned its
+            // whole depth cap on this ("Cannot run a document in the middle of a
+            // pipeline"). Restore the Windows default when missing.
+            if (OperatingSystem.IsWindows()
+                && string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("PATHEXT")))
+            {
+                Environment.SetEnvironmentVariable("PATHEXT",
+                    ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC");
+                notes.Append("PATHEXT = (windows default); ");
+            }
+
+            // ComSpec is cmd.exe's own location — scripts and some tools consult it.
+            if (OperatingSystem.IsWindows()
+                && string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ComSpec")))
+            {
+                Environment.SetEnvironmentVariable("ComSpec",
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe"));
+                notes.Append("ComSpec = (system cmd.exe); ");
+            }
+
             return notes.Length > 0 ? notes.ToString().TrimEnd(' ', ';') : null;
         }
 
