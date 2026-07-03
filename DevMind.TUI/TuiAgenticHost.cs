@@ -250,9 +250,56 @@ namespace DevMind
         public void StartRenderPump(IApplication app)
         {
             if (app == null || _renderPumpToken != null) return;
+
+            // ── Fullscreen-snap fix: disarm WindowsOutput's "maximize workaround" ──
+            // Terminal.Gui's WindowsOutput.GetSize() (verified by decompilation, present
+            // unchanged through 2.4.16) remembers the window size whenever the reported
+            // size equals GetLargestConsoleWindowSize, and on the next differing report
+            // FORCES that remembered size back — a workaround for legacy-conhost
+            // Alt+Enter that misfires under Windows Terminal: after F11 fullscreen the
+            // app can be forced back to its pre-fullscreen dimensions and never fills
+            // the terminal. The trap lives in the private field
+            // _lastWindowSizeBeforeMaximized; nulling it every pump tick keeps it
+            // permanently disarmed so the driver always follows the REAL reported size.
+            // Worst case a resize transition slips through within one 100 ms tick — the
+            // next poll then takes the normal path and self-corrects. All reflection is
+            // best-effort: if the field vanishes in an upgrade this becomes a no-op.
+            object driverOutput = null;
+            System.Reflection.FieldInfo maximizeTrap = null;
+            try
+            {
+                driverOutput = app.Driver?.GetOutput();
+                maximizeTrap = driverOutput?.GetType().GetField(
+                    "_lastWindowSizeBeforeMaximized",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            }
+            catch { /* driver shape changed — feature degrades to no-op */ }
+
+            var lastScreen = System.Drawing.Rectangle.Empty;
             _renderPumpToken = app.AddTimeout(
                 TimeSpan.FromMilliseconds(FlushIntervalMs),
-                () => { FlushPending(); return true; }); // true = keep pumping for the app's life
+                () =>
+                {
+                    if (maximizeTrap != null)
+                    {
+                        try { maximizeTrap.SetValue(driverOutput, null); }
+                        catch { maximizeTrap = null; } // never let the pump die over this
+                    }
+                    try
+                    {
+                        // Diag-only breadcrumb (DEVMIND_TUI_DIAG): trace terminal size changes
+                        // so fullscreen/resize misbehavior is observable in the field.
+                        var screen = app.Driver?.Screen ?? default;
+                        if (screen != lastScreen)
+                        {
+                            Diag($"[SCREEN] {lastScreen.Width}x{lastScreen.Height} -> {screen.Width}x{screen.Height}");
+                            lastScreen = screen;
+                        }
+                    }
+                    catch { /* diagnostics only */ }
+                    FlushPending();
+                    return true; // keep pumping for the app's life
+                });
         }
 
         // Enqueue one colored span. Producers call this from any thread — no App.Invoke; the render
@@ -372,7 +419,14 @@ namespace DevMind
             _colorSpans.AddRange(pendingSpans);
 
             TrimScrollbackIfNeeded(doc);
-            _outputView.CaretOffset = doc.TextLength; // one auto-scroll for the whole batch
+
+            // A live mouse selection owns the caret: setting CaretOffset while a selection
+            // anchor is active EXTENDS the selection to the end of the document on every
+            // flush, corrupting what the user is trying to select mid-stream. Skip the
+            // auto-scroll until the selection is gone — copy (Ctrl+C), a plain click, and
+            // send all clear it, and following resumes on the next flush.
+            if (!_outputView.HasSelection)
+                _outputView.CaretOffset = doc.TextLength; // one auto-scroll for the whole batch
             // The output view is read-only and unfocusable, so its undo history is dead weight:
             // doc.Insert (above) and doc.Remove (in the trim) each push an undo entry, so the
             // UndoStack grows unbounded across a session — the one piece of render state the
@@ -417,6 +471,7 @@ namespace DevMind
         public void ScrollOutputToEnd()
         {
             _pinnedScrollRows = 0;
+            _outputView.ClearSelection(); // a stale selection anchor would re-highlight the stream
             TextDocument doc = _outputView.Document;
             if (doc != null)
                 _outputView.CaretOffset = doc.TextLength;

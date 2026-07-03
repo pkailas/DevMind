@@ -1294,6 +1294,13 @@ namespace DevMind
                 return;
             }
 
+            // Kill the selection ANCHOR, not just the highlight. ClearSelection nulls the
+            // Editor's _selectionAnchor; without this the anchor survives the copy, and every
+            // render-pump CaretOffset = TextLength then re-extends the selection from that
+            // stale anchor to the end of the document — the "everything streamed after a copy
+            // is highlighted" bug.
+            outputView.ClearSelection();
+
             try
             {
                 var psi = new ProcessStartInfo
