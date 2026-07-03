@@ -95,9 +95,13 @@ namespace DevMind
                     : $"{invoke} \"{wd}\" /p:DeployExtension=false /verbosity:minimal";
             }
 
-            // Detect Node/TypeScript: package.json in the working directory.
+            // Detect Node/TypeScript: package.json in the working directory — but only
+            // when it actually DEFINES a "build" script. A dependencies-only
+            // package.json (e.g. stray npm-install debris at a .NET solution root, as
+            // found live in Parsely) must not hijack detection: "npm run build" would
+            // just fail with "Missing script", masking the real dotnet build.
             string packageJsonPath = Path.Combine(wd, "package.json");
-            if (File.Exists(packageJsonPath))
+            if (File.Exists(packageJsonPath) && HasNpmBuildScript(packageJsonPath))
             {
                 bool isBun = File.Exists(Path.Combine(wd, "bun.lockb")) ||
                              File.Exists(Path.Combine(wd, "bunfig.toml"));
@@ -131,6 +135,24 @@ namespace DevMind
             catch { }
 
             return null;
+        }
+
+        /// <summary>True when package.json parses and its "scripts" object contains a
+        /// "build" entry. Unparseable files count as no-build-script (detection moves
+        /// on rather than committing to a command that cannot work).</summary>
+        internal static bool HasNpmBuildScript(string packageJsonPath)
+        {
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(packageJsonPath));
+                return doc.RootElement.TryGetProperty("scripts", out var scripts)
+                    && scripts.ValueKind == System.Text.Json.JsonValueKind.Object
+                    && scripts.TryGetProperty("build", out _);
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         /// <summary>
