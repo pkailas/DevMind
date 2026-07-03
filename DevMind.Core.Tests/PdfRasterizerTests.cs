@@ -19,7 +19,7 @@ namespace DevMind.Core.Tests
         public void RenderPageToPng_MinimalPdf_ProducesValidPngWithCorrectAspect()
         {
             // Landscape page: 400×200 pt → rendered PNG must be wider than tall.
-            string path = WriteTempPdf(widthPts: 400, heightPts: 200);
+            string path = PdfTestFiles.WriteTempPdf(widthPts: 400, heightPts: 200);
             try
             {
                 var rendered = PdfRasterizer.RenderPageToPng(path, pageNumber: 1);
@@ -44,7 +44,7 @@ namespace DevMind.Core.Tests
         [Fact]
         public void RenderPageToPng_PageOutOfRange_ThrowsWithPageCount()
         {
-            string path = WriteTempPdf(widthPts: 200, heightPts: 400);
+            string path = PdfTestFiles.WriteTempPdf(widthPts: 200, heightPts: 400);
             try
             {
                 var ex = Assert.Throws<InvalidOperationException>(
@@ -61,7 +61,7 @@ namespace DevMind.Core.Tests
         [Fact]
         public void RenderPagesToPng_Range_RendersEachPageOnce()
         {
-            string path = WriteTempPdf(widthPts: 200, heightPts: 400, pages: 3);
+            string path = PdfTestFiles.WriteTempPdf(widthPts: 200, heightPts: 400, pages: 3);
             try
             {
                 var pages = PdfRasterizer.RenderPagesToPng(path, 2, 3);
@@ -187,42 +187,5 @@ namespace DevMind.Core.Tests
             throw new InvalidOperationException("no IDAT chunk found");
         }
 
-        /// <summary>
-        /// Writes a minimal PDF (1..N identical pages) with a correct xref table. Object
-        /// byte offsets are computed while assembling so the file is strictly valid.
-        /// </summary>
-        private static string WriteTempPdf(int widthPts, int heightPts, int pages = 1)
-        {
-            var kids = new StringBuilder();
-            for (int i = 0; i < pages; i++)
-                kids.Append($"{3 + i} 0 R ");
-
-            var objects = new List<string>
-            {
-                "1 0 obj\n<</Type/Catalog/Pages 2 0 R>>\nendobj\n",
-                $"2 0 obj\n<</Type/Pages/Kids[{kids.ToString().TrimEnd()}]/Count {pages}>>\nendobj\n",
-            };
-            for (int i = 0; i < pages; i++)
-                objects.Add($"{3 + i} 0 obj\n<</Type/Page/Parent 2 0 R/MediaBox[0 0 {widthPts} {heightPts}]>>\nendobj\n");
-
-            var sb = new StringBuilder();
-            sb.Append("%PDF-1.4\n");
-            var offsets = new long[objects.Count];
-            for (int i = 0; i < objects.Count; i++)
-            {
-                offsets[i] = Encoding.ASCII.GetByteCount(sb.ToString());
-                sb.Append(objects[i]);
-            }
-
-            long xrefOffset = Encoding.ASCII.GetByteCount(sb.ToString());
-            sb.Append($"xref\n0 {objects.Count + 1}\n0000000000 65535 f \n");
-            foreach (long off in offsets)
-                sb.Append($"{off:D10} 00000 n \n");
-            sb.Append($"trailer\n<</Size {objects.Count + 1}/Root 1 0 R>>\nstartxref\n{xrefOffset}\n%%EOF");
-
-            string path = Path.Combine(Path.GetTempPath(), $"devmind_test_{Guid.NewGuid():N}.pdf");
-            File.WriteAllBytes(path, Encoding.ASCII.GetBytes(sb.ToString()));
-            return path;
-        }
     }
 }

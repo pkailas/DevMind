@@ -477,6 +477,115 @@ namespace DevMind
                     old.Dispose();
                 }
 
+                // ── /digest — host-driven, long-running ─────────────────────────
+                // Unlike registry slash commands (quick, token-free, UI-thread),
+                // /digest drives MANY model turns, so it follows the agentic-turn
+                // pattern: input disabled, work off the UI thread, guaranteed
+                // teardown. It runs on a PRIVATE LlmClient conversation so page
+                // images never consume this session's context; only the final
+                // digest is injected into the conversation for follow-ups.
+                if (input.StartsWith("/digest", StringComparison.OrdinalIgnoreCase))
+                {
+                    string digestArgs = input.Length > 7 ? input.Substring(7).Trim() : "";
+                    int digestChunk = 5;
+                    string digestPathRaw = digestArgs;
+                    string[] digestToks = digestArgs.Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
+                    if (digestToks.Length >= 2)
+                    {
+                        string lastTok = digestToks[digestToks.Length - 1];
+                        if (lastTok.StartsWith("p=", StringComparison.OrdinalIgnoreCase)
+                            && int.TryParse(lastTok.Substring(2), out int pz) && pz > 0)
+                        {
+                            digestChunk = pz;
+                            digestPathRaw = string.Join(" ", digestToks, 0, digestToks.Length - 1);
+                        }
+                    }
+                    digestPathRaw = digestPathRaw.Trim().Trim('"');
+                    string digestPdf = string.IsNullOrEmpty(digestPathRaw)
+                        ? null
+                        : Path.IsPathRooted(digestPathRaw)
+                            ? digestPathRaw
+                            : Path.GetFullPath(Path.Combine(options.WorkingDirectory ?? ".", digestPathRaw));
+
+                    if (digestPdf == null || !File.Exists(digestPdf)
+                        || !digestPdf.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
+                    {
+                        host.AppendOutputLocal(
+                            "Usage: /digest <path-to-pdf> [p=N]  — chunk-summarizes the ENTIRE PDF on a side " +
+                            "conversation (default 5 pages per chunk; one model call per chunk, so large " +
+                            "documents take a while), then injects the digest into this session for follow-ups." +
+                            (digestPdf != null ? $"\nNot found or not a PDF: {digestPdf}" : "") + "\n",
+                            OutputColor.Error);
+                        return;
+                    }
+                    if (digestChunk > 20)
+                    {
+                        host.AppendOutputLocal("Chunk size is capped at 20 pages (p=20).\n", OutputColor.Error);
+                        return;
+                    }
+
+                    inputBox.View.CanFocus = false;
+                    inputBox.SetActive(false);
+                    statusBar.SetBusy("Digesting...");
+                    _isTurnRunning = true;
+                    try
+                    {
+                        await Task.Run(async () =>
+                        {
+                            var digestResult = await DocumentDigester.RunAsync(
+                                options, options.EndpointUrl, options.ApiKey, digestPdf, digestChunk,
+                                line => host.AppendOutputLocal(line, OutputColor.Dim),
+                                cts.Token);
+
+                            host.AppendOutputLocal("\n" + digestResult.Digest + "\n", OutputColor.Normal);
+
+                            // Persist beside the PDF (fallback: working directory).
+                            string digestOut = Path.ChangeExtension(digestPdf, ".digest.md");
+                            try { File.WriteAllText(digestOut, digestResult.Digest); }
+                            catch
+                            {
+                                digestOut = Path.Combine(options.WorkingDirectory ?? ".",
+                                    Path.GetFileNameWithoutExtension(digestPdf) + ".digest.md");
+                                try { File.WriteAllText(digestOut, digestResult.Digest); }
+                                catch { digestOut = null; }
+                            }
+
+                            // Inject into THIS conversation (as an early exchange, /resume-style)
+                            // so follow-up questions can reference the digest.
+                            llmClient.PrependMessages(
+                                new[] { "user", "assistant" },
+                                new[]
+                                {
+                                    $"Please digest the document: {Path.GetFileName(digestPdf)}",
+                                    $"[DOCUMENT DIGEST — {Path.GetFileName(digestPdf)}, {digestResult.PageCount} pages]\n{digestResult.Digest}",
+                                });
+
+                            host.AppendOutputLocal(
+                                $"\n[DIGEST] Complete — {digestResult.ChunksProcessed} chunk(s), {digestResult.PageCount} pages." +
+                                (digestOut != null ? $" Saved to {digestOut}." : "") +
+                                " The digest is now in this conversation's context — ask follow-up questions normally.\n",
+                                OutputColor.Dim);
+                        });
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        host.AppendOutputLocal("\n[DIGEST] Cancelled.\n", OutputColor.Error);
+                    }
+                    catch (Exception ex)
+                    {
+                        host.AppendOutputLocal($"\n[DIGEST] Failed: {ex.Message}\n", OutputColor.Error);
+                    }
+                    finally
+                    {
+                        _isTurnRunning = false;
+                        inputBox.View.CanFocus = true;
+                        inputBox.SetActive(true);
+                        inputBox.View.SetFocus();
+                        statusBar.SetReady();
+                    }
+                    return;
+                }
+
                 // ── Slash-command dispatch ──────────────────────────────────────
                 // Intercept slash commands at the input boundary so they never
                 // burn model tokens. The dispatcher routes to registered handlers.

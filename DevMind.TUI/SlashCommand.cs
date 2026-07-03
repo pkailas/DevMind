@@ -395,6 +395,19 @@ namespace DevMind
                 "/image <path> [page|first-last|all|p=N]",
                 ImageHandler);
 
+            // /digest is intercepted and executed by the HOST input handler (it drives
+            // many model turns — the agentic-turn pattern, not a quick registry command).
+            // Registered here only so /help lists it; this handler is a defensive fallback
+            // for hosts that don't wire the interception.
+            RegisterCommand("/digest",
+                "Chunk-summarize an ENTIRE PDF on a side conversation (vision model + mmproj), then inject the digest into this session",
+                "/digest <path-to-pdf> [p=N]",
+                (args, ctx) => Task.FromResult(new CommandResult
+                {
+                    Message = "/digest is handled by the host input loop — this host has not wired it.",
+                    IsError = true,
+                }));
+
            RegisterCommand("/dir",
                 "Change working directory",
                 "/dir [path|-b]",
