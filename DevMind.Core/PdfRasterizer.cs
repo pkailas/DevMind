@@ -58,29 +58,99 @@ namespace DevMind
         /// </summary>
         public static PdfPageImage RenderPageToPng(string pdfPath, int pageNumber)
         {
+            var pages = RenderPagesToPng(pdfPath, pageNumber, pageNumber);
+            return pages[0];
+        }
+
+        /// <summary>
+        /// Renders an inclusive 1-based page range to PNGs with a single document open.
+        /// Throws <see cref="InvalidOperationException"/> (user-presentable) when the
+        /// range falls outside the document.
+        /// </summary>
+        public static System.Collections.Generic.List<PdfPageImage> RenderPagesToPng(
+            string pdfPath, int firstPage, int lastPage)
+        {
             using (var docReader = DocLib.Instance.GetDocReader(
                 pdfPath, new PageDimensions(MaxRenderDimOne, MaxRenderDimTwo)))
             {
                 int pageCount = docReader.GetPageCount();
-                if (pageNumber < 1 || pageNumber > pageCount)
-                    throw new InvalidOperationException(
-                        $"Page {pageNumber} is out of range — the PDF has {pageCount} page(s).");
-
-                using (var pageReader = docReader.GetPageReader(pageNumber - 1))
+                if (firstPage < 1 || lastPage > pageCount || firstPage > lastPage)
                 {
-                    int width = pageReader.GetPageWidth();
-                    int height = pageReader.GetPageHeight();
-                    byte[] bgra = pageReader.GetImage();
-
-                    return new PdfPageImage
-                    {
-                        PngBytes = PngEncoder.EncodeRgbFromBgra(bgra, width, height),
-                        Width = width,
-                        Height = height,
-                        PageCount = pageCount,
-                    };
+                    string what = firstPage == lastPage ? $"Page {firstPage} is" : $"Pages {firstPage}-{lastPage} are";
+                    throw new InvalidOperationException(
+                        $"{what} out of range — the PDF has {pageCount} page(s).");
                 }
+
+                var results = new System.Collections.Generic.List<PdfPageImage>(lastPage - firstPage + 1);
+                for (int page = firstPage; page <= lastPage; page++)
+                {
+                    using (var pageReader = docReader.GetPageReader(page - 1))
+                    {
+                        int width = pageReader.GetPageWidth();
+                        int height = pageReader.GetPageHeight();
+                        byte[] bgra = pageReader.GetImage();
+
+                        results.Add(new PdfPageImage
+                        {
+                            PngBytes = PngEncoder.EncodeRgbFromBgra(bgra, width, height),
+                            Width = width,
+                            Height = height,
+                            PageCount = pageCount,
+                        });
+                    }
+                }
+                return results;
             }
+        }
+
+        /// <summary>Returns the page count of the PDF (opens and closes the document).</summary>
+        public static int GetPageCount(string pdfPath)
+        {
+            using (var docReader = DocLib.Instance.GetDocReader(
+                pdfPath, new PageDimensions(MaxRenderDimOne, MaxRenderDimTwo)))
+            {
+                return docReader.GetPageCount();
+            }
+        }
+
+        /// <summary>
+        /// Parses a /image page spec against a document's page count:
+        /// null/blank → page 1; "all" → every page; "7" → that page; "2-5" → inclusive range.
+        /// Throws <see cref="InvalidOperationException"/> with a user-presentable message
+        /// for malformed specs or out-of-range pages.
+        /// </summary>
+        public static (int First, int Last) ParsePageSpec(string spec, int pageCount)
+        {
+            if (string.IsNullOrWhiteSpace(spec))
+                return (1, 1);
+
+            if (spec.Equals("all", StringComparison.OrdinalIgnoreCase))
+                return (1, pageCount);
+
+            int dash = spec.IndexOf('-');
+            if (dash < 0)
+            {
+                if (!int.TryParse(spec, out int page) || page < 1)
+                    throw new InvalidOperationException(
+                        $"Invalid page '{spec}' — use a page number, a range like 2-5, or 'all'.");
+                if (page > pageCount)
+                    throw new InvalidOperationException(
+                        $"Page {page} is out of range — the PDF has {pageCount} page(s).");
+                return (page, page);
+            }
+
+            if (!int.TryParse(spec.Substring(0, dash), out int first)
+                || !int.TryParse(spec.Substring(dash + 1), out int last)
+                || first < 1 || last < 1)
+                throw new InvalidOperationException(
+                    $"Invalid page range '{spec}' — use a range like 2-5, a single page, or 'all'.");
+            if (first > last)
+                throw new InvalidOperationException(
+                    $"Invalid page range '{spec}' — the first page must not exceed the last.");
+            if (last > pageCount)
+                throw new InvalidOperationException(
+                    $"Pages {first}-{last} are out of range — the PDF has {pageCount} page(s).");
+            return (first, last);
         }
     }
 
