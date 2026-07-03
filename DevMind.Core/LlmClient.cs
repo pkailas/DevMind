@@ -213,6 +213,23 @@ namespace DevMind
         private ContextBudget _budget;
         private Task _contextDetectionTask; // awaited in SendMessageAsync to ensure accurate budget on first message
 
+        /// <summary>
+        /// Image staged by <see cref="StagePendingImage"/> (data: URI or raw base64), consumed
+        /// by the next <see cref="SendMessageAsync"/> whose imageBase64 parameter is null.
+        /// Consumed exactly once via Interlocked.Exchange so a concurrent send cannot attach
+        /// the same image twice.
+        /// </summary>
+        private string _pendingImageBase64;
+
+        /// <summary>
+        /// Estimated prompt tokens per image content part, used wherever history size is
+        /// estimated from message text. A Qwen3-VL-class merger emits (size/patch)²/merge²
+        /// tokens — 576 for a 768×768 image, more for larger inputs before server-side
+        /// downscaling. 1,024 is a deliberate mid-range flat estimate: close enough for
+        /// budget/eviction math without decoding the image, erring high to protect context.
+        /// </summary>
+        internal const int ImageTokenEstimatePerPart = 1024;
+
         private const int MaxConversationTurns = 4;
 
         // MaxPromptTokens = hard limit for all history (leaves ResponseHeadroom for LLM output).
@@ -293,11 +310,31 @@ namespace DevMind
 
         private static int EstimateTokens(string text) => (text?.Length ?? 0) / 4 + 4;
 
+        /// <summary>
+        /// Estimates a message's prompt-token cost: text estimate plus a flat
+        /// <see cref="ImageTokenEstimatePerPart"/> for each image_url content part.
+        /// Without the image term, multimodal messages are invisible to budget and
+        /// eviction math (the base64 lives in ContentParts, not Content).
+        /// </summary>
+        internal static int EstimateMessageTokens(ChatMessage msg)
+        {
+            int total = EstimateTokens(msg.Content);
+            if (msg.ContentParts != null)
+            {
+                foreach (var part in msg.ContentParts)
+                {
+                    if ((string)part["type"] == "image_url")
+                        total += ImageTokenEstimatePerPart;
+                }
+            }
+            return total;
+        }
+
         public int EstimateHistoryTokens()
         {
             int total = 0;
             foreach (var msg in _conversationHistory)
-                total += EstimateTokens(msg.Content);
+                total += EstimateMessageTokens(msg);
             return total;
         }
 
@@ -329,6 +366,19 @@ namespace DevMind
                 new ChatMessage("system", GetSystemPrompt())
             };
             _budget = new ContextBudget(_contextSize);
+        }
+
+        /// <summary>
+        /// Stages an image to be attached to the next <see cref="SendMessageAsync"/> call that
+        /// does not supply its own imageBase64 argument. The staged image is consumed exactly
+        /// once (the send after next is text-only again). Staging a second image before the
+        /// next send replaces the first. Pass a data: URI (e.g. data:image/png;base64,...) or
+        /// a raw base64 string — llama-server accepts both in image_url.url.
+        /// </summary>
+        /// <param name="imageDataUri">The image payload; null/whitespace clears any staged image.</param>
+        public void StagePendingImage(string imageDataUri)
+        {
+            _pendingImageBase64 = string.IsNullOrWhiteSpace(imageDataUri) ? null : imageDataUri;
         }
 
         /// <summary>
@@ -721,15 +771,16 @@ namespace DevMind
         /// tool catalog + DevMind.md context). When non-null, preferred over
         /// DevMindOptions.Instance.SystemPrompt. Pass null to use the options value (legacy path).</param>
         /// <param name="cancellationToken">Cancellation token to abort the request.</param>
-       public async Task SendMessageAsync(
-            string userMessage,
-            Action<string> onToken,
-            Action onComplete,
-            Action<Exception> onError,
-            bool deferCompression = false,
-            string combinedSystemPrompt = null,
-            CancellationToken cancellationToken = default,
-            bool forceToolChoiceRequired = false)
+        public async Task SendMessageAsync(
+             string userMessage,
+             Action<string> onToken,
+             Action onComplete,
+             Action<Exception> onError,
+             bool deferCompression = false,
+             string combinedSystemPrompt = null,
+             CancellationToken cancellationToken = default,
+             bool forceToolChoiceRequired = false,
+             string imageBase64 = null)
         {
             System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] SendMessageAsync ENTER — userMessage length={userMessage?.Length ?? 0}, deferCompression={deferCompression}");
 
@@ -805,8 +856,33 @@ namespace DevMind
                 _originalTaskPrompt = userMessage;
             }
 
+            // Consume any staged image (from /image or StagePendingImage) when the caller
+            // didn't pass one explicitly. Interlocked.Exchange guarantees consume-once even
+            // if two sends race: only one observes the non-null value.
+            if (imageBase64 == null)
+            {
+                imageBase64 = System.Threading.Interlocked.Exchange(ref _pendingImageBase64, null);
+            }
+
             // Append user message — immutable from this point forward
-            _conversationHistory.Add(new ChatMessage("user", userMessage, _currentTurn));
+            if (imageBase64 != null)
+            {
+                // Build multimodal content parts array (OpenAI format)
+                var parts = new JArray
+                {
+                    new JObject { ["type"] = "text", ["text"] = userMessage },
+                    new JObject
+                    {
+                        ["type"] = "image_url",
+                        ["image_url"] = new JObject { ["url"] = imageBase64 }
+                    }
+                };
+                _conversationHistory.Add(new ChatMessage("user", userMessage, _currentTurn, null, null, parts));
+            }
+            else
+            {
+                _conversationHistory.Add(new ChatMessage("user", userMessage, _currentTurn));
+            }
 
             // ── Always-on budget guard ────────────────────────────────────────────
             // Runs on EVERY call including agentic resubmits (deferCompression=true).
@@ -1303,6 +1379,12 @@ namespace DevMind
        /// <summary>
         /// Prepends messages into the conversation history (after the system prompt).
         /// Used by /resume to load prior session messages into context.
+        /// KNOWN LIMITATION: text-only by design — multimodal ContentParts (images) are not
+        /// persisted by the history store and are not restored here. A resumed session keeps
+        /// the model's prior text analysis of any image but not the image itself; re-attach
+        /// with /image if the image is still needed. Persisting megabyte-scale base64 payloads
+        /// in the history DB was judged not worth it for a resume path that rarely needs the
+        /// raw pixels back.
         /// </summary>
         public void PrependMessages(string[] roles, string[] contents)
         {
@@ -1727,6 +1809,30 @@ namespace DevMind
         }
 
         /// <summary>
+        /// Rebuilds a multimodal ContentParts array around new (trimmed/compacted) text:
+        /// the text part is replaced with <paramref name="newText"/>; every non-text part
+        /// (image_url, etc.) is deep-cloned and preserved. Returns null when
+        /// <paramref name="parts"/> is null (text-only message — nothing to rebuild).
+        /// Used by the micro-compact rewrite sites so trimming a message's text never
+        /// silently drops its image. DeepClone avoids Json.NET re-parenting surprises
+        /// when the original array is still referenced by a previous request object.
+        /// </summary>
+        internal static JArray RebuildContentParts(JArray parts, string newText)
+        {
+            if (parts == null) return null;
+            var rebuilt = new JArray
+            {
+                new JObject { ["type"] = "text", ["text"] = newText }
+            };
+            foreach (var part in parts)
+            {
+                if ((string)part["type"] != "text")
+                    rebuilt.Add(part.DeepClone());
+            }
+            return rebuilt;
+        }
+
+        /// <summary>
         /// Computes the current working-budget percentage (quick estimate without full Assess).
         /// Uses server-reported n_past when available for more accurate measurement.
         /// </summary>
@@ -1739,7 +1845,7 @@ namespace DevMind
                 // Add estimates for messages added since last server response
                 int newMsgEst = 0;
                 for (int i = _lastServerCountIndex; i < _conversationHistory.Count; i++)
-                    newMsgEst += EstimateTokens(_conversationHistory[i].Content);
+                    newMsgEst += EstimateMessageTokens(_conversationHistory[i]);
                 return (int)((LastContextUsed + newMsgEst) * 100.0 / ServerContextSize);
             }
 
@@ -1750,7 +1856,7 @@ namespace DevMind
             int workingUsedEstimate = 0;
             int protStart = count - 5;
             for (int i = 1; i < count && i < protStart; i++)
-                workingUsedEstimate += EstimateTokens(_conversationHistory[i].Content);
+                workingUsedEstimate += EstimateMessageTokens(_conversationHistory[i]);
             return (int)(workingUsedEstimate * 100.0 / workingLimit);
         }
 
@@ -1991,7 +2097,8 @@ namespace DevMind
                 if (msg.Turn < minTrimTurn) minTrimTurn = msg.Turn;
                 if (msg.Turn > maxTrimTurn) maxTrimTurn = msg.Turn;
                 _conversationHistory[i] = new ChatMessage(msg.Role,
-                    breadcrumb, msg.Turn, msg.ToolCalls, msg.ToolCallId);
+                    breadcrumb, msg.Turn, msg.ToolCalls, msg.ToolCallId,
+                    RebuildContentParts(msg.ContentParts, breadcrumb));
                 savedChars += origLen;
                 trimmed++;
             }
@@ -2032,7 +2139,8 @@ namespace DevMind
                 if (msg.Turn < minTrimTurn) minTrimTurn = msg.Turn;
                 if (msg.Turn > maxTrimTurn) maxTrimTurn = msg.Turn;
                 _conversationHistory[i] = new ChatMessage(msg.Role,
-                    compacted, msg.Turn, msg.ToolCalls, msg.ToolCallId);
+                    compacted, msg.Turn, msg.ToolCalls, msg.ToolCallId,
+                    RebuildContentParts(msg.ContentParts, compacted));
                 savedChars += origLen - compacted.Length;
                 trimmed++;
             }
@@ -2088,7 +2196,8 @@ namespace DevMind
                     if (msg.Turn < minTrimTurn) minTrimTurn = msg.Turn;
                     if (msg.Turn > maxTrimTurn) maxTrimTurn = msg.Turn;
                     _conversationHistory[i] = new ChatMessage(msg.Role,
-                        replacement, msg.Turn, msg.ToolCalls, msg.ToolCallId);
+                        replacement, msg.Turn, msg.ToolCalls, msg.ToolCallId,
+                        RebuildContentParts(msg.ContentParts, replacement));
                     savedChars += origLen - replacement.Length;
                     trimmed++;
                     currentPct = ComputeWorkingPct();
@@ -3204,7 +3313,7 @@ namespace DevMind
                 var msgObj = new JObject
                 {
                     ["role"]    = msg.Role,
-                    ["content"] = msg.Content
+                    ["content"] = msg.ContentParts != null ? (JToken)msg.ContentParts : msg.Content
                 };
 
                 // Assistant messages with tool_calls must include the tool_calls array.
@@ -3906,6 +4015,13 @@ namespace DevMind
         public string ToolCallId { get; }
 
         /// <summary>
+        /// Multimodal content parts (OpenAI format). When non-null, BuildRequestJson
+        /// serializes <c>content</c> as a JSON array of {type, text}/{type, image_url}
+        /// objects instead of a flat string. Null for text-only messages (existing behavior).
+        /// </summary>
+        public JArray ContentParts { get; }
+
+        /// <summary>
         /// Initializes a new instance of the <see cref="ChatMessage"/> class.
         /// </summary>
         /// <param name="role">The role (system, user, assistant, or tool).</param>
@@ -3915,12 +4031,28 @@ namespace DevMind
         /// <param name="toolCallId">For tool result messages.</param>
         public ChatMessage(string role, string content, int turn = 0,
             JArray toolCalls = null, string toolCallId = null)
+            : this(role, content, turn, toolCalls, toolCallId, null)
+        {
+        }
+
+        /// <summary>
+        /// Initializes a new instance of the <see cref="ChatMessage"/> class with multimodal content parts.
+        /// </summary>
+        /// <param name="role">The role (system, user, assistant, or tool).</param>
+        /// <param name="content">The message text (also stored for backward compat).</param>
+        /// <param name="turn">The turn number.</param>
+        /// <param name="toolCalls">For assistant messages with tool calls.</param>
+        /// <param name="toolCallId">For tool result messages.</param>
+        /// <param name="contentParts">OpenAI-style content parts array for multimodal messages.</param>
+        public ChatMessage(string role, string content, int turn,
+            JArray toolCalls, string toolCallId, JArray contentParts)
         {
             Role = role;
             Content = content;
             Turn = turn;
             ToolCalls = toolCalls;
             ToolCallId = toolCallId;
+            ContentParts = contentParts;
         }
     }
 }

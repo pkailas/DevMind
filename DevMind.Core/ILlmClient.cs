@@ -68,7 +68,15 @@ namespace DevMind
         /// <summary>Injects a tool result message into conversation history.</summary>
         void AddToolResultMessage(string toolCallId, string content);
 
+        /// <summary>Stages an image (data: URI or raw base64) to be attached to the next
+        /// <see cref="SendMessageAsync"/> call that does not supply its own imageBase64.
+        /// Consumed exactly once; staging again before the next send replaces the previous
+        /// image; null/whitespace clears the staged image. Used by the TUI /image command.</summary>
+        void StagePendingImage(string imageDataUri);
+
        /// <summary>Streams a message to the LLM endpoint, invoking callbacks as tokens arrive.</summary>
+        /// <param name="imageBase64">Optional base64-encoded image data (data: URI format). When provided,
+        /// the message is sent as multimodal content with both text and image parts.</param>
         Task SendMessageAsync(
             string userMessage,
             Action<string> onToken,
@@ -77,7 +85,8 @@ namespace DevMind
             bool deferCompression = false,
             string combinedSystemPrompt = null,
             CancellationToken cancellationToken = default,
-            bool forceToolChoiceRequired = false);
+            bool forceToolChoiceRequired = false,
+            string imageBase64 = null);
 
        /// <summary>Resets conversation history to the system prompt only.</summary>
         void ClearHistory(bool preserveScratchpad = false);

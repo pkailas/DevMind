@@ -146,6 +146,13 @@ namespace DevMind
         /// <summary>The LLM's nearline cache (trimmed tool results), for the /cache command.
         /// Null when no host wires it.</summary>
         public NearlineCache NearlineCache { get; set; }
+
+        // -- Multimodal (/image) ----------------------------------------------------
+
+        /// <summary>Stages an image data URI on the LLM client so the next user message is
+        /// sent as multimodal content (text + image). Null when no host wires it or the
+        /// endpoint has no vision support.</summary>
+        public Action<string> StagePendingImage { get; set; }
     }
 
    /// <summary>
@@ -383,6 +390,11 @@ namespace DevMind
                     IsError = false,
                 }));
 
+            RegisterCommand("/image",
+                "Attach an image to your next message (sent as multimodal input — needs a vision model + mmproj)",
+                "/image <path-to-image>",
+                ImageHandler);
+
            RegisterCommand("/dir",
                 "Change working directory",
                 "/dir [path|-b]",
@@ -522,6 +534,95 @@ namespace DevMind
             ctx.SetBehavioralRules(text);
             ctx.RebuildSystemPrompt();
             return Task.FromResult(new CommandResult { Message = $"Behavioral rules set ({text.Length} chars)." });
+        }
+
+        // -- /image <path> ---------------------------------------------------
+        //
+        // Stages an image for the NEXT typed message. Staging (not sending) keeps the
+        // "slash commands never burn model tokens" rule: the user attaches, then asks
+        // their question as a normal message, and that message goes out as multimodal
+        // content. The image travels via LlmClient.StagePendingImage → SendMessageAsync
+        // (ContentParts), never through the tool-result path, so no truncation applies.
+
+        /// <summary>Max raw image size accepted by /image. Matches llama-server's own
+        /// 10 MB cap on remote image downloads; base64 expands this ~1.33× on the wire.</summary>
+        const int MaxImageBytes = 10 * 1024 * 1024;
+
+        static Task<CommandResult> ImageHandler(string[] args, CommandContext ctx)
+        {
+            if (ctx.StagePendingImage == null)
+                return Task.FromResult(new CommandResult
+                {
+                    Message = "Image attach is not available in this host.",
+                    IsError = true,
+                });
+
+            if (args.Length == 0)
+                return Task.FromResult(new CommandResult
+                {
+                    Message = "Usage: /image <path-to-image>  (PNG, JPG, JPEG, GIF, WEBP, BMP)",
+                    IsError = true,
+                });
+
+            // Paths may contain spaces — recombine the whitespace-split args.
+            string raw = string.Join(" ", args).Trim().Trim('"');
+            string path = Path.IsPathRooted(raw)
+                ? raw
+                : Path.GetFullPath(Path.Combine(ctx.WorkingDirectory ?? ".", raw));
+
+            if (!File.Exists(path))
+                return Task.FromResult(new CommandResult
+                {
+                    Message = $"Image file not found: {path}",
+                    IsError = true,
+                });
+
+            string mimeType = Path.GetExtension(path).ToLowerInvariant() switch
+            {
+                ".png" => "image/png",
+                ".jpg" => "image/jpeg",
+                ".jpeg" => "image/jpeg",
+                ".gif" => "image/gif",
+                ".webp" => "image/webp",
+                ".bmp" => "image/bmp",
+                _ => null,
+            };
+            if (mimeType == null)
+                return Task.FromResult(new CommandResult
+                {
+                    Message = $"Unsupported image format '{Path.GetExtension(path)}'. Supported: PNG, JPG, JPEG, GIF, WEBP, BMP.",
+                    IsError = true,
+                });
+
+            byte[] bytes;
+            try
+            {
+                bytes = File.ReadAllBytes(path);
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(new CommandResult
+                {
+                    Message = $"Failed to read image: {ex.Message}",
+                    IsError = true,
+                });
+            }
+
+            if (bytes.Length > MaxImageBytes)
+                return Task.FromResult(new CommandResult
+                {
+                    Message = $"Image too large: {bytes.Length / (1024.0 * 1024.0):F1} MB (max 10 MB).",
+                    IsError = true,
+                });
+
+            string dataUri = $"data:{mimeType};base64,{Convert.ToBase64String(bytes)}";
+            ctx.StagePendingImage(dataUri);
+
+            return Task.FromResult(new CommandResult
+            {
+                Message = $"Image staged: {Path.GetFileName(path)} ({mimeType}, {bytes.Length / 1024.0:F0} KB). " +
+                          "It will be attached to your next message. Requires a vision model with mmproj loaded.",
+            });
         }
 
        // -- /dir [path] ------------------------------------------------------------

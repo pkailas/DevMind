@@ -1687,6 +1687,96 @@ internal sealed class DevMindTools
         }, cancellationToken);
     }
 
+    // ── Image input ──────────────────────────────────────────────────────────
+
+    [McpServerTool(Name = "attach_image")]
+    [Description(
+        "Validate an image file for multimodal LLM input and stage a copy in the session " +
+        "screenshot folder. Returns the resolved path and metadata (mime type, size) — NOT " +
+        "the image bytes: tool results are text, so inlining base64 here cannot reach a " +
+        "vision encoder and only floods context. To actually send the image to the model, " +
+        "the DevMind user runs /image <path> in the TUI, which attaches it to their next " +
+        "message as true multimodal content.")]
+    public async Task<string> AttachImage(
+        [Description("Path to the image file (PNG, JPG, JPEG, GIF, WEBP, BMP).")] string filePath,
+        CancellationToken cancellationToken = default)
+    {
+        return await _svc.EnqueueAsync(async () =>
+        {
+            if (string.IsNullOrWhiteSpace(filePath))
+                return "[attach_image] Provide a non-empty file path.";
+
+            // Resolve path: absolute or relative to working directory
+            string fullPath = filePath;
+            if (!Path.IsPathRooted(filePath))
+                fullPath = Path.Combine(_svc.WorkingDirectory, filePath);
+
+            if (!File.Exists(fullPath))
+                return $"[attach_image] File not found: {fullPath}";
+
+            // Validate extension
+            string ext = Path.GetExtension(fullPath).ToLowerInvariant();
+            string? mimeType = ext switch
+            {
+                ".png" => "image/png",
+                ".jpg" or ".jpeg" => "image/jpeg",
+                ".gif" => "image/gif",
+                ".webp" => "image/webp",
+                ".bmp" => "image/bmp",
+                _ => null
+            };
+            if (mimeType == null)
+                return $"[attach_image] Unsupported image format '{ext}'. Supported: PNG, JPG, JPEG, GIF, WEBP, BMP.";
+
+            byte[] fileBytes;
+            try
+            {
+                fileBytes = File.ReadAllBytes(fullPath);
+            }
+            catch (Exception ex)
+            {
+                return $"[attach_image] Failed to read file: {ex.Message}";
+            }
+
+            // Store copy in session screenshot folder
+            string baseDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                "dm_screenshots",
+                SessionId.Get());
+            string? savedPath = Path.Combine(baseDir, Path.GetFileName(fullPath));
+            try
+            {
+                Directory.CreateDirectory(baseDir);
+                File.WriteAllBytes(savedPath, fileBytes);
+            }
+            catch
+            {
+                // Non-fatal — the original path is still valid for /image
+                savedPath = null;
+            }
+
+            // Deliberately NO data_uri / base64 in the result. A tool result is plain text
+            // fed back into the conversation: the vision encoder never sees it, the LLM
+            // can't do anything useful with it, and a real image's base64 (~1.3 MB for a
+            // 1 MB PNG) would blow past AddToolResultMessage's 50K-char truncation anyway.
+            // The image reaches the model via the TUI /image command (multimodal ContentParts).
+            string escapedFullPath = fullPath.Replace("\\", "\\\\").Replace("\"", "\\\"");
+            var sb = new StringBuilder();
+            sb.AppendLine("{");
+            sb.AppendLine($"  \"file\": \"{escapedFullPath}\",");
+            sb.AppendLine($"  \"mime_type\": \"{mimeType}\",");
+            sb.AppendLine($"  \"size_bytes\": {fileBytes.Length},");
+            if (savedPath != null)
+            {
+                string escapedSaved = savedPath.Replace("\\", "\\\\").Replace("\"", "\\\"");
+                sb.AppendLine($"  \"saved_to\": \"{escapedSaved}\",");
+            }
+            sb.AppendLine($"  \"how_to_send\": \"Ask the user to run: /image {escapedFullPath} — then type their question; the image attaches to that message.\"");
+            sb.Append("}");
+            return sb.ToString();
+        }, cancellationToken);
+    }
+
     // ── Private helpers ──────────────────────────────────────────────────────
 
     /// <summary>

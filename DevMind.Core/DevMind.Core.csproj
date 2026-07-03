@@ -7,6 +7,12 @@
     <Nullable>disable</Nullable>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- Test access to internal types (ChatMessage, LlmClient internals) for the
+         multimodal test suite — see DevMind.Core.Tests/MultimodalTests.cs. -->
+    <InternalsVisibleTo Include="DevMind.Core.Tests" />
+  </ItemGroup>
+
  <ItemGroup>
     <PackageReference Include="DiffPlex" Version="1.9.0" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
