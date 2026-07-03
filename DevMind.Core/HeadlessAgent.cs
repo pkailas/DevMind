@@ -73,8 +73,10 @@ namespace DevMind
             "\n\n--- HEADLESS DELEGATION RULES ---\n" +
             "You are running unattended on behalf of another agent. There is no human to ask:\n" +
             "never ask clarifying questions — make the most reasonable choice and note the\n" +
-            "assumption in your final answer. Operate ONLY within the working directory.\n" +
-            "When the task is complete, end with a concise summary of what you changed and why.\n";
+            "assumption in your final answer. Operate ONLY within the working directory, and\n" +
+            "always refer to files by paths RELATIVE to it — absolute paths outside the\n" +
+            "working directory are blocked. When the task is complete, call task_done with a\n" +
+            "concise summary of what you changed and why.\n";
 
         internal const string NoCommitRule =
             "Do NOT run git commit, git push, or any other git command that rewrites history\n" +
@@ -115,7 +117,12 @@ namespace DevMind
 
             var host = new BufferedAgenticHost(workingDirectory,
                 cancelTurn: () => runCts.Cancel(),
-                outputSink: (text, _) => Emit(text));
+                outputSink: (text, _) => Emit(text))
+            {
+                // Local models sometimes hallucinate absolute paths (/home/user/…);
+                // headless writes are hard-confined to the working directory.
+                RestrictWritesToWorkingDirectory = true,
+            };
             var callbacks = new HeadlessLoopCallbacks(llmClient);
             var state = new LoopState();
             var driver = new LoopDriver(llmClient, host, callbacks, options, state);
