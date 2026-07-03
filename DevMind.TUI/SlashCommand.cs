@@ -391,8 +391,8 @@ namespace DevMind
                 }));
 
             RegisterCommand("/image",
-                "Attach an image to your next message (sent as multimodal input — needs a vision model + mmproj)",
-                "/image <path-to-image>",
+                "Attach an image — or a rasterized PDF page — to your next message (needs a vision model + mmproj)",
+                "/image <path> [pdf-page]",
                 ImageHandler);
 
            RegisterCommand("/dir",
@@ -536,13 +536,15 @@ namespace DevMind
             return Task.FromResult(new CommandResult { Message = $"Behavioral rules set ({text.Length} chars)." });
         }
 
-        // -- /image <path> ---------------------------------------------------
+        // -- /image <path> [pdf-page] ------------------------------------------
         //
         // Stages an image for the NEXT typed message. Staging (not sending) keeps the
         // "slash commands never burn model tokens" rule: the user attaches, then asks
         // their question as a normal message, and that message goes out as multimodal
         // content. The image travels via LlmClient.StagePendingImage → SendMessageAsync
         // (ContentParts), never through the tool-result path, so no truncation applies.
+        // PDFs are rasterized (one page per /image, default page 1) — vision encoders
+        // consume raster images, and llama-server has no PDF media type.
 
         /// <summary>Max raw image size accepted by /image. Matches llama-server's own
         /// 10 MB cap on remote image downloads; base64 expands this ~1.33× on the wire.</summary>
@@ -560,24 +562,85 @@ namespace DevMind
             if (args.Length == 0)
                 return Task.FromResult(new CommandResult
                 {
-                    Message = "Usage: /image <path-to-image>  (PNG, JPG, JPEG, GIF, WEBP, BMP)",
+                    Message = "Usage: /image <path> [pdf-page]  (PNG, JPG, JPEG, GIF, WEBP, BMP, or PDF — PDFs attach one rasterized page, default 1)",
                     IsError = true,
                 });
 
-            // Paths may contain spaces — recombine the whitespace-split args.
+            // Paths may contain spaces — recombine the whitespace-split args. A trailing
+            // integer selects a PDF page: try the full string as a path first, so a file
+            // literally named "scan 2.png" still wins over "scan.pdf page 2" ambiguity.
+            int pdfPage = 1;
             string raw = string.Join(" ", args).Trim().Trim('"');
-            string path = Path.IsPathRooted(raw)
-                ? raw
-                : Path.GetFullPath(Path.Combine(ctx.WorkingDirectory ?? ".", raw));
+            string path = ResolveExistingFile(raw, ctx);
+            if (path == null && args.Length > 1
+                && int.TryParse(args[args.Length - 1], out int pageArg) && pageArg > 0)
+            {
+                string withoutPage = string.Join(" ", args, 0, args.Length - 1).Trim().Trim('"');
+                string candidate = ResolveExistingFile(withoutPage, ctx);
+                if (candidate != null)
+                {
+                    path = candidate;
+                    pdfPage = pageArg;
+                }
+            }
 
-            if (!File.Exists(path))
+            if (path == null)
                 return Task.FromResult(new CommandResult
                 {
-                    Message = $"Image file not found: {path}",
+                    Message = $"Image file not found: {raw}",
                     IsError = true,
                 });
 
-            string mimeType = Path.GetExtension(path).ToLowerInvariant() switch
+            string ext = Path.GetExtension(path).ToLowerInvariant();
+
+            // ── PDF branch: rasterize one page to PNG, then stage like any image ──
+            if (ext == ".pdf")
+            {
+                PdfPageImage rendered;
+                try
+                {
+                    rendered = PdfRasterizer.RenderPageToPng(path, pdfPage);
+                }
+                catch (InvalidOperationException ex)
+                {
+                    // Page out of range — message already user-presentable.
+                    return Task.FromResult(new CommandResult { Message = ex.Message, IsError = true });
+                }
+                catch (Exception ex)
+                {
+                    return Task.FromResult(new CommandResult
+                    {
+                        Message = $"Failed to rasterize PDF (corrupt or password-protected?): {ex.Message}",
+                        IsError = true,
+                    });
+                }
+
+                if (rendered.PngBytes.Length > MaxImageBytes)
+                    return Task.FromResult(new CommandResult
+                    {
+                        Message = $"Rasterized page too large: {rendered.PngBytes.Length / (1024.0 * 1024.0):F1} MB (max 10 MB).",
+                        IsError = true,
+                    });
+
+                ctx.StagePendingImage(
+                    $"data:image/png;base64,{Convert.ToBase64String(rendered.PngBytes)}");
+
+                return Task.FromResult(new CommandResult
+                {
+                    Message = $"PDF page {pdfPage}/{rendered.PageCount} rasterized and staged: {Path.GetFileName(path)} " +
+                              $"({rendered.Width}×{rendered.Height} PNG, {rendered.PngBytes.Length / 1024.0:F0} KB). " +
+                              "It will be attached to your next message. Requires a vision model with mmproj loaded.",
+                });
+            }
+
+            if (pdfPage != 1)
+                return Task.FromResult(new CommandResult
+                {
+                    Message = "A page number is only supported for PDF files.",
+                    IsError = true,
+                });
+
+            string mimeType = ext switch
             {
                 ".png" => "image/png",
                 ".jpg" => "image/jpeg",
@@ -623,6 +686,17 @@ namespace DevMind
                 Message = $"Image staged: {Path.GetFileName(path)} ({mimeType}, {bytes.Length / 1024.0:F0} KB). " +
                           "It will be attached to your next message. Requires a vision model with mmproj loaded.",
             });
+        }
+
+        /// <summary>Resolves a raw /image argument (absolute, or relative to the working
+        /// directory) to an existing file's full path; null when it doesn't exist.</summary>
+        static string ResolveExistingFile(string raw, CommandContext ctx)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return null;
+            string path = Path.IsPathRooted(raw)
+                ? raw
+                : Path.GetFullPath(Path.Combine(ctx.WorkingDirectory ?? ".", raw));
+            return File.Exists(path) ? path : null;
         }
 
        // -- /dir [path] ------------------------------------------------------------
