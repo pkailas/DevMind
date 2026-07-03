@@ -109,6 +109,43 @@ namespace DevMind
                 _memoryManager = new MemoryManager(workingDirectory);
         }
 
+        // ── Write sandbox ────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// When true, file-tool writes (save/append/patch/delete/rename) resolving
+        /// OUTSIDE the working directory are blocked and journaled. Headless delegation
+        /// turns this on: local models sometimes hallucinate absolute paths (a live run
+        /// wrote to /home/user/… → C:\home\user\… — a sandbox escape); interactive skins
+        /// leave it off, where absolute paths are deliberate. Shell commands are not
+        /// sandboxed — that is the accepted full-auto trust boundary.
+        /// </summary>
+        public bool RestrictWritesToWorkingDirectory { get; set; }
+
+        /// <summary>False (and journals the block) when the sandbox is on and
+        /// <paramref name="fullPath"/> falls outside the working directory.</summary>
+        private bool IsWriteAllowed(string fullPath, string operation)
+        {
+            if (!RestrictWritesToWorkingDirectory) return true;
+            try
+            {
+                string root = Path.GetFullPath(_shellRunner.WorkingDirectory ?? Directory.GetCurrentDirectory())
+                    .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                    + Path.DirectorySeparatorChar;
+                string full = Path.GetFullPath(fullPath);
+                if (full.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+                    return true;
+
+                RecordAction("blocked", $"{operation} outside working directory: {full}", success: false);
+                AppendOutput($"[SANDBOX] {operation} blocked — {full} is outside the working directory. " +
+                             "Use a path relative to the working directory.\n", OutputColor.Error);
+                return false;
+            }
+            catch
+            {
+                return false; // unparseable path — treat as outside
+            }
+        }
+
         // ── Action journal ───────────────────────────────────────────────────────
 
         /// <summary>Snapshot of all actions recorded since construction / last clear.</summary>
@@ -198,6 +235,8 @@ namespace DevMind
             try
             {
                 string fullPath = ResolveWritePath(fileName);
+                if (!IsWriteAllowed(fullPath, "write"))
+                    return null;
                 string dir = Path.GetDirectoryName(fullPath);
                 if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                     Directory.CreateDirectory(dir);
@@ -310,6 +349,8 @@ namespace DevMind
             {
                 string resolvedPath = FindFile(fileNameOnly, fileName.Replace('\\', '/'))
                     ?? Path.Combine(_shellRunner.WorkingDirectory, fileName);
+                if (!IsWriteAllowed(resolvedPath, "append"))
+                    return null;
 
                 // New file — no merge gate needed
                 if (!File.Exists(resolvedPath))
@@ -455,6 +496,10 @@ namespace DevMind
             if (!File.Exists(resolvedPath))
                 return Task.FromResult(BuildFileNotFoundMessage("DELETE", filename));
 
+            if (!IsWriteAllowed(resolvedPath, "delete"))
+                return Task.FromResult(
+                    "DELETE blocked: path is outside the working directory — use a relative path.");
+
             try
             {
                 File.Delete(resolvedPath);
@@ -486,6 +531,10 @@ namespace DevMind
 
             if (File.Exists(newPath))
                 return Task.FromResult($"RENAME: destination already exists — {newPath}");
+
+            if (!IsWriteAllowed(oldPath, "rename") || !IsWriteAllowed(newPath, "rename"))
+                return Task.FromResult(
+                    "RENAME blocked: path is outside the working directory — use relative paths.");
 
             try
             {
@@ -1040,6 +1089,9 @@ namespace DevMind
                     AppendOutput($"[PATCH] File not found: {fullPath}\n", OutputColor.Warning);
                     return null;
                 }
+
+                if (!IsWriteAllowed(fullPath, "patch"))
+                    return null;
 
                 if (!_fileCache.Contains(fileNameOnly))
                 {

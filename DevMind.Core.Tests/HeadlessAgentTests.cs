@@ -130,6 +130,31 @@ namespace DevMind.Core.Tests
         }
 
         [Fact]
+        public async Task RestrictedHost_BlocksWritesOutsideWorkingDirectory()
+        {
+            // Regression: a live headless run hallucinated /home/user/greeting.txt —
+            // rooted, so it bypassed working-dir resolution and landed in C:\home\user.
+            var host = new BufferedAgenticHost(_dir) { RestrictWritesToWorkingDirectory = true };
+            IAgenticHost agenticHost = host;
+
+            string outside = Path.Combine(Path.GetTempPath(), $"devmind_escape_{Guid.NewGuid():N}.txt");
+            string saved = await agenticHost.SaveFileAsync("/home/user/escape.txt", "nope", fromToolCall: true);
+            string savedOutside = await agenticHost.SaveFileAsync(outside, "nope", fromToolCall: true);
+
+            Assert.Null(saved);
+            Assert.Null(savedOutside);
+            Assert.False(File.Exists(outside));
+            Assert.False(File.Exists(@"C:\home\user\escape.txt"));
+            Assert.Equal(2, host.GetActions().Count(a => a.Kind == "blocked"));
+
+            // Inside the working directory (relative AND absolute) still works.
+            Assert.NotNull(await agenticHost.SaveFileAsync("inside.txt", "yes", fromToolCall: true));
+            Assert.NotNull(await agenticHost.SaveFileAsync(Path.Combine(_dir, "inside2.txt"), "yes", fromToolCall: true));
+            Assert.True(File.Exists(Path.Combine(_dir, "inside.txt")));
+            Assert.True(File.Exists(Path.Combine(_dir, "inside2.txt")));
+        }
+
+        [Fact]
         public async Task RunAsync_EndpointUnreachable_ReportsErrorInResult()
         {
             string? prior = Environment.GetEnvironmentVariable("DEVMIND_SERVER_TYPE");
