@@ -321,6 +321,8 @@ namespace DevMind.McpServer
                     TranscriptDir,
                     $"{job.Id}-{DateTime.Now:yyyyMMdd-HHmmss}.log");
 
+                WriteActiveMarker(job, transcriptPath);
+
                 try
                 {
                     // Fresh task → new session; continuation → the parent's session
@@ -376,9 +378,43 @@ namespace DevMind.McpServer
                 finally
                 {
                     job.EndedAtUtc = DateTime.UtcNow;
+                    ClearActiveMarker();
                     try { _onJobFinished(); } catch { /* never kill the worker */ }
                 }
             }
+        }
+
+        // ── Active-job marker ────────────────────────────────────────────────
+        // %TEMP%\devmind\tasks\_active.json exists exactly while a job is
+        // executing — a positive "DM is busy" signal for external tooling
+        // (dm-watch, deploy scripts). Transcript silence and CPU load both lie
+        // (think blocks are transcript-silent; generation is GPU-bound): a
+        // deploy killed a live job on those heuristics. Check the marker, and
+        // verify its pid is alive before trusting a leftover after a crash.
+
+        private static string ActiveMarkerPath => Path.Combine(TranscriptDir, "_active.json");
+
+        private static void WriteActiveMarker(AgentJob job, string transcriptPath)
+        {
+            try
+            {
+                Directory.CreateDirectory(TranscriptDir);
+                File.WriteAllText(ActiveMarkerPath, System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    job_id = job.Id,
+                    state = "running",
+                    pid = Environment.ProcessId,
+                    working_dir = job.WorkingDirectory,
+                    started_at_utc = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss"),
+                    transcript = transcriptPath,
+                }));
+            }
+            catch { /* marker is best-effort — never fail the job over it */ }
+        }
+
+        private static void ClearActiveMarker()
+        {
+            try { File.Delete(ActiveMarkerPath); } catch { }
         }
 
         private static bool HasFileChanges(HeadlessAgentResult result)
@@ -437,6 +473,7 @@ namespace DevMind.McpServer
                 }
             }
             try { _workerTask.Wait(TimeSpan.FromSeconds(2)); } catch { }
+            ClearActiveMarker(); // graceful shutdown — don't leave a stale busy signal
             _shutdownCts.Dispose();
         }
     }
