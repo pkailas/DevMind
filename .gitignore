@@ -41,3 +41,6 @@ dist/*
 !dist/deploy-devmind.ps1
 !dist/dm-watch.cmd
 !dist/dm-watch.ps1
+
+# Claude extended memory (local only)
+.claude-memory.md
