@@ -193,6 +193,24 @@ namespace DevMind
                         return "[SQL result not available]";
                     }
 
+                case "search_memory":
+                    {
+                        if (result.ToolResultContents != null &&
+                            result.ToolResultContents.TryGetValue("search_memory", out string searchContent) &&
+                            !string.IsNullOrEmpty(searchContent))
+                            return searchContent;
+                        return "[Memory search result not available]";
+                    }
+
+                case "query_library":
+                    {
+                        if (result.ToolResultContents != null &&
+                            result.ToolResultContents.TryGetValue("query_library", out string libraryContent) &&
+                            !string.IsNullOrEmpty(libraryContent))
+                            return libraryContent;
+                        return "[Library query result not available]";
+                    }
+
                 case "recall_cache":
                     {
                         if (result.ToolResultContents != null &&
@@ -243,7 +261,8 @@ namespace DevMind
             sb.Append("- Running tests: run_tests\n");
             sb.Append("- Interactive debugging (DAP via netcoredbg): debug — command launch|attach|break|clear_breaks|continue|step|stepin|stepout|inspect|stack|eval|detach|stop, with command-specific args (also the /debug slash command)\n");
             sb.Append("- Tracking state: scratchpad\n");
-            sb.Append("- Saving cross-session knowledge: save_memory / recall_memory / list_memory_topics\n");
+            sb.Append("- Saving cross-session knowledge: save_memory / recall_memory / list_memory_topics / search_memory (grep across all topics)\n");
+            sb.Append("- Reference lookup (RAG over ingested docs): query_library — framework/API questions (hooks rules, TS patterns) before guessing\n");
             sb.Append("- Code intelligence (semantic): get_diagnostics (errors without a build), go_to_definition, find_references, hover, find_symbol (solution-wide symbol search)\n");
             sb.Append("- Web: web_search (docs, APIs, error messages), web_fetch (read a URL as text)\n");
             sb.Append("- Finishing: task_done\n\n");

@@ -476,6 +476,37 @@ namespace DevMind
                         }
                         break;
 
+                    case BlockType.SearchMemory:
+                        try
+                        {
+                            string searchResult = await _host.SearchMemoryAsync(block.MemorySearchPattern);
+                            result.ToolResultContents["search_memory"] = searchResult;
+                        }
+                        catch (Exception ex)
+                        {
+                            result.ToolResultContents["search_memory"] = $"Error searching memory: {ex.Message}";
+                            _host.AppendOutput($"[MEMORY ERROR] {ex.Message}\n", OutputColor.Error);
+                        }
+                        break;
+
+                    case BlockType.QueryLibrary:
+                        try
+                        {
+                            string libraryResult = await _host.QueryLibraryAsync(
+                                block.LibraryQuestion, block.LibraryTopK, _cancellationToken);
+                            result.ToolResultContents["query_library"] = libraryResult;
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            throw;
+                        }
+                        catch (Exception ex)
+                        {
+                            result.ToolResultContents["query_library"] = $"Error querying library: {ex.Message}";
+                            _host.AppendOutput($"[LIBRARY ERROR] {ex.Message}\n", OutputColor.Error);
+                        }
+                        break;
+
                     case BlockType.GetDiagnostics:
                         try
                         {

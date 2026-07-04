@@ -197,6 +197,21 @@ namespace DevMind
                         Type = BlockType.ListMemory
                     };
 
+                case "search_memory":
+                    return new ResponseBlock
+                    {
+                        Type = BlockType.SearchMemory,
+                        MemorySearchPattern = GetArg(tc, "pattern")
+                    };
+
+                case "query_library":
+                    return new ResponseBlock
+                    {
+                        Type = BlockType.QueryLibrary,
+                        LibraryQuestion = GetArg(tc, "question"),
+                        LibraryTopK = GetIntArg(tc, "top_k")
+                    };
+
                 case "list_files":
                     return new ResponseBlock
                     {

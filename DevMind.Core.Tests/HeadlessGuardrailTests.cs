@@ -252,5 +252,55 @@ namespace DevMind.Core.Tests
             Assert.Contains(Environment.UserName, output);
             Assert.DoesNotContain("%USERNAME%", output);
         }
+
+        // ── Knowledge access: search_memory / query_library ──────────────────
+
+        [Fact]
+        public async Task SearchMemory_FindsAcrossTopics_WithAlternation()
+        {
+            var host = new BufferedAgenticHost(_dir);
+            IAgenticHost agenticHost = host;
+
+            await agenticHost.SaveMemoryAsync("parsely-frontend",
+                "Enums serialize PascalCase (JsonStringEnumConverter, no naming policy).\nDTO types import from types/index.ts.",
+                "Parsely frontend conventions");
+            await agenticHost.SaveMemoryAsync("build-quirks",
+                "Use npm run build; tsc -b runs first.",
+                "Build notes");
+
+            string hits = await agenticHost.SearchMemoryAsync("PascalCase|naming policy");
+            Assert.Contains("parsely-frontend:1:", hits);
+            Assert.DoesNotContain("build-quirks", hits);
+
+            string none = await agenticHost.SearchMemoryAsync("kubernetes");
+            Assert.Contains("no matches", none);
+        }
+
+        [Fact]
+        public async Task SearchMemory_NoTopics_ReturnsGuidance()
+        {
+            var host = new BufferedAgenticHost(_dir);
+            string result = await ((IAgenticHost)host).SearchMemoryAsync("anything");
+            Assert.Contains("No memory topics found", result);
+        }
+
+        [Fact]
+        public async Task QueryLibrary_NotConfigured_ReturnsClearMessage_NeverThrows()
+        {
+            string result = await DocumentLibrarian.QueryAsTextAsync(
+                "http://127.0.0.1:9", connectionString: "", "react hooks rules", 6, CancellationToken.None);
+            Assert.Contains("not configured", result);
+        }
+
+        // ── Headless addendum: frontend-quality rails ─────────────────────────
+
+        [Fact]
+        public void HeadlessAddendum_ContainsTsDiagnosticsAndMemoryRules()
+        {
+            Assert.Contains("get_diagnostics", HeadlessAgent.HeadlessAddendum);
+            Assert.Contains(".ts or .tsx", HeadlessAgent.HeadlessAddendum);
+            Assert.Contains("recall_memory", HeadlessAgent.HeadlessAddendum);
+            Assert.Contains("query_library", HeadlessAgent.HeadlessAddendum);
+        }
     }
 }
