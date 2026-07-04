@@ -191,6 +191,24 @@ namespace DevMind
                 "Use this to see what knowledge has been saved in previous sessions before " +
                 "recalling a specific topic."));
 
+            // ── search_memory ────────────────────────────────────────────────
+            tools.Add(MakeTool("search_memory",
+                "Search ACROSS all memory topic files for lines matching a pattern " +
+                "(case-insensitive substring; '|' separates OR alternatives — same semantics as grep_file). " +
+                "Returns topic:line: content hits. Use this to find which topic covers a subject " +
+                "when the topic slug isn't obvious, then recall_memory the matching topic.",
+                Required("pattern", "string", "Search pattern (case-insensitive substring; '|' separates OR alternatives)")));
+
+            // ── query_library ────────────────────────────────────────────────
+            tools.Add(MakeTool("query_library",
+                "Semantic (RAG) search over the document library — ingested reference documents " +
+                "(framework guides, API references, design docs). Returns provenance-labelled excerpts. " +
+                "Use this for framework/reference questions (e.g. React hooks rules, TypeScript patterns) " +
+                "instead of guessing from memory. If the library is not configured or has no coverage, " +
+                "the result says so — then proceed with your own knowledge or web_search.",
+                Required("question", "string", "Natural-language question to retrieve reference excerpts for"),
+                Optional("top_k", "integer", "Number of excerpts to retrieve (default 6)")));
+
             // ── list_files ───────────────────────────────────────────────────
             tools.Add(MakeTool("list_files",
                 "List files matching a glob pattern under the project root. Returns absolute paths, " +

@@ -155,6 +155,20 @@ namespace DevMind
         Task<string> ListMemoryTopicsAsync();
 
         /// <summary>
+        /// Search all memory topic files for lines matching a pattern (case-insensitive
+        /// substring; '|' OR-alternation — grep_file semantics). Returns formatted
+        /// "topic:line: content" hits, or a no-matches / not-available message.
+        /// </summary>
+        Task<string> SearchMemoryAsync(string pattern);
+
+        /// <summary>
+        /// Query the document library (RAG over ingested reference docs) and return
+        /// provenance-labelled excerpts as text. Returns a clear not-configured message
+        /// when the library is unavailable; never throws for retrieval failures.
+        /// </summary>
+        Task<string> QueryLibraryAsync(string question, int topK, CancellationToken cancellationToken = default);
+
+        /// <summary>
         /// Enumerates files matching a glob pattern under the project root.
         /// Returns absolute paths, alphabetically sorted, capped at 200 results.
         /// Skips bin/, obj/, .vs/, .git/, node_modules/, packages/ directories.

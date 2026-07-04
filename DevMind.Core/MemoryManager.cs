@@ -169,6 +169,47 @@ namespace DevMind
         }
 
         /// <summary>
+        /// Searches all topic files for lines matching a pattern (case-insensitive
+        /// substring; '|' separates OR alternatives — same semantics as grep_file).
+        /// Returns "topic:line: content" hits, or null when there are no topics.
+        /// </summary>
+        public string SearchTopics(string pattern, int maxMatches = 50)
+        {
+            var topics = ListTopics();
+            if (topics.Count == 0)
+                return null;
+
+            var matcher = SearchPattern.BuildMatcher(pattern);
+            var sb = new StringBuilder();
+            int matches = 0;
+            var matchedTopics = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (string topic in topics)
+            {
+                string content = LoadTopic(topic);
+                if (content == null) continue;
+
+                string[] lines = content.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+                for (int i = 0; i < lines.Length && matches < maxMatches; i++)
+                {
+                    if (!matcher(lines[i])) continue;
+                    sb.AppendLine($"  {topic}:{i + 1}: {lines[i].TrimEnd()}");
+                    matches++;
+                    matchedTopics.Add(topic);
+                }
+                if (matches >= maxMatches) break;
+            }
+
+            if (matches == 0)
+                return $"search_memory: no matches for \"{pattern}\" across {topics.Count} topic(s).";
+
+            string header = matches >= maxMatches
+                ? $"search_memory results for \"{pattern}\" (first {maxMatches} matches — recall_memory a topic for full content):"
+                : $"search_memory results for \"{pattern}\" ({matches} match(es) across {matchedTopics.Count} topic(s)):";
+            return header + "\n" + sb.ToString().TrimEnd('\r', '\n');
+        }
+
+        /// <summary>
         /// Deletes a topic file and removes its index entry.
         /// </summary>
         public void DeleteTopic(string topicSlug)

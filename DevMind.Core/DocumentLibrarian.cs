@@ -179,6 +179,54 @@ namespace DevMind
         }
 
         /// <summary>
+        /// Agent-tool wrapper over <see cref="QueryAsync"/>: runs a library query and
+        /// returns provenance-labelled excerpts as plain text (a tool result, not an
+        /// augmented user prompt). Returns a clear not-configured message when the
+        /// library connection string is blank, and never throws — retrieval failures
+        /// (embedding server down, SQL unreachable) come back as [ERROR] text the
+        /// model can react to.
+        /// </summary>
+        public static async Task<string> QueryAsTextAsync(
+            string embeddingEndpointUrl,
+            string connectionString,
+            string question,
+            int topK,
+            CancellationToken ct)
+        {
+            if (string.IsNullOrWhiteSpace(connectionString))
+                return "query_library: the document library is not configured on this machine " +
+                       "(no libraryConnectionString in devmind.json). Proceed without it.";
+
+            try
+            {
+                var hits = await QueryAsync(embeddingEndpointUrl, connectionString, question,
+                    topK > 0 ? topK : DefaultTopK, ct).ConfigureAwait(false);
+                if (hits.Count == 0)
+                    return $"query_library: no matches for \"{question}\" — the library may not cover this topic.";
+
+                var sb = new StringBuilder();
+                sb.AppendLine($"query_library results for \"{question}\" ({hits.Count} excerpt(s), most relevant first):");
+                for (int i = 0; i < hits.Count; i++)
+                {
+                    var h = hits[i];
+                    sb.AppendLine($"({i + 1}) {h.DocumentName} — {ProvenanceLabel(h)} (distance {h.Distance:F3}):");
+                    sb.AppendLine(h.Notes);
+                    sb.AppendLine();
+                }
+                return sb.ToString().TrimEnd('\r', '\n');
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                return $"[ERROR] query_library failed: {ex.Message} " +
+                       "(is the embedding server running?). Proceed without the library.";
+            }
+        }
+
+        /// <summary>
         /// Builds the augmented user message for a library question: provenance-labelled
         /// excerpts followed by the question, with grounding instructions.
         /// </summary>

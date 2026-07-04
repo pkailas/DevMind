@@ -42,5 +42,8 @@ namespace DevMind
         public string DebugCommand { get; set; }                          // for Debug — DAP subcommand (launch, attach, break, continue, step, inspect, eval, ...)
         public IReadOnlyDictionary<string, string> DebugArgs { get; set; } // for Debug — command-specific args (project, pid_or_name, file, line, variable, expression)
         public string RecallCacheCommand { get; set; }                    // for RecallCache — the nearline cache handle to recall (e.g. "nl-7")
+        public string MemorySearchPattern { get; set; }                   // for SearchMemory — search pattern ('|' OR-alternation, same as grep_file)
+        public string LibraryQuestion { get; set; }                       // for QueryLibrary — natural-language question for the document library
+        public int    LibraryTopK { get; set; }                           // for QueryLibrary — excerpts to retrieve (0 = default)
     }
 }

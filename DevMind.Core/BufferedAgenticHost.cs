@@ -666,6 +666,35 @@ namespace DevMind
             return Task.FromResult(index);
         }
 
+        // ── IAgenticHost.SearchMemoryAsync ────────────────────────────────────────
+
+        Task<string> IAgenticHost.SearchMemoryAsync(string pattern)
+        {
+            if (_memoryManager == null)
+                return Task.FromResult("Memory not available: no working directory");
+
+            string result = _memoryManager.SearchTopics(pattern);
+            if (result == null)
+            {
+                AppendOutput("[MEMORY] No memory topics to search.\n", OutputColor.Dim);
+                return Task.FromResult("No memory topics found. Use save_memory to create one.");
+            }
+
+            AppendOutput($"[MEMORY] Searched topics for \"{pattern}\"\n", OutputColor.Dim);
+            return Task.FromResult(result);
+        }
+
+        // ── IAgenticHost.QueryLibraryAsync ────────────────────────────────────────
+
+        async Task<string> IAgenticHost.QueryLibraryAsync(string question, int topK, CancellationToken cancellationToken)
+        {
+            var config = TuiConfig.Load();
+            AppendOutput($"[LIBRARY] Query: \"{question}\"\n", OutputColor.Dim);
+            return await DocumentLibrarian.QueryAsTextAsync(
+                config.LibraryEmbeddingEndpoint, config.LibraryConnectionString,
+                question, topK, cancellationToken).ConfigureAwait(false);
+        }
+
         // ── IAgenticHost LSP tools (delegate to shared Core LspToolService) ───────
 
         async Task<string> IAgenticHost.GetDiagnosticsAsync(string filename)

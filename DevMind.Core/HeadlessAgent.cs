@@ -395,7 +395,20 @@ namespace DevMind
             "only for a quick compile check when you genuinely need one mid-task. Do not\n" +
             "write scratch/output files into the repository — describe results in your\n" +
             "answer instead. When the task is complete, call task_done with a concise\n" +
-            "summary of what you changed and why.\n";
+            "summary of what you changed and why.\n" +
+            "\n" +
+            "TypeScript discipline: after EVERY write to a .ts or .tsx file (create_file,\n" +
+            "patch_file, or append_file), immediately call get_diagnostics on that file and\n" +
+            "fix all reported errors before doing anything else. A type error caught at\n" +
+            "write time costs one iteration; the same error discovered at build time costs\n" +
+            "many (wrong import module for a type, implicit-any callbacks, and rules-of-hooks\n" +
+            "violations are all visible to get_diagnostics the moment the file is written).\n" +
+            "\n" +
+            "Repo knowledge first: the Session Memory index above lists saved topics. Before\n" +
+            "editing code — especially frontend code — recall_memory any topic matching this\n" +
+            "repo or its frameworks (conventions, patterns, gotchas), or search_memory when\n" +
+            "the right topic isn't obvious. For framework reference questions (React hooks\n" +
+            "rules, TypeScript patterns), use query_library before guessing from memory.\n";
 
         internal const string NoCommitRule =
             "Do NOT run git commit, git push, or any other git command that rewrites history\n" +
