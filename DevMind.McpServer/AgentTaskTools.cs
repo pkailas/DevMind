@@ -53,6 +53,7 @@ namespace DevMind.McpServer
             [Description("Wall-clock kill timeout in minutes (default 30).")] int? timeout_minutes = null,
             [Description("Allow the agent to run git commit (default false — the caller owns version control).")] bool? allow_commit = null,
             [Description("After the agent finishes, the job runner builds the working_dir itself and attaches build_verification to the result (default true).")] bool? verify_build = null,
+            [Description("Enable model reasoning (think blocks) for this task (default false). Leave off for briefed mechanical tasks — thinking runs UNBOUNDED on the local server and can add minutes per iteration. Turn on only for genuinely hard design/debugging tasks. Continuations inherit this setting.")] bool? think = null,
             CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(prompt))
@@ -73,7 +74,8 @@ namespace DevMind.McpServer
                 maxDepth: Math.Clamp(max_depth ?? 25, 1, 100),
                 timeoutMinutes: Math.Clamp(timeout_minutes ?? 30, 1, 240),
                 allowCommit: allow_commit ?? false,
-                verifyBuild: verify_build ?? true);
+                verifyBuild: verify_build ?? true,
+                think: think ?? false);
 
             return JsonSerializer.Serialize(new
             {
