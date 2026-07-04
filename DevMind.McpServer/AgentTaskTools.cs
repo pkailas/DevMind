@@ -154,6 +154,57 @@ namespace DevMind.McpServer
             }, JsonOpts));
         }
 
+        [McpServerTool(Name = "devmind_task_list")]
+        [Description(
+            "List DevMind delegated tasks: every job known to the running server (id, state, prompt " +
+            "snippet, timings, whether its conversation can still be continued) plus recent transcript " +
+            "files on disk, which survive server restarts. Call this FIRST in a new conversation to " +
+            "rediscover job ids from earlier work.")]
+        public Task<string> TaskList(CancellationToken cancellationToken = default)
+        {
+            var jobs = _jobs.List().Select(j => new
+            {
+                job_id = j.Id,
+                state = j.State.ToString().ToLowerInvariant(),
+                prompt_snippet = Snippet(j.Prompt, 120),
+                working_dir = j.WorkingDirectory,
+                queued_at_utc = j.QueuedAtUtc.ToString("yyyy-MM-dd HH:mm:ss"),
+                ended_at_utc = j.EndedAtUtc?.ToString("yyyy-MM-dd HH:mm:ss"),
+                parent_job_id = j.ParentJobId,
+                continued_by = j.ContinuedByJobId,
+                can_continue = j.Session != null && j.ContinuedByJobId == null
+                    && j.State is AgentJobState.Done or AgentJobState.Failed or AgentJobState.Cancelled,
+            }).ToList();
+
+            object[] transcripts;
+            try
+            {
+                transcripts = new DirectoryInfo(AgentJobManager.TranscriptDir)
+                    .GetFiles("job-*.log")
+                    .OrderByDescending(f => f.LastWriteTimeUtc)
+                    .Take(15)
+                    .Select(f => (object)new
+                    {
+                        file = f.FullName,
+                        written_utc = f.LastWriteTimeUtc.ToString("yyyy-MM-dd HH:mm:ss"),
+                        size_bytes = f.Length,
+                    })
+                    .ToArray();
+            }
+            catch { transcripts = Array.Empty<object>(); }
+
+            return Task.FromResult(JsonSerializer.Serialize(new
+            {
+                jobs,
+                note = jobs.Count == 0
+                    ? "No jobs in this server process (it may have restarted — job state is in-memory). " +
+                      "Recent transcript files below survive restarts; read one with read_file, or pass its " +
+                      "job id to devmind_task_result for the disk-fallback summary."
+                    : "Job ids reset when the server restarts; transcript files below are the durable record.",
+                recent_transcripts = transcripts,
+            }, JsonOpts));
+        }
+
         [McpServerTool(Name = "devmind_task_result")]
         [Description(
             "Fetch the result of a finished DevMind task: the agent's final answer, the action " +
@@ -165,7 +216,7 @@ namespace DevMind.McpServer
         {
             var job = _jobs.Get(job_id);
             if (job == null)
-                return Task.FromResult(Err($"Unknown job_id: {job_id}."));
+                return Task.FromResult(TranscriptFallback(job_id));
 
             if (job.State is AgentJobState.Queued or AgentJobState.Running)
                 return Task.FromResult(Err($"Job {job_id} is still {job.State.ToString().ToLowerInvariant()} — poll devmind_task_status."));
@@ -240,5 +291,60 @@ namespace DevMind.McpServer
 
         private static string Err(string message)
             => JsonSerializer.Serialize(new { error = message }, JsonOpts);
+
+        private static string Snippet(string text, int max)
+        {
+            if (string.IsNullOrEmpty(text)) return "";
+            string flat = text.Replace("\r", " ").Replace("\n", " ").Trim();
+            return flat.Length <= max ? flat : flat.Substring(0, max) + "…";
+        }
+
+        /// <summary>
+        /// devmind_task_result fallback when the job is not in memory (server restarted
+        /// or evicted past the retention cap): serve the newest on-disk transcript for
+        /// that job id. Job ids RESET per server process, so multiple runs' files can
+        /// match — all candidates are listed and the newest one's tail is returned.
+        /// </summary>
+        private static string TranscriptFallback(string jobId)
+        {
+            const int TailChars = 4_000;
+            FileInfo[] matches;
+            try
+            {
+                matches = new DirectoryInfo(AgentJobManager.TranscriptDir)
+                    .GetFiles($"{jobId}-*.log")
+                    .OrderByDescending(f => f.LastWriteTimeUtc)
+                    .ToArray();
+            }
+            catch { matches = Array.Empty<FileInfo>(); }
+
+            if (matches.Length == 0)
+                return Err($"Unknown job_id: {jobId} — not in this server process and no transcript " +
+                           "found on disk. Use devmind_task_list to see what exists.");
+
+            string tail;
+            try
+            {
+                string content = File.ReadAllText(matches[0].FullName);
+                tail = content.Length <= TailChars ? content : content.Substring(content.Length - TailChars);
+            }
+            catch (Exception ex)
+            {
+                return Err($"Job {jobId} is not in this server process and its transcript could not be read: {ex.Message}");
+            }
+
+            return JsonSerializer.Serialize(new
+            {
+                job_id = jobId,
+                state = "unknown (not in this server process — recovered from disk transcript)",
+                note = "Job ids reset when the server restarts; this is the NEWEST transcript matching " +
+                       "the id. The tail below usually ends with the agent's final summary. " +
+                       "The conversation is NOT continuable — start a fresh task with a continuation brief.",
+                transcript_path = matches[0].FullName,
+                transcript_written_utc = matches[0].LastWriteTimeUtc.ToString("yyyy-MM-dd HH:mm:ss"),
+                transcript_tail = tail,
+                other_matching_transcripts = matches.Skip(1).Select(f => f.FullName),
+            }, JsonOpts);
+        }
     }
 }

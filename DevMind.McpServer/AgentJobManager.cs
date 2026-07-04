@@ -251,6 +251,23 @@ namespace DevMind.McpServer
             lock (_lock) return _jobs.TryGetValue(jobId, out var job) ? job : null;
         }
 
+        /// <summary>All known jobs, newest first. Snapshot — safe to enumerate.</summary>
+        public List<AgentJob> List()
+        {
+            lock (_lock)
+            {
+                var snapshot = new List<AgentJob>(_jobOrder.Count);
+                for (int i = _jobOrder.Count - 1; i >= 0; i--)
+                    snapshot.Add(_jobs[_jobOrder[i]]);
+                return snapshot;
+            }
+        }
+
+        /// <summary>Where job transcripts are written. Transcripts OUTLIVE the server
+        /// process — the disk-fallback in devmind_task_result depends on this path.</summary>
+        public static string TranscriptDir =>
+            Path.Combine(Path.GetTempPath(), "devmind", "tasks");
+
         /// <summary>0 when running/next up; N when N jobs are ahead of it in the queue.</summary>
         public int QueuePosition(AgentJob job)
         {
@@ -296,7 +313,7 @@ namespace DevMind.McpServer
                 job.Cts.CancelAfter(TimeSpan.FromMinutes(job.TimeoutMinutes));
 
                 string transcriptPath = Path.Combine(
-                    Path.GetTempPath(), "devmind", "tasks",
+                    TranscriptDir,
                     $"{job.Id}-{DateTime.Now:yyyyMMdd-HHmmss}.log");
 
                 try
