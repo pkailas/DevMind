@@ -189,6 +189,16 @@ namespace DevMind
             bool firstIteration = true;
             string lastResponse = "";
 
+            // DEVMIND_TASK_SHOW_THINKING=1 streams the model's think tokens into the
+            // transcript (dm-watch shows it reasoning live). Off by default: think
+            // blocks are filtered, so instead a heartbeat line lands every
+            // HeartbeatSeconds of visible silence — long unbounded reasoning otherwise
+            // looks identical to a wedged request from the outside.
+            string showThinkingRaw = Environment.GetEnvironmentVariable("DEVMIND_TASK_SHOW_THINKING");
+            bool showThinking = showThinkingRaw == "1"
+                || string.Equals(showThinkingRaw, "true", StringComparison.OrdinalIgnoreCase);
+            const int HeartbeatSeconds = 30;
+
             try
             {
                 while (true)
@@ -214,14 +224,41 @@ namespace DevMind
                     // would hang forever after cancellation.
                     using var cancelReg = runCts.Token.Register(() => tcs.TrySetCanceled(runCts.Token));
 
+                    long thinkChars = 0;
+                    DateTime generationStartUtc = DateTime.UtcNow;
+                    DateTime lastTranscriptEmitUtc = DateTime.UtcNow;
+
                     await _llmClient.SendMessageAsync(
                         currentPrompt,
                         onToken: token =>
                         {
-                            string visible = thinkFilter.Process(token, showThinking: false, out _);
-                            if (string.IsNullOrEmpty(visible)) return;
-                            responseBuffer.Append(visible);
-                            EmitToTurn(visible);
+                            string visible = thinkFilter.Process(token, showThinking, out string thinkText);
+                            if (showThinking && !string.IsNullOrEmpty(thinkText))
+                            {
+                                EmitToTurn(thinkText);
+                                lastTranscriptEmitUtc = DateTime.UtcNow;
+                            }
+                            if (!string.IsNullOrEmpty(visible))
+                            {
+                                responseBuffer.Append(visible);
+                                EmitToTurn(visible);
+                                lastTranscriptEmitUtc = DateTime.UtcNow;
+                                return;
+                            }
+
+                            // Nothing visible this chunk — the model is inside a think
+                            // block. Heartbeat so an operator tailing the transcript can
+                            // tell "reasoning" from "wedged" (transcript-only breadcrumb;
+                            // never part of the response).
+                            thinkChars += token.Length;
+                            DateTime now = DateTime.UtcNow;
+                            if (!showThinking && (now - lastTranscriptEmitUtc).TotalSeconds >= HeartbeatSeconds)
+                            {
+                                lastTranscriptEmitUtc = now;
+                                EmitToTurn(
+                                    $"[LLM] reasoning… ~{thinkChars / 4:N0} think tokens, " +
+                                    $"{(int)(now - generationStartUtc).TotalSeconds}s into this response\n");
+                            }
                         },
                         onComplete: () => tcs.TrySetResult(true),
                         onError: ex => tcs.TrySetException(ex),
