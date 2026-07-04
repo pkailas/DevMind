@@ -33,6 +33,9 @@ namespace DevMind.McpServer
         public int TimeoutMinutes { get; init; }
         public bool AllowCommit { get; init; }
         public bool VerifyBuild { get; init; }
+        /// <summary>Enable model reasoning (think blocks) for this task. Default false:
+        /// briefed mechanical tasks iterate faster without unbounded thinking.</summary>
+        public bool Think { get; init; }
 
         public AgentJobState State;
         public HeadlessAgentResult? Result;
@@ -130,7 +133,7 @@ namespace DevMind.McpServer
         }
 
         public AgentJob Start(string prompt, string workingDirectory, int maxDepth, int timeoutMinutes,
-            bool allowCommit, bool verifyBuild)
+            bool allowCommit, bool verifyBuild, bool think = false)
         {
             var job = new AgentJob
             {
@@ -141,6 +144,7 @@ namespace DevMind.McpServer
                 TimeoutMinutes = timeoutMinutes,
                 AllowCommit = allowCommit,
                 VerifyBuild = verifyBuild,
+                Think = think,
                 State = AgentJobState.Queued,
             };
 
@@ -199,6 +203,7 @@ namespace DevMind.McpServer
                 TimeoutMinutes = timeoutMinutes,
                 AllowCommit = parent.AllowCommit,
                 VerifyBuild = verifyBuild,
+                Think = parent.Think, // continuation inherits the parent's reasoning mode
                 State = AgentJobState.Queued,
                 ParentJobId = parentJobId,
                 Session = session,
@@ -324,7 +329,14 @@ namespace DevMind.McpServer
                     HeadlessSession? session = job.Session;
                     if (session == null)
                     {
-                        var options = new HeadlessOptions { AgenticLoopMaxDepth = job.MaxDepth };
+                        var options = new HeadlessOptions
+                        {
+                            AgenticLoopMaxDepth = job.MaxDepth,
+                            // ShowLlmThinking doubles as the enable_thinking template switch
+                            // (see LlmClient.BuildRequestJson) — false = the model does not
+                            // generate think blocks at all for this session.
+                            ShowLlmThinking = job.Think,
+                        };
                         session = new HeadlessSession(options, EndpointUrl, ApiKey,
                             job.WorkingDirectory, buildCommand: null, allowCommit: job.AllowCommit);
                         job.Session = session;

@@ -3396,16 +3396,20 @@ namespace DevMind
                 request["timings_per_token"] = true;
             }
 
-            if (ServerType == LlmServerType.Vllm)
+            if (ServerType == LlmServerType.Vllm || ServerType == LlmServerType.LlamaServer)
             {
-                // vLLM/Qwen3 toggle reasoning via the chat template, not the Anthropic-style
-                // {"thinking": {"type": "disabled"}} object (which vLLM ignores). enable_thinking
-                // rides in chat_template_kwargs; when thinking is on, cap the reasoning budget.
+                // vLLM and llama-server (--jinja) toggle Qwen-style reasoning via the chat
+                // template, not the Anthropic-style {"thinking": {"type": "disabled"}} object
+                // (both ignore it — llama-server field evidence: headless tasks ran unbounded
+                // multi-minute think blocks with ShowLlmThinking=false because the old
+                // else-branch sent the ignored Anthropic form). enable_thinking rides in
+                // chat_template_kwargs; when thinking is on, vLLM additionally caps the budget
+                // (llama-server has no working numeric budget — on/off only).
                 request["chat_template_kwargs"] = new JObject
                 {
                     ["enable_thinking"] = _options.ShowLlmThinking
                 };
-                if (_options.ShowLlmThinking)
+                if (_options.ShowLlmThinking && ServerType == LlmServerType.Vllm)
                 {
                     request["thinking_token_budget"] = 2048;
                 }
