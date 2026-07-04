@@ -549,6 +549,126 @@ internal sealed class DevMindTools
        }, cancellationToken);
     }
 
+    // ── Document library (RAG) ──────────────────────────────────────────────
+    // Config comes from the global devmind.json (libraryConnectionString /
+    // libraryEmbeddingEndpoint) — same source as the TUI's /library command.
+
+    [McpServerTool(Name = "library_add")]
+    [Description(
+        "Ingest a document into the RAG library so query_library (and this server's library_query) can retrieve it. " +
+        "Accepts .md/.markdown/.txt/.docx (fast: chunked at paragraph boundaries, embedded verbatim — needs only the " +
+        "embedding server) and .pdf (SLOW: vision notes per page range via the chat model — can take minutes; " +
+        "needs chat AND embedding servers). Re-ingesting the same or a changed file replaces its prior chunks.")]
+    public async Task<string> LibraryAdd(
+        [Description("Path to the document (.pdf/.md/.markdown/.txt/.docx). Relative paths resolve against the working directory.")] string path,
+        [Description("PDF only: pages per vision chunk (default 5). Ignored for text documents.")] int pages_per_chunk = 5,
+        CancellationToken cancellationToken = default)
+    {
+        return await _svc.EnqueueAsync(async () =>
+        {
+            try
+            {
+                var config = TuiConfig.Load();
+                if (string.IsNullOrWhiteSpace(config.LibraryConnectionString))
+                    return "library_add: the library is not configured — set libraryConnectionString " +
+                           "(SQL Server 2025+) in devmind.json.";
+
+                string fullPath = Path.IsPathRooted(path)
+                    ? path
+                    : Path.GetFullPath(Path.Combine(_svc.WorkingDirectory, path));
+                bool isPdf = fullPath.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase);
+                if (!File.Exists(fullPath))
+                    return $"library_add: file not found — {fullPath}";
+                if (!isPdf && !TextDocumentReader.IsTextDocument(fullPath))
+                    return $"library_add: unsupported type — {Path.GetExtension(fullPath)}. " +
+                           "Supported: .pdf, .md, .markdown, .txt, .docx.";
+
+                // PDFs need a chat model for the vision pass; text docs never touch it.
+                string? endpoint = Environment.GetEnvironmentVariable("DEVMIND_ENDPOINT")?.Trim();
+                if (string.IsNullOrEmpty(endpoint)) endpoint = "http://127.0.0.1:8080/v1";
+                string apiKey = Environment.GetEnvironmentVariable("DEVMIND_API_KEY") ?? "";
+
+                var ingest = await DocumentLibrarian.IngestAsync(
+                    new HeadlessOptions(), endpoint, apiKey,
+                    config.LibraryEmbeddingEndpoint, config.LibraryConnectionString,
+                    fullPath, pages_per_chunk > 0 ? pages_per_chunk : 5,
+                    line => Console.Error.Write(line),
+                    cancellationToken);
+
+                string extent = isPdf
+                    ? $"{ingest.Chunks} chunk(s), {ingest.Pages} page(s)"
+                    : $"{ingest.Chunks} section(s)";
+                return $"library_add: {Path.GetFileName(fullPath)} ingested and searchable ({extent}). " +
+                       "Verify with library_list or library_query.";
+            }
+            catch (OperationCanceledException)
+            {
+                return "[library_add] Cancelled.";
+            }
+            catch (Exception ex)
+            {
+                return $"[library_add error] {ex.Message} " +
+                       "(is the embedding server running? PDFs also need the chat server)";
+            }
+        }, cancellationToken);
+    }
+
+    [McpServerTool(Name = "library_list")]
+    [Description(
+        "List all documents in the RAG library with id, name, extent, chunk count, and ingest time. " +
+        "Use to verify what reference material is available before relying on library queries.")]
+    public async Task<string> LibraryList(CancellationToken cancellationToken = default)
+    {
+        return await _svc.EnqueueAsync(async () =>
+        {
+            try
+            {
+                var config = TuiConfig.Load();
+                if (string.IsNullOrWhiteSpace(config.LibraryConnectionString))
+                    return "library_list: the library is not configured — set libraryConnectionString " +
+                           "(SQL Server 2025+) in devmind.json.";
+
+                var store = new LibraryStore(config.LibraryConnectionString);
+                await store.EnsureSchemaAsync(cancellationToken);
+                var docs = await store.ListDocumentsAsync(cancellationToken);
+                if (docs.Count == 0)
+                    return "library_list: the library is empty. Ingest with library_add.";
+
+                var sb = new StringBuilder($"Library documents ({docs.Count}):\n");
+                foreach (var d in docs)
+                    sb.AppendLine($"  [{d.Id}] {d.Name} — {d.Pages} page(s), {d.ChunkCount} chunk(s), ingested {d.IngestedAtUtc:yyyy-MM-dd HH:mm}Z");
+                return sb.ToString().TrimEnd();
+            }
+            catch (OperationCanceledException)
+            {
+                return "[library_list] Cancelled.";
+            }
+            catch (Exception ex)
+            {
+                return $"[library_list error] {ex.Message}";
+            }
+        }, cancellationToken);
+    }
+
+    [McpServerTool(Name = "library_query")]
+    [Description(
+        "Semantic (RAG) search over the ingested document library. Returns provenance-labelled excerpts " +
+        "(document name + page/section range) ranked by relevance. Same retrieval the task agent's " +
+        "query_library tool uses — handy for verifying ingested content actually answers a question.")]
+    public async Task<string> LibraryQuery(
+        [Description("Natural-language question to retrieve reference excerpts for.")] string question,
+        [Description("Number of excerpts to retrieve (default 6).")] int top_k = 6,
+        CancellationToken cancellationToken = default)
+    {
+        return await _svc.EnqueueAsync(async () =>
+        {
+            var config = TuiConfig.Load();
+            return await DocumentLibrarian.QueryAsTextAsync(
+                config.LibraryEmbeddingEndpoint, config.LibraryConnectionString,
+                question, top_k, cancellationToken);
+        }, cancellationToken);
+    }
+
     [McpServerTool(Name = "query_db")]
     [Description(
         "Execute a read-only SQL query against a named database connection. " +
