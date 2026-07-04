@@ -9,6 +9,7 @@
 //   * HeadlessAgent answer sanitization (leaked <tool_call>/</think> tokens)
 //   * ShellRunner %VAR% expansion under PowerShell (literal %TEMP% directories)
 
+using System.Text;
 using Xunit;
 
 namespace DevMind.Core.Tests
@@ -162,6 +163,69 @@ namespace DevMind.Core.Tests
             string result = await agenticHost.GrepFileAsync("replaced by another agent", "shared.txt", null, null);
             Assert.Contains("replaced by another agent", result);
             Assert.DoesNotContain("no matches", result);
+        }
+
+        [Fact]
+        public async Task Grep_SameFileNameInDifferentDirs_DoesNotServeWrongFile()
+        {
+            // Regression (job-8 postmortem): the file cache was keyed by BARE file name,
+            // so once any Program.cs was cached (e.g. by an earlier **/*.cs FIND scan),
+            // grepping a DIFFERENT Program.cs served the first one's content — a false
+            // "0 matches" for a 7-alternative pattern whose hits sat past line 300.
+            var host = new BufferedAgenticHost(_dir);
+            IAgenticHost agenticHost = host;
+
+            string harnessFile = Path.Combine(_dir, "harness", "Program.cs");
+            string apiFile     = Path.Combine(_dir, "api", "Program.cs");
+            Directory.CreateDirectory(Path.GetDirectoryName(harnessFile)!);
+            Directory.CreateDirectory(Path.GetDirectoryName(apiFile)!);
+
+            File.WriteAllText(harnessFile, "var files = Directory.EnumerateFiles(dir);\n");
+
+            // 420-line file whose interesting content sits past line 300.
+            File.WriteAllLines(apiFile, Enumerable.Range(1, 420).Select(i => i switch
+            {
+                203 => "// still enumerates IEnumerable<IPipelineStep>",
+                348 => "options.JsonSerializerOptions.PropertyNameCaseInsensitive = true;",
+                350 => "// naming policy stays default, not camelCase",
+                351 => "opts.Converters.Add(new JsonStringEnumConverter());",
+                _   => $"var filler{i} = {i};",
+            }));
+
+            // Cache the same-named harness file first — the collision trigger.
+            await agenticHost.GrepFileAsync("EnumerateFiles", harnessFile, null, null);
+
+            const string sevenAlt = "JsonStringEnumConverter|JsonSerializerOptions|AddJsonOptions|"
+                + "WriteAsString|EnumNamingPolicy|camelCase|PropertyNameCaseInsensitive";
+            string r1 = await agenticHost.GrepFileAsync(sevenAlt, apiFile, null, null);
+            Assert.Contains("(3 matches)", r1);
+            Assert.Contains("348:", r1);
+            Assert.Contains("350:", r1);
+            Assert.Contains("351:", r1);
+
+            string r2 = await agenticHost.GrepFileAsync("enum|Enum", apiFile, null, null);
+            Assert.Contains("(2 matches)", r2);
+            Assert.Contains("203:", r2);
+            Assert.Contains("351:", r2);
+        }
+
+        [Fact]
+        public async Task Grep_TranscriptLine_LogsScanWindowAndFileSize()
+        {
+            // The transcript summary must carry the full call parameters — a bare
+            // "0 matches" line made the job-8 false negative undiagnosable from logs.
+            var transcript = new StringBuilder();
+            var host = new BufferedAgenticHost(_dir, outputSink: (s, _) => transcript.Append(s));
+            IAgenticHost agenticHost = host;
+
+            string file = Path.Combine(_dir, "windowed.txt");
+            File.WriteAllText(file, string.Join("\n", Enumerable.Range(1, 10).Select(i => $"line {i}")));
+
+            await agenticHost.GrepFileAsync("line 5", "windowed.txt", 2, 8);
+            Assert.Contains("[lines 2-8 of 10, requested start_line=2 end_line=8]", transcript.ToString());
+
+            await agenticHost.GrepFileAsync("nope", "windowed.txt", null, null);
+            Assert.Contains("[GREP] no matches for \"nope\" in windowed.txt [lines 1-10 of 10]", transcript.ToString());
         }
 
         // ── Answer sanitization ───────────────────────────────────────────────

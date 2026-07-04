@@ -302,7 +302,7 @@ namespace DevMind
                 if (!File.Exists(fullPath))
                 {
                     File.WriteAllText(fullPath, fileContent);
-                    _fileCache.Store(fileNameOnly, fileContent);
+                    _fileCache.Store(FileCacheKey(fullPath), fileContent);
                     int newFileLines = fileContent.Split('\n').Length;
                     AppendOutput($"[FILE] Saved {fileNameOnly} ({newFileLines} lines)\n", OutputColor.Success);
                     RecordAction("save", $"{fullPath} (new, {newFileLines} lines)");
@@ -311,7 +311,7 @@ namespace DevMind
 
                 // Existing file — run three-way merge gate
                 string currentText = File.ReadAllText(fullPath);
-                string baseText = _fileCache.GetFull(fileNameOnly);
+                string baseText = _fileCache.GetFull(FileCacheKey(fullPath));
 
                 MergeCheckResult merge = ThreeWayMergeCheck.CheckAndMerge(baseText, fileContent, currentText);
 
@@ -355,7 +355,7 @@ namespace DevMind
                 // No conflicts — write the merged text
                 string finalContent = merge.MergedText;
                 File.WriteAllText(fullPath, finalContent);
-                _fileCache.Store(fileNameOnly, finalContent);
+                _fileCache.Store(FileCacheKey(fullPath), finalContent);
                 int lineCount = finalContent.Split('\n').Length;
                 AppendOutput($"[FILE] Saved {fileNameOnly} ({lineCount} lines){(merge.UsedFallback ? " [two-way fallback]" : "")}\n", OutputColor.Success);
                 RecordAction("save", $"{fullPath} ({lineCount} lines)");
@@ -416,7 +416,7 @@ namespace DevMind
                     if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                         Directory.CreateDirectory(dir);
                     File.WriteAllText(resolvedPath, content);
-                    _fileCache.Store(fileNameOnly, content);
+                    _fileCache.Store(FileCacheKey(resolvedPath), content);
                     AppendOutput($"[APPEND] Created {fileNameOnly}\n", OutputColor.Success);
                     RecordAction("append", $"{resolvedPath} (created)");
                     return resolvedPath;
@@ -424,13 +424,13 @@ namespace DevMind
 
                 // Existing file — always re-read from disk and refresh cache before merge (requirement #3)
                 string currentText = File.ReadAllText(resolvedPath);
-                _fileCache.Store(fileNameOnly, currentText);
+                _fileCache.Store(FileCacheKey(resolvedPath), currentText);
 
                 // For append: proposed = currentText + separator + content
                 string separator = currentText.Length > 0 && !currentText.EndsWith("\n", StringComparison.Ordinal) ? "\n" : "";
                 string proposedText = currentText + separator + content;
 
-                string baseText = _fileCache.GetFull(fileNameOnly);
+                string baseText = _fileCache.GetFull(FileCacheKey(resolvedPath));
 
                 MergeCheckResult merge = ThreeWayMergeCheck.CheckAndMerge(baseText, proposedText, currentText);
 
@@ -468,7 +468,7 @@ namespace DevMind
 
                 // No conflicts — write the merged text
                 File.WriteAllText(resolvedPath, merge.MergedText);
-                _fileCache.Store(fileNameOnly, merge.MergedText);
+                _fileCache.Store(FileCacheKey(resolvedPath), merge.MergedText);
                 AppendOutput($"[APPEND] Appended to {fileNameOnly}{(merge.UsedFallback ? " [two-way fallback]" : "")}\n", OutputColor.Success);
                 RecordAction("append", resolvedPath);
                 return resolvedPath;
@@ -520,7 +520,7 @@ namespace DevMind
                 {
                     File.WriteAllText(pc.FilePath, pc.ProposedContent);
                     string fileNameOnly = SafeGetFileName(pc.FilePath);
-                    _fileCache.Store(fileNameOnly, pc.ProposedContent);
+                    _fileCache.Store(FileCacheKey(pc.FilePath), pc.ProposedContent);
                     _pendingConflict = null;
                     AppendOutput($"[MERGE] Accepted proposed content for {fileNameOnly}\n", OutputColor.Success);
                     return $"[MERGE] Accepted proposed content for {fileNameOnly}";
@@ -596,7 +596,7 @@ namespace DevMind
             try
             {
                 File.Move(oldPath, newPath);
-                _fileCache.Invalidate(oldNameOnly);
+                _fileCache.Invalidate(FileCacheKey(oldPath));
                 RecordAction("rename", $"{oldPath} → {newPath}");
                 return Task.FromResult($"Renamed: {oldPath} → {newPath}");
             }
@@ -816,24 +816,30 @@ namespace DevMind
             if (resolvedPath == null || !File.Exists(resolvedPath))
                 return Task.FromResult(BuildFileNotFoundMessage("GREP", filename));
 
-            _fileCache.InvalidateIfStale(fileNameOnly, resolvedPath); // out-of-band writes
-            if (!_fileCache.Contains(fileNameOnly))
+            string cacheKey = FileCacheKey(resolvedPath);
+            _fileCache.InvalidateIfStale(cacheKey, resolvedPath); // out-of-band writes
+            if (!_fileCache.Contains(cacheKey))
             {
                 string diskContent;
                 try { diskContent = File.ReadAllText(resolvedPath); }
                 catch (Exception ex) { return Task.FromResult($"GREP: error reading {filename} — {ex.Message}"); }
-                _fileCache.Store(fileNameOnly, diskContent);
+                _fileCache.Store(cacheKey, diskContent);
             }
 
-            int totalFileLines = _fileCache.GetLineCount(fileNameOnly);
+            int totalFileLines = _fileCache.GetLineCount(cacheKey);
             int scanStart = startLine.HasValue ? Math.Max(1, startLine.Value) : 1;
             int scanEnd   = endLine.HasValue   ? Math.Min(totalFileLines, endLine.Value) : totalFileLines;
+
+            // Full call parameters + effective window in the transcript line — a bare
+            // "0 matches" summary made the job-8 false negative undiagnosable from logs.
+            string grepScope = $"[lines {scanStart}-{scanEnd} of {totalFileLines}" +
+                $"{(startLine.HasValue || endLine.HasValue ? $", requested start_line={(startLine?.ToString() ?? "-")} end_line={(endLine?.ToString() ?? "-")}" : "")}]";
 
             var matcher = SearchPattern.BuildMatcher(pattern);
             var matches = new List<(int lineNum, string lineText)>();
             for (int lineNum = scanStart; lineNum <= scanEnd; lineNum++)
             {
-                string lineContent = _fileCache.GetLineRange(fileNameOnly, lineNum, lineNum);
+                string lineContent = _fileCache.GetLineRange(cacheKey, lineNum, lineNum);
                 if (lineContent == null) continue;
                 if (matcher(lineContent))
                     matches.Add((lineNum, lineContent));
@@ -841,7 +847,7 @@ namespace DevMind
 
             if (matches.Count == 0)
             {
-                AppendOutput($"[GREP] no matches for \"{pattern}\" in {filename}\n", OutputColor.Dim);
+                AppendOutput($"[GREP] no matches for \"{pattern}\" in {filename} {grepScope}\n", OutputColor.Dim);
                 return Task.FromResult($"GREP: no matches for \"{pattern}\" in {filename}");
             }
 
@@ -862,7 +868,7 @@ namespace DevMind
                 sb.AppendLine($"  {lineNum.ToString().PadLeft(numWidth)}: {lineText.TrimEnd()}");
 
             _taskReadFiles.Add(fileNameOnly);
-            AppendOutput($"[GREP] {totalMatches} match{(totalMatches == 1 ? "" : "es")} for \"{pattern}\" in {filename}\n", OutputColor.Success);
+            AppendOutput($"[GREP] {totalMatches} match{(totalMatches == 1 ? "" : "es")} for \"{pattern}\" in {filename} {grepScope}\n", OutputColor.Success);
             return Task.FromResult(sb.ToString().TrimEnd('\r', '\n'));
         }
 
@@ -905,9 +911,10 @@ namespace DevMind
             {
                 if (hitCap) break;
                 string fileNameOnly = SafeGetFileName(filePath);
+                string cacheKey = FileCacheKey(filePath);
 
-                _fileCache.InvalidateIfStale(fileNameOnly, filePath); // out-of-band writes
-                if (!_fileCache.Contains(fileNameOnly))
+                _fileCache.InvalidateIfStale(cacheKey, filePath); // out-of-band writes
+                if (!_fileCache.Contains(cacheKey))
                 {
                     // Skip cloud/OneDrive placeholders (would download), binaries, oversized.
                     if (ContextEngine.ShouldSkipForContentSearch(filePath)) continue;
@@ -915,16 +922,16 @@ namespace DevMind
                     string diskContent;
                     try { diskContent = File.ReadAllText(filePath); }
                     catch { continue; }
-                    _fileCache.Store(fileNameOnly, diskContent);
+                    _fileCache.Store(cacheKey, diskContent);
                 }
 
-                int totalFileLines = _fileCache.GetLineCount(fileNameOnly);
+                int totalFileLines = _fileCache.GetLineCount(cacheKey);
                 int scanStart = startLine.HasValue ? Math.Max(1, startLine.Value) : 1;
                 int scanEnd   = endLine.HasValue   ? Math.Min(totalFileLines, endLine.Value) : totalFileLines;
 
                 for (int lineNum = scanStart; lineNum <= scanEnd; lineNum++)
                 {
-                    string lineContent = _fileCache.GetLineRange(fileNameOnly, lineNum, lineNum);
+                    string lineContent = _fileCache.GetLineRange(cacheKey, lineNum, lineNum);
                     if (lineContent == null) continue;
                     if (findMatcher(lineContent))
                     {
@@ -1175,12 +1182,12 @@ namespace DevMind
                 if (!IsWriteAllowed(fullPath, "patch"))
                     return null;
 
-                _fileCache.InvalidateIfStale(fileNameOnly, fullPath); // out-of-band writes
-                if (!_fileCache.Contains(fileNameOnly))
+                _fileCache.InvalidateIfStale(FileCacheKey(fullPath), fullPath); // out-of-band writes
+                if (!_fileCache.Contains(FileCacheKey(fullPath)))
                 {
                     AppendOutput($"[AUTO-READ] Loading {fileNameOnly} before patch...\n", OutputColor.Dim);
                     var (cached, _enc) = PatchEngine.ReadFilePreservingEncoding(fullPath);
-                    _fileCache.Store(fileNameOnly, cached);
+                    _fileCache.Store(FileCacheKey(fullPath), cached);
                     _filesRead.Add(fileNameOnly);
                     _taskReadFiles.Add(fileNameOnly);
                 }
@@ -1215,7 +1222,7 @@ namespace DevMind
 
                 // Existing file — run merge gate before applying patch
                 string currentText = File.ReadAllText(resolved.FullPath);
-                string baseText = _fileCache.GetFull(fileNameOnly);
+                string baseText = _fileCache.GetFull(FileCacheKey(resolved.FullPath));
 
                 // Compute proposed content from resolved blocks (before disk write)
                 string proposedText = ComputePatchedContent(resolved);
@@ -1278,7 +1285,7 @@ namespace DevMind
                     _patchBackupStack.Push((resolved.FullPath, result.BackupPath));
                 }
 
-                _fileCache.Store(fileNameOnly, result.UpdatedContent);
+                _fileCache.Store(FileCacheKey(resolved.FullPath), result.UpdatedContent);
 
                 int undosAvailable = _patchBackupStack.Count;
                 AppendOutput($"[PATCH] Applied to {resolved.FullPath} (undo depth: {undosAvailable}){(merge.UsedFallback ? " [two-way fallback]" : "")}\n",
@@ -1465,6 +1472,19 @@ namespace DevMind
             catch { return path; }
         }
 
+        /// <summary>
+        /// Canonical <see cref="_fileCache"/> key: the FULL path, never the bare file
+        /// name. Repos routinely hold many same-named files (Program.cs); bare-name keys
+        /// let a FIND scan of one Program.cs poison GREP/READ/merge-base of every other
+        /// one — the job-8 false-negative postmortem (grep of Parsely.Api/Program.cs
+        /// served ParselyExtractionHarness/Program.cs cached by an earlier **/*.cs FIND).
+        /// </summary>
+        private static string FileCacheKey(string fullPath)
+        {
+            try { return Path.GetFullPath(fullPath); }
+            catch { return fullPath; }
+        }
+
         // ── Private async helpers ─────────────────────────────────────────────────
 
         private async Task<string> LoadFileContentCoreAsync(
@@ -1485,22 +1505,23 @@ namespace DevMind
 
                 if (rangeStart > 0)
                 {
-                    _fileCache.InvalidateIfStale(fileNameOnly, fullPath); // out-of-band writes
-                    if (!_fileCache.Contains(fileNameOnly))
+                    string cacheKey = FileCacheKey(fullPath);
+                    _fileCache.InvalidateIfStale(cacheKey, fullPath); // out-of-band writes
+                    if (!_fileCache.Contains(cacheKey))
                     {
                         var (diskContent, _) = PatchEngine.ReadFilePreservingEncoding(fullPath);
-                        _fileCache.Store(fileNameOnly, diskContent);
+                        _fileCache.Store(cacheKey, diskContent);
                     }
 
                     _taskReadFiles.Add(fileNameOnly);
                     _patchesSinceRead.Remove(fileNameOnly); // model refreshed its view
-                    int totalLines = _fileCache.GetLineCount(fileNameOnly);
+                    int totalLines = _fileCache.GetLineCount(cacheKey);
 
                     if (rangeStart > rangeEnd) { int t = rangeStart; rangeStart = rangeEnd; rangeEnd = t; }
                     int clampedEnd   = Math.Min(rangeEnd,   totalLines);
                     int clampedStart = Math.Max(1, rangeStart);
 
-                    string rangeContent = _fileCache.GetLineRange(fileNameOnly, clampedStart, clampedEnd);
+                    string rangeContent = _fileCache.GetLineRange(cacheKey, clampedStart, clampedEnd);
                     if (rangeContent == null)
                     {
                         AppendOutput($"[READ] Range {rangeStart}-{rangeEnd} out of bounds for {fileNameOnly} ({totalLines} lines)\n", OutputColor.Error);
@@ -1524,7 +1545,7 @@ namespace DevMind
 
                 // Full / outline path
                 var (content, _enc) = PatchEngine.ReadFilePreservingEncoding(fullPath);
-                _fileCache.Store(fileNameOnly, content);
+                _fileCache.Store(FileCacheKey(fullPath), content);
                 _taskReadFiles.Add(fileNameOnly);
                 _patchesSinceRead.Remove(fileNameOnly); // model refreshed its view
                 int lineCount = content.Split('\n').Length;
