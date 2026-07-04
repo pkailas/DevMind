@@ -122,15 +122,24 @@ namespace DevMind
         }
 
         // Per-turn transcript sink (reset each turn so each job's transcript file
-        // holds exactly that turn's activity).
+        // holds exactly that turn's activity). The writer streams to the transcript
+        // file LIVE (FileShare.Read) so an operator can tail the file while the job
+        // runs — before this, the file appeared only after the turn finished, giving
+        // zero mid-run visibility. The StringBuilder stays as the fallback source
+        // when the writer could not be opened.
         private StringBuilder _turnTranscript;
+        private StreamWriter _turnTranscriptWriter;
         private readonly object _transcriptLock = new object();
         private Action<string> _turnProgress;
 
         private void EmitToTurn(string text)
         {
             if (string.IsNullOrEmpty(text)) return;
-            lock (_transcriptLock) _turnTranscript?.Append(text);
+            lock (_transcriptLock)
+            {
+                _turnTranscript?.Append(text);
+                try { _turnTranscriptWriter?.Write(text); } catch { /* live tail is best-effort */ }
+            }
             try { _turnProgress?.Invoke(text); } catch { /* progress is best-effort */ }
         }
 
@@ -148,7 +157,22 @@ namespace DevMind
             var result = new HeadlessAgentResult();
             var sw = Stopwatch.StartNew();
 
-            lock (_transcriptLock) _turnTranscript = new StringBuilder();
+            lock (_transcriptLock)
+            {
+                _turnTranscript = new StringBuilder();
+                _turnTranscriptWriter = null;
+                if (!string.IsNullOrEmpty(transcriptPath))
+                {
+                    try
+                    {
+                        Directory.CreateDirectory(Path.GetDirectoryName(transcriptPath));
+                        var stream = new FileStream(transcriptPath,
+                            FileMode.Create, FileAccess.Write, FileShare.Read);
+                        _turnTranscriptWriter = new StreamWriter(stream) { AutoFlush = true };
+                    }
+                    catch { _turnTranscriptWriter = null; } // fall back to end-of-turn write
+                }
+            }
             _turnProgress = progress;
 
             using var runCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -289,14 +313,26 @@ namespace DevMind
 
             if (!string.IsNullOrEmpty(transcriptPath))
             {
-                try
+                lock (_transcriptLock)
                 {
-                    Directory.CreateDirectory(Path.GetDirectoryName(transcriptPath));
-                    lock (_transcriptLock)
-                        File.WriteAllText(transcriptPath, _turnTranscript.ToString());
-                    result.TranscriptPath = transcriptPath;
+                    if (_turnTranscriptWriter != null)
+                    {
+                        // Streamed live throughout the turn — just close it out.
+                        try { _turnTranscriptWriter.Dispose(); result.TranscriptPath = transcriptPath; }
+                        catch { }
+                        _turnTranscriptWriter = null;
+                    }
+                    else
+                    {
+                        try
+                        {
+                            Directory.CreateDirectory(Path.GetDirectoryName(transcriptPath));
+                            File.WriteAllText(transcriptPath, _turnTranscript.ToString());
+                            result.TranscriptPath = transcriptPath;
+                        }
+                        catch { /* transcript is best-effort — never fail the task over it */ }
+                    }
                 }
-                catch { /* transcript is best-effort — never fail the task over it */ }
             }
 
             return result;
@@ -336,6 +372,11 @@ namespace DevMind
             if (_disposed) return;
             _disposed = true;
             try { _currentTurnCts?.Cancel(); } catch { }
+            lock (_transcriptLock)
+            {
+                try { _turnTranscriptWriter?.Dispose(); } catch { }
+                _turnTranscriptWriter = null;
+            }
             _llmClient.Dispose();
         }
 

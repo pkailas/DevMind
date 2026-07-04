@@ -35,7 +35,9 @@ CodeReviewBenchmarkWithBugs/
 # Compiled output — never commit binaries
 publish/
 
-# dist build/runtime output — keep ONLY the launcher + deploy script, ignore the rest
+# dist build/runtime output — keep ONLY the launchers + deploy script, ignore the rest
 dist/*
 !dist/devmind.cmd
 !dist/deploy-devmind.ps1
+!dist/dm-watch.cmd
+!dist/dm-watch.ps1
