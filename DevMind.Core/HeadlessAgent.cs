@@ -111,6 +111,7 @@ namespace DevMind
                 // Local models sometimes hallucinate absolute paths (/home/user/…);
                 // headless writes are hard-confined to the working directory.
                 RestrictWritesToWorkingDirectory = true,
+                NearlineCache = _llmClient.NearlineCache, // for the recall_cache tool
             };
             _callbacks = new HeadlessLoopCallbacks(_llmClient);
             _state = new LoopState();
