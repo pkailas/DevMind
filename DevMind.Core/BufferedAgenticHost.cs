@@ -798,11 +798,35 @@ namespace DevMind
             return Task.FromResult($"[ERROR] {msg}");
         }
 
+        /// <summary>The LLM's nearline cache, wired by the session owner — used by recall_cache. May be null.</summary>
+        public NearlineCache NearlineCache { get; set; }
+
+        /// <summary>Max characters of a recalled result returned to the model (mirrors the history cap).</summary>
+        private const int MaxRecallChars = 50_000;
+
         Task<string> IAgenticHost.RecallCacheAsync(string handle)
         {
-            const string msg = "recall_cache not supported in console mode.";
-            AppendOutput($"[RECALL] {msg}\n", OutputColor.Warning);
-            return Task.FromResult($"[ERROR] {msg}");
+            if (NearlineCache == null)
+                return Task.FromResult("[recall_cache] nearline cache is not available in this host.");
+            if (string.IsNullOrWhiteSpace(handle))
+                return Task.FromResult("[recall_cache] no handle provided. Pass a handle like \"nl-7\".");
+
+            string key = NearlineCache.GetKeyForHandle(handle);
+            if (key == null)
+                return Task.FromResult($"[recall_cache] unknown handle '{handle}'. It may be from a previous session or never existed.");
+
+            string content = NearlineCache.Retrieve(key);
+            if (content == null)
+                return Task.FromResult($"[recall_cache] content for handle '{handle}' is no longer available (evicted or unreadable).");
+
+            if (content.Length > MaxRecallChars)
+            {
+                int originalLength = content.Length;
+                content = content.Substring(0, MaxRecallChars) + $"\n[truncated — {originalLength} chars]";
+            }
+
+            AppendOutput($"[RECALL] {handle} → {key} ({content.Length} chars)\n", OutputColor.Dim);
+            return Task.FromResult(content);
         }
 
         Task<bool> IAgenticHost.ConfirmContinueAsync(string message) => ConfirmContinueCoreAsync(message);

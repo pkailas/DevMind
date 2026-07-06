@@ -32,7 +32,10 @@ namespace DevMind
             llmClient.Configure(options.EndpointUrl, options.ApiKey);
 
             var cts = new CancellationTokenSource();
-            var host = new ConsoleAgenticHost(options.WorkingDirectory, () => cts.Cancel());
+            var host = new ConsoleAgenticHost(options.WorkingDirectory, () => cts.Cancel())
+            {
+                NearlineCache = llmClient.NearlineCache, // for the recall_cache tool
+            };
             var callbacks = new ConsoleLoopCallbacks(llmClient);
             var state = new LoopState();
             var driver = new LoopDriver(llmClient, host, callbacks, options, state);
@@ -103,7 +106,7 @@ namespace DevMind
                     if (resolveResult != null)
                         Console.WriteLine(resolveResult);
                     continue;
-                }
+                }
 
                 // Direct PATCH routing — equivalent to the extension's input.StartsWith("PATCH ") check.
                 if (input.StartsWith("PATCH ", StringComparison.OrdinalIgnoreCase))
