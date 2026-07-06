@@ -1261,15 +1261,16 @@ namespace DevMind
             if (NearlineCache == null)
                 return "[recall_cache] nearline cache is not available in this host.";
             if (string.IsNullOrWhiteSpace(handle))
-                return "[recall_cache] no handle provided. Pass a handle like \"nl-7\".";
+                return "[recall_cache] no handle provided. Pass a handle like \"nl-7\" or a cache key like \"read:file.cs\".";
 
-            string key = NearlineCache.GetKeyForHandle(handle);
-            if (key == null)
-                return $"[recall_cache] unknown handle '{handle}'. It may be from a previous session or never existed.";
+            // Accept either a breadcrumb handle ("nl-7") or a raw cache key ("read:file.cs",
+            // "tool:call_3") — after a brainwash the breadcrumbs are gone, so keys advertised
+            // in the synthetic prompt must be recallable directly.
+            string key = NearlineCache.GetKeyForHandle(handle) ?? handle;
 
             string content = NearlineCache.Retrieve(key);
             if (content == null)
-                return $"[recall_cache] content for handle '{handle}' is no longer available (evicted or unreadable).";
+                return $"[recall_cache] no cached content for '{handle}' — unknown handle/key, or the entry was evicted.";
 
             if (content.Length > MaxRecallChars)
             {

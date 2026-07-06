@@ -100,6 +100,27 @@ namespace DevMind
         }
 
         /// <summary>
+        /// Snapshot of live handle → key pairs (one live handle per key), oldest first by
+        /// handle number. Used to advertise recallable content after a brainwash, when the
+        /// breadcrumbs that carried the handles have been discarded along with the conversation.
+        /// </summary>
+        public IReadOnlyList<KeyValuePair<string, string>> Handles
+        {
+            get
+            {
+                var list = new List<KeyValuePair<string, string>>(_handleToKey);
+                list.Sort((a, b) => HandleNumber(a.Key).CompareTo(HandleNumber(b.Key)));
+                return list;
+            }
+        }
+
+        private static long HandleNumber(string handle)
+        {
+            return handle != null && handle.StartsWith("nl-", StringComparison.OrdinalIgnoreCase)
+                && long.TryParse(handle.Substring(3), out long n) ? n : 0;
+        }
+
+        /// <summary>
         /// Returns the cached content, or null if not found. Checks the memory tier first, then disk.
         /// Disk hits are returned directly with NO promotion back into the memory tier.
         /// </summary>

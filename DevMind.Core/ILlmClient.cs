@@ -65,8 +65,9 @@ namespace DevMind
         /// <summary>Estimates total history token usage from conversation message lengths.</summary>
         int EstimateHistoryTokens();
 
-        /// <summary>Injects a tool result message into conversation history.</summary>
-        void AddToolResultMessage(string toolCallId, string content);
+        /// <summary>Injects a tool result message into conversation history. <paramref name="toolName"/>
+        /// lets the ingest-capping policy exempt tools whose results must arrive verbatim (recall_cache).</summary>
+        void AddToolResultMessage(string toolCallId, string content, string toolName = null);
 
         /// <summary>Stages an image (data: URI or raw base64) for the next
         /// <see cref="SendMessageAsync"/> call. Staged images accumulate — call once per

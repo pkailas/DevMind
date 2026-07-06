@@ -48,6 +48,7 @@ dotnet run --project DevMind.Cli -- --dir <repo> --endpoint <llm-endpoint>
 | `DEVMIND_SERVER_TYPE` | Force backend type (`vllm`/`llama`/`lmstudio`/`custom`); overrides startup auto-detection |
 | `DEVMIND_HISTORY_*` | History store configuration (SqlServer/Sqlite/Null) |
 | `DEVMIND_BUILD_COMMAND` | Explicit build command for `run_build` (overrides auto-detection) |
+| `DEVMIND_CONTEXT_STRATEGY` | Force context-management policy (`transformer`/`hybrid`/`auto`); auto (default) picks by measured prompt-cache reuse, seeded by a model-name hint (Qwen3.5/3.6, Mamba, etc.) |
 | `DEVMIND_TUI_VERBOSE` | Show the full firehose in the TUI transcript (disables the quiet filter that hides `[CONTEXT]`/`[TOOL_USE]`/`[LLM]`/`[AGENTIC] Iteration` churn) |
 | `DEVMIND_TUI_DIAG` | Path to a trace file for the TUI color-stamping/append pipeline (inert when unset) |
 
