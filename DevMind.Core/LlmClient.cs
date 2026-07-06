@@ -260,6 +260,95 @@ namespace DevMind
         public event Action ContextSizeDetected;
         public int LastContextDelta { get; private set; }  // n_past growth since previous response
 
+        /// <summary>Rolling prompt-cache reuse measurement (prompt_n vs cache_n on append-only turns).</summary>
+        public CacheReuseMonitor CacheReuse { get; } = new CacheReuseMonitor();
+
+        // True when this send's preamble rewrote or removed already-sent history
+        // (micro-compact, brainwash, eviction, system-prompt change) — the server
+        // must re-prefill, so the turn is excluded from cache-reuse sampling.
+        private bool _historyMutatedThisSend;
+
+        // Set by mutations that happen BETWEEN sends (ClearHistory via /new). SendMessageAsync
+        // resets _historyMutatedThisSend at entry, so out-of-send mutations carry over here
+        // and taint the next send instead of being wiped by the reset.
+        private bool _historyMutatedBetweenSends;
+
+        // ── Context strategy (transformer vs hybrid compaction policy) ──────
+        private ContextStrategy? _configuredContextStrategy; // lazy env read, cached
+        private bool _modelNameHintsHybrid;                  // set during context detection
+
+        /// <summary>
+        /// The <c>DEVMIND_CONTEXT_STRATEGY</c> env override (<c>auto</c> | <c>transformer</c> |
+        /// <c>hybrid</c>, case-insensitive). Unset/unrecognized → Auto. Mirrors the
+        /// DEVMIND_SERVER_TYPE convention.
+        /// </summary>
+        private ContextStrategy ConfiguredContextStrategy
+        {
+            get
+            {
+                if (_configuredContextStrategy == null)
+                {
+                    string raw = Environment.GetEnvironmentVariable("DEVMIND_CONTEXT_STRATEGY")?.Trim().ToLowerInvariant();
+                    switch (raw)
+                    {
+                        case "transformer": _configuredContextStrategy = ContextStrategy.Transformer; break;
+                        case "hybrid":      _configuredContextStrategy = ContextStrategy.Hybrid;      break;
+                        default:            _configuredContextStrategy = ContextStrategy.Auto;        break;
+                    }
+                }
+                return _configuredContextStrategy.Value;
+            }
+        }
+
+        /// <summary>
+        /// The context strategy in force this turn. Env override wins; otherwise measured
+        /// cache reuse decides; before enough samples exist, the model-name hint from
+        /// context detection seeds the choice (avoids paying the expensive learning turns
+        /// on a known-hybrid model).
+        /// </summary>
+        public ContextStrategy EffectiveContextStrategy
+        {
+            get
+            {
+                if (ConfiguredContextStrategy != ContextStrategy.Auto)
+                    return ConfiguredContextStrategy;
+
+                // Measured reuse can DEMOTE a backend to hybrid (append-only turns that
+                // re-prefill everything), but it cannot promote a known-hybrid model to
+                // transformer: append-only reuse works on recurrent backends too (the slot's
+                // state already sits at end-of-prompt), while mid-prefix edits still cost a
+                // near-full re-prefill because a recurrent state cannot roll back. The
+                // model-name hint therefore stays sticky under a Reusing verdict.
+                if (_modelNameHintsHybrid || CacheReuse.Verdict == CacheReuseVerdict.NotReusing)
+                    return ContextStrategy.Hybrid;
+                return ContextStrategy.Transformer;
+            }
+        }
+
+        // Families with linear/recurrent layers (fixed-size state, no rollback): any prefix
+        // edit forces a full re-prefill, so they start on the hybrid policy until measured
+        // reuse says otherwise. Substring match against the served model name/path.
+        private static readonly string[] _hybridModelHints =
+        {
+            "qwen3.5", "qwen3.6", "qwen3-next", "qwen3next", "deltanet",
+            "mamba", "jamba", "zamba", "rwkv", "granite-h", "falcon-h", "nemotron-h", "lfm2",
+        };
+
+        private void ApplyModelNameHint(string modelName)
+        {
+            if (string.IsNullOrEmpty(modelName)) return;
+            string lower = modelName.ToLowerInvariant();
+            foreach (string hint in _hybridModelHints)
+            {
+                if (lower.Contains(hint))
+                {
+                    _modelNameHintsHybrid = true;
+                    Debug.WriteLine($"[DevMind] Context strategy hint: '{modelName}' matches '{hint}' — starting on hybrid policy (auto mode).");
+                    return;
+                }
+            }
+        }
+
         // ── Live running usage for the in-progress response (per-chunk usage.*) ───
         // Reliable across content / reasoning / tool_call chunks; the live status-bar
         // counter reads these instead of counting content deltas (which are null on
@@ -641,6 +730,7 @@ namespace DevMind
             if (!response.IsSuccessStatusCode) return 0;
             var content = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
             var data = JObject.Parse(content);
+            ApplyModelNameHint(data?["model_path"]?.ToString() ?? data?["model_alias"]?.ToString());
             return data?["default_generation_settings"]?["n_ctx"]?.Value<int>() ?? 0;
         }
 
@@ -658,6 +748,7 @@ namespace DevMind
                     var modelObj = model as JObject;
                     if (modelObj?["state"]?.ToString() == "loaded")
                     {
+                        ApplyModelNameHint(modelObj["id"]?.ToString());
                         int? ctx = modelObj["loaded_context_length"]?.Value<int>();
                         if (ctx.HasValue && ctx.Value > 0) return ctx.Value;
                     }
@@ -683,6 +774,7 @@ namespace DevMind
                 var first = models[0] as JObject;
                 if (first?["owned_by"]?.ToString() == "vllm")
                 {
+                    ApplyModelNameHint(first["id"]?.ToString());
                     int? ctx = first["max_model_len"]?.Value<int>();
                     if (ctx.HasValue && ctx.Value > 0) return ctx.Value;
                 }
@@ -793,6 +885,9 @@ namespace DevMind
         {
             System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] SendMessageAsync ENTER — userMessage length={userMessage?.Length ?? 0}, deferCompression={deferCompression}");
 
+            _historyMutatedThisSend = _historyMutatedBetweenSends;
+            _historyMutatedBetweenSends = false;
+
             // Ensure context-size detection has completed before computing budget math.
             // If detection is still in-flight (common on the first message after launch),
             // wait up to 5 seconds. If it times out or the send is cancelled first,
@@ -824,7 +919,12 @@ namespace DevMind
 
             // Tier 1: Trim stale tool result content in-place — runs ALWAYS, including agentic resubmits
             // If thrashing is detected, escalate to brainwash (full context replacement).
-            if (_options.MicroCompactBrainwash && IsThrashing())
+            // The hybrid strategy enables brainwash implicitly: on a backend that re-prefills
+            // everything after any edit, deep+rare replacement is the cheap option, not the
+            // aggressive one — that is the strategy's core trade.
+            bool allowBrainwash = _options.MicroCompactBrainwash
+                || EffectiveContextStrategy == ContextStrategy.Hybrid;
+            if (allowBrainwash && IsThrashing())
             {
                 bool showDebug = _options.ShowDebugOutput;
                 string brainwashMsg = await BrainwashContextAsync(showDebug).ConfigureAwait(false);
@@ -842,8 +942,12 @@ namespace DevMind
             if (_currentTurn - _lastCompactionTurn >= 3)
                 _recentCompactionCount = 0;
 
-            // Drop stale turns before adding the new message
-            if (!deferCompression)
+            // Drop stale turns before adding the new message. On the hybrid strategy,
+            // removals only piggyback on turns that already rebuilt the prefix
+            // (compaction/brainwash above) — a standalone eviction would force a full
+            // re-prefill just to drop a few stale messages.
+            if (!deferCompression
+                && (EffectiveContextStrategy != ContextStrategy.Hybrid || _historyMutatedThisSend))
             {
                 string evictionMsg = EvictStaleContext();
                 if (evictionMsg != null)
@@ -1295,7 +1399,14 @@ namespace DevMind
                     int ctxTotal = ServerContextSize > 0 ? ServerContextSize : _contextSize;
                     int ctxPct = ctxTotal > 0 ? (int)(LastContextUsed * 100.0 / ctxTotal) : 0;
                     string deltaStr = LastContextDelta > 0 ? $" | delta +{LastContextDelta:N0}" : "";
-                    onToken($"\n[LLM] {LastGeneratedTokens:N0} tok in {genSec:F1}s ({tokPerSec:F1} tok/s) | Prompt: {LastContextUsed:N0} / {ctxTotal:N0} ({ctxPct}%){deltaStr}\n");
+                    string reuseStr = "";
+                    if (CacheReuse.LastReuseRatio >= 0)
+                    {
+                        reuseStr = $" | reuse {CacheReuse.LastReuseRatio * 100:F0}%";
+                        if (CacheReuse.LastTurnWasRebuild)
+                            reuseStr += " (rebuild)";
+                    }
+                    onToken($"\n[LLM] {LastGeneratedTokens:N0} tok in {genSec:F1}s ({tokPerSec:F1} tok/s) | Prompt: {LastContextUsed:N0} / {ctxTotal:N0} ({ctxPct}%){deltaStr}{reuseStr}\n");
                 }
 
                 onComplete();
@@ -1376,6 +1487,7 @@ namespace DevMind
         {
             _conversationHistory.Clear();
             _conversationHistory.Add(new ChatMessage("system", GetSystemPrompt()));
+            _historyMutatedBetweenSends = true; // /new runs between sends; taint the NEXT send
             _filesReadThisSession.Clear();
             NearlineCache.Clear();
             _microCompactWatermark = 0;
@@ -1488,10 +1600,14 @@ namespace DevMind
                     return;
 
                 _conversationHistory[0] = new ChatMessage("system", prompt);
+                _historyMutatedThisSend = true;
             }
             else
             {
                 _conversationHistory.Insert(0, new ChatMessage("system", prompt));
+                // A fresh conversation has no prior context to reuse — the first turn is
+                // not evidence about the backend's cache, so exclude it from sampling.
+                _historyMutatedThisSend = true;
             }
         }
 
@@ -1615,6 +1731,7 @@ namespace DevMind
             // Remove in reverse index order to preserve indices
             if (indicesToRemove.Count > 0)
             {
+                _historyMutatedThisSend = true;
                 for (int i = indicesToRemove.Count - 1; i >= 0; i--)
                 {
                     int idx = indicesToRemove[i];
@@ -1887,10 +2004,16 @@ namespace DevMind
         /// </summary>
         private bool IsThrashing()
         {
-            if (_recentCompactionCount < 2 || ServerContextSize <= 0)
+            if (ServerContextSize <= 0)
                 return false;
 
-            return LastContextUsed > ServerContextSize * 0.60;
+            // Hybrid backends re-prefill the whole prompt after ANY history edit, so a second
+            // incremental compaction costs nearly as much as a brainwash while reclaiming far
+            // less. Escalate a full compaction cycle earlier than on transformer backends.
+            if (EffectiveContextStrategy == ContextStrategy.Hybrid)
+                return _recentCompactionCount >= 1 && LastContextUsed > ServerContextSize * 0.50;
+
+            return _recentCompactionCount >= 2 && LastContextUsed > ServerContextSize * 0.60;
         }
 
         /// <summary>
@@ -1925,8 +2048,18 @@ namespace DevMind
 
             if (NearlineCache != null && NearlineCache.Count > 0)
             {
-                contextBlock.Append("## Files in cache (available for re-read without disk I/O): ");
-                contextBlock.AppendLine(string.Join(", ", NearlineCache.Keys));
+                // List handle → key pairs, not bare keys: the breadcrumbs that carried the
+                // handles are gone after the rebuild, and recall_cache needs a handle or key.
+                // Capped to the newest entries so a long session can't bloat the synthetic
+                // prompt — older content stays recallable by its key.
+                const int maxListedHandles = 40;
+                var handles = NearlineCache.Handles;
+                contextBlock.AppendLine("## Cached content (retrieve with recall_cache(\"nl-N\") or recall_cache(\"key\")): ");
+                int skip = Math.Max(0, handles.Count - maxListedHandles);
+                for (int hi = skip; hi < handles.Count; hi++)
+                    contextBlock.AppendLine($"- {handles[hi].Key} → {handles[hi].Value}");
+                if (skip > 0)
+                    contextBlock.AppendLine($"- (+{skip} older entries, recallable by key)");
                 contextBlock.AppendLine();
             }
 
@@ -1972,6 +2105,7 @@ namespace DevMind
             _recentCompactionCount = 0;
             _lastCompactionTurn = 0;
             _microCompactWatermark = 0;
+            _historyMutatedThisSend = true;
             // The rolling [DROPPED] marker is wiped by the _conversationHistory.Clear() above; reset
             // its counters so the cumulative count restarts with the fresh synthetic history.
             _droppedMessageCount = 0;
@@ -2049,7 +2183,10 @@ namespace DevMind
             }
 
             // ── Determine watermark target ────────────────────────────────────
-            int watermarkTarget = _microCompactWatermark > 0 ? _microCompactWatermark : 40;
+            // Hybrid strategy compacts deeper: every compaction costs a full re-prefill
+            // there, so buying more headroom per rebuild means fewer rebuilds per session.
+            int defaultWatermark = EffectiveContextStrategy == ContextStrategy.Hybrid ? 25 : 40;
+            int watermarkTarget = _microCompactWatermark > 0 ? _microCompactWatermark : defaultWatermark;
 
             // ── Pin the original task prompt ──────────────────────────────────
             int firstUserIndex = -1;
@@ -2111,8 +2248,14 @@ namespace DevMind
 
                 string c = msg.Content;
                 int origLen = c.Length;
-                string cacheKey = $"tool:{msg.ToolCallId ?? i.ToString()}";
-                string handle = NearlineCache.Store(cacheKey, c, BuildToolResultBreadcrumb(c, origLen, null));
+                // An ingest-capped excerpt already has its FULL content cached — reuse that
+                // handle; re-storing would overwrite the full content with the excerpt.
+                string handle = ExtractIngestHandle(c);
+                if (handle == null)
+                {
+                    string cacheKey = $"tool:{msg.ToolCallId ?? i.ToString()}";
+                    handle = NearlineCache.Store(cacheKey, c, BuildToolResultBreadcrumb(c, origLen, null));
+                }
                 string breadcrumb = BuildToolResultBreadcrumb(c, origLen, handle);
                 trimmedOriginals.Add(msg);
                 if (msg.Turn < minTrimTurn) minTrimTurn = msg.Turn;
@@ -2190,8 +2333,13 @@ namespace DevMind
 
                     if (msg.Role == "tool")
                     {
-                        string cacheKey = $"tool:{msg.ToolCallId ?? i.ToString()}";
-                        string handle = NearlineCache.Store(cacheKey, msg.Content, BuildToolResultBreadcrumb(msg.Content, origLen, null));
+                        // Reuse an ingest-capped excerpt's handle — see Pass 2.
+                        string handle = ExtractIngestHandle(msg.Content);
+                        if (handle == null)
+                        {
+                            string cacheKey = $"tool:{msg.ToolCallId ?? i.ToString()}";
+                            handle = NearlineCache.Store(cacheKey, msg.Content, BuildToolResultBreadcrumb(msg.Content, origLen, null));
+                        }
                         replacement = BuildToolResultBreadcrumb(msg.Content, origLen, handle);
                     }
                     else if (msg.Role == "user" && msg.Content.IndexOf("[READ:", StringComparison.Ordinal) >= 0)
@@ -2262,7 +2410,7 @@ namespace DevMind
             if (_microCompactWatermark == 0)
                 _microCompactWatermark = finalPct;
 
-            string logMsg = $"\n[CONTEXT] Compacting — one-time cache rebuild expected.\n[CONTEXT] MicroCompact: trimmed {trimmed} message(s), reclaimed ~{savedChars / 4} tokens. Working budget: {finalPct}% (watermark: {_microCompactWatermark}%).\n" + summaryLogExtra;
+            string logMsg = $"\n[CONTEXT] Compacting — one-time cache rebuild expected.\n[CONTEXT] MicroCompact: trimmed {trimmed} message(s), reclaimed ~{savedChars / 4} tokens. Working budget: {finalPct}% (watermark: {_microCompactWatermark}%, strategy: {EffectiveContextStrategy.ToString().ToLowerInvariant()}).\n" + summaryLogExtra;
             if (showDebug)
             {
                 System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] MicroCompact: {trimmed} trimmed, {savedChars} chars saved, finalPct={finalPct}%, threshold={threshold}%, watermark={_microCompactWatermark}%");
@@ -2274,6 +2422,7 @@ namespace DevMind
             LastContextUsed = 0;
             _lastServerCountIndex = 0;
             _previousContextUsed = 0;
+            _historyMutatedThisSend = true;
             // Do NOT clear _contextDeltas — the growth pattern is still valid for future predictions
 
             // Track compaction frequency for thrashing detection
@@ -3501,6 +3650,7 @@ namespace DevMind
                 // equals usage.prompt_tokens. prompt_n alone undercounts on cache hits (agentic
                 // resubmits), so use the sum for both the finalized and live "in" counts.
                 int promptTotal = promptN + cacheN;
+                CacheReuse.RecordTurn(promptN, cacheN, _historyMutatedThisSend);
                 if (promptTotal > 0) LastPromptTokens = promptTotal;
                 if (promptTotal > LivePromptTokens) LivePromptTokens = promptTotal;
                 if (promptMs > 0) LastPromptMs = promptMs;
@@ -4003,14 +4153,65 @@ namespace DevMind
         private const int MaxToolResultChars = 50_000;
 
         /// <summary>
+        /// Tool results longer than this are nearline-capped at ingest: the full content goes to
+        /// the NearlineCache and only a head+tail excerpt (with the recall handle) enters history.
+        /// Keeping the context small at the source makes compactions rare, which keeps the prompt
+        /// prefix stable — on hybrid/recurrent backends (Gated DeltaNet, Mamba) any prefix edit
+        /// forces a full re-prefill, so avoiding the edit beats recovering from it.
+        /// </summary>
+        private const int NearlineIngestThresholdChars = 8_000;
+        private const int IngestExcerptHeadChars = 4_000;
+        private const int IngestExcerptTailChars = 2_000;
+
+        // Matches the exact marker AddToolResultMessage embeds in ingest-capped excerpts, so
+        // the compaction passes can reuse the existing handle instead of re-storing the
+        // excerpt over the full cached content under the same key. Anchored on the full
+        // marker phrasing (not just "nl-N") so tool output that merely quotes a DevMind
+        // transcript is unlikely to match; matched handles are additionally validated
+        // against the live handle index before reuse.
+        private static readonly Regex _reIngestHandle = new Regex(
+            @"chars omitted — full output cached as (nl-\d+); call recall_cache", RegexOptions.Compiled);
+
+        private string ExtractIngestHandle(string content)
+        {
+            if (string.IsNullOrEmpty(content)) return null;
+            var m = _reIngestHandle.Match(content);
+            if (!m.Success) return null;
+            string handle = m.Groups[1].Value;
+            // Stale or spoofed marker (e.g. the model read an old transcript): the handle
+            // doesn't resolve, so the caller must store the content fresh instead.
+            return NearlineCache.GetKeyForHandle(handle) != null ? handle : null;
+        }
+
+        /// <summary>
         /// Appends a tool result message to conversation history.
         /// Called by the onComplete handler after executing each tool call.
+        /// Oversized results are nearline-capped: full content is cached immediately and
+        /// only an excerpt + recall handle enters history (append-only context discipline).
+        /// recall_cache results are exempt — the model explicitly asked for the full
+        /// content, and re-capping them would hand back another excerpt forever.
         /// </summary>
-        public void AddToolResultMessage(string toolCallId, string content)
+        public void AddToolResultMessage(string toolCallId, string content, string toolName = null)
         {
             string stored = content ?? "";
-            if (stored.Length > MaxToolResultChars)
+            bool exemptFromIngestCap = string.Equals(toolName, "recall_cache", StringComparison.OrdinalIgnoreCase);
+
+            if (!exemptFromIngestCap && stored.Length > NearlineIngestThresholdChars)
             {
+                int originalLength = stored.Length;
+                string cacheKey = $"tool:{toolCallId ?? $"ingest-{_currentTurn}-{_conversationHistory.Count}"}";
+                string handle = NearlineCache.Store(cacheKey, stored,
+                    BuildToolResultBreadcrumb(stored, originalLength, null));
+
+                int omitted = originalLength - IngestExcerptHeadChars - IngestExcerptTailChars;
+                stored = stored.Substring(0, IngestExcerptHeadChars)
+                    + $"\n[... {omitted:N0} chars omitted — full output cached as {handle}; call recall_cache(\"{handle}\") to retrieve ...]\n"
+                    + stored.Substring(originalLength - IngestExcerptTailChars);
+            }
+            else if (stored.Length > MaxToolResultChars)
+            {
+                // Exempted results still respect the hard verbatim cap (recall_cache is
+                // already host-capped at 50k, so this is a safety net, not the norm).
                 int originalLength = stored.Length;
                 stored = stored.Substring(0, MaxToolResultChars)
                     + $"\n[truncated — {originalLength} chars]";

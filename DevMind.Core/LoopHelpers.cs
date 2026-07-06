@@ -40,7 +40,7 @@ namespace DevMind
             foreach (var tc in toolCalls)
             {
                 string resultContent = BuildToolResultContent(tc, result, executedBlocks);
-                llmClient.AddToolResultMessage(tc.Id, resultContent);
+                llmClient.AddToolResultMessage(tc.Id, resultContent, tc.Name);
             }
         }
 
