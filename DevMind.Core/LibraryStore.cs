@@ -191,6 +191,43 @@ ORDER BY d.IngestedAt DESC;";
             return docs;
         }
 
+        /// <summary>Look up a document id by file path. Returns null when not found.</summary>
+        public async Task<int?> GetDocumentIdByPathAsync(string path, CancellationToken ct)
+        {
+            const string sql = "SELECT Id FROM lib.Documents WHERE Path = @path;";
+            using (var conn = new SqlConnection(_connectionString))
+            {
+                await conn.OpenAsync(ct).ConfigureAwait(false);
+                using (var cmd = new SqlCommand(sql, conn))
+                {
+                    cmd.Parameters.AddWithValue("@path", path);
+                    object result = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
+                    if (result == null || result == System.DBNull.Value)
+                        return null;
+                    return (int)result;
+                }
+            }
+        }
+
+        /// <summary>Delete chunks overlapping a page range (for partial re-ingest).</summary>
+        public async Task DeleteChunksInRangeAsync(int documentId, int startPage, int endPage, CancellationToken ct)
+        {
+            const string sql = @"
+DELETE FROM lib.Chunks
+WHERE DocumentId = @doc AND FirstPage <= @end AND LastPage >= @start;";
+            using (var conn = new SqlConnection(_connectionString))
+            {
+                await conn.OpenAsync(ct).ConfigureAwait(false);
+                using (var cmd = new SqlCommand(sql, conn))
+                {
+                    cmd.Parameters.AddWithValue("@doc", documentId);
+                    cmd.Parameters.AddWithValue("@start", startPage);
+                    cmd.Parameters.AddWithValue("@end", endPage);
+                    await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                }
+            }
+        }
+
         /// <summary>Removes a document (and its chunks via cascade) by id. True when found.</summary>
         public async Task<bool> RemoveDocumentAsync(int documentId, CancellationToken ct)
         {
