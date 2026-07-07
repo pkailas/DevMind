@@ -695,8 +695,123 @@ namespace DevMind
                         return;
                     }
 
+                    // ── /library replace <pdf> r=<start>-<end> [p=N] ──────────
+                    if (libArgs.StartsWith("replace ", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string replaceArgs = libArgs.Substring(8).Trim();
+                        int repChunk = 5;
+                        int repStart = 0, repEnd = 0;
+                        bool repHasRange = false;
+                        string repPathRaw = replaceArgs;
+                        string[] repToks = replaceArgs.Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
+
+                        // Find and strip r= and p= flags (in any order)
+                        var repPathToks = new System.Collections.Generic.List<string>();
+                        foreach (string tok in repToks)
+                        {
+                            if (tok.StartsWith("r=", StringComparison.OrdinalIgnoreCase))
+                            {
+                                string rangeStr = tok.Substring(2);
+                                int dashIdx = rangeStr.IndexOf('-');
+                                if (dashIdx > 0 && int.TryParse(rangeStr.Substring(0, dashIdx), out int rs)
+                                    && int.TryParse(rangeStr.Substring(dashIdx + 1), out int re)
+                                    && rs >= 1 && re >= rs)
+                                {
+                                    repStart = rs;
+                                    repEnd = re;
+                                    repHasRange = true;
+                                }
+                            }
+                            else if (tok.StartsWith("p=", StringComparison.OrdinalIgnoreCase))
+                            {
+                                if (int.TryParse(tok.Substring(2), out int rp) && rp > 0)
+                                    repChunk = rp;
+                            }
+                            else
+                            {
+                                repPathToks.Add(tok);
+                            }
+                        }
+
+                        repPathRaw = string.Join(" ", repPathToks).Trim().Trim('"');
+
+                        if (!repHasRange)
+                        {
+                            host.AppendOutputLocal(
+                                "Usage: /library replace <pdf-path> r=<start>-<end> [p=N]\n" +
+                                "  Re-ingests a page range within an already-ingested PDF.\n" +
+                                "  r=1-10  pages to replace (start and end inclusive)\n" +
+                                "  p=5     chunk size (default 5)\n",
+                                OutputColor.Error);
+                            return;
+                        }
+
+                        string repPdf = string.IsNullOrEmpty(repPathRaw)
+                            ? null
+                            : Path.IsPathRooted(repPathRaw)
+                                ? repPathRaw
+                                : Path.GetFullPath(Path.Combine(options.WorkingDirectory ?? ".", repPathRaw));
+
+                        if (repPdf == null || !File.Exists(repPdf))
+                        {
+                            host.AppendOutputLocal(
+                                $"Not found: {repPdf ?? repPathRaw}\n", OutputColor.Error);
+                            return;
+                        }
+
+                        if (!repPdf.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
+                        {
+                            host.AppendOutputLocal(
+                                "/library replace only supports PDFs (use /library add for .md/.txt/.docx).\n",
+                                OutputColor.Error);
+                            return;
+                        }
+
+                        inputBox.View.CanFocus = false;
+                        inputBox.SetActive(false);
+                        statusBar.SetBusy("Replacing library range...");
+                        _isTurnRunning = true;
+                        try
+                        {
+                            await Task.Run(async () =>
+                            {
+                                var replaceResult = await DocumentLibrarian.ReplaceRangeAsync(
+                                    options, options.EndpointUrl, options.ApiKey,
+                                    libEmbed, libConn, repPdf, repStart, repEnd, repChunk,
+                                    line => host.AppendOutputLocal(line, OutputColor.Dim),
+                                    cts.Token);
+                                host.AppendOutputLocal(
+                                    $"[LIBRARY] Done — pages {repStart}-{repEnd} of {Path.GetFileName(repPdf)} replaced " +
+                                    $"({replaceResult.Chunks} chunk(s)). Ask: /library <question>\n",
+                                    OutputColor.Dim);
+                            });
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            host.AppendOutputLocal("\n[LIBRARY] Replace cancelled.\n", OutputColor.Error);
+                        }
+                        catch (Exception ex)
+                        {
+                            host.AppendOutputLocal(
+                                $"\n[LIBRARY] Replace failed: {ex.Message}\n" +
+                                "Is the embedding server running? Start it with llm-launchers\\start-qwen3-embedding.bat\n",
+                                OutputColor.Error);
+                        }
+                        finally
+                        {
+                            _isTurnRunning = false;
+                            inputBox.View.CanFocus = true;
+                            inputBox.SetActive(true);
+                            inputBox.View.SetFocus();
+                            statusBar.SetReady();
+                        }
+                        return;
+
+                    }
+
                     // ── /library add <path> [p=N] ────────────────────────────
                     if (libArgs.StartsWith("add ", StringComparison.OrdinalIgnoreCase))
+
                     {
                         string addArgs = libArgs.Substring(4).Trim();
                         int libChunk = 5;

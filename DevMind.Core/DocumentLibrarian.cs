@@ -117,6 +117,100 @@ namespace DevMind
         }
 
         /// <summary>
+        /// Re-ingest a specific page range within an already-ingested PDF, replacing only
+        /// the chunks that overlap the requested range. The document row (and its Pages
+        /// count) is untouched; only overlapping chunks are deleted and re-created.
+        /// </summary>
+        public static async Task<LibraryIngestResult> ReplaceRangeAsync(
+            ILlmOptions options,
+            string chatEndpointUrl,
+            string apiKey,
+            string embeddingEndpointUrl,
+            string connectionString,
+            string pdfPath,
+            int startPage,
+            int endPage,
+            int chunkSize,
+            Action<string> progress,
+            CancellationToken ct)
+        {
+            // Validate range
+            if (startPage < 1)
+                throw new InvalidOperationException($"startPage must be >= 1, got {startPage}.");
+            if (endPage < startPage)
+                throw new InvalidOperationException($"endPage ({endPage}) must be >= startPage ({startPage}).");
+
+            string name = Path.GetFileName(pdfPath);
+            int pageCount = PdfRasterizer.GetPageCount(pdfPath);
+            if (endPage > pageCount)
+                throw new InvalidOperationException(
+                    $"endPage ({endPage}) exceeds document page count ({pageCount}).");
+
+            var store = new LibraryStore(connectionString);
+            await store.EnsureSchemaAsync(ct).ConfigureAwait(false);
+
+            // Look up existing document by path
+            int? documentId = await store.GetDocumentIdByPathAsync(pdfPath, ct).ConfigureAwait(false);
+            if (documentId == null)
+                throw new InvalidOperationException(
+                    $"No document found for \"{pdfPath}\" — use /library add first.");
+
+            // Delete overlapping chunks
+            await store.DeleteChunksInRangeAsync(documentId.Value, startPage, endPage, ct).ConfigureAwait(false);
+
+            // Compute how many new chunks the range will produce (for progress display)
+            int rangePageCount = endPage - startPage + 1;
+            int totalChunks = (rangePageCount + chunkSize - 1) / chunkSize;
+
+            progress?.Invoke(
+                $"[LIBRARY] Replacing pages {startPage}-{endPage} in {name}: {totalChunks} chunk(s) of up to {chunkSize}.\n");
+
+            using (var chat = new LlmClient(options))
+            using (var embedder = new EmbeddingClient(embeddingEndpointUrl))
+            {
+                chat.Configure(chatEndpointUrl, apiKey);
+
+                int lastPage = startPage - 1;
+                int chunkIndex = 0;
+                var swAll = Stopwatch.StartNew();
+                while (true)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    var chunk = PdfRasterizer.NextChunk(lastPage, chunkSize, endPage);
+                    if (chunk == null)
+                        break;
+                    var (first, last) = chunk.Value;
+                    chunkIndex++;
+
+                    var sw = Stopwatch.StartNew();
+                    var pages = PdfRasterizer.RenderPagesToPng(pdfPath, first, last);
+                    chat.ClearHistory();
+                    foreach (var page in pages)
+                        chat.StagePendingImage($"data:image/png;base64,{Convert.ToBase64String(page.PngBytes)}");
+                    chat.IncrementTurn();
+
+                    string prompt =
+                        $"These images are pages {first}-{last} of {pageCount} from the document \"{name}\". " +
+                        DocumentDigester.ChunkInstruction;
+                    string note = await DocumentDigester.AskAsync(chat, prompt, DocumentDigester.ChunkMaxTokens, ct)
+                        .ConfigureAwait(false);
+                    note = DocumentDigester.TruncateNote(note, DocumentDigester.MaxChunkNoteChars);
+
+                    float[] embedding = await embedder.EmbedAsync(note, ct).ConfigureAwait(false);
+                    await store.AddChunkAsync(documentId.Value, first, last, note, embedding, ct).ConfigureAwait(false);
+
+                    progress?.Invoke($"[LIBRARY] chunk {chunkIndex}/{totalChunks} (pages {first}-{last}) " +
+                                     $"noted + embedded in {sw.Elapsed.TotalSeconds:F0}s.\n");
+                    lastPage = last;
+                }
+
+                progress?.Invoke($"[LIBRARY] {name} replaced in {swAll.Elapsed.TotalMinutes:F1} min — " +
+                                 $"{chunkIndex} chunk(s) for pages {startPage}-{endPage}.\n");
+                return new LibraryIngestResult { DocumentId = documentId.Value, Chunks = chunkIndex, Pages = pageCount };
+            }
+        }
+
+        /// <summary>
         /// Ingests a text-native document (.md/.txt/.docx): extract text, chunk at
         /// paragraph boundaries, embed each chunk verbatim — no chat-model calls, so
         /// nothing is lossy and ingest runs at embedding speed. FirstPage/LastPage

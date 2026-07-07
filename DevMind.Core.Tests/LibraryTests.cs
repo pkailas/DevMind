@@ -107,6 +107,64 @@ namespace DevMind.Core.Tests
             }
         }
 
+        // ── LibraryStore: GetDocumentIdByPath + DeleteChunksInRange ────────────
+
+        [Fact]
+        public async Task LibraryStore_GetDocumentIdByPathAndDeleteChunksInRange_RoundTrip()
+        {
+            if (!await SqlAvailableAsync()) return; // soft-skip off-rig
+
+            var store = new LibraryStore(ConnectionString);
+            await store.EnsureSchemaAsync(CancellationToken.None);
+
+            string sha = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+            string path = $"X:\\tests\\{sha}.pdf";
+            int docId = await store.UpsertDocumentAsync(
+                "range-test.pdf", path, 10, sha, CancellationToken.None);
+            try
+            {
+                // GetDocumentIdByPathAsync returns the correct id
+                int? foundId = await store.GetDocumentIdByPathAsync(path, CancellationToken.None);
+                Assert.Equal(docId, foundId);
+
+                // Nonexistent path returns null
+                Assert.Null(await store.GetDocumentIdByPathAsync("X:\\nope.pdf", CancellationToken.None));
+
+                // Add 3 chunks: pages 1-3, 4-6, 7-10
+                await store.AddChunkAsync(docId, 1, 3, "chunk-A", Unit(0), CancellationToken.None);
+                await store.AddChunkAsync(docId, 4, 6, "chunk-B", Unit(1), CancellationToken.None);
+                await store.AddChunkAsync(docId, 7, 10, "chunk-C", Unit(2), CancellationToken.None);
+
+                var docs = await store.ListDocumentsAsync(CancellationToken.None);
+                Assert.Equal(3, docs.Single(d => d.Id == docId).ChunkCount);
+
+                // Delete range pages 3-7 — should remove chunk-A (1-3 overlaps 3) and chunk-B (4-6 overlaps 3-7)
+                // chunk-C (7-10) also overlaps at page 7, so all 3 should be deleted
+                await store.DeleteChunksInRangeAsync(docId, 3, 7, CancellationToken.None);
+
+                var docsAfter = await store.ListDocumentsAsync(CancellationToken.None);
+                Assert.Equal(0, docsAfter.Single(d => d.Id == docId).ChunkCount);
+
+                // Re-add chunks for a more selective test
+                await store.AddChunkAsync(docId, 1, 3, "chunk-A", Unit(0), CancellationToken.None);
+                await store.AddChunkAsync(docId, 4, 6, "chunk-B", Unit(1), CancellationToken.None);
+                await store.AddChunkAsync(docId, 7, 10, "chunk-C", Unit(2), CancellationToken.None);
+
+                // Delete range pages 5-5 — only chunk-B (4-6) overlaps
+                await store.DeleteChunksInRangeAsync(docId, 5, 5, CancellationToken.None);
+
+                var docsAfter2 = await store.ListDocumentsAsync(CancellationToken.None);
+                Assert.Equal(2, docsAfter2.Single(d => d.Id == docId).ChunkCount);
+
+                // Documents.Pages is unchanged (still 10)
+                Assert.Equal(10, docsAfter2.Single(d => d.Id == docId).Pages);
+            }
+            finally
+            {
+                Assert.True(await store.RemoveDocumentAsync(docId, CancellationToken.None));
+            }
+        }
+
         // ── DocumentLibrarian E2E: fake chat + fake embeddings + real SQL ─────
 
         [Fact]
