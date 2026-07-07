@@ -64,13 +64,31 @@ namespace DevMind
         [JsonPropertyName("libraryEmbeddingEndpoint")]
         public string LibraryEmbeddingEndpoint { get; set; } = "http://127.0.0.1:8082/v1";
 
+        /// <summary>OpenAI-compatible /v1 endpoint of a DEDICATED vision model for PDF ingest
+        /// (e.g. Qwen3-VL on vLLM). When set and reachable, /library add|replace routes PDF
+        /// page images here (one image per request, notes combined per chunk) instead of the
+        /// main chat model; if unreachable the TUI warns and offers the main model. Blank
+        /// (default) = always use the main chat endpoint (original behavior).</summary>
+        [JsonPropertyName("libraryVisionEndpoint")]
+        public string LibraryVisionEndpoint { get; set; } = "";
+
+        /// <summary>Model id sent to the dedicated vision endpoint (vLLM requires an exact
+        /// match, e.g. "Qwen3-VL-32B-Instruct-AWQ").</summary>
+        [JsonPropertyName("libraryVisionModel")]
+        public string LibraryVisionModel { get; set; } = "";
+
+        /// <summary>Optional API key (Bearer) for the dedicated vision endpoint.</summary>
+        [JsonPropertyName("libraryVisionApiKey")]
+        public string LibraryVisionApiKey { get; set; } = "";
+
         /// <summary>When true (default), image file paths typed in a message are
         /// detected (extension + magic bytes) and auto-attached as multimodal content —
         /// no /image needed. PDFs always require /image (page-spec decision).</summary>
         [JsonPropertyName("autoAttachImages")]
         public bool AutoAttachImages { get; set; } = true;
 
-        private static string ConfigPath => Path.Combine(
+        private static string ConfigPath
+ => Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             ConfigDirName, ConfigFileName);
 
@@ -118,6 +136,15 @@ namespace DevMind
 
                 if (root.TryGetProperty("libraryEmbeddingEndpoint", out var lee) && lee.ValueKind == JsonValueKind.String)
                     config.LibraryEmbeddingEndpoint = lee.GetString() ?? "";
+
+                if (root.TryGetProperty("libraryVisionEndpoint", out var lve) && lve.ValueKind == JsonValueKind.String)
+                    config.LibraryVisionEndpoint = lve.GetString() ?? "";
+
+                if (root.TryGetProperty("libraryVisionModel", out var lvm) && lvm.ValueKind == JsonValueKind.String)
+                    config.LibraryVisionModel = lvm.GetString() ?? "";
+
+                if (root.TryGetProperty("libraryVisionApiKey", out var lvk) && lvk.ValueKind == JsonValueKind.String)
+                    config.LibraryVisionApiKey = lvk.GetString() ?? "";
 
                 if (root.TryGetProperty("autoAttachImages", out var aai)
                     && (aai.ValueKind == JsonValueKind.True || aai.ValueKind == JsonValueKind.False))

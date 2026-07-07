@@ -52,7 +52,10 @@ namespace DevMind
             string pdfPath,
             int chunkSize,
             Action<string> progress,
-            CancellationToken ct)
+            CancellationToken ct,
+            string visionEndpoint = null,
+            string visionModel = null,
+            string visionApiKey = null)
         {
             if (TextDocumentReader.IsTextDocument(pdfPath))
             {
@@ -70,8 +73,12 @@ namespace DevMind
 
             progress?.Invoke($"[LIBRARY] Ingesting {name}: {pageCount} page(s) → {totalChunks} chunk(s) of up to {chunkSize}.\n");
 
+            VisionNoteClient vision = string.IsNullOrWhiteSpace(visionEndpoint)
+                ? null
+                : new VisionNoteClient(visionEndpoint, visionModel, visionApiKey);
             using (var chat = new LlmClient(options))
             using (var embedder = new EmbeddingClient(embeddingEndpointUrl))
+            using (vision)
             {
                 chat.Configure(chatEndpointUrl, apiKey);
                 int documentId = await store.UpsertDocumentAsync(name, pdfPath, pageCount, sha256, ct).ConfigureAwait(false);
@@ -90,17 +97,8 @@ namespace DevMind
 
                     var sw = Stopwatch.StartNew();
                     var pages = PdfRasterizer.RenderPagesToPng(pdfPath, first, last);
-                    chat.ClearHistory();
-                    foreach (var page in pages)
-                        chat.StagePendingImage($"data:image/png;base64,{Convert.ToBase64String(page.PngBytes)}");
-                    chat.IncrementTurn();
-
-                    string prompt =
-                        $"These images are pages {first}-{last} of {pageCount} from the document \"{name}\". " +
-                        DocumentDigester.ChunkInstruction;
-                    string note = await DocumentDigester.AskAsync(chat, prompt, DocumentDigester.ChunkMaxTokens, ct)
+                    string note = await GenerateChunkNoteAsync(chat, vision, pages, first, last, pageCount, name, ct)
                         .ConfigureAwait(false);
-                    note = DocumentDigester.TruncateNote(note, DocumentDigester.MaxChunkNoteChars);
 
                     float[] embedding = await embedder.EmbedAsync(note, ct).ConfigureAwait(false);
                     await store.AddChunkAsync(documentId, first, last, note, embedding, ct).ConfigureAwait(false);
@@ -114,6 +112,53 @@ namespace DevMind
                                  $"{chunkIndex} chunk(s) searchable.\n");
                 return new LibraryIngestResult { DocumentId = documentId, Chunks = chunkIndex, Pages = pageCount };
             }
+        }
+
+        /// <summary>
+        /// Produces one chunk's note from its rendered page images. With a dedicated vision
+        /// endpoint (<paramref name="vision"/> non-null), sends ONE image per request — the
+        /// shape document-vision servers expect (no tools, respects image-per-prompt caps) —
+        /// and combines the per-page notes into the chunk note. Otherwise stages every page
+        /// image into a single agentic LlmClient call (the original behavior). Either way the
+        /// result is capped by TruncateNote so downstream sizing is identical.
+        /// </summary>
+        private static async Task<string> GenerateChunkNoteAsync(
+            LlmClient chat, VisionNoteClient vision, List<PdfPageImage> pages,
+            int first, int last, int pageCount, string name, CancellationToken ct)
+        {
+            string note;
+            if (vision != null)
+            {
+                var parts = new List<string>();
+                for (int i = 0; i < pages.Count; i++)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    int pageNo = first + i;
+                    string pagePrompt =
+                        $"This image is page {pageNo} of {pageCount} from the document \"{name}\". " +
+                        DocumentDigester.ChunkInstruction;
+                    string pageNote = await vision.NotePageAsync(
+                        pages[i].PngBytes, pagePrompt, DocumentDigester.DigestSystemPrompt,
+                        DocumentDigester.ChunkMaxTokens, ct).ConfigureAwait(false);
+                    if (!string.IsNullOrWhiteSpace(pageNote))
+                        parts.Add(pageNote.Trim());
+                }
+                note = string.Join("\n\n", parts);
+            }
+            else
+            {
+                chat.ClearHistory();
+                foreach (var page in pages)
+                    chat.StagePendingImage($"data:image/png;base64,{Convert.ToBase64String(page.PngBytes)}");
+                chat.IncrementTurn();
+
+                string prompt =
+                    $"These images are pages {first}-{last} of {pageCount} from the document \"{name}\". " +
+                    DocumentDigester.ChunkInstruction;
+                note = await DocumentDigester.AskAsync(chat, prompt, DocumentDigester.ChunkMaxTokens, ct)
+                    .ConfigureAwait(false);
+            }
+            return DocumentDigester.TruncateNote(note, DocumentDigester.MaxChunkNoteChars);
         }
 
         /// <summary>
@@ -132,7 +177,10 @@ namespace DevMind
             int endPage,
             int chunkSize,
             Action<string> progress,
-            CancellationToken ct)
+            CancellationToken ct,
+            string visionEndpoint = null,
+            string visionModel = null,
+            string visionApiKey = null)
         {
             // Validate range
             if (startPage < 1)
@@ -167,8 +215,12 @@ namespace DevMind
             // only removed once the replacements are ready, so a failed or cancelled re-ingest
             // never leaves the range empty.
             var pending = new List<PendingChunk>();
+            VisionNoteClient vision = string.IsNullOrWhiteSpace(visionEndpoint)
+                ? null
+                : new VisionNoteClient(visionEndpoint, visionModel, visionApiKey);
             using (var chat = new LlmClient(options))
             using (var embedder = new EmbeddingClient(embeddingEndpointUrl))
+            using (vision)
             {
                 chat.Configure(chatEndpointUrl, apiKey);
 
@@ -186,17 +238,8 @@ namespace DevMind
 
                     var sw = Stopwatch.StartNew();
                     var pages = PdfRasterizer.RenderPagesToPng(pdfPath, first, last);
-                    chat.ClearHistory();
-                    foreach (var page in pages)
-                        chat.StagePendingImage($"data:image/png;base64,{Convert.ToBase64String(page.PngBytes)}");
-                    chat.IncrementTurn();
-
-                    string prompt =
-                        $"These images are pages {first}-{last} of {pageCount} from the document \"{name}\". " +
-                        DocumentDigester.ChunkInstruction;
-                    string note = await DocumentDigester.AskAsync(chat, prompt, DocumentDigester.ChunkMaxTokens, ct)
+                    string note = await GenerateChunkNoteAsync(chat, vision, pages, first, last, pageCount, name, ct)
                         .ConfigureAwait(false);
-                    note = DocumentDigester.TruncateNote(note, DocumentDigester.MaxChunkNoteChars);
 
                     float[] embedding = await embedder.EmbedAsync(note, ct).ConfigureAwait(false);
                     pending.Add(new PendingChunk

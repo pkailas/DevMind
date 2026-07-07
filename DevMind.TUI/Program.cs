@@ -643,6 +643,44 @@ namespace DevMind
 
                     string libArgs = input.Length > 8 ? input.Substring(8).Trim() : "";
 
+                    // Dedicated vision endpoint for PDF ingest (env overrides devmind.json).
+                    string libVisionEp = Environment.GetEnvironmentVariable("DEVMIND_LIBRARY_VISION_ENDPOINT");
+                    if (string.IsNullOrWhiteSpace(libVisionEp)) libVisionEp = _config.LibraryVisionEndpoint;
+                    string libVisionModel = Environment.GetEnvironmentVariable("DEVMIND_LIBRARY_VISION_MODEL");
+                    if (string.IsNullOrWhiteSpace(libVisionModel)) libVisionModel = _config.LibraryVisionModel;
+                    string libVisionKey = Environment.GetEnvironmentVariable("DEVMIND_LIBRARY_VISION_API_KEY");
+                    if (string.IsNullOrWhiteSpace(libVisionKey)) libVisionKey = _config.LibraryVisionApiKey;
+
+                    // For a PDF add/replace: decide whether to route page images to the
+                    // dedicated vision endpoint. Probes it; if down, warns and asks whether to
+                    // fall back to the (slow) main model. Returns proceed=false if the user
+                    // cancels, useVision=true when the dedicated endpoint should be used.
+                    async Task<(bool proceed, bool useVision)> ResolveVisionRouteAsync()
+                    {
+                        if (string.IsNullOrWhiteSpace(libVisionEp))
+                            return (true, false);
+                        host.AppendOutputLocal($"[LIBRARY] Checking vision endpoint {libVisionEp} ...\n", OutputColor.Dim);
+                        bool up = await VisionNoteClient.IsReachableAsync(
+                            libVisionEp, libVisionKey, TimeSpan.FromSeconds(3), cts.Token);
+                        if (up)
+                        {
+                            host.AppendOutputLocal(
+                                $"[LIBRARY] Using dedicated vision model {libVisionModel} @ {libVisionEp} (1 image/request).\n",
+                                OutputColor.Dim);
+                            return (true, true);
+                        }
+                        bool fallback = await ((IAgenticHost)host).ConfirmContinueAsync(
+                            $"Dedicated vision endpoint is unreachable:\n  {libVisionEp}\n\n" +
+                            "Fall back to the main chat model for this PDF? It is much slower on dense\n" +
+                            "pages and can leave some pages with empty notes.\n\n" +
+                            "Continue = use the main model     Stop = cancel this add");
+                        if (!fallback)
+                            return (false, false);
+                        host.AppendOutputLocal(
+                            "[LIBRARY] Vision endpoint down — falling back to the main chat model.\n", OutputColor.Error);
+                        return (true, false);
+                    }
+
                     // ── /library  (list) ─────────────────────────────────────
                     if (libArgs.Length == 0 || libArgs.Equals("list", StringComparison.OrdinalIgnoreCase))
                     {
@@ -767,6 +805,13 @@ namespace DevMind
                             return;
                         }
 
+                        var (repProceed, repUseVision) = await ResolveVisionRouteAsync();
+                        if (!repProceed)
+                        {
+                            host.AppendOutputLocal("[LIBRARY] Replace cancelled.\n", OutputColor.Error);
+                            return;
+                        }
+
                         inputBox.View.CanFocus = false;
                         inputBox.SetActive(false);
                         statusBar.SetBusy("Replacing library range...");
@@ -779,7 +824,10 @@ namespace DevMind
                                     options, options.EndpointUrl, options.ApiKey,
                                     libEmbed, libConn, repPdf, repStart, repEnd, repChunk,
                                     line => host.AppendOutputLocal(line, OutputColor.Dim),
-                                    cts.Token);
+                                    cts.Token,
+                                    repUseVision ? libVisionEp : null,
+                                    repUseVision ? libVisionModel : null,
+                                    repUseVision ? libVisionKey : null);
                                 host.AppendOutputLocal(
                                     $"[LIBRARY] Done — pages {repStart}-{repEnd} of {Path.GetFileName(repPdf)} replaced " +
                                     $"({replaceResult.Chunks} chunk(s)). Ask: /library <question>\n",
@@ -848,6 +896,19 @@ namespace DevMind
                             return;
                         }
 
+                        // PDFs may route to the dedicated vision endpoint; text docs never do.
+                        bool addUseVision = false;
+                        if (libIsPdf)
+                        {
+                            var (addProceed, uv) = await ResolveVisionRouteAsync();
+                            if (!addProceed)
+                            {
+                                host.AppendOutputLocal("[LIBRARY] Add cancelled.\n", OutputColor.Error);
+                                return;
+                            }
+                            addUseVision = uv;
+                        }
+
                         inputBox.View.CanFocus = false;
                         inputBox.SetActive(false);
                         statusBar.SetBusy("Ingesting...");
@@ -860,7 +921,10 @@ namespace DevMind
                                     options, options.EndpointUrl, options.ApiKey,
                                     libEmbed, libConn, libPdf, libChunk,
                                     line => host.AppendOutputLocal(line, OutputColor.Dim),
-                                    cts.Token);
+                                    cts.Token,
+                                    addUseVision ? libVisionEp : null,
+                                    addUseVision ? libVisionModel : null,
+                                    addUseVision ? libVisionKey : null);
                                 string libExtent = libIsPdf
                                     ? $"{ingest.Chunks} chunks, {ingest.Pages} pages"
                                     : $"{ingest.Chunks} section(s)";
