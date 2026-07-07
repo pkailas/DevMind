@@ -165,6 +165,55 @@ namespace DevMind.Core.Tests
             }
         }
 
+        // ── LibraryStore: atomic ReplaceChunksInRange (build-then-swap) ────────
+
+        [Fact]
+        public async Task LibraryStore_ReplaceChunksInRange_AtomicSwap_ReplacesOnlyOverlap()
+        {
+            if (!await SqlAvailableAsync()) return; // soft-skip off-rig
+
+            var store = new LibraryStore(ConnectionString);
+            await store.EnsureSchemaAsync(CancellationToken.None);
+
+            string sha = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+            string path = $"X:\\tests\\{sha}.pdf";
+            int docId = await store.UpsertDocumentAsync(
+                "swap-test.pdf", path, 10, sha, CancellationToken.None);
+            try
+            {
+                // Three original chunks with distinctive embeddings.
+                await store.AddChunkAsync(docId, 1, 3, "orig-A", Unit(700), CancellationToken.None);
+                await store.AddChunkAsync(docId, 4, 6, "orig-B", Unit(701), CancellationToken.None);
+                await store.AddChunkAsync(docId, 7, 10, "orig-C", Unit(702), CancellationToken.None);
+
+                // Atomically swap the middle range (pages 4-6) for a new single chunk.
+                var replacement = new List<PendingChunk>
+                {
+                    new PendingChunk { FirstPage = 4, LastPage = 6, Notes = "new-B", Embedding = Unit(703) },
+                };
+                await store.ReplaceChunksInRangeAsync(docId, 4, 6, replacement, CancellationToken.None);
+
+                // Count is still 3 (A, new-B, C): the overlap was swapped, not duplicated.
+                var docs = await store.ListDocumentsAsync(CancellationToken.None);
+                Assert.Equal(3, docs.Single(d => d.Id == docId).ChunkCount);
+
+                // Chunks OUTSIDE the range survive untouched.
+                Assert.Equal("orig-A", (await store.SearchAsync(Unit(700), 1, CancellationToken.None))[0].Notes);
+                Assert.Equal("orig-C", (await store.SearchAsync(Unit(702), 1, CancellationToken.None))[0].Notes);
+
+                // The IN-range chunk was replaced: new-B is now present (old orig-B is gone —
+                // proven by count==3 with A, new-B, C being the only chunks).
+                Assert.Equal("new-B", (await store.SearchAsync(Unit(703), 1, CancellationToken.None))[0].Notes);
+
+                // Documents.Pages is unchanged (still 10).
+                Assert.Equal(10, docs.Single(d => d.Id == docId).Pages);
+            }
+            finally
+            {
+                Assert.True(await store.RemoveDocumentAsync(docId, CancellationToken.None));
+            }
+        }
+
         // ── DocumentLibrarian E2E: fake chat + fake embeddings + real SQL ─────
 
         [Fact]

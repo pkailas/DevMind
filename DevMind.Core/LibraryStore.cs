@@ -23,6 +23,15 @@ namespace DevMind
         public DateTime IngestedAtUtc { get; set; }
     }
 
+    /// <summary>A chunk ready to persist (notes + embedding for a page range).</summary>
+    public sealed class PendingChunk
+    {
+        public int FirstPage { get; set; }
+        public int LastPage { get; set; }
+        public string Notes { get; set; }
+        public float[] Embedding { get; set; }
+    }
+
     /// <summary>A retrieved chunk with provenance (for context injection).</summary>
     public sealed class LibraryHit
     {
@@ -224,6 +233,51 @@ WHERE DocumentId = @doc AND FirstPage <= @end AND LastPage >= @start;";
                     cmd.Parameters.AddWithValue("@start", startPage);
                     cmd.Parameters.AddWithValue("@end", endPage);
                     await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Atomically swaps all chunks overlapping [startPage, endPage] for a new set, in a
+        /// single transaction: delete-in-range then insert every chunk in <paramref name="newChunks"/>,
+        /// commit once. The caller builds the replacement chunks first and only calls this when
+        /// they are ready — so a failed or cancelled re-ingest never destroys the existing chunks.
+        /// </summary>
+        public async Task ReplaceChunksInRangeAsync(
+            int documentId, int startPage, int endPage,
+            IReadOnlyList<PendingChunk> newChunks, CancellationToken ct)
+        {
+            const string deleteSql = @"
+DELETE FROM lib.Chunks
+WHERE DocumentId = @doc AND FirstPage <= @end AND LastPage >= @start;";
+            const string insertSql = @"
+INSERT INTO lib.Chunks (DocumentId, FirstPage, LastPage, Notes, Embedding)
+VALUES (@doc, @first, @last, @notes, CAST(@emb AS VECTOR(1024)));";
+            using (var conn = new SqlConnection(_connectionString))
+            {
+                await conn.OpenAsync(ct).ConfigureAwait(false);
+                using (var tx = (SqlTransaction)await conn.BeginTransactionAsync(ct).ConfigureAwait(false))
+                {
+                    using (var del = new SqlCommand(deleteSql, conn, tx))
+                    {
+                        del.Parameters.AddWithValue("@doc", documentId);
+                        del.Parameters.AddWithValue("@start", startPage);
+                        del.Parameters.AddWithValue("@end", endPage);
+                        await del.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                    }
+                    foreach (var chunk in newChunks)
+                    {
+                        using (var ins = new SqlCommand(insertSql, conn, tx))
+                        {
+                            ins.Parameters.AddWithValue("@doc", documentId);
+                            ins.Parameters.AddWithValue("@first", chunk.FirstPage);
+                            ins.Parameters.AddWithValue("@last", chunk.LastPage);
+                            ins.Parameters.AddWithValue("@notes", chunk.Notes);
+                            ins.Parameters.AddWithValue("@emb", EmbeddingClient.ToJsonArray(chunk.Embedding));
+                            await ins.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                        }
+                    }
+                    await tx.CommitAsync(ct).ConfigureAwait(false);
                 }
             }
         }

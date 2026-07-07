@@ -155,9 +155,6 @@ namespace DevMind
                 throw new InvalidOperationException(
                     $"No document found for \"{pdfPath}\" — use /library add first.");
 
-            // Delete overlapping chunks
-            await store.DeleteChunksInRangeAsync(documentId.Value, startPage, endPage, ct).ConfigureAwait(false);
-
             // Compute how many new chunks the range will produce (for progress display)
             int rangePageCount = endPage - startPage + 1;
             int totalChunks = (rangePageCount + chunkSize - 1) / chunkSize;
@@ -165,6 +162,11 @@ namespace DevMind
             progress?.Invoke(
                 $"[LIBRARY] Replacing pages {startPage}-{endPage} in {name}: {totalChunks} chunk(s) of up to {chunkSize}.\n");
 
+            // Build-then-swap: render/note/embed every replacement chunk into memory FIRST,
+            // then delete-in-range + insert-all in one transaction. The existing chunks are
+            // only removed once the replacements are ready, so a failed or cancelled re-ingest
+            // never leaves the range empty.
+            var pending = new List<PendingChunk>();
             using (var chat = new LlmClient(options))
             using (var embedder = new EmbeddingClient(embeddingEndpointUrl))
             {
@@ -197,16 +199,26 @@ namespace DevMind
                     note = DocumentDigester.TruncateNote(note, DocumentDigester.MaxChunkNoteChars);
 
                     float[] embedding = await embedder.EmbedAsync(note, ct).ConfigureAwait(false);
-                    await store.AddChunkAsync(documentId.Value, first, last, note, embedding, ct).ConfigureAwait(false);
+                    pending.Add(new PendingChunk
+                    {
+                        FirstPage = first,
+                        LastPage = last,
+                        Notes = note,
+                        Embedding = embedding,
+                    });
 
                     progress?.Invoke($"[LIBRARY] chunk {chunkIndex}/{totalChunks} (pages {first}-{last}) " +
                                      $"noted + embedded in {sw.Elapsed.TotalSeconds:F0}s.\n");
                     lastPage = last;
                 }
 
+                // Atomic swap: only now are the old chunks removed and the new ones written.
+                await store.ReplaceChunksInRangeAsync(documentId.Value, startPage, endPage, pending, ct)
+                    .ConfigureAwait(false);
+
                 progress?.Invoke($"[LIBRARY] {name} replaced in {swAll.Elapsed.TotalMinutes:F1} min — " +
-                                 $"{chunkIndex} chunk(s) for pages {startPage}-{endPage}.\n");
-                return new LibraryIngestResult { DocumentId = documentId.Value, Chunks = chunkIndex, Pages = pageCount };
+                                 $"{pending.Count} chunk(s) for pages {startPage}-{endPage}.\n");
+                return new LibraryIngestResult { DocumentId = documentId.Value, Chunks = pending.Count, Pages = pageCount };
             }
         }
 
