@@ -279,6 +279,29 @@ public sealed class ResolvePatchMultiBlockTests
         }
         finally { TempHelpers.Cleanup(tmpPath, backupPath); }
     }
+
+    // Atomic-fail guarantee that batched patch_file relies on: if ANY block's FIND is
+    // missing, the whole patch resolves to null — no partial application.
+    [Fact]
+    public void MultiBlock_OneFindMissing_ResolvesToNull()
+    {
+        var patch =
+            "PATCH service.cs\n" +
+            "FIND:\n" +
+            "    public void Start() { }\n" +
+            "REPLACE:\n" +
+            "    public void Start() { Console.WriteLine(\"Starting\"); }\n" +
+            "FIND:\n" +
+            "    public void DoesNotExist() { }\n" +   // no such method → whole patch must fail
+            "REPLACE:\n" +
+            "    public void DoesNotExist() { Console.WriteLine(\"x\"); }\n";
+
+        var resolved = PatchEngine.ResolvePatch(
+            patch, TempHelpers.TmpFile(), "service.cs",
+            PatchFixtures.TwoStubSource, Encoding.UTF8, fromToolCall: false, (_, _) => { });
+
+        Assert.Null(resolved); // all-or-nothing — the valid first block is NOT applied on its own
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
