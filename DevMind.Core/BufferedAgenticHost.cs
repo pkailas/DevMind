@@ -178,7 +178,7 @@ namespace DevMind
                 string root = Path.GetFullPath(_shellRunner.WorkingDirectory ?? Directory.GetCurrentDirectory())
                     .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
                     + Path.DirectorySeparatorChar;
-                string devmindRoot = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "devmind"))
+                string devmindRoot = OutputDirectory
                     .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
                     + Path.DirectorySeparatorChar;
                 string full = Path.GetFullPath(fullPath);
@@ -195,6 +195,35 @@ namespace DevMind
             {
                 return false; // unparseable path — treat as outside
             }
+        }
+
+        // ── Large-output spill ─────────────────────────────────────────────────────
+
+        /// <summary>The dedicated DevMind output/scratch directory (<c>&lt;temp&gt;/devmind</c>).
+        /// Headless runs are permitted to write here (see <see cref="IsWriteAllowed"/>) so large
+        /// reports and spilled tool output land outside the working tree instead of polluting the
+        /// repo — the failure mode that put a committed <c>dm_output.txt</c> in the working dir.</summary>
+        public static string OutputDirectory { get; } =
+            Path.GetFullPath(Path.Combine(Path.GetTempPath(), "devmind"));
+
+        /// <summary>Writes <paramref name="content"/> to <c>dm_out_&lt;label&gt;.txt</c> under
+        /// <see cref="OutputDirectory"/> and returns a short preview plus a pointer to the full file.
+        /// Used when a tool result is too large to inline sensibly. This is a host-internal write —
+        /// it does NOT route through the write sandbox, so it can never be blocked.</summary>
+        internal static string SpillLargeOutput(string label, string content, int previewChars = 200)
+        {
+            Directory.CreateDirectory(OutputDirectory);
+
+            string safeLabel = string.IsNullOrWhiteSpace(label) ? "out" : label;
+            foreach (char c in Path.GetInvalidFileNameChars())
+                safeLabel = safeLabel.Replace(c, '_');
+
+            string outputPath = Path.Combine(OutputDirectory, $"dm_out_{safeLabel}.txt");
+            File.WriteAllText(outputPath, content);
+
+            string preview = content.Length > previewChars ? content.Substring(0, previewChars) : content;
+            return $"[Output too large ({content.Length:N0} chars) — written to: {outputPath}]\n" +
+                   $"{preview}...\n[See file for full output]";
         }
 
         // ── Action journal ───────────────────────────────────────────────────────
@@ -780,15 +809,9 @@ namespace DevMind
             if (connectionOpened)
                 _lastSuccessfulSqlConnectionString = resolved; // cache the known-good connection for this session
 
-            // Write to file if output is very large
+            // Spill to a file if the result is very large, rather than flooding the context.
             if (result.Length > 4000)
-            {
-                var outputDir = Path.Combine(Path.GetTempPath(), "devmind");
-                Directory.CreateDirectory(outputDir);
-                var outputPath = Path.Combine(outputDir, "dm_sql_output.txt");
-                File.WriteAllText(outputPath, result);
-                result = $"[SQL] Result too large ({result.Length} chars). Written to: {outputPath}\n{result.Substring(0, Math.Min(200, result.Length))}...\n[See file for full output]";
-            }
+                result = SpillLargeOutput("sql", result);
 
             AppendOutput($"[SQL] {result}\n", OutputColor.Success);
             return result;
