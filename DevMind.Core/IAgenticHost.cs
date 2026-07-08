@@ -128,6 +128,14 @@ namespace DevMind
         Task<string> ApplyResolvedPatchAsync(PatchResolveResult resolved);
 
         /// <summary>
+        /// Optional (headless): returns and clears a fresh numbered content window around the region
+        /// the most recent patch to <paramref name="fullPath"/> touched, so the model can re-orient
+        /// and patch again without issuing a separate READ. Null when none is pending or the host
+        /// does not produce echoes. Default: null (interactive hosts do not need it).
+        /// </summary>
+        string TakePatchContextEcho(string fullPath) => null;
+
+        /// <summary>
         /// Presents diff preview cards for a batch of resolved patches and awaits
         /// user decisions. Returns the list of indices that were approved.
         /// If the cancellation token is triggered, all pending cards are cancelled.
