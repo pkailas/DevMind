@@ -371,6 +371,33 @@ namespace DevMind.Core.Tests
             }
         }
 
+        [Fact]
+        public void SpillLargeOutput_WritesFullContentUnderOutputDirAndReturnsPointer()
+        {
+            string big = new string('x', 12_000);
+            string outputPath = Path.Combine(BufferedAgenticHost.OutputDirectory, "dm_out_unittest.txt");
+
+            try
+            {
+                string result = BufferedAgenticHost.SpillLargeOutput("unittest", big);
+
+                // Full content is on disk, under the dedicated output directory (not the working tree).
+                Assert.True(File.Exists(outputPath));
+                Assert.Equal(big, File.ReadAllText(outputPath));
+
+                // The returned summary is a pointer, not the full payload — it names the path
+                // and is far shorter than the original.
+                Assert.Contains(outputPath, result);
+                Assert.Contains("See file for full output", result);
+                Assert.True(result.Length < big.Length);
+            }
+            finally
+            {
+                if (File.Exists(outputPath))
+                    File.Delete(outputPath);
+            }
+        }
+
         // ── Headless addendum: frontend-quality rails ─────────────────────────
 
         [Fact]

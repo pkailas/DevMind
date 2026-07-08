@@ -276,6 +276,11 @@ namespace DevMind
             sb.Append("All file-path arguments to read_file, patch_file, create_file, grep_file, delete_file, diff_file, append_file, and rename_file must be absolute paths.\n");
             sb.Append("When list_files or find_in_files returns paths, pass those exact strings to read_file — do not shorten to just the filename.\n\n");
 
+            sb.Append("## Large Output & Reports\n");
+            sb.Append("When you need to emit a large report, analysis, log, or scratch artifact that is NOT source code belonging in the project, write it with create_file under the dedicated output directory:\n");
+            sb.Append($"  {BufferedAgenticHost.OutputDirectory}\n");
+            sb.Append("Never write such files into the working tree — they get committed as clutter. State the written path in your task_done summary so the operator can retrieve it.\n\n");
+
             sb.Append("## Build Verification\n");
             if (!string.IsNullOrWhiteSpace(buildCommand))
             {

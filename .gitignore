@@ -28,6 +28,10 @@ CodeReviewBenchmarkWithBugs/
 # DevMind trace output
 .dm-trace/
 
+# DevMind agent scratch/report output accidentally written into the working tree
+dm_out*.txt
+dm_output.txt
+
 # Self-contained publish staging + any loose executables (never commit binaries)
 .publish-*/
 *.exe
