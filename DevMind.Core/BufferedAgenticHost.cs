@@ -168,7 +168,8 @@ namespace DevMind
         }
 
         /// <summary>False (and journals the block) when the sandbox is on and
-        /// <paramref name="fullPath"/> falls outside the working directory.</summary>
+        /// <paramref name="fullPath"/> falls outside the working directory or the
+        /// dedicated devmind output directory (<c>&lt;temp&gt;/devmind</c>).</summary>
         private bool IsWriteAllowed(string fullPath, string operation)
         {
             if (!RestrictWritesToWorkingDirectory) return true;
@@ -177,8 +178,12 @@ namespace DevMind
                 string root = Path.GetFullPath(_shellRunner.WorkingDirectory ?? Directory.GetCurrentDirectory())
                     .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
                     + Path.DirectorySeparatorChar;
+                string devmindRoot = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "devmind"))
+                    .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                    + Path.DirectorySeparatorChar;
                 string full = Path.GetFullPath(fullPath);
-                if (full.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+                if (full.StartsWith(root, StringComparison.OrdinalIgnoreCase) ||
+                    full.StartsWith(devmindRoot, StringComparison.OrdinalIgnoreCase))
                     return true;
 
                 RecordAction("blocked", $"{operation} outside working directory: {full}", success: false);
