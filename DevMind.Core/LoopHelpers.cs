@@ -83,7 +83,18 @@ namespace DevMind
 
                 case "patch_file":
                     if (result.PatchedPaths != null && result.PatchedPaths.Count > 0)
-                        return $"[PATCH applied to {string.Join(", ", result.PatchedPaths)}]";
+                    {
+                        string header = $"[PATCH applied to {string.Join(", ", result.PatchedPaths)}]";
+                        // Append any post-patch context echoes (fresh view around each edit) so the
+                        // model can patch again without a separate READ. Keyed by full path.
+                        var echoes = new StringBuilder();
+                        foreach (var p in result.PatchedPaths.Distinct())
+                            if (result.ToolResultContents != null &&
+                                result.ToolResultContents.TryGetValue(p, out string ctx) &&
+                                !string.IsNullOrEmpty(ctx))
+                                echoes.Append('\n').Append(ctx);
+                        return echoes.Length > 0 ? header + "\n" + echoes.ToString().TrimStart('\n') : header;
+                    }
                     if (result.Errors != null && result.Errors.Count > 0)
                         return $"[PATCH-FAILED: {string.Join("; ", result.Errors)}]";
                     return "[PATCH processed]";

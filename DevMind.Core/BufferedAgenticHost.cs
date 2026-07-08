@@ -63,6 +63,22 @@ namespace DevMind
         private readonly Dictionary<string, int> _patchesSinceRead =
             new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
+        // Locality-aware companion to _patchesSinceRead: line spans edited since the last read of a
+        // file, kept in CURRENT-content space (shifted as later patches change line counts). Only a
+        // patch that OVERLAPS/ADJOINS a prior edited span advances _patchesSinceRead — distant,
+        // non-overlapping edits are safe (unique FIND text, no drift) and must NOT force a re-read.
+        private readonly Dictionary<string, List<(int start, int end)>> _editedSpansSinceRead =
+            new Dictionary<string, List<(int start, int end)>>(StringComparer.OrdinalIgnoreCase);
+
+        // Edits closer than this many lines to a prior edit count as overlapping (adjacency tolerance).
+        private const int PatchAdjacencyLines = 3;
+        // Lines of surrounding context echoed back to the model after a patch (post-patch view).
+        private const int PatchEchoContextLines = 6;
+
+        // Pending post-patch context echoes, keyed by full path; drained by TakePatchContextEcho.
+        private readonly Dictionary<string, string> _pendingPatchEcho =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
         private readonly ShellRunner _shellRunner;
         private readonly FileContentCache _fileCache = new FileContentCache();
 
@@ -1373,7 +1389,12 @@ namespace DevMind
                 AppendOutput($"[PATCH] Applied to {resolved.FullPath} (undo depth: {undosAvailable}){(merge.UsedFallback ? " [two-way fallback]" : "")}\n",
                     OutputColor.Success);
                 RecordAction("patch", resolved.FullPath);
-                _patchesSinceRead[fileNameOnly] = _patchesSinceRead.GetValueOrDefault(fileNameOnly) + 1;
+
+                // Locality-aware staleness accounting (#1) + fresh post-patch context echo (#2).
+                // Headless only — the guard and echo are for the no-human-in-the-loop path.
+                if (RestrictWritesToWorkingDirectory)
+                    UpdatePatchLocalityAndEcho(fileNameOnly, resolved, result.UpdatedContent);
+
                 return Task.FromResult(resolved.FullPath);
             }
             catch (Exception ex)
@@ -1383,6 +1404,96 @@ namespace DevMind
             }
         }
 
+
+        // ── Patch locality guard (#1) + post-patch context echo (#2) ──────────────
+
+        /// <summary>Returns and clears the pending post-patch context echo for a path.</summary>
+        string IAgenticHost.TakePatchContextEcho(string fullPath)
+        {
+            if (fullPath != null && _pendingPatchEcho.TryGetValue(fullPath, out string echo))
+            {
+                _pendingPatchEcho.Remove(fullPath);
+                return echo;
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// After a successful patch: (1) advances the staleness counter ONLY when the edit
+        /// overlaps/adjoins a region already edited since the last read (the precondition for
+        /// stale-view corruption) — distant edits are left free; and (2) stages a fresh numbered
+        /// window of the NEW content around the edit so the model can patch again without re-reading.
+        /// Edited spans are tracked in current-content line space and shifted as edits change lengths.
+        /// </summary>
+        private void UpdatePatchLocalityAndEcho(string fileNameOnly, PatchResolveResult resolved, string newContent)
+        {
+            string oldContent = resolved.OriginalContent ?? string.Empty;
+
+            // Aggregate this patch's edited region across all blocks, in OLD-content line space.
+            int minStart = int.MaxValue, maxEnd = 0;
+            foreach (var (origStart, origEnd, _replace) in resolved.ResolvedBlocks ?? new List<(int, int, string)>())
+            {
+                int s = LineAtOffset(oldContent, origStart);
+                int e = LineAtOffset(oldContent, Math.Max(origStart, origEnd - 1));
+                if (s < minStart) minStart = s;
+                if (e > maxEnd)   maxEnd   = e;
+            }
+            if (minStart == int.MaxValue) return; // nothing resolved to a location
+
+            int delta = CountLines(newContent) - CountLines(oldContent);
+
+            var spans = _editedSpansSinceRead.GetValueOrDefault(fileNameOnly) ?? new List<(int start, int end)>();
+
+            // Advance the staleness counter for the first edit to a file (establishes the region)
+            // and for any later edit that overlaps/adjoins a prior edit — i.e. the clustered case
+            // that drifts a stale view. A later edit far from every prior edit is safe and is left
+            // uncounted, so many distinct sites never force a re-read.
+            bool overlaps = spans.Any(sp =>
+                minStart <= sp.end + PatchAdjacencyLines && sp.start <= maxEnd + PatchAdjacencyLines);
+            if (spans.Count == 0 || overlaps)
+                _patchesSinceRead[fileNameOnly] = _patchesSinceRead.GetValueOrDefault(fileNameOnly) + 1;
+
+            // Shift prior spans that sit below this edit into NEW-content space, then record this edit.
+            var updated = new List<(int start, int end)>(spans.Count + 1);
+            foreach (var sp in spans)
+                updated.Add(sp.start > maxEnd ? (sp.start + delta, sp.end + delta) : sp);
+            int newEditEnd = Math.Max(minStart, maxEnd + delta);
+            updated.Add((minStart, newEditEnd));
+            _editedSpansSinceRead[fileNameOnly] = updated;
+
+            _pendingPatchEcho[resolved.FullPath] = BuildPatchEcho(fileNameOnly, newContent, minStart, newEditEnd);
+        }
+
+        /// <summary>1-based line number containing character <paramref name="offset"/>.</summary>
+        private static int LineAtOffset(string content, int offset)
+        {
+            if (string.IsNullOrEmpty(content) || offset <= 0) return 1;
+            if (offset > content.Length) offset = content.Length;
+            int line = 1;
+            for (int i = 0; i < offset; i++)
+                if (content[i] == '\n') line++;
+            return line;
+        }
+
+        private static int CountLines(string s) =>
+            string.IsNullOrEmpty(s) ? 0 : s.Count(c => c == '\n') + 1;
+
+        /// <summary>Numbered window of the new content around an edited line range — the "current
+        /// view after your edit" the model can patch against without re-reading.</summary>
+        private static string BuildPatchEcho(string fileNameOnly, string newContent, int editStart, int editEnd)
+        {
+            string[] lines = newContent.Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
+            int total = lines.Length;
+            int from = Math.Max(1, editStart - PatchEchoContextLines);
+            int to   = Math.Min(total, editEnd + PatchEchoContextLines);
+
+            var sb = new StringBuilder();
+            sb.Append($"[POST-PATCH VIEW] {fileNameOnly}:{from}-{to} — current content after your edit; " +
+                      "patch again from this without re-reading:\n");
+            for (int i = from; i <= to; i++)
+                sb.Append($"{i}: {lines[i - 1]}\n");
+            return sb.ToString();
+        }
 
         // ── IAgenticHost.ShowDiffPreviewAsync ─────────────────────────────────────
         // Diff rendering + approval loop live here; the DECISION is a virtual so
@@ -1596,7 +1707,8 @@ namespace DevMind
                     }
 
                     _taskReadFiles.Add(fileNameOnly);
-                    _patchesSinceRead.Remove(fileNameOnly); // model refreshed its view
+                    _patchesSinceRead.Remove(fileNameOnly);      // model refreshed its view
+                _editedSpansSinceRead.Remove(fileNameOnly);  // stale-overlap tracking reset with it
                     int totalLines = _fileCache.GetLineCount(cacheKey);
 
                     if (rangeStart > rangeEnd) { int t = rangeStart; rangeStart = rangeEnd; rangeEnd = t; }
@@ -1629,7 +1741,8 @@ namespace DevMind
                 var (content, _enc) = PatchEngine.ReadFilePreservingEncoding(fullPath);
                 _fileCache.Store(FileCacheKey(fullPath), content);
                 _taskReadFiles.Add(fileNameOnly);
-                _patchesSinceRead.Remove(fileNameOnly); // model refreshed its view
+                _patchesSinceRead.Remove(fileNameOnly);      // model refreshed its view
+                _editedSpansSinceRead.Remove(fileNameOnly);  // stale-overlap tracking reset with it
                 int lineCount = content.Split('\n').Length;
 
                 bool alreadyRead = _filesRead.Contains(fileNameOnly);

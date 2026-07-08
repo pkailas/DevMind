@@ -121,6 +121,60 @@ namespace DevMind.Core.Tests
             Assert.Contains("DELTA", File.ReadAllText(file));
         }
 
+        [Fact]
+        public async Task DistantNonOverlappingPatches_DoNotTripGuard()
+        {
+            // #1 locality: many patches to well-separated sites in one file, no re-read between.
+            // The blunt count guard would throw on the 4th; the locality-aware guard must not,
+            // because none of these edits overlap/adjoin another (unique FIND, no drift).
+            var host = new BufferedAgenticHost(_dir) { RestrictWritesToWorkingDirectory = true };
+            IAgenticHost agenticHost = host;
+
+            string file = Path.Combine(_dir, "big.txt");
+            var lines = Enumerable.Range(1, 60).Select(i => $"line {i:D2} original").ToArray();
+            File.WriteAllText(file, string.Join("\n", lines) + "\n");
+            await agenticHost.LoadFileContentAsync("big.txt", forceFullRead: true);
+
+            // Patch 10 sites spaced 5 lines apart (> adjacency tolerance) — none should trip.
+            for (int i = 5; i <= 50; i += 5)
+            {
+                string patch = $"PATCH big.txt\nFIND:\nline {i:D2} original\nREPLACE:\nline {i:D2} PATCHED\nEND_PATCH";
+                var resolved = await agenticHost.ResolvePatchAsync(patch, fromToolCall: true); // must NOT throw
+                Assert.NotNull(resolved);
+                Assert.NotNull(await agenticHost.ApplyResolvedPatchAsync(resolved));
+            }
+
+            string final = File.ReadAllText(file);
+            Assert.Equal(10, final.Split("PATCHED").Length - 1);
+        }
+
+        [Fact]
+        public async Task Patch_EchoesFreshContextAroundTheEdit()
+        {
+            // #2: after a successful patch the host stages a numbered post-patch view around the
+            // edit — one-shot, taken by the executor to spare the model a re-read.
+            var host = new BufferedAgenticHost(_dir) { RestrictWritesToWorkingDirectory = true };
+            IAgenticHost agenticHost = host;
+
+            string file = Path.Combine(_dir, "echo.txt");
+            File.WriteAllText(file, "one\ntwo\nthree\nfour\nfive\n");
+            await agenticHost.LoadFileContentAsync("echo.txt", forceFullRead: true);
+
+            var resolved = await agenticHost.ResolvePatchAsync(
+                "PATCH echo.txt\nFIND:\nthree\nREPLACE:\nTHREE_EDITED\nEND_PATCH", fromToolCall: true);
+            string patchedPath = await agenticHost.ApplyResolvedPatchAsync(resolved);
+            Assert.NotNull(patchedPath);
+
+            string echo = agenticHost.TakePatchContextEcho(patchedPath);
+            Assert.NotNull(echo);
+            Assert.Contains("POST-PATCH VIEW", echo);
+            Assert.Contains("THREE_EDITED", echo);   // shows the NEW content, numbered
+            Assert.Contains("3: THREE_EDITED", echo);
+
+            // One-shot: a second take returns nothing.
+            Assert.Null(agenticHost.TakePatchContextEcho(patchedPath));
+        }
+
         // ── Stale-cache invalidation (out-of-band writes) ─────────────────────
 
         [Fact]

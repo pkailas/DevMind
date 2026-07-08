@@ -743,6 +743,9 @@ namespace DevMind
                         {
                             result.PatchesApplied++;
                             result.PatchedPaths.Add(patchedPath);
+                            string ctxEcho = _host.TakePatchContextEcho(patchedPath);
+                            if (!string.IsNullOrEmpty(ctxEcho))
+                                result.ToolResultContents[patchedPath] = ctxEcho;
                             _lastReadKey = null;
                             _lastReadRepeatCount = 0;
                         }
@@ -802,6 +805,9 @@ namespace DevMind
                             {
                                 result.PatchesApplied++;
                                 result.PatchedPaths.Add(patchedPath);
+                                string ctxEcho = _host.TakePatchContextEcho(patchedPath);
+                                if (!string.IsNullOrEmpty(ctxEcho))
+                                    result.ToolResultContents[patchedPath] = ctxEcho;
                                 _lastReadKey = null;
                                 _lastReadRepeatCount = 0;
                             }
