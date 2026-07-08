@@ -69,15 +69,18 @@ namespace DevMind
 
             // ── patch_file ───────────────────────────────────────────────────
             tools.Add(MakeTool("patch_file",
-                "Edit an existing file by replacing exact text. The find text must be copied " +
-                "verbatim from read_file output — never reconstructed from memory. " +
-                "Whitespace-normalized matching is applied (CRLF and indentation differences ignored). " +
-                "If find matches multiple locations, the patch is rejected — provide more context to disambiguate. " +
-                "Always read_file first if you have not seen the file. " +
-                "After any code change, call run_build to verify the build still passes.",
+                "Edit an existing file by replacing exact text. When a file needs MORE THAN ONE change, " +
+                "pass ALL of them in a single call via the 'edits' array (one {find, replace} per change) " +
+                "instead of calling patch_file repeatedly — they apply atomically in one step. Use the " +
+                "top-level find/replace only for a single change. The find text must be copied verbatim " +
+                "from read_file output — never reconstructed from memory. Whitespace-normalized matching is " +
+                "applied (CRLF and indentation differences ignored). If a find matches multiple locations, " +
+                "the patch is rejected — provide more context to disambiguate. Always read_file first if you " +
+                "have not seen the file. After any code change, call run_build to verify the build still passes.",
                 Required("filename", "string", "Absolute file path — e.g., 'C:\\Projects\\MyApp\\Services\\UserService.cs'. Always pass the full absolute path that list_files or find_in_files returned; do not shorten to just the filename."),
-                Required("find", "string", "Exact text to find in the file (verbatim from read_file output)"),
-                Required("replace", "string", "Replacement text")));
+                Optional("find", "string", "Single edit: exact text to find (verbatim from read_file output). Omit when using 'edits'."),
+                Optional("replace", "string", "Single edit: replacement text. Omit when using 'edits'."),
+                EditsArrayParam()));
 
            // ── run_shell ────────────────────────────────────────────────────
             tools.Add(MakeTool("run_shell",
@@ -450,6 +453,29 @@ namespace DevMind
             {
                 ["type"] = type,
                 ["description"] = "[optional] " + description
+            });
+        }
+
+        /// <summary>The <c>edits</c> array-of-{find,replace} parameter for batched patch_file calls.</summary>
+        private static JProperty EditsArrayParam()
+        {
+            return new JProperty("edits", new JObject
+            {
+                ["type"] = "array",
+                ["description"] = "[optional] Batch of edits applied to this file in ONE atomic call — " +
+                    "strongly preferred whenever a file needs several changes (one call, not many). Each item " +
+                    "is a {find, replace} pair. When provided, the top-level find/replace are ignored.",
+                ["items"] = new JObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JObject
+                    {
+                        ["find"]    = PropSchema("string", "Exact text to find (verbatim from read_file output)."),
+                        ["replace"] = PropSchema("string", "Replacement text.")
+                    },
+                    ["required"] = new JArray("find", "replace"),
+                    ["additionalProperties"] = false
+                }
             });
         }
     }
