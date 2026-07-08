@@ -66,18 +66,42 @@ namespace DevMind
 
                 case "patch_file":
                     {
-                        // Reconstruct the PATCH text format expected by ApplyPatchAsync.
-                        // Format: PATCH filename\nFIND:\n{find}\nREPLACE:\n{replace}\nEND_PATCH
+                        // Reconstruct the PATCH text format expected by ApplyPatchAsync. One PATCH block
+                        // carries every find/replace pair; PatchEngine resolves/applies them atomically.
+                        // Format: PATCH filename\n(FIND:\n{find}\nREPLACE:\n{replace}\n)+ END_PATCH
                         string filename = GetArg(tc, "filename");
-                        string find = GetArg(tc, "find");
-                        string replace = GetArg(tc, "replace");
 
+                        // Use explicit '\n' (not AppendLine, which emits CRLF on Windows and leaks a
+                        // stray '\r' into the parsed replace text). Content's own newlines are preserved.
                         var sb = new StringBuilder();
-                        sb.AppendLine($"PATCH {filename}");
-                        sb.AppendLine("FIND:");
-                        sb.AppendLine(find);
-                        sb.AppendLine("REPLACE:");
-                        sb.AppendLine(replace);
+                        sb.Append("PATCH ").Append(filename).Append('\n');
+
+                        int pairCount = 0;
+                        string editsJson = GetArg(tc, "edits");
+                        if (!string.IsNullOrWhiteSpace(editsJson))
+                        {
+                            try
+                            {
+                                foreach (var item in JArray.Parse(editsJson))
+                                {
+                                    string f = item?["find"]?.ToString();
+                                    if (string.IsNullOrEmpty(f)) continue;   // skip empty; PatchEngine would reject anyway
+                                    string r = item?["replace"]?.ToString() ?? "";
+                                    sb.Append("FIND:\n").Append(f).Append('\n');
+                                    sb.Append("REPLACE:\n").Append(r).Append('\n');
+                                    pairCount++;
+                                }
+                            }
+                            catch { /* malformed edits — fall through to single find/replace */ }
+                        }
+
+                        if (pairCount == 0)
+                        {
+                            // Single-edit form (or no usable edits): fall back to top-level find/replace.
+                            sb.Append("FIND:\n").Append(GetArg(tc, "find")).Append('\n');
+                            sb.Append("REPLACE:\n").Append(GetArg(tc, "replace")).Append('\n');
+                        }
+
                         sb.Append("END_PATCH");
 
                         return new ResponseBlock
