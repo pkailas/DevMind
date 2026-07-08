@@ -51,6 +51,16 @@ using DevMind.McpServer;
 using ModelContextProtocol;
 using ModelContextProtocol.Server;
 
+/// <summary>One find/replace edit in a batched <c>patch_file</c> call.</summary>
+public sealed class PatchEdit
+{
+    [Description("Exact text to find in the file (verbatim from read_file output).")]
+    public string Find { get; set; } = "";
+
+    [Description("Replacement text.")]
+    public string Replace { get; set; } = "";
+}
+
 [McpServerToolType]
 internal sealed class DevMindTools
 {
@@ -839,20 +849,43 @@ internal sealed class DevMindTools
 
     [McpServerTool(Name = "patch_file")]
     [Description(
-        "Edit an existing file by replacing exact text. The find text must be copied " +
-        "verbatim from read_file output — never reconstructed from memory. " +
-        "Whitespace-normalized matching is applied (CRLF and indentation differences ignored). " +
-        "Always read_file first if you have not seen the file.")]
+        "Edit an existing file by replacing exact text. Provide EITHER a single find/replace, OR an " +
+        "'edits' array to apply several replacements in ONE atomic patch — strongly preferred for " +
+        "multi-site edits (one call instead of many, applied all-or-nothing). Find text must be copied " +
+        "verbatim from read_file output, never reconstructed from memory. Whitespace-normalized matching " +
+        "is applied (CRLF and indentation differences ignored). Always read_file first if you have not " +
+        "seen the file.")]
     public async Task<string> PatchFile(
         [Description("Absolute file path.")] string filename,
-        [Description("Exact text to find in the file (verbatim from read_file output).")] string find,
-        [Description("Replacement text.")] string replace,
+        [Description("Exact text to find (verbatim from read_file output). Omit when using 'edits'.")] string? find = null,
+        [Description("Replacement text. Omit when using 'edits'.")] string? replace = null,
+        [Description("Batch of {find, replace} edits applied to this file in one atomic patch (all succeed or none). When provided, top-level find/replace are ignored.")] PatchEdit[]? edits = null,
         CancellationToken cancellationToken = default)
     {
         return await _svc.EnqueueAsync(async () =>
         {
             try
             {
+                // Normalize inputs into a list of find/replace pairs.
+                var pairs = new List<(string find, string replace)>();
+                if (edits is { Length: > 0 })
+                {
+                    foreach (var e in edits)
+                    {
+                        if (e == null || string.IsNullOrEmpty(e.Find))
+                            return "patch_file: failed — each entry in 'edits' must have non-empty 'find' text.";
+                        pairs.Add((e.Find, e.Replace ?? ""));
+                    }
+                }
+                else if (find != null)
+                {
+                    pairs.Add((find, replace ?? ""));
+                }
+                else
+                {
+                    return "patch_file: failed — provide either 'find'/'replace' or a non-empty 'edits' array.";
+                }
+
                 string? fullPath = ResolveFilePath(filename);
                 if (fullPath == null || !File.Exists(fullPath))
                     return BuildFileNotFoundMessage("patch_file", filename);
@@ -867,8 +900,13 @@ internal sealed class DevMindTools
                 // Read file content preserving encoding (matches what PatchEngine writes back).
                 var (content, encoding) = PatchEngine.ReadFilePreservingEncoding(fullPath);
 
-                // Build PATCH block. fromToolCall=true: PatchEngine skips fence stripping.
-                string patchInput = $"PATCH {fileNameOnly}\nFIND:\n{find}\nREPLACE:\n{replace}";
+                // Build one PATCH block carrying every pair — PatchEngine resolves & applies them
+                // together (atomic: any unresolved FIND fails the whole patch, no partial writes).
+                // fromToolCall=true: PatchEngine skips fence stripping.
+                var patchInput = new StringBuilder();
+                patchInput.Append($"PATCH {fileNameOnly}\n");
+                foreach (var (f, r) in pairs)
+                    patchInput.Append($"FIND:\n{f}\nREPLACE:\n{r}\n");
 
                 // Capture reporter output so errors return to the MCP client AND go to stderr.
                 var errorLog = new StringBuilder();
@@ -880,7 +918,7 @@ internal sealed class DevMindTools
                 };
 
                 var resolved = PatchEngine.ResolvePatch(
-                    patchInput, fullPath, fileNameOnly, content, encoding,
+                    patchInput.ToString(), fullPath, fileNameOnly, content, encoding,
                     fromToolCall: true, reporter: reporter);
 
                 if (resolved == null)
@@ -903,7 +941,8 @@ internal sealed class DevMindTools
                 string badge = resolved.Confidence == PatchConfidence.Fuzzy
                     ? " (fuzzy match — verify with diff_file)"
                     : "";
-                return $"patch_file: applied to {fullPath}{badge}";
+                string countNote = pairs.Count > 1 ? $" ({pairs.Count} edits)" : "";
+                return $"patch_file: applied to {fullPath}{countNote}{badge}";
             }
             catch (Exception ex)
             {
