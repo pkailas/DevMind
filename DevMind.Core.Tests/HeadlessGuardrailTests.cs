@@ -292,6 +292,85 @@ namespace DevMind.Core.Tests
             Assert.Contains("not configured", result);
         }
 
+        // ── Sandbox write restriction ──────────────────────────────────────────
+
+        [Fact]
+        public async Task RestrictedHost_AllowsWriteUnderDevMindTempDir()
+        {
+            var host = new BufferedAgenticHost(_dir) { RestrictWritesToWorkingDirectory = true };
+
+            // Path under <temp>\devmind — should be allowed
+            string devmindTempDir = Path.Combine(Path.GetTempPath(), "devmind");
+            Directory.CreateDirectory(devmindTempDir);
+            string testFile = Path.Combine(devmindTempDir, $"sandbox_test_{Guid.NewGuid():N}.txt");
+
+            try
+            {
+                var result = await ((IAgenticHost)host).SaveFileAsync(testFile, "hello", false);
+
+                // Should succeed — not null means the write was allowed
+                Assert.NotNull(result);
+                Assert.True(File.Exists(testFile));
+
+                // Should NOT have a "blocked" action
+                Assert.DoesNotContain(host.GetActions(), a => a.Kind == "blocked");
+            }
+            finally
+            {
+                // Cleanup
+                if (File.Exists(testFile))
+                    File.Delete(testFile);
+            }
+        }
+
+        [Fact]
+        public async Task RestrictedHost_BlocksWriteOutsideBothRoots()
+        {
+            var host = new BufferedAgenticHost(_dir) { RestrictWritesToWorkingDirectory = true };
+
+            // (1) Path directly under <temp> but NOT under <temp>\devmind — should be blocked
+            string tempSiblingFile = Path.Combine(Path.GetTempPath(), $"blocked_test_{Guid.NewGuid():N}.txt");
+
+            try
+            {
+                var result = await ((IAgenticHost)host).SaveFileAsync(tempSiblingFile, "hello", false);
+
+                Assert.Null(result);
+                Assert.Contains(host.GetActions(), a => a.Kind == "blocked");
+            }
+            finally
+            {
+                if (File.Exists(tempSiblingFile))
+                    File.Delete(tempSiblingFile);
+            }
+        }
+
+        [Fact]
+        public async Task RestrictedHost_BlocksWriteToSiblingOfWorkingDir()
+        {
+            var host = new BufferedAgenticHost(_dir) { RestrictWritesToWorkingDirectory = true };
+
+            // Sibling directory of the working directory — should be blocked
+            string siblingDir = Path.Combine(Path.GetDirectoryName(_dir)!, $"sibling_{Guid.NewGuid():N}");
+            Directory.CreateDirectory(siblingDir);
+            string siblingFile = Path.Combine(siblingDir, "test.txt");
+
+            try
+            {
+                var result = await ((IAgenticHost)host).SaveFileAsync(siblingFile, "hello", false);
+
+                Assert.Null(result);
+                Assert.Contains(host.GetActions(), a => a.Kind == "blocked");
+            }
+            finally
+            {
+                if (File.Exists(siblingFile))
+                    File.Delete(siblingFile);
+                if (Directory.Exists(siblingDir))
+                    Directory.Delete(siblingDir);
+            }
+        }
+
         // ── Headless addendum: frontend-quality rails ─────────────────────────
 
         [Fact]
