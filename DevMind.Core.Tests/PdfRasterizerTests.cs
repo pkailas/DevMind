@@ -89,7 +89,7 @@ namespace DevMind.Core.Tests
         [InlineData("2-5", 7, 2, 5)]       // range
         [InlineData("7-7", 7, 7, 7)]       // single-page range
         public void ParsePageSpec_ValidSpecs_ResolveToExpectedRange(
-            string spec, int pageCount, int expectedFirst, int expectedLast)
+            string? spec, int pageCount, int expectedFirst, int expectedLast)
         {
             var (first, last) = PdfRasterizer.ParsePageSpec(spec, pageCount);
             Assert.Equal(expectedFirst, first);
