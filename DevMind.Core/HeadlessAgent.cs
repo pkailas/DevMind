@@ -390,9 +390,18 @@ namespace DevMind
 
             try
             {
-                string memoryIndex = new MemoryManager(_workingDirectory).LoadIndex();
+                var memory = new MemoryManager(_workingDirectory);
+                string memoryIndex = memory.LoadIndex();
                 if (!string.IsNullOrWhiteSpace(memoryIndex))
                     combined += $"\n\n--- Session Memory (MEMORY.md) ---\n{memoryIndex}\n---";
+
+                // Standing convention topics are injected IN FULL, not just indexed:
+                // delegated agents repeatedly tripped repo rules (warnings-as-errors,
+                // LoggerMessage pattern, test naming) that were sitting un-recalled in
+                // .devmind/memory — the index alone doesn't put them in frame.
+                string standing = memory.LoadStandingContext();
+                if (!string.IsNullOrWhiteSpace(standing))
+                    combined += $"\n\n--- STANDING REPO CONVENTIONS (follow these in every change) ---\n{standing}\n---";
             }
             catch { /* memory is best-effort */ }
 
