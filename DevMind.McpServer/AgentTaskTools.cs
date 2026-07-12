@@ -146,7 +146,18 @@ namespace DevMind.McpServer
         {
             var job = _jobs.Get(job_id);
             if (job == null)
-                return Task.FromResult(Err($"Unknown job_id: {job_id} (results are retained for the server's lifetime, max 20 jobs)."));
+            {
+                var (diedMidRun, startedAt) = CheckStaleActiveMarker(job_id);
+                if (diedMidRun)
+                    return Task.FromResult(Err(
+                        $"Job {job_id} was RUNNING when its server process died or was killed" +
+                        $"{(startedAt != null ? $" (started {startedAt} UTC)" : "")}. Its conversation and " +
+                        "result are gone; at most a partial transcript survives — devmind_task_result " +
+                        "will serve it. Re-delegate with a fresh brief."));
+                return Task.FromResult(Err(
+                    $"Unknown job_id: {job_id} — not in this server process. Finished jobs persist a " +
+                    "result sidecar + transcript on disk: try devmind_task_result, or devmind_task_list."));
+            }
 
             double? elapsed = job.StartedAtUtc.HasValue
                 ? Math.Round(((job.EndedAtUtc ?? DateTime.UtcNow) - job.StartedAtUtc.Value).TotalSeconds, 0)
@@ -318,6 +329,47 @@ namespace DevMind.McpServer
         private static string Err(string message)
             => JsonSerializer.Serialize(new { error = message }, JsonOpts);
 
+        /// <summary>
+        /// Detects a job that died mid-run: the _active.json marker is written while a
+        /// job executes and cleared on every graceful finish — so a marker naming this
+        /// job whose pid is no longer alive means the server was killed or crashed
+        /// WHILE the job was running. Turns "unknown job_id" into an honest answer.
+        /// </summary>
+        private static (bool DiedMidRun, string? StartedAtUtc) CheckStaleActiveMarker(string jobId)
+        {
+            try
+            {
+                string markerPath = Path.Combine(AgentJobManager.TranscriptDir, "_active.json");
+                if (!File.Exists(markerPath))
+                    return (false, null);
+
+                using var doc = JsonDocument.Parse(File.ReadAllText(markerPath));
+                var root = doc.RootElement;
+                if (!root.TryGetProperty("job_id", out var idEl)
+                    || !string.Equals(idEl.GetString(), jobId, StringComparison.OrdinalIgnoreCase))
+                {
+                    return (false, null);
+                }
+
+                int pid = root.TryGetProperty("pid", out var pidEl) ? pidEl.GetInt32() : 0;
+                bool alive = false;
+                try
+                {
+                    alive = pid > 0 && !System.Diagnostics.Process.GetProcessById(pid).HasExited;
+                }
+                catch { /* GetProcessById throws when the pid is gone — that IS the signal */ }
+                if (alive)
+                    return (false, null); // another live server process is running it right now
+
+                string? started = root.TryGetProperty("started_at_utc", out var s) ? s.GetString() : null;
+                return (true, started);
+            }
+            catch
+            {
+                return (false, null);
+            }
+        }
+
         private static string Snippet(string text, int max)
         {
             if (string.IsNullOrEmpty(text)) return "";
@@ -363,9 +415,18 @@ namespace DevMind.McpServer
             }
             catch { matches = Array.Empty<FileInfo>(); }
 
+            var (diedMidRun, startedAtUtc) = CheckStaleActiveMarker(jobId);
+
             if (matches.Length == 0)
+            {
+                if (diedMidRun)
+                    return Err($"Job {jobId} was RUNNING when its server process died or was killed" +
+                               $"{(startedAtUtc != null ? $" (started {startedAtUtc} UTC)" : "")} — " +
+                               "nothing was persisted (the result sidecar only writes on completion, and " +
+                               "no transcript reached disk). Re-delegate with a fresh brief.");
                 return Err($"Unknown job_id: {jobId} — not in this server process and no transcript " +
                            "found on disk. Use devmind_task_list to see what exists.");
+            }
 
             string tail;
             try
@@ -381,11 +442,17 @@ namespace DevMind.McpServer
             return JsonSerializer.Serialize(new
             {
                 job_id = jobId,
-                state = "unknown (not in this server process — recovered from disk transcript)",
-                note = "No result sidecar exists for this id (job predates sidecar support); this is the " +
-                       "NEWEST transcript matching the id. The tail below usually ends with the agent's " +
-                       "final summary. The conversation is NOT continuable — start a fresh task with a " +
-                       "continuation brief.",
+                state = diedMidRun
+                    ? "died_mid_run (server process died or was killed while this job was running)"
+                    : "unknown (not in this server process — recovered from disk transcript)",
+                note = diedMidRun
+                    ? "The transcript below is PARTIAL — no final answer, actions journal, or " +
+                      "verification was persisted (the result sidecar only writes on completion). " +
+                      "Re-delegate with a fresh brief."
+                    : "No result sidecar exists for this id (job predates sidecar support); this is the " +
+                      "NEWEST transcript matching the id. The tail below usually ends with the agent's " +
+                      "final summary. The conversation is NOT continuable — start a fresh task with a " +
+                      "continuation brief.",
                 transcript_path = matches[0].FullName,
                 transcript_written_utc = matches[0].LastWriteTimeUtc.ToString("yyyy-MM-dd HH:mm:ss"),
                 transcript_tail = tail,
