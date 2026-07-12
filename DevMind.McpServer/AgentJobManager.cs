@@ -186,16 +186,54 @@ namespace DevMind.McpServer
             return 0;
         }
 
+        // Allocation is a read-increment-write under an EXCLUSIVE file lock, not a
+        // startup snapshot: multiple MCP server processes run concurrently (one per
+        // client session — three were live on BEAST at once), and a per-process
+        // in-memory counter seeded at startup would mint colliding ids across them.
+        private static readonly object _idAllocLock = new object();
+
         private string NextJobId()
         {
-            int n = Interlocked.Increment(ref _nextId);
-            try
+            lock (_idAllocLock) // intra-process; the FileShare.None handle is the inter-process lock
             {
-                Directory.CreateDirectory(TranscriptDir);
-                File.WriteAllText(IdCounterPath, n.ToString());
+                for (int attempt = 0; attempt < 10; attempt++)
+                {
+                    try
+                    {
+                        Directory.CreateDirectory(TranscriptDir);
+                        using var fs = new FileStream(
+                            IdCounterPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+                        using var reader = new StreamReader(fs, Encoding.UTF8,
+                            detectEncodingFromByteOrderMarks: true, 128, leaveOpen: true);
+                        string text = reader.ReadToEnd();
+                        int persisted = int.TryParse(text.Trim(), out int v) && v > 0 ? v : 0;
+                        int next = Math.Max(persisted, Volatile.Read(ref _nextId)) + 1;
+
+                        fs.SetLength(0);
+                        fs.Position = 0;
+                        using (var writer = new StreamWriter(fs, Encoding.UTF8, 128, leaveOpen: true))
+                        {
+                            writer.Write(next);
+                            writer.Flush();
+                        }
+
+                        Volatile.Write(ref _nextId, next);
+                        return $"job-{next}";
+                    }
+                    catch (IOException)
+                    {
+                        Thread.Sleep(25); // another server process holds the counter — brief retry
+                    }
+                    catch
+                    {
+                        break; // unexpected (permissions, disk) — fall through to in-memory
+                    }
+                }
+
+                // Degraded fallback: in-memory increment from the startup seed (the
+                // pre-lock behavior). Only here can ids collide with another process.
+                return $"job-{Interlocked.Increment(ref _nextId)}";
             }
-            catch { /* best effort */ }
-            return $"job-{n}";
         }
 
         public AgentJob Start(string prompt, string workingDirectory, int maxDepth, int timeoutMinutes,
