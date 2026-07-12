@@ -681,15 +681,20 @@ internal sealed class DevMindTools
 
     [McpServerTool(Name = "query_db")]
     [Description(
-        "Execute a read-only SQL query against a named database connection. " +
+        "Execute a SQL query against a named database connection. " +
         "Connections are defined in DEVMIND_DB_CONNECTIONS environment variable. " +
-        "Only SELECT statements and read-only stored proc calls are permitted. " +
+        "Read-only by default (SELECT only, enforced by an always-rolled-back transaction). " +
+        "Single-statement DML writes (INSERT/UPDATE/DELETE, single statement, no DDL) are " +
+        "permitted ONLY when allow_write=true AND the server has DEVMIND_DB_ALLOW_WRITE=1 — " +
+        "writes run with ADO.NET session defaults (QUOTED_IDENTIFIER ON, unlike raw sqlcmd) " +
+        "and are committed; the response reports rows affected. " +
         "Supports SQL Server, PostgreSQL, and SQLite — auto-detected from connection string. " +
         "Returns results as a formatted table, capped at 100 rows.")]
     public async Task<string> QueryDb(
         [Description("Connection alias from DEVMIND_DB_CONNECTIONS.")] string connection,
-        [Description("SQL query to execute (SELECT only).")] string query,
+        [Description("SQL to execute (single statement).")] string query,
         [Description("Query timeout in seconds (default 30).")] int? timeout_seconds = null,
+        [Description("Permit a single-statement DML write (requires DEVMIND_DB_ALLOW_WRITE=1 on the server; default false).")] bool? allow_write = null,
         CancellationToken cancellationToken = default)
     {
         return await _svc.EnqueueAsync(async () =>
@@ -701,14 +706,25 @@ internal sealed class DevMindTools
                 if (!_svc.DbConnections.TryGetValue(connection, out string? connStr) || string.IsNullOrWhiteSpace(connStr))
                     return $"[query_db] Unknown connection \"{connection}\". Define it in DEVMIND_DB_CONNECTIONS.";
 
-                // Safety check — read-only only.
+                bool writeRequested = allow_write == true;
+                bool writeEnabled = Environment.GetEnvironmentVariable("DEVMIND_DB_ALLOW_WRITE")?.Trim() == "1";
+                if (writeRequested && !writeEnabled)
+                    return "[query_db] Blocked: allow_write requires DEVMIND_DB_ALLOW_WRITE=1 in the server's environment.";
+
                 string trimmed = query.TrimStart().ToUpperInvariant();
-                string[] blocked = { "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE", "CREATE", "EXEC ", "EXECUTE " };
-                foreach (var keyword in blocked)
+
+                // DDL and EXEC are never permitted, write mode or not.
+                string[] alwaysBlocked = { "DROP", "ALTER", "TRUNCATE", "CREATE", "EXEC ", "EXECUTE ", "MERGE", "GRANT", "REVOKE" };
+                foreach (var keyword in alwaysBlocked)
                 {
                     if (trimmed.StartsWith(keyword, StringComparison.Ordinal))
-                        return $"[query_db] Blocked: only SELECT queries are permitted. Got: {keyword}";
+                        return $"[query_db] Blocked: {keyword.TrimEnd()} is not permitted (write mode allows single-statement INSERT/UPDATE/DELETE only).";
                 }
+
+                string[] dml = { "INSERT", "UPDATE", "DELETE" };
+                bool isDml = dml.Any(k => trimmed.StartsWith(k, StringComparison.Ordinal));
+                if (isDml && !writeRequested)
+                    return "[query_db] Blocked: only SELECT queries are permitted without allow_write=true.";
 
                 // Reject stacked statements: a ';' outside a single-quoted string literal can
                 // smuggle a COMMIT that escapes the rollback enforcement below. Scan for ';'
@@ -772,6 +788,36 @@ internal sealed class DevMindTools
                     DbTransaction tx = dbConn is SqliteConnection
                         ? dbConn.BeginTransaction()
                         : dbConn.BeginTransaction(IsolationLevel.ReadCommitted);
+
+                    // ── Gated write path ────────────────────────────────────────────
+                    // Single-statement DML, double-gated (allow_write param AND
+                    // DEVMIND_DB_ALLOW_WRITE=1). Runs with ADO.NET session defaults —
+                    // QUOTED_IDENTIFIER ON — which is exactly the sqlcmd trap this
+                    // path replaces. Committed explicitly; everything else below
+                    // stays on the always-rollback read-only guarantee.
+                    if (isDml && writeRequested)
+                    {
+                        try
+                        {
+                            using var writeCmd = dbConn.CreateCommand();
+                            writeCmd.Transaction    = tx;
+                            writeCmd.CommandText    = query;
+                            writeCmd.CommandTimeout = timeoutSecs;
+                            int affected = await writeCmd.ExecuteNonQueryAsync(cancellationToken);
+                            tx.Commit();
+                            return $"[query_db] {connection} → write committed, {affected} row(s) affected.";
+                        }
+                        catch (Exception writeEx)
+                        {
+                            try { tx.Rollback(); } catch { }
+                            return $"[query_db error] write failed (rolled back): {writeEx.Message}";
+                        }
+                        finally
+                        {
+                            tx.Dispose();
+                        }
+                    }
+
                     try
                     {
                         using var cmd = dbConn.CreateCommand();
@@ -954,46 +1000,95 @@ internal sealed class DevMindTools
     [McpServerTool(Name = "create_file")]
     [Description(
         "Create a new file with the given content. Use for brand-new files only — " +
-        "use patch_file to edit existing files. Do not wrap content in code fences.")]
-    public async Task<string> CreateFile(
-        [Description("Absolute file path.")] string filename,
+        "use patch_file to edit existing files, or write_file to overwrite. " +
+        "Do not wrap content in code fences.")]
+    public Task<string> CreateFile(
+        [Description("Absolute file path (must be inside the working directory).")] string filename,
         [Description("The complete content for the new file.")] string content,
         CancellationToken cancellationToken = default)
+        => WriteFileCore("create_file", filename, content, overwrite: false, cancellationToken);
+
+    [McpServerTool(Name = "write_file")]
+    [Description(
+        "Write a file with the given content, creating it or fully OVERWRITING it if it exists. " +
+        "Content is written to disk verbatim — this is the reliable way to produce multi-line " +
+        "files (no shell quoting or newline hazards; never route file content through run_shell). " +
+        "Prefer patch_file for small edits to existing files. Do not wrap content in code fences.")]
+    public Task<string> WriteFile(
+        [Description("Absolute file path (must be inside the working directory).")] string filename,
+        [Description("The complete content to write.")] string content,
+        CancellationToken cancellationToken = default)
+        => WriteFileCore("write_file", filename, content, overwrite: true, cancellationToken);
+
+    /// <summary>
+    /// Shared body for create_file / write_file. EVERYTHING is inside the outer
+    /// try/catch — an exception must never escape to the MCP SDK, whose generic
+    /// "An error occurred invoking '<tool>'" hides the actual reason from the caller
+    /// (field complaint: create_file failed opaquely while the internal agent's path
+    /// worked; a path-containment throw or a null argument must surface as text).
+    /// </summary>
+    private async Task<string> WriteFileCore(
+        string toolName, string filename, string content, bool overwrite, CancellationToken cancellationToken)
     {
-        return await _svc.EnqueueAsync(async () =>
+        try
         {
-            try
+            if (string.IsNullOrWhiteSpace(filename))
+                return $"[{toolName} error] filename is required.";
+            if (content is null)
+                return $"[{toolName} error] content is required (send an empty string for an empty file).";
+
+            return await _svc.EnqueueAsync(async () =>
             {
-                string fullPath = PathContainmentCheck(Path.IsPathRooted(filename)
-                    ? filename
-                    : Path.Combine(_svc.WorkingDirectory, filename));
+                try
+                {
+                    string fullPath = PathContainmentCheck(Path.IsPathRooted(filename)
+                        ? filename
+                        : Path.Combine(_svc.WorkingDirectory, filename));
 
-                if (File.Exists(fullPath))
-                    return $"create_file: file already exists — {fullPath}. Use patch_file to edit it.";
+                    bool existed = File.Exists(fullPath);
+                    if (existed && !overwrite)
+                        return $"create_file: file already exists — {fullPath}. Use patch_file to edit it or write_file to overwrite.";
 
-               string? dir = Path.GetDirectoryName(fullPath);
-                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
-                    Directory.CreateDirectory(dir);
+                    // Snapshot the original content before first mutation (for diff_file).
+                    if (existed)
+                        _svc.TrySnapshot(fullPath);
 
-                // Script files (.cmd/.bat/.sh/.ps1) always get UTF-8 without BOM to prevent
-                // garbled output in shells that don't expect a BOM preamble.
-                var fileEncoding = IsScriptFileExtension(fullPath)
-                    ? new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)
-                    : System.Text.Encoding.UTF8;
-                File.WriteAllText(fullPath, content, fileEncoding);
+                    string? dir = Path.GetDirectoryName(fullPath);
+                    if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                        Directory.CreateDirectory(dir);
 
-                int lineCount       = content.Split('\n').Length;
-                string cacheKey     = Path.GetFullPath(fullPath);
-                _svc.FileCache.Store(cacheKey, content);
-                _svc.FilesRead.Add(cacheKey);
+                    // Script files (.cmd/.bat/.sh/.ps1) always get UTF-8 without BOM to prevent
+                    // garbled output in shells that don't expect a BOM preamble.
+                    var fileEncoding = IsScriptFileExtension(fullPath)
+                        ? new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)
+                        : System.Text.Encoding.UTF8;
+                    File.WriteAllText(fullPath, content, fileEncoding);
 
-                return $"create_file: created {fullPath} ({lineCount} lines)";
-            }
-            catch (Exception ex)
-            {
-                return $"[create_file error] {filename}: {ex.Message}";
-            }
-        }, cancellationToken);
+                    int lineCount       = content.Split('\n').Length;
+                    string cacheKey     = Path.GetFullPath(fullPath);
+                    _svc.FileCache.Store(cacheKey, content);
+                    _svc.FilesRead.Add(cacheKey);
+
+                    return existed
+                        ? $"{toolName}: overwrote {fullPath} ({lineCount} lines)"
+                        : $"{toolName}: created {fullPath} ({lineCount} lines)";
+                }
+                catch (Exception ex)
+                {
+                    return $"[{toolName} error] {filename}: {ex.Message}";
+                }
+            }, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            return $"[{toolName}] Cancelled.";
+        }
+        catch (Exception ex)
+        {
+            // Last-resort surface: whatever went wrong OUTSIDE the queued work
+            // (dispatch, argument handling) is reported as text, never rethrown.
+            return $"[{toolName} error] {filename}: {ex.GetType().Name}: {ex.Message}";
+        }
     }
 
     [McpServerTool(Name = "append_file")]
@@ -1167,15 +1262,26 @@ internal sealed class DevMindTools
 
     [McpServerTool(Name = "run_shell")]
     [Description(
-        "Execute a shell command and return its output. Commands run via PowerShell with a " +
-        "120-second timeout. Use this for git commands and operations no other tool covers. " +
-        "Do not use run_shell to list or search files — use list_files or find_in_files instead. " +
-        "Progress notifications stream output lines to the client during long-running commands.")]
+        "Execute a shell command and return its output. Commands run via PowerShell " +
+        "(multi-line commands and here-strings are passed to PowerShell verbatim). Default " +
+        "timeout 120s — override with timeout_seconds. For anything expected to run longer than " +
+        "~45s (installs, deploys, long test runs), pass background=true: the call returns a " +
+        "shell_job_id immediately and the command runs detached — poll shell_job_status. This " +
+        "avoids the MCP client-timeout trap where the call dies but the command keeps running " +
+        "and blocks every subsequent tool call. Do not use run_shell to list or search files — " +
+        "use list_files or find_in_files instead; do not route file content through the shell — " +
+        "use write_file.")]
     public async Task<string> RunShell(
-        [Description("The shell command to execute.")] string command,
+        [Description("The shell command to execute. Newlines are preserved.")] string command,
+        [Description("Timeout in seconds (default 120, max 3600). Ignored when background=true (background default 1800).")] int? timeout_seconds = null,
+        [Description("Run detached and return a shell_job_id to poll with shell_job_status (default false).")] bool? background = null,
         IProgress<ProgressNotificationValue>? progress = null,
         CancellationToken cancellationToken = default)
     {
+        if (background == true)
+            return StartBackgroundShell(command, timeout_seconds);
+
+        int? timeout = timeout_seconds is > 0 ? Math.Min(timeout_seconds.Value, 3600) : null;
         return await _svc.EnqueueAsync(async () =>
         {
             try
@@ -1186,7 +1292,7 @@ internal sealed class DevMindTools
                     : null;
 
                 var (output, exitCode) = await _svc.Shell.ExecuteAsync(
-                    command, cancellationToken, onLine: bridgedProgress);
+                    command, cancellationToken, timeoutSeconds: timeout, onLine: bridgedProgress);
 
                 return CapShellOutput(output, exitCode);
             }
@@ -1195,6 +1301,224 @@ internal sealed class DevMindTools
                 return $"[run_shell error] {ex.Message}";
             }
         }, cancellationToken);
+    }
+
+    // ── Background shell jobs ────────────────────────────────────────────────
+    // A long command must never ride the synchronous tool call: MCP clients time out
+    // (observed ~60s) WITHOUT sending a cancel, the shell keeps running server-side,
+    // and — worse — it used to keep the FIFO dispatcher busy, wedging every later
+    // tool call behind it. Background jobs run OFF the dispatcher on their own task.
+
+    private sealed class ShellJob
+    {
+        public required string Id { get; init; }
+        public required string Command { get; init; }
+        public required Task<(string Output, int ExitCode)> Run { get; init; }
+        public required CancellationTokenSource Cts { get; init; }
+        public readonly DateTime StartedUtc = DateTime.UtcNow;
+        public readonly StringBuilder Tail = new StringBuilder();
+        public readonly object TailLock = new object();
+
+        public string GetTail(int maxChars)
+        {
+            lock (TailLock)
+            {
+                string s = Tail.ToString();
+                return s.Length <= maxChars ? s : s.Substring(s.Length - maxChars);
+            }
+        }
+    }
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, ShellJob> _shellJobs = new();
+    private static int _nextShellJobId;
+
+    private string StartBackgroundShell(string command, int? timeoutSeconds)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(command))
+                return "[run_shell error] command is required.";
+
+            int timeout = timeoutSeconds is > 0 ? Math.Min(timeoutSeconds.Value, 7200) : 1800;
+            var cts = new CancellationTokenSource();
+            // Own runner so a background job can't fight the shared runner's cd state.
+            var runner = new ShellRunner(_svc.Shell.WorkingDirectory);
+            string id = $"sh-{Interlocked.Increment(ref _nextShellJobId)}";
+
+            ShellJob? job = null;
+            var onLine = new Progress<ShellOutputLine>(line =>
+            {
+                var j = job;
+                if (j == null) return;
+                lock (j.TailLock)
+                {
+                    j.Tail.AppendLine(line.Line);
+                    if (j.Tail.Length > 64_000) j.Tail.Remove(0, j.Tail.Length - 32_000);
+                }
+            });
+
+            var run = Task.Run(() => runner.ExecuteAsync(command, cts.Token, timeoutSeconds: timeout, onLine: onLine));
+            job = new ShellJob { Id = id, Command = command, Run = run, Cts = cts };
+            _shellJobs[id] = job;
+
+            // Bounded retention: drop the oldest FINISHED jobs past 20.
+            if (_shellJobs.Count > 20)
+            {
+                foreach (var old in _shellJobs.Values
+                    .Where(j => j.Run.IsCompleted)
+                    .OrderBy(j => j.StartedUtc)
+                    .Take(_shellJobs.Count - 20))
+                {
+                    _shellJobs.TryRemove(old.Id, out _);
+                }
+            }
+
+            return JsonSerializer.Serialize(new
+            {
+                shell_job_id = id,
+                state = "running",
+                timeout_seconds = timeout,
+                hint = "Poll shell_job_status with this id. The command runs detached — later tool calls are not blocked.",
+            });
+        }
+        catch (Exception ex)
+        {
+            return $"[run_shell error] {ex.Message}";
+        }
+    }
+
+    [McpServerTool(Name = "shell_job_status")]
+    [Description(
+        "Check a background shell job started with run_shell background=true: state, elapsed time, " +
+        "live output tail while running, and full (capped) output + exit code once finished. " +
+        "Pass cancel=true to kill the job's process tree.")]
+    public async Task<string> ShellJobStatus(
+        [Description("The shell_job_id returned by run_shell.")] string shell_job_id,
+        [Description("Kill the job's process tree (default false).")] bool? cancel = null,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (!_shellJobs.TryGetValue(shell_job_id, out var job))
+                return $"[shell_job_status error] Unknown shell_job_id: {shell_job_id} (jobs are retained in-process, max 20).";
+
+            if (cancel == true && !job.Run.IsCompleted)
+                job.Cts.Cancel();
+
+            double elapsed = Math.Round((DateTime.UtcNow - job.StartedUtc).TotalSeconds, 0);
+
+            if (!job.Run.IsCompleted)
+            {
+                return JsonSerializer.Serialize(new
+                {
+                    shell_job_id,
+                    state = cancel == true ? "cancelling" : "running",
+                    elapsed_seconds = elapsed,
+                    output_tail = job.GetTail(4_000),
+                });
+            }
+
+            var (output, exitCode) = await job.Run.ConfigureAwait(false);
+            return JsonSerializer.Serialize(new
+            {
+                shell_job_id,
+                state = "done",
+                elapsed_seconds = elapsed,
+                exit_code = exitCode,
+                output = output.Length <= 24_000 ? output : output.Substring(output.Length - 24_000),
+            });
+        }
+        catch (Exception ex)
+        {
+            return $"[shell_job_status error] {ex.Message}";
+        }
+    }
+
+    [McpServerTool(Name = "elevated_shell")]
+    [Description(
+        "Run a PowerShell command ELEVATED (Administrator) via a UAC prompt on the interactive " +
+        "desktop — for service restarts, installs, and deploys that plain run_shell cannot do. " +
+        "Opt-in: refused unless the DEVMIND_ALLOW_ELEVATION environment variable is set to 1. " +
+        "The command runs from a script file with all output captured to a transcript and " +
+        "returned; the user must approve the UAC prompt within the timeout.")]
+    public async Task<string> ElevatedShell(
+        [Description("The PowerShell command/script to run elevated. Newlines are preserved.")] string command,
+        [Description("Seconds to wait for UAC approval + completion (default 300, max 1800).")] int? timeout_seconds = null,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (Environment.GetEnvironmentVariable("DEVMIND_ALLOW_ELEVATION")?.Trim() != "1")
+                return "[elevated_shell] Refused: elevation is not enabled for this server. " +
+                       "Set DEVMIND_ALLOW_ELEVATION=1 in the MCP server's environment to opt in.";
+            if (string.IsNullOrWhiteSpace(command))
+                return "[elevated_shell error] command is required.";
+
+            int timeout = Math.Min(Math.Max(timeout_seconds ?? 300, 10), 1800);
+
+            // Script + output files in %TEMP%\devmind — never in the working tree.
+            string dir = Path.Combine(Path.GetTempPath(), "devmind", "elevated");
+            Directory.CreateDirectory(dir);
+            string stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss-fff");
+            string scriptPath = Path.Combine(dir, $"elev-{stamp}.ps1");
+            string outPath = Path.Combine(dir, $"elev-{stamp}.out.txt");
+
+            // The wrapper script self-captures ALL streams and its exit code — the
+            // elevated process cannot share our redirected pipes across the integrity
+            // boundary, so a transcript file is the only reliable output channel.
+            string wrapper =
+                "$ErrorActionPreference = 'Continue'\n" +
+                "& {\n" + command + "\n} *>&1 | Out-File -FilePath '" + outPath.Replace("'", "''") + "' -Encoding utf8\n" +
+                "exit $LASTEXITCODE\n";
+            File.WriteAllText(scriptPath, wrapper, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = "powershell.exe",
+                Arguments = $"-NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\"",
+                UseShellExecute = true,   // required for the UAC verb
+                Verb = "runas",
+                WindowStyle = ProcessWindowStyle.Hidden,
+                WorkingDirectory = _svc.WorkingDirectory,
+            };
+
+            Process proc;
+            try
+            {
+                proc = Process.Start(psi)!;
+            }
+            catch (System.ComponentModel.Win32Exception)
+            {
+                return "[elevated_shell] UAC prompt was declined (or elevation is blocked by policy).";
+            }
+
+            using (proc)
+            {
+                var exited = await Task.Run(() => proc.WaitForExit(timeout * 1000), cancellationToken)
+                    .ConfigureAwait(false);
+                if (!exited)
+                {
+                    try { proc.Kill(entireProcessTree: true); } catch { }
+                    return $"[elevated_shell] Timed out after {timeout}s (output so far, if any, is at {outPath}).";
+                }
+
+                string output = "";
+                try { if (File.Exists(outPath)) output = File.ReadAllText(outPath); } catch { }
+                int exitCode = 0;
+                try { exitCode = proc.ExitCode; } catch { }
+
+                string capped = output.Length <= 24_000 ? output : output.Substring(output.Length - 24_000);
+                return $"[elevated_shell] exit code {exitCode}\n{(string.IsNullOrWhiteSpace(capped) ? "(no output)" : capped.TrimEnd())}";
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            return "[elevated_shell] Cancelled.";
+        }
+        catch (Exception ex)
+        {
+            return $"[elevated_shell error] {ex.Message}";
+        }
     }
 
     [McpServerTool(Name = "run_build")]
