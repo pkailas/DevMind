@@ -148,6 +148,48 @@ namespace DevMind
         }
 
         /// <summary>
+        /// Standing context: the full content of every topic whose slug marks it as a
+        /// repo-level convention file (starts with "standing-" or contains "convention").
+        /// These are the frame rules a delegated agent must never work without
+        /// (warnings-as-errors, logging patterns, test-naming rules) — field failures
+        /// were all frame failures: the index alone doesn't make the model recall them.
+        /// Concatenated with per-topic headers, capped at <paramref name="maxTotalBytes"/>.
+        /// Returns null when there are no standing topics.
+        /// </summary>
+        public string LoadStandingContext(int maxTotalBytes = 24 * 1024)
+        {
+            try
+            {
+                var sb = new StringBuilder();
+                int budget = maxTotalBytes;
+                foreach (string slug in ListTopics())
+                {
+                    bool standing = slug.StartsWith("standing-", StringComparison.OrdinalIgnoreCase)
+                        || slug.IndexOf("convention", StringComparison.OrdinalIgnoreCase) >= 0;
+                    if (!standing) continue;
+
+                    string content = LoadTopic(slug);
+                    if (string.IsNullOrWhiteSpace(content)) continue;
+
+                    string block = $"\n## [{slug}]\n{content.Trim()}\n";
+                    int bytes = Encoding.UTF8.GetByteCount(block);
+                    if (bytes > budget)
+                    {
+                        sb.Append($"\n## [{slug}]\n[omitted — standing-context budget exhausted; recall_memory \"{slug}\"]\n");
+                        continue;
+                    }
+                    sb.Append(block);
+                    budget -= bytes;
+                }
+                return sb.Length == 0 ? null : sb.ToString();
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
         /// Lists all available topic slugs (filenames without .md extension).
         /// </summary>
         public List<string> ListTopics()

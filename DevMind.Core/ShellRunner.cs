@@ -7,6 +7,11 @@
 // v1.8: redirect + immediately close every spawned child's stdin so it gets an instant EOF instead of
 //       inheriting the McpServer's open stdio pipe. Without this any tool that reads stdin (npx, vite,
 //       npm) blocks to the 120s timeout. Generalizes the git-specific GIT_REDIRECT_STDIN workaround.
+// v1.9: multi-line PowerShell commands go through -EncodedCommand (base64 UTF-16) so every newline
+//       and quote reaches PowerShell VERBATIM — no SanitizeCommand, no \" escaping. Here-strings and
+//       multi-line scripts previously arrived flattened to one line and died on parse errors
+//       (SanitizeCommand collapses newlines inside quoted spans, and a here-string's '@ terminator
+//       must sit at column 0 on its own line). Single-line commands keep the battle-tested path.
 
 using System;
 using System.Collections.Generic;
@@ -98,10 +103,27 @@ namespace DevMind
                     command = Environment.ExpandEnvironmentVariables(command);
             }
 
-            string sanitized = SanitizeCommand(command);
-            string args = usePowerShell
-                ? $"-NoProfile -NonInteractive -Command \"{sanitized.Replace("\"", "\\\"")}\""
-                : $"/c \"{sanitized}\"";
+            bool multiLine = command.IndexOf('\n') >= 0;
+
+            string sanitized;
+            string args;
+            if (usePowerShell && multiLine)
+            {
+                // Multi-line command (script block, here-string): encode verbatim so
+                // newlines and quotes survive intact. SanitizeCommand is deliberately
+                // bypassed — it exists to rescue single-line commands with embedded
+                // newlines in string literals, and it destroys here-strings.
+                sanitized = command;
+                string encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(command));
+                args = $"-NoProfile -NonInteractive -EncodedCommand {encoded}";
+            }
+            else
+            {
+                sanitized = SanitizeCommand(command);
+                args = usePowerShell
+                    ? $"-NoProfile -NonInteractive -Command \"{sanitized.Replace("\"", "\\\"")}\""
+                    : $"/c \"{sanitized}\"";
+            }
 
             var psi = new ProcessStartInfo(shell, args);
            return await RunProcessAsync(
