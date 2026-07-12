@@ -44,15 +44,17 @@ namespace DevMind.McpServer
             "prompt like a task brief for a junior developer: include the goal, relevant file paths, " +
             "and how to verify success. Do not edit files under working_dir while the job runs. " +
             "Estimate max_depth to the task size (verify ~25, single-file feature ~40, cross-cutting " +
-            "~60) — hitting the cap is cheap to recover: devmind_task_continue resumes the " +
-            "conversation where it stopped.")]
+            "~60; default 40) — hitting the cap is cheap to recover: devmind_task_continue resumes " +
+            "the conversation where it stopped, and the result reports state stopped_incomplete " +
+            "when the cap or a failed build verification means the work is not trustworthy as-is.")]
         public async Task<string> TaskStart(
             [Description("The task brief: goal, relevant files, constraints, and how to verify success.")] string prompt,
             [Description("Absolute path of the directory the agent operates in (its sandbox).")] string working_dir,
-            [Description("Max agentic iterations before the agent must stop (default 25).")] int? max_depth = null,
+            [Description("Max agentic iterations before the agent must stop (default 40).")] int? max_depth = null,
             [Description("Wall-clock kill timeout in minutes (default 30).")] int? timeout_minutes = null,
             [Description("Allow the agent to run git commit (default false — the caller owns version control).")] bool? allow_commit = null,
             [Description("After the agent finishes, the job runner builds the working_dir itself and attaches build_verification to the result (default true).")] bool? verify_build = null,
+            [Description("After a successful build verification, also run `dotnet test` in working_dir and attach test_verification (default false — tests can be slow).")] bool? verify_tests = null,
             [Description("Enable model reasoning (think blocks) for this task (default false). Leave off for briefed mechanical tasks — thinking runs UNBOUNDED on the local server and can add minutes per iteration. Turn on only for genuinely hard design/debugging tasks. Continuations inherit this setting.")] bool? think = null,
             CancellationToken cancellationToken = default)
         {
@@ -71,11 +73,12 @@ namespace DevMind.McpServer
 
             var job = _jobs.Start(
                 prompt, working_dir,
-                maxDepth: Math.Clamp(max_depth ?? 25, 1, 100),
+                maxDepth: Math.Clamp(max_depth ?? 40, 1, 100),
                 timeoutMinutes: Math.Clamp(timeout_minutes ?? 30, 1, 240),
                 allowCommit: allow_commit ?? false,
                 verifyBuild: verify_build ?? true,
-                think: think ?? false);
+                think: think ?? false,
+                verifyTests: verify_tests ?? false);
 
             return JsonSerializer.Serialize(new
             {
@@ -98,9 +101,10 @@ namespace DevMind.McpServer
         public async Task<string> TaskContinue(
             [Description("The job_id of the finished task to resume (the newest in its chain).")] string job_id,
             [Description("Instruction for the resumed agent. Default: 'Continue the task from where you left off.'")] string? prompt = null,
-            [Description("Max agentic iterations for this continuation (default 25).")] int? max_depth = null,
+            [Description("Max agentic iterations for this continuation (default 40).")] int? max_depth = null,
             [Description("Wall-clock kill timeout in minutes (default 30).")] int? timeout_minutes = null,
             [Description("Run build verification after this turn (default true).")] bool? verify_build = null,
+            [Description("After a successful build verification, also run `dotnet test` and attach test_verification (default false).")] bool? verify_tests = null,
             CancellationToken cancellationToken = default)
         {
             string? health = await ProbeModelServerAsync(cancellationToken).ConfigureAwait(false);
@@ -110,10 +114,11 @@ namespace DevMind.McpServer
             var job = _jobs.Continue(
                 job_id,
                 string.IsNullOrWhiteSpace(prompt) ? "Continue the task from where you left off." : prompt,
-                maxDepth: Math.Clamp(max_depth ?? 25, 1, 100),
+                maxDepth: Math.Clamp(max_depth ?? 40, 1, 100),
                 timeoutMinutes: Math.Clamp(timeout_minutes ?? 30, 1, 240),
                 verifyBuild: verify_build ?? true,
-                out string error);
+                out string error,
+                verifyTests: verify_tests ?? false);
 
             if (job == null)
                 return Err(error);
@@ -130,8 +135,11 @@ namespace DevMind.McpServer
 
         [McpServerTool(Name = "devmind_task_status")]
         [Description(
-            "Check a delegated DevMind task: state (queued/running/done/failed/cancelled), elapsed " +
-            "time, queue position, and the live tail of the agent's transcript.")]
+            "Check a delegated DevMind task: state (queued/running/done/stopped_incomplete/failed/" +
+            "cancelled), elapsed time, queue position, and the live tail of the agent's transcript. " +
+            "stopped_incomplete means the job finished but its work is NOT trustworthy as-is (hit " +
+            "the iteration cap mid-task, or build/test verification failed) — check incomplete_reasons " +
+            "and usually devmind_task_continue it.")]
         public Task<string> TaskStatus(
             [Description("The job_id returned by devmind_task_start.")] string job_id,
             CancellationToken cancellationToken = default)
@@ -147,7 +155,8 @@ namespace DevMind.McpServer
             return Task.FromResult(JsonSerializer.Serialize(new
             {
                 job_id = job.Id,
-                state = job.State.ToString().ToLowerInvariant(),
+                state = DisplayState(job),
+                incomplete_reasons = job.IsIncomplete ? job.IncompleteReasons() : null,
                 queue_position = job.State == AgentJobState.Queued ? _jobs.QueuePosition(job) : (int?)null,
                 elapsed_seconds = elapsed,
                 working_dir = job.WorkingDirectory,
@@ -155,6 +164,12 @@ namespace DevMind.McpServer
                 transcript_tail = job.GetTail(),
             }, JsonOpts));
         }
+
+        /// <summary>"done" only when the work is actually trustworthy — a depth-capped or
+        /// verification-failed job reports stopped_incomplete instead (field lesson: "done"
+        /// with a broken build was built upon).</summary>
+        private static string DisplayState(AgentJob job)
+            => job.IsIncomplete ? "stopped_incomplete" : job.State.ToString().ToLowerInvariant();
 
         [McpServerTool(Name = "devmind_task_list")]
         [Description(
@@ -167,7 +182,7 @@ namespace DevMind.McpServer
             var jobs = _jobs.List().Select(j => new
             {
                 job_id = j.Id,
-                state = j.State.ToString().ToLowerInvariant(),
+                state = DisplayState(j),
                 prompt_snippet = Snippet(j.Prompt, 120),
                 working_dir = j.WorkingDirectory,
                 queued_at_utc = j.QueuedAtUtc.ToString("yyyy-MM-dd HH:mm:ss"),
@@ -199,10 +214,11 @@ namespace DevMind.McpServer
             {
                 jobs,
                 note = jobs.Count == 0
-                    ? "No jobs in this server process (it may have restarted — job state is in-memory). " +
-                      "Recent transcript files below survive restarts; read one with read_file, or pass its " +
-                      "job id to devmind_task_result for the disk-fallback summary."
-                    : "Job ids reset when the server restarts; transcript files below are the durable record.",
+                    ? "No jobs in this server process (it may have restarted — live job state is in-memory). " +
+                      "Job ids are unique across restarts; pass an old id to devmind_task_result to recover " +
+                      "its persisted result sidecar, or read a transcript file below with read_file."
+                    : "Job ids are unique across restarts. Finished jobs persist a result sidecar + transcript " +
+                      "on disk; live conversations still die with the process.",
                 recent_transcripts = transcripts,
             }, JsonOpts));
         }
@@ -227,7 +243,8 @@ namespace DevMind.McpServer
             return Task.FromResult(JsonSerializer.Serialize(new
             {
                 job_id = job.Id,
-                state = job.State.ToString().ToLowerInvariant(),
+                state = DisplayState(job),
+                incomplete_reasons = job.IsIncomplete ? job.IncompleteReasons() : null,
                 answer = r?.Answer ?? "",
                 actions = (r?.Actions ?? Array.Empty<HostAction>())
                     .Select(a => new { kind = a.Kind, detail = a.Detail, success = a.Success }),
@@ -245,6 +262,13 @@ namespace DevMind.McpServer
                     succeeded = job.Build.Succeeded,
                     exit_code = job.Build.ExitCode,
                     output_tail = job.Build.OutputTail,
+                },
+                test_verification = job.Tests == null ? null : new
+                {
+                    command = job.Tests.Command,
+                    succeeded = job.Tests.Succeeded,
+                    exit_code = job.Tests.ExitCode,
+                    output_tail = job.Tests.OutputTail,
                 },
             }, JsonOpts));
         }
@@ -303,13 +327,32 @@ namespace DevMind.McpServer
 
         /// <summary>
         /// devmind_task_result fallback when the job is not in memory (server restarted
-        /// or evicted past the retention cap): serve the newest on-disk transcript for
-        /// that job id. Job ids RESET per server process, so multiple runs' files can
-        /// match — all candidates are listed and the newest one's tail is returned.
+        /// or evicted past the retention cap). Preference order:
+        /// 1. The {id}.result.json sidecar — the REAL persisted result (answer, actions,
+        ///    verifications), written on every job finish; ids are unique across restarts.
+        /// 2. The newest on-disk transcript's tail (legacy jobs that predate sidecars).
         /// </summary>
         private static string TranscriptFallback(string jobId)
         {
             const int TailChars = 4_000;
+
+            // 1) Result sidecar — authoritative.
+            try
+            {
+                string sidecarPath = Path.Combine(AgentJobManager.TranscriptDir, $"{jobId}.result.json");
+                if (File.Exists(sidecarPath))
+                {
+                    using var doc = JsonDocument.Parse(File.ReadAllText(sidecarPath));
+                    return JsonSerializer.Serialize(new
+                    {
+                        recovered_from = "result sidecar (server restarted or job evicted — this is the persisted final result)",
+                        can_continue = false,
+                        note = "The conversation is NOT continuable across restarts — start a fresh task with a continuation brief.",
+                        result = doc.RootElement.Clone(),
+                    }, JsonOpts);
+                }
+            }
+            catch { /* fall through to transcript tail */ }
             FileInfo[] matches;
             try
             {
@@ -339,9 +382,10 @@ namespace DevMind.McpServer
             {
                 job_id = jobId,
                 state = "unknown (not in this server process — recovered from disk transcript)",
-                note = "Job ids reset when the server restarts; this is the NEWEST transcript matching " +
-                       "the id. The tail below usually ends with the agent's final summary. " +
-                       "The conversation is NOT continuable — start a fresh task with a continuation brief.",
+                note = "No result sidecar exists for this id (job predates sidecar support); this is the " +
+                       "NEWEST transcript matching the id. The tail below usually ends with the agent's " +
+                       "final summary. The conversation is NOT continuable — start a fresh task with a " +
+                       "continuation brief.",
                 transcript_path = matches[0].FullName,
                 transcript_written_utc = matches[0].LastWriteTimeUtc.ToString("yyyy-MM-dd HH:mm:ss"),
                 transcript_tail = tail,

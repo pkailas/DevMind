@@ -33,6 +33,9 @@ namespace DevMind.McpServer
         public int TimeoutMinutes { get; init; }
         public bool AllowCommit { get; init; }
         public bool VerifyBuild { get; init; }
+        /// <summary>Run `dotnet test` after a successful build verification and attach
+        /// test_verification to the result (default false — tests can be slow).</summary>
+        public bool VerifyTests { get; init; }
         /// <summary>Enable model reasoning (think blocks) for this task. Default false:
         /// briefed mechanical tasks iterate faster without unbounded thinking.</summary>
         public bool Think { get; init; }
@@ -44,6 +47,33 @@ namespace DevMind.McpServer
         /// <summary>Post-run build verification outcome (null when skipped: no file
         /// changes, no resolvable build command, or verify_build false).</summary>
         public BuildVerification? Build;
+
+        /// <summary>Post-run test verification outcome (null when skipped: verify_tests
+        /// false, no file changes, or the build verification failed).</summary>
+        public BuildVerification? Tests;
+
+        /// <summary>
+        /// True when the job technically finished but its work is NOT trustworthy as-is:
+        /// it hit the iteration cap mid-task, or the post-run build/test verification
+        /// failed. Surfaced as state "stopped_incomplete" — field lesson: "done" read as
+        /// done, and broken-build results were built upon.
+        /// </summary>
+        public bool IsIncomplete =>
+            State == AgentJobState.Done
+            && ((Result?.HitDepthCap ?? false)
+                || Build is { Succeeded: false }
+                || Tests is { Succeeded: false });
+
+        /// <summary>Why the job is incomplete (empty when it isn't).</summary>
+        public string[] IncompleteReasons()
+        {
+            if (State != AgentJobState.Done) return Array.Empty<string>();
+            var reasons = new List<string>(2);
+            if (Result?.HitDepthCap ?? false) reasons.Add("hit_depth_cap");
+            if (Build is { Succeeded: false }) reasons.Add("build_verification_failed");
+            if (Tests is { Succeeded: false }) reasons.Add("test_verification_failed");
+            return reasons.ToArray();
+        }
 
         /// <summary>The live conversation, retained after completion so
         /// devmind_task_continue can resume it. Transferred to the continuation job
@@ -129,15 +159,51 @@ namespace DevMind.McpServer
             EndpointUrl = string.IsNullOrEmpty(endpoint) ? "http://127.0.0.1:8080/v1" : endpoint;
             ApiKey = Environment.GetEnvironmentVariable("DEVMIND_API_KEY") ?? "";
 
+            _nextId = LoadPersistedIdCounter();
             _workerTask = Task.Run(WorkerLoopAsync);
         }
 
+        // ── Persistent job identity ──────────────────────────────────────────
+        // Job ids used to reset to job-1 on every server restart, so a stale id from
+        // an earlier process silently matched a NEW job's transcript. The counter is
+        // persisted so ids stay unique across restarts (sessions still die with the
+        // process — only identity and on-disk artifacts survive).
+
+        private static string IdCounterPath => Path.Combine(TranscriptDir, "_jobcounter.txt");
+
+        private static int LoadPersistedIdCounter()
+        {
+            try
+            {
+                if (File.Exists(IdCounterPath)
+                    && int.TryParse(File.ReadAllText(IdCounterPath).Trim(), out int persisted)
+                    && persisted > 0)
+                {
+                    return persisted;
+                }
+            }
+            catch { /* best effort — worst case ids restart at 1 as before */ }
+            return 0;
+        }
+
+        private string NextJobId()
+        {
+            int n = Interlocked.Increment(ref _nextId);
+            try
+            {
+                Directory.CreateDirectory(TranscriptDir);
+                File.WriteAllText(IdCounterPath, n.ToString());
+            }
+            catch { /* best effort */ }
+            return $"job-{n}";
+        }
+
         public AgentJob Start(string prompt, string workingDirectory, int maxDepth, int timeoutMinutes,
-            bool allowCommit, bool verifyBuild, bool think = false)
+            bool allowCommit, bool verifyBuild, bool think = false, bool verifyTests = false)
         {
             var job = new AgentJob
             {
-                Id = $"job-{Interlocked.Increment(ref _nextId)}",
+                Id = NextJobId(),
                 Prompt = prompt,
                 WorkingDirectory = workingDirectory,
                 MaxDepth = maxDepth,
@@ -145,6 +211,7 @@ namespace DevMind.McpServer
                 AllowCommit = allowCommit,
                 VerifyBuild = verifyBuild,
                 Think = think,
+                VerifyTests = verifyTests,
                 State = AgentJobState.Queued,
             };
 
@@ -160,7 +227,7 @@ namespace DevMind.McpServer
         /// user-presentable error when the parent cannot be continued.
         /// </summary>
         public AgentJob? Continue(string parentJobId, string prompt, int maxDepth, int timeoutMinutes,
-            bool verifyBuild, out string error)
+            bool verifyBuild, out string error, bool verifyTests = false)
         {
             error = null!;
             AgentJob parent;
@@ -196,13 +263,14 @@ namespace DevMind.McpServer
 
             var job = new AgentJob
             {
-                Id = $"job-{Interlocked.Increment(ref _nextId)}",
+                Id = NextJobId(),
                 Prompt = prompt,
                 WorkingDirectory = parent.WorkingDirectory,
                 MaxDepth = maxDepth,
                 TimeoutMinutes = timeoutMinutes,
                 AllowCommit = parent.AllowCommit,
                 VerifyBuild = verifyBuild,
+                VerifyTests = verifyTests,
                 Think = parent.Think, // continuation inherits the parent's reasoning mode
                 State = AgentJobState.Queued,
                 ParentJobId = parentJobId,
@@ -366,6 +434,14 @@ namespace DevMind.McpServer
                     // Only when the agent actually changed files, and never on cancel.
                     if (job.VerifyBuild && job.State == AgentJobState.Done && HasFileChanges(result))
                         job.Build = await VerifyBuildAsync(job).ConfigureAwait(false);
+
+                    // Test verification (opt-in): only when the build verification did
+                    // not already fail — red tests on a broken build are noise.
+                    if (job.VerifyTests && job.State == AgentJobState.Done && HasFileChanges(result)
+                        && job.Build is not { Succeeded: false })
+                    {
+                        job.Tests = await VerifyTestsAsync(job).ConfigureAwait(false);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -379,6 +455,7 @@ namespace DevMind.McpServer
                 {
                     job.EndedAtUtc = DateTime.UtcNow;
                     ClearActiveMarker();
+                    WriteResultSidecar(job);
                     try { _onJobFinished(); } catch { /* never kill the worker */ }
                 }
             }
@@ -420,6 +497,82 @@ namespace DevMind.McpServer
         private static bool HasFileChanges(HeadlessAgentResult result)
             => result.Actions.Any(a =>
                 a.Kind is "save" or "append" or "patch" or "delete" or "rename");
+
+        /// <summary>Runs `dotnet test` in the working directory (opt-in via verify_tests).
+        /// Never throws — a verification failure is data.</summary>
+        private static async Task<BuildVerification?> VerifyTestsAsync(AgentJob job)
+        {
+            const int TestTimeoutSeconds = 900;
+            const int TailChars = 2_000;
+            const string command = "dotnet test";
+
+            try
+            {
+                var runner = new ShellRunner(job.WorkingDirectory);
+                var (output, exitCode) = await runner.ExecuteAsync(
+                    command, CancellationToken.None, TestTimeoutSeconds).ConfigureAwait(false);
+                string tail = output.Length <= TailChars ? output : output.Substring(output.Length - TailChars);
+                return new BuildVerification { Command = command, ExitCode = exitCode, OutputTail = tail };
+            }
+            catch (Exception ex)
+            {
+                return new BuildVerification
+                {
+                    Command = command,
+                    ExitCode = -1,
+                    OutputTail = $"test verification crashed: {ex.Message}",
+                };
+            }
+        }
+
+        /// <summary>
+        /// Persists a finished job's outcome next to its transcript
+        /// ({TranscriptDir}\{id}.result.json) so devmind_task_result can serve REAL
+        /// results — answer, actions, verification — after a server restart, not just
+        /// a transcript tail. Best effort; ids are unique across restarts (see
+        /// NextJobId), so a sidecar is never ambiguous.
+        /// </summary>
+        private static void WriteResultSidecar(AgentJob job)
+        {
+            try
+            {
+                Directory.CreateDirectory(TranscriptDir);
+                var r = job.Result;
+                string json = System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    job_id = job.Id,
+                    state = job.IsIncomplete ? "stopped_incomplete" : job.State.ToString().ToLowerInvariant(),
+                    incomplete_reasons = job.IncompleteReasons(),
+                    answer = r?.Answer ?? "",
+                    actions = (r?.Actions ?? Array.Empty<HostAction>())
+                        .Select(a => new { kind = a.Kind, detail = a.Detail, success = a.Success }),
+                    iterations = r?.Iterations ?? 0,
+                    elapsed_seconds = r?.ElapsedSeconds ?? 0,
+                    hit_depth_cap = r?.HitDepthCap ?? false,
+                    error = job.Error,
+                    transcript_path = r?.TranscriptPath,
+                    parent_job_id = job.ParentJobId,
+                    working_dir = job.WorkingDirectory,
+                    ended_at_utc = (job.EndedAtUtc ?? DateTime.UtcNow).ToString("yyyy-MM-dd HH:mm:ss"),
+                    build_verification = job.Build == null ? null : new
+                    {
+                        command = job.Build.Command,
+                        succeeded = job.Build.Succeeded,
+                        exit_code = job.Build.ExitCode,
+                        output_tail = job.Build.OutputTail,
+                    },
+                    test_verification = job.Tests == null ? null : new
+                    {
+                        command = job.Tests.Command,
+                        succeeded = job.Tests.Succeeded,
+                        exit_code = job.Tests.ExitCode,
+                        output_tail = job.Tests.OutputTail,
+                    },
+                });
+                File.WriteAllText(Path.Combine(TranscriptDir, $"{job.Id}.result.json"), json);
+            }
+            catch { /* sidecar is best-effort — never fail the job over it */ }
+        }
 
         /// <summary>Runs the working directory's resolved build command with a
         /// build-sized timeout. Never throws — a verification failure is data.</summary>
