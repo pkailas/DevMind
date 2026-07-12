@@ -49,6 +49,14 @@ for (int i = 0; i < args.Length - 1; i++)
 
 Console.Error.WriteLine($"[McpServer] Starting. Working directory: {workingDirectory}");
 
+// ~/.devmind.env is the machine-local config convention (endpoints, DB connections,
+// SSH hosts, opt-in gates like DEVMIND_ALLOW_ELEVATION / DEVMIND_DB_ALLOW_WRITE).
+// The TUI and CLI have always loaded it; the MCP server previously did NOT, so its
+// DEVMIND_* config silently depended on whatever environment the MCP client happened
+// to launch it with. Load BEFORE McpServices/AgentJobManager read any env vars;
+// existing process env vars still win (EnvFileLoader never overwrites).
+DevMind.EnvFileLoader.Load();
+
 // GUI MCP clients (Claude Desktop) launch this process with a minimal PATH — dotnet
 // and dotnet-ef were unresolvable during live delegations. Enrich once; every
 // ShellRunner child (run_shell/run_build/run_tests and headless agents) inherits it.
