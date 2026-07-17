@@ -283,7 +283,7 @@ namespace DevMind
                     _state.ConsecutiveErrorToolName = null;
                     _state.ConsecutiveErrorCount    = 0;
                     _state.AgenticDepth = 0;
-                    return MakeTerminal(userMessage, assistantResponse, outcome, result, lastToolCalls);
+                    return MakeTerminal(userMessage, assistantResponse, outcome, result, lastToolCalls, "consecutive_errors");
                 }
 
                 // Thrash abort — same failure signature past the cap, research nudge spent.
@@ -314,7 +314,7 @@ namespace DevMind
                         _agenticHost.AppendOutput($"[AGENTIC] Depth cap reached ({_state.AgenticDepth}). Stopping.\n", OutputColor.Dim);
                     }
                     _state.AgenticDepth = 0;
-                    return MakeTerminal(userMessage, assistantResponse, outcome, result, lastToolCalls);
+                    return MakeTerminal(userMessage, assistantResponse, outcome, result, lastToolCalls, "depth_cap");
                 }
 
                 // ── Context-window guard ───────────────────────────────────────────────

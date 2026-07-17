@@ -196,6 +196,7 @@ namespace DevMind
             string currentPrompt = prompt;
             bool firstIteration = true;
             string lastResponse = "";
+            string lastTerminalReason = null;
 
             // DEVMIND_TASK_SHOW_THINKING=1 streams the model's think tokens into the
             // transcript (dm-watch shows it reasoning live). Off by default: think
@@ -325,9 +326,10 @@ namespace DevMind
                         {
                             lastResponse = doneSummary;
                         }
+                        lastTerminalReason = iter.TerminalReason;
                         if (iter.TerminalReason == "needs_input")
                             result.NeedsInput = true;
-                        else if (iter.TerminalReason == "thrashing")
+                        else if (iter.TerminalReason is "thrashing" or "consecutive_errors")
                             result.ThrashStopped = true;
                         break;
                     }
@@ -353,8 +355,11 @@ namespace DevMind
             result.Answer = HeadlessAgent.SanitizeAnswer(lastResponse);
             result.Actions = _host.GetActions();
             result.ElapsedSeconds = Math.Round(sw.Elapsed.TotalSeconds, 1);
-            result.HitDepthCap = _options.AgenticLoopMaxDepth > 0
-                && result.Iterations >= _options.AgenticLoopMaxDepth;
+            // HitDepthCap means the loop stopped BECAUSE of the cap (LoopDriver's
+            // depth-cap terminal), not that the counter happened to reach it. Field
+            // lesson: a run that finished with a clean task_done ON the cap boundary
+            // was mislabeled stopped_incomplete by the old iterations>=max check.
+            result.HitDepthCap = lastTerminalReason == "depth_cap";
 
             // A depth-cap exit truncates the model mid-thought; its last message can
             // claim failure that already resolved (or success that didn't). Field
