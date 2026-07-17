@@ -48,3 +48,5 @@ dist/*
 
 # Claude extended memory (local only)
 .claude-memory.md
+
+deploy-log.txt
