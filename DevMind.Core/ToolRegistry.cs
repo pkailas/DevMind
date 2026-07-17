@@ -170,6 +170,18 @@ namespace DevMind
                     "Required for read-only tasks: place the actual answer to the user's question here. " +
                     "For code-change tasks: brief summary of what was accomplished.")));
 
+            // ── ask_caller ───────────────────────────────────────────────────
+            tools.Add(MakeTool("ask_caller",
+                "Pause the task and ask the delegating caller questions you cannot answer yourself. " +
+                "Use ONLY when you are blocked on a consequential decision (data semantics, destructive " +
+                "changes, conflicting requirements), or when the same failure keeps recurring after you " +
+                "researched it (LSP tools, query_library, web_search). NOT for minor choices — make a " +
+                "reasonable assumption and note it in your task_done summary instead. " +
+                "The task ends in a needs_input state; the caller answers and resumes this conversation " +
+                "with full context, so asking a good question is cheap — guessing wrong is expensive.",
+                Required("questions", "string", "1-3 specific, numbered questions the caller can answer directly."),
+                Required("tried", "string", "What you already tried and researched, and why it did not resolve the blocker.")));
+
             // ── recall_memory ─────────────────────────────────────────────────
             tools.Add(MakeTool("recall_memory",
                 "Recall previously saved knowledge about a topic. Returns the content of a memory " +

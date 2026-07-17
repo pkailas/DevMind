@@ -29,6 +29,16 @@ namespace DevMind
         // progressive debugging cycles without masking genuine stuck loops.
         private const int ConsecutiveErrorAbortThreshold = 5;
 
+        // ── Thrash guard thresholds ─────────────────────────────────────
+        // Detects edit→build→SAME-error cycles that the consecutive-error counter
+        // misses (the tools alternate: patch_file succeeds, run_build fails, so the
+        // per-tool counter keeps resetting while the underlying error never changes).
+        // At the nudge threshold the re-trigger prompt is replaced with a research
+        // directive (LSP → library/memory → web); at the abort threshold the loop
+        // stops with TerminalReason "thrashing".
+        private const int ThrashNudgeThreshold = 3;
+        private const int ThrashAbortThreshold = 5;
+
         // ── Layer 2: Narration-stall retry guard ──────────────────────────────
         //
         // When the model returns prose with no tool_calls but the content matches
@@ -201,6 +211,42 @@ namespace DevMind
                     _state.ConsecutiveErrorCount    = 0;
                 }
 
+                // Update thrash-guard signature: does THIS failure look like the LAST one?
+                if (turnHadError)
+                {
+                    string sig = NormalizeFailureSignature(
+                        result.Errors.Count > 0 ? result.Errors[0] : result.ShellOutput);
+                    if (sig != null)
+                    {
+                        if (sig == _state.LastFailureSignature)
+                        {
+                            _state.RepeatedFailureCount++;
+                        }
+                        else
+                        {
+                            _state.LastFailureSignature = sig;
+                            _state.RepeatedFailureCount = 1;
+                            _state.ResearchNudgeIssued  = false;
+                        }
+                    }
+                }
+                else if (result.ShellExitCode.HasValue && result.ShellExitCode.Value == 0)
+                {
+                    // A clean shell/build/test run resolves the failure. Read-only turns
+                    // (research between failures) deliberately leave the counters alone.
+                    _state.LastFailureSignature = null;
+                    _state.RepeatedFailureCount = 0;
+                    _state.ResearchNudgeIssued  = false;
+                }
+
+                // ask_caller — the model is blocked and needs the caller's answer.
+                if (outcome.IsNeedsInput)
+                {
+                    _agenticHost.AppendOutput("[AGENTIC] Task paused — the agent needs input from the caller (ask_caller).\n", OutputColor.Normal);
+                    _state.AgenticDepth = 0;
+                    return MakeTerminal(userMessage, assistantResponse, outcome, result, lastToolCalls, "needs_input");
+                }
+
                 // Explicit DONE signal
                 if (outcome.IsDone)
                 {
@@ -238,6 +284,19 @@ namespace DevMind
                     _state.ConsecutiveErrorCount    = 0;
                     _state.AgenticDepth = 0;
                     return MakeTerminal(userMessage, assistantResponse, outcome, result, lastToolCalls);
+                }
+
+                // Thrash abort — same failure signature past the cap, research nudge spent.
+                if (_state.RepeatedFailureCount >= ThrashAbortThreshold && _state.ResearchNudgeIssued)
+                {
+                    _agenticHost.AppendOutput(
+                        $"[AGENTIC] Stopped: the same failure recurred {_state.RepeatedFailureCount} times, " +
+                        "including after a research directive.\n" +
+                        $"Failure: {_state.LastFailureSignature}\n" +
+                        "The current approach is wrong — re-brief with more context or answer the agent's open questions.\n",
+                        OutputColor.Error);
+                    _state.AgenticDepth = 0;
+                    return MakeTerminal(userMessage, assistantResponse, outcome, result, lastToolCalls, "thrashing");
                 }
 
                 // Depth cap
@@ -309,11 +368,34 @@ namespace DevMind
                     return LoopIterationResult.MakeCancelled(assistantResponse, outcome, result, lastToolCalls);
                 }
 
+                // Thrash nudge — replace the neutral re-trigger with a research directive
+                // the first time a failure signature repeats to the nudge threshold.
+                string nextMessage = "Continue with the task.";
+                if (_state.RepeatedFailureCount >= ThrashNudgeThreshold && !_state.ResearchNudgeIssued)
+                {
+                    _state.ResearchNudgeIssued = true;
+                    _agenticHost.AppendOutput(
+                        $"[AGENTIC] Thrash guard: same failure {_state.RepeatedFailureCount}x — injecting research directive.\n",
+                        OutputColor.Dim);
+                    nextMessage =
+                        $"STOP. The SAME failure has now occurred {_state.RepeatedFailureCount} times in a row:\n" +
+                        $"{_state.LastFailureSignature}\n" +
+                        "Your current hypothesis is wrong — do not patch again yet. Research first, in this order, " +
+                        "citing the evidence you gather: " +
+                        "(1) LSP: hover / go_to_definition / find_references on the exact symbols named in the error — " +
+                        "verify real signatures, return types, and overloads instead of guessing; " +
+                        "(2) query_library and recall_memory / search_memory for repo conventions related to this error; " +
+                        "(3) web_search the exact error text. " +
+                        "Then state your NEW hypothesis and the evidence for it before your next patch. " +
+                        "If research does not produce a new hypothesis, call ask_caller with specific questions " +
+                        "instead of patching again.";
+                }
+
                 _state.ShellLoopPending = true;
                 MaybeLogTurn(userMessage, assistantResponse, outcome, result, lastToolCalls);
                 return LoopIterationResult.MakeShouldReTrigger(
                     assistantResponse, outcome, result, lastToolCalls,
-                    "Continue with the task.", shouldLog: true);
+                    nextMessage, shouldLog: true);
             }
            else
             {
@@ -394,7 +476,8 @@ namespace DevMind
         }
 
         private LoopIterationResult MakeTerminal(
-            string userMessage, string assistantResponse, ResponseOutcome outcome, ExecutionResult result, List<ToolCallResult> toolCalls)
+            string userMessage, string assistantResponse, ResponseOutcome outcome, ExecutionResult result, List<ToolCallResult> toolCalls,
+            string terminalReason = null)
         {
             if (_options.ShowContextBudget)
             {
@@ -409,7 +492,31 @@ namespace DevMind
             _state.AgenticDepth = 0;
             // Terminal results always carry ShouldLogTurn == true (see LoopIterationResult.MakeTerminal).
             MaybeLogTurn(userMessage, assistantResponse, outcome, result, toolCalls);
-            return LoopIterationResult.MakeTerminal(assistantResponse, outcome, result, toolCalls);
+            return LoopIterationResult.MakeTerminal(assistantResponse, outcome, result, toolCalls, terminalReason);
+        }
+
+        /// <summary>
+        /// Reduces raw failure output to a comparable one-line signature: the first
+        /// line mentioning "error" (else the first non-empty line), whitespace-collapsed
+        /// and capped. Two iterations with the same signature are fighting the same
+        /// failure, whatever tools they used to get there.
+        /// </summary>
+        private static string NormalizeFailureSignature(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return null;
+            string[] lines = raw.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            string line = null;
+            foreach (string l in lines)
+            {
+                if (l.IndexOf("error", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    line = l;
+                    break;
+                }
+            }
+            line = line ?? lines[0];
+            line = Regex.Replace(line.Trim(), @"\s+", " ");
+            return line.Length <= 240 ? line : line.Substring(0, 240);
         }
 
         // ── Training-turn capture ─────────────────────────────────────────────────

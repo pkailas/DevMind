@@ -138,6 +138,12 @@ namespace DevMind
                             _host.AppendOutput(block.Content.TrimEnd('\r', '\n') + "\n", OutputColor.Normal);
                         break;
 
+                    case BlockType.NeedsInput:
+                        // Render ask_caller's questions so they land in the transcript/UI.
+                        if (!string.IsNullOrWhiteSpace(block.Content))
+                            _host.AppendOutput(block.Content.TrimEnd('\r', '\n') + "\n", OutputColor.Normal);
+                        break;
+
                     case BlockType.Scratchpad:
                         try
                         {

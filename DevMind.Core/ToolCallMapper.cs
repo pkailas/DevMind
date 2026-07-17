@@ -192,6 +192,16 @@ namespace DevMind
                         Content = GetArg(tc, "summary")
                     };
 
+                case "ask_caller":
+                    return new ResponseBlock
+                    {
+                        Type = BlockType.NeedsInput,
+                        Content = "NEEDS INPUT — questions for the caller:\n"
+                                  + GetArg(tc, "questions")
+                                  + "\n\nAlready tried:\n"
+                                  + GetArg(tc, "tried")
+                    };
+
                 case "run_build":
                     return new ResponseBlock
                     {

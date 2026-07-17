@@ -27,6 +27,23 @@ namespace DevMind
         /// drops back below the limit — e.g. after a compaction.</summary>
         public bool   ContextGuardArmed         { get; set; }
 
+        // ── Thrash guard ─────────────────────────────────────────────────────
+        // Tracks the SAME normalized failure signature recurring across iterations
+        // (edit→build→same error cycles). Distinct from ConsecutiveError*: there the
+        // same TOOL fails repeatedly; here the tools alternate (patch succeeds, build
+        // fails with an unchanged error) so the tool counter never trips.
+
+        /// <summary>Normalized signature of the most recent failure (null when the last
+        /// consequential action succeeded).</summary>
+        public string LastFailureSignature      { get; set; }
+
+        /// <summary>How many times LastFailureSignature has occurred in a row.</summary>
+        public int    RepeatedFailureCount      { get; set; }
+
+        /// <summary>True once the research-directive nudge for the current signature
+        /// has been injected — one nudge per signature, then the hard stop.</summary>
+        public bool   ResearchNudgeIssued       { get; set; }
+
         /// <summary>
         /// Resets all fields to initial values for a new user-initiated turn.
         /// Does NOT clear _taskReadFiles — the caller handles that separately.
@@ -40,6 +57,9 @@ namespace DevMind
             ConsecutiveErrorCount     = 0;
             NarrationRetryUsed        = false;
             ContextGuardArmed         = true; // armed at the start of every turn
+            LastFailureSignature      = null;
+            RepeatedFailureCount      = 0;
+            ResearchNudgeIssued       = false;
         }
     }
 }
