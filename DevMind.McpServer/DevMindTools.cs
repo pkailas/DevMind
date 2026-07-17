@@ -946,14 +946,6 @@ internal sealed class DevMindTools
                 // Read file content preserving encoding (matches what PatchEngine writes back).
                 var (content, encoding) = PatchEngine.ReadFilePreservingEncoding(fullPath);
 
-                // Build one PATCH block carrying every pair — PatchEngine resolves & applies them
-                // together (atomic: any unresolved FIND fails the whole patch, no partial writes).
-                // fromToolCall=true: PatchEngine skips fence stripping.
-                var patchInput = new StringBuilder();
-                patchInput.Append($"PATCH {fileNameOnly}\n");
-                foreach (var (f, r) in pairs)
-                    patchInput.Append($"FIND:\n{f}\nREPLACE:\n{r}\n");
-
                 // Capture reporter output so errors return to the MCP client AND go to stderr.
                 var errorLog = new StringBuilder();
                 Action<string, OutputColor> reporter = (text, color) =>
@@ -963,9 +955,12 @@ internal sealed class DevMindTools
                         errorLog.Append(text);
                 };
 
-                var resolved = PatchEngine.ResolvePatch(
-                    patchInput.ToString(), fullPath, fileNameOnly, content, encoding,
-                    fromToolCall: true, reporter: reporter);
+                // Structured pairs go STRAIGHT to the engine (atomic: any unresolved
+                // find fails the whole patch, no partial writes). Never serialize them
+                // into the text PATCH format for re-parsing: its directive markers can
+                // collide with literal file content and silently truncate an edit.
+                var resolved = PatchEngine.ResolvePairs(
+                    pairs, fullPath, fileNameOnly, content, encoding, reporter);
 
                 if (resolved == null)
                 {

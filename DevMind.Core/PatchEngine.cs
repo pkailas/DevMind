@@ -1,4 +1,4 @@
-// File: PatchEngine.cs  v1.0
+﻿// File: PatchEngine.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -407,6 +407,24 @@ namespace DevMind
                 return null;
             }
 
+            return ResolvePairs(rawBlocks, fullPath, fileName, fileContent, fileEncoding, reporter);
+        }
+
+        /// <summary>
+        /// Resolves already-parsed find/replace pairs against pre-loaded file content.
+        /// Structured (tool-call) patches enter HERE directly with their verbatim
+        /// strings — they must never round-trip through the text PATCH format, whose
+        /// FIND:/REPLACE:/SHELL: markers collide with literal content (field lesson:
+        /// a replace string containing the word "find:" was silently truncated at it).
+        /// </summary>
+        public static PatchResolveResult ResolvePairs(
+            List<(string findText, string replaceText)> rawBlocks,
+            string fullPath,
+            string fileName,
+            string fileContent,
+            Encoding fileEncoding,
+            Action<string, OutputColor> reporter)
+        {
             bool fileUsesCrlf = fileContent.Contains("\r\n");
             var (normContent, normToOrig) = NormalizeWithMap(fileContent);
             var resolvedBlocks = new List<(int origStart, int origEnd, string replaceText)>();
@@ -462,9 +480,27 @@ namespace DevMind
                 }
 
                 origStart = normToOrig[normIdx];
-                // Walk back to include leading indentation on the same line
-                while (origStart > 0 && fileContent[origStart - 1] != '\n')
-                    origStart--;
+                // Include the line's leading indentation in the replaced span ONLY
+                // when everything before the match on its line is whitespace (the
+                // classic full-line match, where the replacement carries its own
+                // indentation). A match that starts mid-line keeps origStart exactly
+                // at the match: the old unconditional walk-back to line start
+                // silently deleted the text before a mid-line match (field lesson:
+                // a suffix match on a one-line enum erased the line's prefix).
+                int lineStart = origStart;
+                while (lineStart > 0 && fileContent[lineStart - 1] != '\n')
+                    lineStart--;
+                bool onlyIndentationBefore = true;
+                for (int k = lineStart; k < origStart; k++)
+                {
+                    if (fileContent[k] != ' ' && fileContent[k] != '\t')
+                    {
+                        onlyIndentationBefore = false;
+                        break;
+                    }
+                }
+                if (onlyIndentationBefore)
+                    origStart = lineStart;
                 origEnd = (normIdx + normFind.Length < normToOrig.Length)
                     ? normToOrig[normIdx + normFind.Length]
                     : fileContent.Length;
