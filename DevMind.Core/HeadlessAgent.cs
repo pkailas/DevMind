@@ -56,6 +56,13 @@ namespace DevMind
         public double ElapsedSeconds { get; set; }
         public bool HitDepthCap { get; set; }
         public bool Cancelled { get; set; }
+        /// <summary>True when the agent called ask_caller: the task is paused on
+        /// questions only the caller can answer. Answer contains the questions and
+        /// what was already tried; resume via the conversation with the answers.</summary>
+        public bool NeedsInput { get; set; }
+        /// <summary>True when the loop's thrash guard stopped the turn: the same
+        /// failure kept recurring even after an injected research directive.</summary>
+        public bool ThrashStopped { get; set; }
         /// <summary>Non-null when the run failed with an error (endpoint down, etc.).</summary>
         public string Error { get; set; }
         /// <summary>Full transcript file (model output + tool activity), when requested.</summary>
@@ -303,11 +310,25 @@ namespace DevMind
 
                         // A run finished via task_done carries the real answer in the
                         // tool call's summary — the visible prose of that turn is often
-                        // empty (tool-call-only response).
+                        // empty (tool-call-only response). ask_caller likewise carries
+                        // the questions in its block content.
+                        string needsInputContent = iter.Outcome?.Blocks?
+                            .FirstOrDefault(b => b.Type == BlockType.NeedsInput)?.Content;
                         string doneSummary = iter.Outcome?.Blocks?
                             .FirstOrDefault(b => b.Type == BlockType.Done)?.Content;
-                        if (!string.IsNullOrWhiteSpace(doneSummary))
+                        if (!string.IsNullOrWhiteSpace(needsInputContent))
+                        {
+                            result.NeedsInput = true;
+                            lastResponse = needsInputContent;
+                        }
+                        else if (!string.IsNullOrWhiteSpace(doneSummary))
+                        {
                             lastResponse = doneSummary;
+                        }
+                        if (iter.TerminalReason == "needs_input")
+                            result.NeedsInput = true;
+                        else if (iter.TerminalReason == "thrashing")
+                            result.ThrashStopped = true;
                         break;
                     }
 
@@ -473,9 +494,14 @@ namespace DevMind
         /// </summary>
         internal const string HeadlessAddendum =
             "\n\n--- HEADLESS DELEGATION RULES ---\n" +
-            "You are running unattended on behalf of another agent. There is no human to ask:\n" +
-            "never ask clarifying questions — make the most reasonable choice and note the\n" +
-            "assumption in your final answer. Operate ONLY within the working directory, and\n" +
+            "You are running unattended on behalf of another agent (the caller). For minor\n" +
+            "ambiguities make the most reasonable choice and note the assumption in your final\n" +
+            "answer. But when you are blocked on a consequential decision (data semantics,\n" +
+            "destructive changes, conflicting requirements), or the same failure keeps\n" +
+            "recurring after real research, call ask_caller with 1-3 specific questions and\n" +
+            "what you already tried — the caller answers and resumes this conversation with\n" +
+            "full context. NEVER guess at facts you could not verify; a good question is\n" +
+            "cheap, a confident wrong answer is expensive. Operate ONLY within the working directory, and\n" +
             "always refer to files by paths RELATIVE to it — absolute paths outside the\n" +
             "working directory are blocked. Do NOT spend iterations verifying the full build\n" +
             "or wrestling shell timeouts to do so — the job runner builds the project itself\n" +
@@ -484,6 +510,20 @@ namespace DevMind
             "write scratch/output files into the repository — describe results in your\n" +
             "answer instead. When the task is complete, call task_done with a concise\n" +
             "summary of what you changed and why.\n" +
+            "\n" +
+            "C# discipline: NEVER guess an API shape. Before calling, overriding, or mocking\n" +
+            "any method or type you have not read in this session, use hover or go_to_definition\n" +
+            "on it — signatures, return types (Task vs Task<T>), and overloads must come from\n" +
+            "the source, not from memory. After EVERY C# edit, call get_diagnostics on the\n" +
+            "file and fix reported errors before moving on.\n" +
+            "\n" +
+            "When a build/test/shell error REPEATS: stop patching. Re-read the error\n" +
+            "literally, then research in this order: (1) LSP — hover / go_to_definition /\n" +
+            "find_references on the symbols named in the error; (2) query_library and\n" +
+            "recall_memory / search_memory for repo conventions; (3) web_search the exact\n" +
+            "error message. State your new hypothesis and its evidence before the next\n" +
+            "patch. If research produces no new hypothesis, call ask_caller instead of\n" +
+            "trying again.\n" +
             "\n" +
             "TypeScript discipline: after EVERY write to a .ts or .tsx file (create_file,\n" +
             "patch_file, or append_file), immediately call get_diagnostics on that file and\n" +

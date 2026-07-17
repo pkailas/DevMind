@@ -36,6 +36,13 @@ namespace DevMind
         /// </summary>
         public bool ForceToolChoiceRequired { get; }
 
+        /// <summary>
+        /// Why a Terminal result stopped, when it stopped for a notable reason.
+        /// Null for ordinary completions. Known values: "needs_input" (model called
+        /// ask_caller), "thrashing" (same failure repeated past the thrash guard).
+        /// </summary>
+        public string TerminalReason { get; }
+
        private LoopIterationResult(
             LoopIterationKind kind,
             string assistantResponse,
@@ -44,7 +51,8 @@ namespace DevMind
             List<ToolCallResult> toolCalls,
             string nextContextualMessage,
             bool shouldLogTurn,
-            bool forceToolChoiceRequired = false)
+            bool forceToolChoiceRequired = false,
+            string terminalReason = null)
         {
             Kind = kind;
             AssistantResponse = assistantResponse;
@@ -54,11 +62,14 @@ namespace DevMind
             NextContextualMessage = nextContextualMessage;
             ShouldLogTurn = shouldLogTurn;
             ForceToolChoiceRequired = forceToolChoiceRequired;
+            TerminalReason = terminalReason;
         }
 
         internal static LoopIterationResult MakeTerminal(
-            string assistantResponse, ResponseOutcome outcome, ExecutionResult result, List<ToolCallResult> toolCalls)
-            => new LoopIterationResult(LoopIterationKind.Terminal, assistantResponse, outcome, result, toolCalls, null, true);
+            string assistantResponse, ResponseOutcome outcome, ExecutionResult result, List<ToolCallResult> toolCalls,
+            string terminalReason = null)
+            => new LoopIterationResult(LoopIterationKind.Terminal, assistantResponse, outcome, result, toolCalls, null, true,
+                forceToolChoiceRequired: false, terminalReason: terminalReason);
 
        internal static LoopIterationResult MakeShouldReTrigger(
             string assistantResponse, ResponseOutcome outcome, ExecutionResult result, List<ToolCallResult> toolCalls,

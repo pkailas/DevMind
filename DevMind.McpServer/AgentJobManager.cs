@@ -61,6 +61,8 @@ namespace DevMind.McpServer
         public bool IsIncomplete =>
             State == AgentJobState.Done
             && ((Result?.HitDepthCap ?? false)
+                || (Result?.NeedsInput ?? false)
+                || (Result?.ThrashStopped ?? false)
                 || Build is { Succeeded: false }
                 || Tests is { Succeeded: false });
 
@@ -68,7 +70,9 @@ namespace DevMind.McpServer
         public string[] IncompleteReasons()
         {
             if (State != AgentJobState.Done) return Array.Empty<string>();
-            var reasons = new List<string>(2);
+            var reasons = new List<string>(3);
+            if (Result?.NeedsInput ?? false) reasons.Add("needs_input");
+            if (Result?.ThrashStopped ?? false) reasons.Add("thrashing");
             if (Result?.HitDepthCap ?? false) reasons.Add("hit_depth_cap");
             if (Build is { Succeeded: false }) reasons.Add("build_verification_failed");
             if (Tests is { Succeeded: false }) reasons.Add("test_verification_failed");

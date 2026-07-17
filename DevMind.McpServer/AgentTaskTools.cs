@@ -135,11 +135,13 @@ namespace DevMind.McpServer
 
         [McpServerTool(Name = "devmind_task_status")]
         [Description(
-            "Check a delegated DevMind task: state (queued/running/done/stopped_incomplete/failed/" +
-            "cancelled), elapsed time, queue position, and the live tail of the agent's transcript. " +
+            "Check a delegated DevMind task: state (queued/running/done/needs_input/stopped_incomplete/" +
+            "failed/cancelled), elapsed time, queue position, and the live tail of the agent's transcript. " +
             "stopped_incomplete means the job finished but its work is NOT trustworthy as-is (hit " +
-            "the iteration cap mid-task, or build/test verification failed) — check incomplete_reasons " +
-            "and usually devmind_task_continue it.")]
+            "the iteration cap mid-task, thrashed on a repeating failure, or build/test verification " +
+            "failed) — check incomplete_reasons and usually devmind_task_continue it. needs_input means " +
+            "the agent paused with specific questions (in the result answer) — answer them via " +
+            "devmind_task_continue.")]
         public Task<string> TaskStatus(
             [Description("The job_id returned by devmind_task_start.")] string job_id,
             CancellationToken cancellationToken = default)
@@ -178,9 +180,13 @@ namespace DevMind.McpServer
 
         /// <summary>"done" only when the work is actually trustworthy — a depth-capped or
         /// verification-failed job reports stopped_incomplete instead (field lesson: "done"
-        /// with a broken build was built upon).</summary>
+        /// with a broken build was built upon). A job paused on ask_caller reports
+        /// needs_input: the agent has specific questions — answer them via
+        /// devmind_task_continue (the conversation keeps full context).</summary>
         private static string DisplayState(AgentJob job)
-            => job.IsIncomplete ? "stopped_incomplete" : job.State.ToString().ToLowerInvariant();
+            => (job.Result?.NeedsInput ?? false) && job.State == AgentJobState.Done
+                ? "needs_input"
+                : job.IsIncomplete ? "stopped_incomplete" : job.State.ToString().ToLowerInvariant();
 
         [McpServerTool(Name = "devmind_task_list")]
         [Description(

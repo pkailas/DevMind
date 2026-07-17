@@ -34,6 +34,10 @@ namespace DevMind
         public bool HasWebRequests    { get; }
         public bool IsDone             { get; }
 
+        /// <summary>True when the model called ask_caller — the task pauses in a
+        /// needs-input state; the caller answers and resumes the conversation.</summary>
+        public bool IsNeedsInput       { get; }
+
         /// <summary>
         /// True when Blocks is empty, or contains only Text blocks with no
         /// actionable directives (covers bare code fences the model forgot to
@@ -72,6 +76,7 @@ namespace DevMind
             HasTestRequests   = Blocks.Any(b => b.Type == BlockType.Test);
             HasScratchpad     = Blocks.Any(b => b.Type == BlockType.Scratchpad);
             IsDone            = Blocks.Any(b => b.Type == BlockType.Done);
+            IsNeedsInput      = Blocks.Any(b => b.Type == BlockType.NeedsInput);
 
             HasRecallMemory   = Blocks.Any(b => b.Type == BlockType.RecallMemory);
             HasSaveMemory     = Blocks.Any(b => b.Type == BlockType.SaveMemory);
