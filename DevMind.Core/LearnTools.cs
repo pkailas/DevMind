@@ -158,7 +158,7 @@ namespace DevMind
                 if (payload == null)
                     return "[learn_code_search error] No response from Learn MCP server";
 
-                var results = ParseSearchResults(payload);
+                var results = ParseCodeSampleResults(payload);
                 if (results == null)
                     return "[learn_code_search error] Failed to parse search results";
 
@@ -173,9 +173,11 @@ namespace DevMind
                 for (int i = 0; i < results.Count; i++)
                 {
                     var r = results[i];
-                    sb.AppendLine($"{i + 1}. {r.Title}");
-                    sb.AppendLine($"   URL: {r.Url}");
-                    sb.AppendLine($"   {r.Content}");
+                    sb.AppendLine($"{i + 1}. [{r.Language}] {r.Description}");
+                    sb.AppendLine($"   Link: {r.Link}");
+                    sb.AppendLine($"   ```{r.Language}");
+                    sb.AppendLine(r.CodeSnippet);
+                    sb.AppendLine("   ```");
                     if (i < results.Count - 1)
                         sb.AppendLine();
                 }
@@ -305,10 +307,18 @@ namespace DevMind
             public string Content { get; set; } = "";
         }
 
+        internal sealed class CodeSampleResult
+        {
+            public string Description { get; set; } = "";
+            public string CodeSnippet { get; set; } = "";
+            public string Link { get; set; } = "";
+            public string Language { get; set; } = "";
+        }
+
         /// <summary>
-        /// Parse the unwrapped JSON payload from a search tool response into
+        /// Parse the unwrapped JSON payload from a docs search tool response into
         /// a list of SearchResult objects. The payload contains a "results" array
-        /// with objects having title, url, and content fields.
+        /// with objects having title, contentUrl (or url as fallback), and content fields.
         /// </summary>
         internal static System.Collections.Generic.List<SearchResult> ParseSearchResults(string payload)
         {
@@ -332,8 +342,46 @@ namespace DevMind
                 var result = new SearchResult
                 {
                     Title = item.TryGetProperty("title", out var t) ? t.GetString() ?? "" : "",
-                    Url = item.TryGetProperty("url", out var u) ? u.GetString() ?? "" : "",
+                    Url = item.TryGetProperty("contentUrl", out var cu) ? cu.GetString() ?? ""
+                         : (item.TryGetProperty("url", out var u) ? u.GetString() ?? "" : ""),
                     Content = item.TryGetProperty("content", out var c) ? c.GetString() ?? "" : ""
+                };
+                results.Add(result);
+            }
+
+            return results;
+        }
+
+        /// <summary>
+        /// Parse the unwrapped JSON payload from a code sample search tool response into
+        /// a list of CodeSampleResult objects. The payload contains a "results" array
+        /// with objects having description, codeSnippet, link, and language fields.
+        /// </summary>
+        internal static System.Collections.Generic.List<CodeSampleResult> ParseCodeSampleResults(string payload)
+        {
+            var results = new System.Collections.Generic.List<CodeSampleResult>();
+
+            JsonDocument doc;
+            try
+            {
+                doc = JsonDocument.Parse(payload);
+            }
+            catch
+            {
+                return null;
+            }
+
+            if (!doc.RootElement.TryGetProperty("results", out var resultsArr))
+                return null;
+
+            foreach (var item in resultsArr.EnumerateArray())
+            {
+                var result = new CodeSampleResult
+                {
+                    Description = item.TryGetProperty("description", out var d) ? d.GetString() ?? "" : "",
+                    CodeSnippet = item.TryGetProperty("codeSnippet", out var cs) ? cs.GetString() ?? "" : "",
+                    Link = item.TryGetProperty("link", out var l) ? l.GetString() ?? "" : "",
+                    Language = item.TryGetProperty("language", out var lang) ? lang.GetString() ?? "" : ""
                 };
                 results.Add(result);
             }

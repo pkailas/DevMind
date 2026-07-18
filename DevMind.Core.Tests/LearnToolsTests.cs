@@ -148,10 +148,15 @@ data: {""jsonrpc"":""2.0"",""id"":1,""result"":{""content"":[{""type"":""text""}
         [Fact]
         public void ParseSearchResults_HappyPath_ReturnsResults()
         {
-            string payload = @"{""results"":[
-                {""title"":""Result 1"",""url"":""https://learn.microsoft.com/1"",""content"":""Content 1""},
-                {""title"":""Result 2"",""url"":""https://learn.microsoft.com/2"",""content"":""Content 2""}
-            ]}";
+            // Build fixtures programmatically using the real API shape (contentUrl).
+            string payload = JsonSerializer.Serialize(new
+            {
+                results = new[]
+                {
+                    new { title = "Result 1", contentUrl = "https://learn.microsoft.com/1", content = "Content 1" },
+                    new { title = "Result 2", contentUrl = "https://learn.microsoft.com/2", content = "Content 2" }
+                }
+            });
 
             var results = LearnTools.ParseSearchResults(payload);
 
@@ -161,6 +166,26 @@ data: {""jsonrpc"":""2.0"",""id"":1,""result"":{""content"":[{""type"":""text""}
             Assert.Equal("https://learn.microsoft.com/1", results[0].Url);
             Assert.Equal("Content 1", results[0].Content);
             Assert.Equal("Result 2", results[1].Title);
+            Assert.Equal("https://learn.microsoft.com/2", results[1].Url);
+        }
+
+        [Fact]
+        public void ParseSearchResults_ContentUrlFallbackToUrl_ReturnsUrl()
+        {
+            // When contentUrl is absent but url exists, the fallback should work.
+            string payload = JsonSerializer.Serialize(new
+            {
+                results = new[]
+                {
+                    new { title = "Fallback", url = "https://learn.microsoft.com/fallback", content = "Content" }
+                }
+            });
+
+            var results = LearnTools.ParseSearchResults(payload);
+
+            Assert.NotNull(results);
+            Assert.Single(results);
+            Assert.Equal("https://learn.microsoft.com/fallback", results[0].Url);
         }
 
         // ── ParseSearchResults error paths ─────────────────────────────────────
@@ -208,6 +233,79 @@ data: {""jsonrpc"":""2.0"",""id"":1,""result"":{""content"":[{""type"":""text""}
             Assert.Equal("", results[0].Title);
             Assert.Equal("", results[0].Url);
             Assert.Equal("", results[0].Content);
+        }
+
+        // ── ParseCodeSampleResults happy path ──────────────────────────────────
+
+        [Fact]
+        public void ParseCodeSampleResults_HappyPath_ReturnsResults()
+        {
+            string payload = JsonSerializer.Serialize(new
+            {
+                results = new[]
+                {
+                    new { description = "Console app", codeSnippet = "Console.WriteLine(\"hello\");", link = "https://learn.microsoft.com/code/1", language = "C#" },
+                    new { description = "Web API", codeSnippet = "app.MapGet(\"/\", () => \"OK\");", link = "https://learn.microsoft.com/code/2", language = "C#" }
+                }
+            });
+
+            var results = LearnTools.ParseCodeSampleResults(payload);
+
+            Assert.NotNull(results);
+            Assert.Equal(2, results.Count);
+            Assert.Equal("Console app", results[0].Description);
+            Assert.Equal("Console.WriteLine(\"hello\");", results[0].CodeSnippet);
+            Assert.Equal("https://learn.microsoft.com/code/1", results[0].Link);
+            Assert.Equal("C#", results[0].Language);
+            Assert.Equal("Web API", results[1].Description);
+        }
+
+        // ── ParseCodeSampleResults error paths ─────────────────────────────────
+
+        [Fact]
+        public void ParseCodeSampleResults_MissingResultsArray_ReturnsNull()
+        {
+            string payload = JsonSerializer.Serialize(new { other = "field" });
+
+            var results = LearnTools.ParseCodeSampleResults(payload);
+
+            Assert.Null(results);
+        }
+
+        [Fact]
+        public void ParseCodeSampleResults_MalformedJson_ReturnsNull()
+        {
+            string payload = "not json at all";
+
+            var results = LearnTools.ParseCodeSampleResults(payload);
+
+            Assert.Null(results);
+        }
+
+        [Fact]
+        public void ParseCodeSampleResults_EmptyResultsArray_ReturnsEmptyList()
+        {
+            string payload = JsonSerializer.Serialize(new { results = Array.Empty<object>() });
+
+            var results = LearnTools.ParseCodeSampleResults(payload);
+
+            Assert.NotNull(results);
+            Assert.Empty(results);
+        }
+
+        [Fact]
+        public void ParseCodeSampleResults_MissingFields_ReturnsEmptyStrings()
+        {
+            string payload = JsonSerializer.Serialize(new { results = new[] { new { } } });
+
+            var results = LearnTools.ParseCodeSampleResults(payload);
+
+            Assert.NotNull(results);
+            Assert.Single(results);
+            Assert.Equal("", results[0].Description);
+            Assert.Equal("", results[0].CodeSnippet);
+            Assert.Equal("", results[0].Link);
+            Assert.Equal("", results[0].Language);
         }
     }
 }
