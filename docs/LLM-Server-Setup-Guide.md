@@ -5,9 +5,11 @@ works. This guide documents a complete, known-good **reference stack** — the
 configuration DevMind is developed and daily-driven on — so you can reproduce
 it rather than assemble one from scratch.
 
-The reference machine runs Windows with a Blackwell-generation NVIDIA GPU
-(RTX 5090 class), models stored on a local SSD (`G:\models\...`), and llama.cpp
-built locally. Adjust paths, hosts, and VRAM-sensitive flags to your hardware.
+The reference machine runs Windows with an NVIDIA RTX PRO 6000 Blackwell
+Workstation Edition (96 GB VRAM), models stored on a local SSD (`G:\models\...`),
+and llama.cpp built locally. Adjust paths, hosts, and VRAM-sensitive flags to
+your hardware — smaller cards mean smaller quants, shorter context, or partial
+offload.
 
 ## The pieces at a glance
 
