@@ -799,6 +799,26 @@ namespace DevMind
             return await WebTools.WebFetchAsync(url, CancellationToken);
         }
 
+        // ── IAgenticHost Learn tools (delegate to shared Core LearnTools) ─────────────
+
+        async Task<string> IAgenticHost.LearnSearchAsync(string query, int? maxResults)
+        {
+            AppendOutput($"[LEARN] search: {query}\n", OutputColor.Dim);
+            return await LearnTools.LearnSearchAsync(query, maxResults, CancellationToken);
+        }
+
+        async Task<string> IAgenticHost.LearnFetchAsync(string url)
+        {
+            AppendOutput($"[LEARN] fetch: {url}\n", OutputColor.Dim);
+            return await LearnTools.LearnFetchAsync(url, CancellationToken);
+        }
+
+        async Task<string> IAgenticHost.LearnCodeSearchAsync(string query, int? maxResults)
+        {
+            AppendOutput($"[LEARN] code_search: {query}\n", OutputColor.Dim);
+            return await LearnTools.LearnCodeSearchAsync(query, maxResults, CancellationToken);
+        }
+
         // Last connection that opened successfully this session — sticky reuse so a stateless
         // run_sql call need not re-supply the connection. Session-scoped (instance field), not static.
         private string _lastSuccessfulSqlConnectionString;

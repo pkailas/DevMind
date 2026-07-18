@@ -233,6 +233,24 @@ namespace DevMind
         /// </summary>
         Task<string> WebFetchAsync(string url);
 
+        /// <summary>
+        /// Searches official Microsoft documentation (learn.microsoft.com) via the Learn MCP server.
+        /// Returns up to 10 results with title, URL, and excerpt, or an error message.
+        /// </summary>
+        Task<string> LearnSearchAsync(string query, int? maxResults);
+
+        /// <summary>
+        /// Fetches a learn.microsoft.com page and returns its content as markdown,
+        /// or an error message. Output is capped at 8000 chars.
+        /// </summary>
+        Task<string> LearnFetchAsync(string url);
+
+        /// <summary>
+        /// Searches official Microsoft code samples via the Learn MCP server.
+        /// Returns up to 10 results with title, URL, and code excerpt, or an error message.
+        /// </summary>
+        Task<string> LearnCodeSearchAsync(string query, int? maxResults);
+
        /// <summary>
         /// Asks the user a yes/no question mid-turn and awaits the answer (used by the
         /// token-budget guard to pause a long agentic run). Returns true to continue,

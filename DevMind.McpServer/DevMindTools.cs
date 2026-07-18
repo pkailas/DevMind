@@ -1616,6 +1616,55 @@ internal sealed class DevMindTools
             cancellationToken);
     }
 
+    // ── Phase D: Microsoft Learn tools ────────────────────────────────────────
+
+    [McpServerTool(Name = "learn_search")]
+    [Description(
+        "Search official Microsoft documentation (learn.microsoft.com). Returns up to 10 results " +
+        "with title, URL, and excerpt. Prefer this over web_search for .NET, C#, Azure, SQL Server, " +
+        "and other Microsoft/Azure API documentation questions — it returns authoritative, curated docs.")]
+    public async Task<string> LearnSearch(
+        [Description("Search query string.")] string query,
+        [Description("Maximum number of results to return (default 10, max 10).")] int? max_results = null,
+        CancellationToken cancellationToken = default)
+    {
+        // Shared implementation in DevMind.Core — same code path as the TUI/CLI hosts.
+        return await _svc.EnqueueAsync(
+            async () => await LearnTools.LearnSearchAsync(query, max_results, cancellationToken),
+            cancellationToken);
+    }
+
+    [McpServerTool(Name = "learn_fetch")]
+    [Description(
+        "Fetch a specific learn.microsoft.com page and return its content as markdown. " +
+        "Use after learn_search to read a full article, or when you have a direct learn.microsoft.com URL. " +
+        "Prefer over web_fetch for Microsoft documentation pages — it returns clean markdown.")]
+    public async Task<string> LearnFetch(
+        [Description("learn.microsoft.com URL to fetch.")] string url,
+        CancellationToken cancellationToken = default)
+    {
+        // Shared implementation in DevMind.Core — same code path as the TUI/CLI hosts.
+        return await _svc.EnqueueAsync(
+            async () => await LearnTools.LearnFetchAsync(url, cancellationToken),
+            cancellationToken);
+    }
+
+    [McpServerTool(Name = "learn_code_search")]
+    [Description(
+        "Search official Microsoft code samples. Returns up to 10 results with title, URL, " +
+        "and code excerpt. Prefer this over web_search when looking for .NET, C#, or Azure code " +
+        "examples — it returns curated, official samples.")]
+    public async Task<string> LearnCodeSearch(
+        [Description("Search query string.")] string query,
+        [Description("Maximum number of results to return (default 10, max 10).")] int? max_results = null,
+        CancellationToken cancellationToken = default)
+    {
+        // Shared implementation in DevMind.Core — same code path as the TUI/CLI hosts.
+        return await _svc.EnqueueAsync(
+            async () => await LearnTools.LearnCodeSearchAsync(query, max_results, cancellationToken),
+            cancellationToken);
+    }
+
     // ── Phase D: ssh_exec ────────────────────────────────────────────────────
 
     [McpServerTool(Name = "ssh_exec")]

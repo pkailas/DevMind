@@ -279,6 +279,7 @@ namespace DevMind
             sb.Append("- Reference lookup (RAG over ingested docs): query_library — framework/API questions (hooks rules, TS patterns) before guessing\n");
             sb.Append("- Code intelligence (semantic): get_diagnostics (errors without a build), go_to_definition, find_references, hover, find_symbol (solution-wide symbol search)\n");
             sb.Append("- Web: web_search (docs, APIs, error messages), web_fetch (read a URL as text)\n");
+            sb.Append("- Microsoft Learn: learn_search (authoritative .NET/C#/Azure/SQL docs), learn_fetch (read a learn.microsoft.com page as markdown), learn_code_search (official code samples). Prefer over web_search for Microsoft API questions.\n");
             sb.Append("- Finishing: task_done (complete) / ask_caller (blocked — pause and ask the caller)\n\n");
 
             sb.Append("## Termination Contract\n");

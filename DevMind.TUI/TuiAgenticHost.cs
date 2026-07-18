@@ -1243,6 +1243,26 @@ namespace DevMind
             return await WebTools.WebFetchAsync(url, CancellationToken);
         }
 
+        // ── IAgenticHost Learn tools (delegate to shared Core LearnTools) ─────────────
+
+        async Task<string> IAgenticHost.LearnSearchAsync(string query, int? maxResults)
+        {
+            AppendOutputLocal($"[LEARN] search: {query}\n", OutputColor.Dim);
+            return await LearnTools.LearnSearchAsync(query, maxResults, CancellationToken);
+        }
+
+        async Task<string> IAgenticHost.LearnFetchAsync(string url)
+        {
+            AppendOutputLocal($"[LEARN] fetch: {url}\n", OutputColor.Dim);
+            return await LearnTools.LearnFetchAsync(url, CancellationToken);
+        }
+
+        async Task<string> IAgenticHost.LearnCodeSearchAsync(string query, int? maxResults)
+        {
+            AppendOutputLocal($"[LEARN] code_search: {query}\n", OutputColor.Dim);
+            return await LearnTools.LearnCodeSearchAsync(query, maxResults, CancellationToken);
+        }
+
         // Last connection that opened successfully this session — sticky reuse so the model
         // doesn't have to re-supply the connection on every stateless run_sql call. Session-scoped
         // (instance field), never a process-static, so it can't leak across DM sessions.
