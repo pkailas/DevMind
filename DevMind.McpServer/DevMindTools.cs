@@ -567,8 +567,9 @@ internal sealed class DevMindTools
     [Description(
         "Ingest a document into the RAG library so query_library (and this server's library_query) can retrieve it. " +
         "Accepts .md/.markdown/.txt/.docx (fast: chunked at paragraph boundaries, embedded verbatim — needs only the " +
-        "embedding server) and .pdf (SLOW: vision notes per page range via the chat model — can take minutes; " +
-        "needs chat AND embedding servers). Re-ingesting the same or a changed file replaces its prior chunks.")]
+        "embedding server) and .pdf (digital PDFs with a text layer: fast, verbatim text extraction, embedding server " +
+        "only, exact identifiers preserved; scanned PDFs with no text layer are rejected — run OCR first). " +
+        "Re-ingesting the same or a changed file replaces its prior chunks.")]
     public async Task<string> LibraryAdd(
         [Description("Path to the document (.pdf/.md/.markdown/.txt/.docx). Relative paths resolve against the working directory.")] string path,
         [Description("PDF only: pages per vision chunk (default 5). Ignored for text documents.")] int pages_per_chunk = 5,

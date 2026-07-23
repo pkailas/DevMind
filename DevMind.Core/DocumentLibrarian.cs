@@ -38,10 +38,12 @@ namespace DevMind
         public const int DefaultTopK = 6;
 
         /// <summary>
-        /// Ingests a document. PDFs get vision notes per chunk (chat endpoint); text
-        /// documents (.md/.txt/.docx — see TextDocumentReader) skip the chat model and
-        /// embed raw text chunks directly. Either way each chunk gets one embedding and
-        /// provenance rows; re-ingesting the same or a changed file replaces prior rows.
+        /// Ingests a document. PDFs with a text layer are ingested verbatim (fast,
+        /// embedding-only); scanned PDFs with no text layer are rejected unless
+        /// <paramref name="allowVisionForScans"/> is true. Text documents
+        /// (.md/.txt/.docx — see TextDocumentReader) skip the chat model and embed raw
+        /// text chunks directly. Either way each chunk gets one embedding and provenance
+        /// rows; re-ingesting the same or a changed file replaces prior rows.
         /// </summary>
         public static async Task<LibraryIngestResult> IngestAsync(
             ILlmOptions options,
@@ -55,7 +57,8 @@ namespace DevMind
             CancellationToken ct,
             string visionEndpoint = null,
             string visionModel = null,
-            string visionApiKey = null)
+            string visionApiKey = null,
+            bool allowVisionForScans = false)
         {
             if (TextDocumentReader.IsTextDocument(pdfPath))
             {
@@ -63,55 +66,34 @@ namespace DevMind
                     embeddingEndpointUrl, connectionString, pdfPath, progress, ct).ConfigureAwait(false);
             }
 
-            string name = Path.GetFileName(pdfPath);
-            string sha256 = ComputeSha256(pdfPath);
-            int pageCount = PdfRasterizer.GetPageCount(pdfPath);
-            int totalChunks = (pageCount + chunkSize - 1) / chunkSize;
-
-            var store = new LibraryStore(connectionString);
-            await store.EnsureSchemaAsync(ct).ConfigureAwait(false);
-
-            progress?.Invoke($"[LIBRARY] Ingesting {name}: {pageCount} page(s) → {totalChunks} chunk(s) of up to {chunkSize}.\n");
-
-            VisionNoteClient vision = string.IsNullOrWhiteSpace(visionEndpoint)
-                ? null
-                : new VisionNoteClient(visionEndpoint, visionModel, visionApiKey);
-            using (var chat = new LlmClient(options))
-            using (var embedder = new EmbeddingClient(embeddingEndpointUrl))
-            using (vision)
+            // PDF handling: try text layer first, fall back to vision or reject
+            string ext = Path.GetExtension(pdfPath);
+            if (string.Equals(ext, ".pdf", StringComparison.OrdinalIgnoreCase))
             {
-                chat.Configure(chatEndpointUrl, apiKey);
-                int documentId = await store.UpsertDocumentAsync(name, pdfPath, pageCount, sha256, ct).ConfigureAwait(false);
-
-                int lastPage = 0;
-                int chunkIndex = 0;
-                var swAll = Stopwatch.StartNew();
-                while (true)
+                if (PdfTextReader.HasTextLayer(pdfPath))
                 {
-                    ct.ThrowIfCancellationRequested();
-                    var chunk = PdfRasterizer.NextChunk(lastPage, chunkSize, pageCount);
-                    if (chunk == null)
-                        break;
-                    var (first, last) = chunk.Value;
-                    chunkIndex++;
-
-                    var sw = Stopwatch.StartNew();
-                    var pages = PdfRasterizer.RenderPagesToPng(pdfPath, first, last);
-                    string note = await GenerateChunkNoteAsync(chat, vision, pages, first, last, pageCount, name, ct)
-                        .ConfigureAwait(false);
-
-                    float[] embedding = await embedder.EmbedAsync(note, ct).ConfigureAwait(false);
-                    await store.AddChunkAsync(documentId, first, last, note, embedding, ct).ConfigureAwait(false);
-
-                    progress?.Invoke($"[LIBRARY] chunk {chunkIndex}/{totalChunks} (pages {first}-{last}) " +
-                                     $"noted + embedded in {sw.Elapsed.TotalSeconds:F0}s.\n");
-                    lastPage = last;
+                    string text = PdfTextReader.ExtractText(pdfPath);
+                    return await IngestExtractedTextAsync(
+                        embeddingEndpointUrl, connectionString, pdfPath, text, progress, ct).ConfigureAwait(false);
                 }
 
-                progress?.Invoke($"[LIBRARY] {name} ingested in {swAll.Elapsed.TotalMinutes:F1} min — " +
-                                 $"{chunkIndex} chunk(s) searchable.\n");
-                return new LibraryIngestResult { DocumentId = documentId, Chunks = chunkIndex, Pages = pageCount };
+                // No text layer (scanned PDF)
+                if (allowVisionForScans)
+                {
+                    return await IngestPdfViaVisionAsync(
+                        options, chatEndpointUrl, apiKey, embeddingEndpointUrl, connectionString,
+                        pdfPath, chunkSize, progress, ct,
+                        visionEndpoint, visionModel, visionApiKey).ConfigureAwait(false);
+                }
+
+                throw new InvalidOperationException(
+                    $"\"{Path.GetFileName(pdfPath)}\": no text layer found (looks like a scanned PDF). " +
+                    "Verbatim-only mode did not ingest it — run OCR first, or call with allowVisionForScans:true.");
             }
+
+            // Unsupported extension
+            throw new InvalidOperationException(
+                $"Unsupported document type: {ext}. Supported: .pdf, .md, .markdown, .txt, .docx.");
         }
 
         /// <summary>
@@ -278,17 +260,33 @@ namespace DevMind
             Action<string> progress,
             CancellationToken ct)
         {
+            string text = TextDocumentReader.ExtractText(path);
+            return await IngestExtractedTextAsync(
+                embeddingEndpointUrl, connectionString, path, text, progress, ct).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Shared verbatim ingestion body: chunk extracted text and embed each chunk.
+        /// Used by both text-native docs and PDFs with text layers.
+        /// </summary>
+        private static async Task<LibraryIngestResult> IngestExtractedTextAsync(
+            string embeddingEndpointUrl,
+            string connectionString,
+            string path,
+            string extractedText,
+            Action<string> progress,
+            CancellationToken ct)
+        {
             string name = Path.GetFileName(path);
             string sha256 = ComputeSha256(path);
-            string text = TextDocumentReader.ExtractText(path);
-            var chunks = TextDocumentReader.ChunkText(text);
+            var chunks = TextDocumentReader.ChunkText(extractedText);
             if (chunks.Count == 0)
                 throw new InvalidOperationException($"No text extracted from {name} — nothing to ingest.");
 
             var store = new LibraryStore(connectionString);
             await store.EnsureSchemaAsync(ct).ConfigureAwait(false);
 
-            progress?.Invoke($"[LIBRARY] Ingesting {name}: {text.Length:N0} chars → {chunks.Count} section(s), " +
+            progress?.Invoke($"[LIBRARY] Ingesting {name}: {extractedText.Length:N0} chars → {chunks.Count} section(s), " +
                              "embedded verbatim (no vision pass).\n");
 
             using (var embedder = new EmbeddingClient(embeddingEndpointUrl))
@@ -308,6 +306,75 @@ namespace DevMind
                 progress?.Invoke($"[LIBRARY] {name} ingested in {swAll.Elapsed.TotalSeconds:F0}s — " +
                                  $"{chunks.Count} section(s) searchable.\n");
                 return new LibraryIngestResult { DocumentId = documentId, Chunks = chunks.Count, Pages = chunks.Count };
+            }
+        }
+
+        /// <summary>
+        /// Ingests a PDF via the vision path: renders pages, generates notes via chat/vision,
+        /// and embeds each note. Refactored from the original IngestAsync inline loop.
+        /// </summary>
+        private static async Task<LibraryIngestResult> IngestPdfViaVisionAsync(
+            ILlmOptions options,
+            string chatEndpointUrl,
+            string apiKey,
+            string embeddingEndpointUrl,
+            string connectionString,
+            string pdfPath,
+            int chunkSize,
+            Action<string> progress,
+            CancellationToken ct,
+            string visionEndpoint,
+            string visionModel,
+            string visionApiKey)
+        {
+            string name = Path.GetFileName(pdfPath);
+            string sha256 = ComputeSha256(pdfPath);
+            int pageCount = PdfRasterizer.GetPageCount(pdfPath);
+            int totalChunks = (pageCount + chunkSize - 1) / chunkSize;
+
+            var store = new LibraryStore(connectionString);
+            await store.EnsureSchemaAsync(ct).ConfigureAwait(false);
+
+            progress?.Invoke($"[LIBRARY] Ingesting {name}: {pageCount} page(s) → {totalChunks} chunk(s) of up to {chunkSize}.\n");
+
+            VisionNoteClient vision = string.IsNullOrWhiteSpace(visionEndpoint)
+                ? null
+                : new VisionNoteClient(visionEndpoint, visionModel, visionApiKey);
+            using (var chat = new LlmClient(options))
+            using (var embedder = new EmbeddingClient(embeddingEndpointUrl))
+            using (vision)
+            {
+                chat.Configure(chatEndpointUrl, apiKey);
+                int documentId = await store.UpsertDocumentAsync(name, pdfPath, pageCount, sha256, ct).ConfigureAwait(false);
+
+                int lastPage = 0;
+                int chunkIndex = 0;
+                var swAll = Stopwatch.StartNew();
+                while (true)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    var chunk = PdfRasterizer.NextChunk(lastPage, chunkSize, pageCount);
+                    if (chunk == null)
+                        break;
+                    var (first, last) = chunk.Value;
+                    chunkIndex++;
+
+                    var sw = Stopwatch.StartNew();
+                    var pages = PdfRasterizer.RenderPagesToPng(pdfPath, first, last);
+                    string note = await GenerateChunkNoteAsync(chat, vision, pages, first, last, pageCount, name, ct)
+                        .ConfigureAwait(false);
+
+                    float[] embedding = await embedder.EmbedAsync(note, ct).ConfigureAwait(false);
+                    await store.AddChunkAsync(documentId, first, last, note, embedding, ct).ConfigureAwait(false);
+
+                    progress?.Invoke($"[LIBRARY] chunk {chunkIndex}/{totalChunks} (pages {first}-{last}) " +
+                                     $"noted + embedded in {sw.Elapsed.TotalSeconds:F0}s.\n");
+                    lastPage = last;
+                }
+
+                progress?.Invoke($"[LIBRARY] {name} ingested in {swAll.Elapsed.TotalMinutes:F1} min — " +
+                                 $"{chunkIndex} chunk(s) searchable.\n");
+                return new LibraryIngestResult { DocumentId = documentId, Chunks = chunkIndex, Pages = pageCount };
             }
         }
 
