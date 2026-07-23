@@ -128,6 +128,9 @@ namespace DevMind
                 // (e.g. a future path), make sure the ticker is alive.
                 if (_turnTicker == null) StartTickerLocked();
             }
+
+            // Push iteration to the status bar chip (1-based display).
+            _statusBar.SetIteration(depth + 1, maxDepth);
         }
 
         /// <summary>Tokens are flowing for the current iteration — switch the
@@ -185,6 +188,7 @@ namespace DevMind
                 _statusBar.SetTokRate(gen * 1000.0 / ms);
 
             _statusBar.SetReady();
+            _statusBar.ClearIteration();
         }
 
         /// <summary>One streamed token arrived (called from the SSE onToken path —

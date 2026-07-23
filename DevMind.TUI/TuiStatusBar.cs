@@ -63,6 +63,7 @@ namespace DevMind
         private readonly Label _lspDot;
         private readonly Label _lspText;
         private readonly Label _meterLabel;
+        private readonly Label _iterLabel;
         private readonly Label _rateLabel;
 
         public TuiStatusBar(int toolCount, bool lspEnabled, string lspLanguages)
@@ -108,11 +109,15 @@ namespace DevMind
             _meterLabel.X = Pos.Right(_lspText);
             _meterLabel.Y = 0;
 
+            _iterLabel = MakeLabel("", FgDim);
+            _iterLabel.X = Pos.Right(_meterLabel);
+            _iterLabel.Y = 0;
+
             _rateLabel = MakeLabel("", FgDim);
-            _rateLabel.X = Pos.Right(_meterLabel);
+            _rateLabel.X = Pos.Right(_iterLabel);
             _rateLabel.Y = 0;
 
-            _rightGroup.Add(_lspDot, _lspText, _meterLabel, _rateLabel);
+            _rightGroup.Add(_lspDot, _lspText, _meterLabel, _iterLabel, _rateLabel);
             _root.Add(_stateLabel, _hintLabel, _rightGroup);
         }
 
@@ -191,6 +196,23 @@ namespace DevMind
         public void SetLspBusy(bool busy)
         {
             OnUi(() => Pin(_lspDot, busy ? FgAmber : FgSuccess));
+        }
+
+        /// <summary>Update the iteration chip: " · it 12/40" (dim pending color).</summary>
+        public void SetIteration(int current, int max)
+        {
+            string text = max > 0 ? $" · it {current}/{max}" : $" · it {current}";
+            OnUi(() =>
+            {
+                _iterLabel.Text = text;
+                Pin(_iterLabel, FgPending);
+            });
+        }
+
+        /// <summary>Blank the iteration chip.</summary>
+        public void ClearIteration()
+        {
+            OnUi(() => _iterLabel.Text = "");
         }
 
         // ── Helpers ──────────────────────────────────────────────────────────────

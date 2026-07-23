@@ -674,6 +674,7 @@ namespace DevMind
                         inputBox.SetActive(true);
                         inputBox.View.SetFocus();
                         statusBar.SetReady();
+                        statusBar.ClearIteration();
                     }
                     return;
                 }
@@ -906,6 +907,7 @@ namespace DevMind
                             inputBox.SetActive(true);
                             inputBox.View.SetFocus();
                             statusBar.SetReady();
+                            statusBar.ClearIteration();
                         }
                         return;
 
@@ -1006,6 +1008,7 @@ namespace DevMind
                             inputBox.SetActive(true);
                             inputBox.View.SetFocus();
                             statusBar.SetReady();
+                            statusBar.ClearIteration();
                         }
                         return;
                     }
@@ -1021,6 +1024,7 @@ namespace DevMind
                             host.AppendOutputLocal(
                                 "Library returned no matches (is it empty? /library list).\n", OutputColor.Error);
                             statusBar.SetReady();
+                            statusBar.ClearIteration();
                             return;
                         }
                         host.AppendOutputLocal(
@@ -1031,12 +1035,13 @@ namespace DevMind
                     }
                     catch (Exception ex)
                     {
-                        host.AppendOutputLocal(
-                            $"/library query failed: {ex.Message}\n" +
-                            "Is the embedding server running? Start it with llm-launchers\\start-qwen3-embedding.bat\n",
-                            OutputColor.Error);
-                        statusBar.SetReady();
-                        return;
+                            host.AppendOutputLocal(
+                                $"/library query failed: {ex.Message}\n" +
+                                "Is the embedding server running? Start it with llm-launchers\\start-qwen3-embedding.bat\n",
+                                OutputColor.Error);
+                            statusBar.SetReady();
+                            statusBar.ClearIteration();
+                            return;
                     }
                 }
 
@@ -1237,6 +1242,7 @@ namespace DevMind
                     inputBox.SetActive(true);
                     inputBox.View.SetFocus();
                     statusBar.SetReady();
+                    statusBar.ClearIteration();
                     return;
                 }
 
