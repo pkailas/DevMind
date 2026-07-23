@@ -894,6 +894,13 @@ namespace DevMind
             return Task.FromResult(content);
         }
 
+        Task<string> IAgenticHost.ListCacheAsync()
+        {
+            if (NearlineCache == null)
+                return Task.FromResult("[list_cache] nearline cache is not available in this host.");
+            return Task.FromResult(NearlineCache.BuildManifest());
+        }
+
         Task<bool> IAgenticHost.ConfirmContinueAsync(string message) => ConfirmContinueCoreAsync(message);
 
         /// <summary>Agentic checkpoint ("depth cap reached — continue?"). Headless default:

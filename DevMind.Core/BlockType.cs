@@ -3,5 +3,5 @@
 
 namespace DevMind
 {
- public enum BlockType { Text, File, Patch, Shell, ReadRequest, Scratchpad, Done, Grep, Find, Delete, Rename, Diff, Test, RecallMemory, SaveMemory, ListMemory, AppendFile, ListFiles, GetDiagnostics, GoToDefinition, FindReferences, Hover, FindSymbol, WebSearch, WebFetch, RunSql, Debug, RecallCache, SearchMemory, QueryLibrary, NeedsInput }
+ public enum BlockType { Text, File, Patch, Shell, ReadRequest, Scratchpad, Done, Grep, Find, Delete, Rename, Diff, Test, RecallMemory, SaveMemory, ListMemory, AppendFile, ListFiles, GetDiagnostics, GoToDefinition, FindReferences, Hover, FindSymbol, WebSearch, WebFetch, RunSql, Debug, RecallCache, ListCache, SearchMemory, QueryLibrary, NeedsInput }
 }

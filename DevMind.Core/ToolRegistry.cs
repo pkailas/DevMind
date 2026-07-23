@@ -322,12 +322,16 @@ namespace DevMind
             // command-specific args object — shapes the flat Required/Optional helpers can't express.
             tools.Add(MakeDebugTool());
 
-            // ── recall_cache ──────────────────────────────────────────────────
+            // ── recall_cache / list_cache ──────────────────────────────────────
             tools.Add(MakeTool("recall_cache",
                 "Retrieve the full content of a compacted or excerpted tool result from the nearline cache. " +
                 "Accepts a breadcrumb handle (e.g. nl-7) or a cache key (e.g. read:file.cs, tool:call_3). " +
                 "Use when a breadcrumb or excerpt marker references cached content you need to inspect.",
                 Required("handle", "string", "The cache handle from a breadcrumb (\"nl-7\") or a cache key (\"read:file.cs\").")));
+
+            tools.Add(MakeTool("list_cache",
+                "List every entry currently recallable from the nearline cache (handle, key, and a one-line description of the content). " +
+                "Use this when a breadcrumb or summary indicates content was compacted away and you need to find the right handle to recall."));
 
             return tools;
         }

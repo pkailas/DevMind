@@ -285,5 +285,12 @@ namespace DevMind
         /// handle is unknown, the content is no longer available, or the host has no cache.
         /// </summary>
         Task<string> RecallCacheAsync(string handle);
+
+        /// <summary>
+        /// Lists every entry currently recallable from the nearline cache (handle, key, and
+        /// one-line description). Returns a manifest string. Returns an explanatory error
+        /// string when the host has no cache.
+        /// </summary>
+        Task<string> ListCacheAsync();
     }
 }

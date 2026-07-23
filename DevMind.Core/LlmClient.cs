@@ -2060,6 +2060,7 @@ namespace DevMind
                     contextBlock.AppendLine($"- {handles[hi].Key} → {handles[hi].Value}");
                 if (skip > 0)
                     contextBlock.AppendLine($"- (+{skip} older entries, recallable by key)");
+                contextBlock.AppendLine("- Call list_cache() to see the full manifest of recallable content.");
                 contextBlock.AppendLine();
             }
 
@@ -2089,6 +2090,7 @@ namespace DevMind
             syntheticBuilder.AppendLine("Continue from where you left off.");
             syntheticBuilder.AppendLine("Do NOT re-read or re-analyze files listed above as completed.");
             syntheticBuilder.AppendLine("Continue finding numbering from where the last summary left off.");
+            syntheticBuilder.AppendLine("Some earlier detail was compacted away. If information you need is missing (research findings, file contents, tool output), retrieve it with recall_cache using the handles/keys listed above BEFORE guessing or re-deriving it — and before writing any final output.");
 
             string syntheticPrompt = syntheticBuilder.ToString();
 
@@ -2353,8 +2355,10 @@ namespace DevMind
                         // Trim long assistant messages to first 200 chars + breadcrumb
                         int keepLen = 200;
                         if (msg.Content.Length <= keepLen) continue;
+                        string aHandle = NearlineCache.Store($"assistant:turn-{msg.Turn}-{i}", msg.Content,
+                            $"[cached — assistant message, {origLen} chars]");
                         replacement = msg.Content.Substring(0, keepLen)
-                            + $"\n[... trimmed {origLen - keepLen} chars to reclaim context ...]";
+                            + $"\n[... trimmed {origLen - keepLen} chars — full text cached as {aHandle}; call recall_cache(\"{aHandle}\") to retrieve ...]";
                     }
                     else
                     {
@@ -2390,7 +2394,7 @@ namespace DevMind
                     string turnRange = (minTrimTurn == maxTrimTurn)
                         ? minTrimTurn.ToString()
                         : $"{minTrimTurn}-{maxTrimTurn}";
-                    string summaryContent = $"[CONTEXT SUMMARY — Turns {turnRange}]\n{summary}\n[END SUMMARY]";
+                    string summaryContent = $"[CONTEXT SUMMARY — Turns {turnRange}]\n{summary}\n[END SUMMARY — trimmed originals are recallable via recall_cache; breadcrumbs like [cached:nl-N — ...] mark what was removed]";
                     _conversationHistory.Insert(insertIdx, new ChatMessage("user", summaryContent, 0));
                     AddCompactionSummary(summary);
                     summaryLogExtra = $"[CONTEXT] Summary generated ({summary.Length / 4} tokens, {sw.Elapsed.TotalSeconds:F1}s)\n";
@@ -2472,9 +2476,17 @@ namespace DevMind
                 if (string.IsNullOrWhiteSpace(extractedContent))
                     return null;
 
-                // Cap input to avoid sending an enormous payload to the summarizer
-                if (extractedContent.Length > 8000)
-                    extractedContent = extractedContent.Substring(0, 8000) + "\n[... truncated ...]";
+                // Cap input to avoid sending an enormous payload to the summarizer.
+                // Keep head AND tail (recent turns matter most).
+                const int summarizerInputCap = 24_000;
+                if (extractedContent.Length > summarizerInputCap)
+                {
+                    int headLen = summarizerInputCap * 2 / 3;
+                    int tailLen = summarizerInputCap - headLen;
+                    extractedContent = extractedContent.Substring(0, headLen)
+                        + $"\n[... {extractedContent.Length - summarizerInputCap:N0} chars of mid-session detail omitted ...]\n"
+                        + extractedContent.Substring(extractedContent.Length - tailLen);
+                }
 
                 // Include previous compaction summaries so the new summary builds cumulatively
                 string previousContext = "";
@@ -2527,12 +2539,15 @@ namespace DevMind
                         ["content"] = previousContext
                             + cacheContext
                             + completedContext
-                            + "Summarize these NEW conversation turns into this exact format:\n\n"
-                            + "FILES COMPLETED (findings written to output): [files with analysis appended to CodeReview.md or similar]\n"
-                            + "FILES READ BUT NOT YET ANALYZED: [files loaded into context but findings not yet written]\n"
-                            + "FILES REMAINING: [files not yet read, based on project file list]\n"
-                            + "FINDING COUNT: [last finding IDs used, e.g., SEC-12, BUG-8 — so numbering can continue]\n"
-                            + "CURRENT FILE: [file currently being worked on, with progress if chunked]\n"
+                            + "Summarize these NEW conversation turns into this exact format. Omit any section with nothing to report; never invent content to fill a section:\n\n"
+                            + "TASK KIND: [one line — e.g. code review, research, file authoring, refactor, debugging]\n"
+                            + "KEY FACTS LEARNED: [facts, values, identifiers, URLs, API signatures discovered this session — VERBATIM, these cannot be re-derived once trimmed]\n"
+                            + "DECISIONS & CONSTRAINTS: [choices made, approaches rejected, requirements and constraints stated by the user]\n"
+                            + "FILES COMPLETED (output written): [files whose findings/content were already written out]\n"
+                            + "FILES READ BUT NOT YET PROCESSED: [loaded into context but output not yet produced]\n"
+                            + "FILES/ITEMS REMAINING: [work items not yet started]\n"
+                            + "COUNTERS: [last finding/sequence IDs used (e.g. SEC-12, BUG-8) so numbering can continue, if any]\n"
+                            + "CURRENT ITEM: [what is being worked on right now, with progress if chunked]\n"
                             + "NEXT ACTION: [the specific next thing to do — not a vague description]\n\n"
                             + "Conversation:\n" + extractedContent
                     }
@@ -2542,7 +2557,7 @@ namespace DevMind
                 {
                     ["messages"] = messages,
                     ["stream"] = false,
-                    ["max_tokens"] = 500,
+                    ["max_tokens"] = 800,
                     ["temperature"] = 0.3,
                     ["chat_template_kwargs"] = new JObject { ["enable_thinking"] = false }
                 };
@@ -2645,7 +2660,7 @@ namespace DevMind
             if (content.IndexOf("exit code", StringComparison.OrdinalIgnoreCase) >= 0
                 || content.IndexOf("[SHELL", StringComparison.OrdinalIgnoreCase) >= 0)
             {
-                return $"{tag} — shell output, {origLen} chars]";
+                return $"{tag} — shell output, {origLen} chars{FirstContentHint(content)}]";
             }
 
             // Grep/find results — look for match pattern
@@ -2653,7 +2668,7 @@ namespace DevMind
                 || content.IndexOf("GREP:", StringComparison.OrdinalIgnoreCase) >= 0
                 || content.IndexOf("FIND:", StringComparison.OrdinalIgnoreCase) >= 0)
             {
-                return $"{tag} — search results, {origLen} chars]";
+                return $"{tag} — search results, {origLen} chars{FirstContentHint(content)}]";
             }
 
             // Test results
@@ -2664,7 +2679,27 @@ namespace DevMind
             }
 
             // Fallback
-            return $"{tag} — {origLen} chars]";
+            return $"{tag} — {origLen} chars{FirstContentHint(content)}]";
+        }
+
+        /// <summary>
+        /// First non-empty, non-bracket line of the content, whitespace-collapsed and capped,
+        /// used to give trimmed-result breadcrumbs a semantic hint of what was cached.
+        /// </summary>
+        private static string FirstContentHint(string content, int max = 80)
+        {
+            if (string.IsNullOrEmpty(content)) return "";
+            foreach (var rawLine in content.Split('\n'))
+            {
+                string line = rawLine.Trim();
+                if (line.Length == 0) continue;
+                if (line.StartsWith("[", StringComparison.Ordinal)) continue; // skip [READ:/[SHELL/[GREP markers
+                if (line.StartsWith("```", StringComparison.Ordinal)) continue;
+                line = System.Text.RegularExpressions.Regex.Replace(line, @"\s+", " ");
+                if (line.Length > max) line = line.Substring(0, max) + "…";
+                return " — \"" + line.Replace('\n', ' ').Replace('\r', ' ') + "\"";
+            }
+            return "";
         }
 
         /// <summary>

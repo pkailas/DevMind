@@ -665,6 +665,19 @@ namespace DevMind
                         }
                         break;
 
+                    case BlockType.ListCache:
+                        try
+                        {
+                            string manifest = await _host.ListCacheAsync();
+                            result.ToolResultContents["list_cache"] = manifest;
+                        }
+                        catch (Exception ex)
+                        {
+                            result.Errors.Add(ex.Message);
+                            _host.AppendOutput($"[LIST_CACHE ERROR] {ex.Message}\n", OutputColor.Error);
+                        }
+                        break;
+
                     // Text, Done — already handled during streaming or by resolver
                     default:
                         break;

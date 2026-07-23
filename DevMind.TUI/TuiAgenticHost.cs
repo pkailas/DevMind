@@ -1302,6 +1302,15 @@ namespace DevMind
             return content;
         }
 
+        async Task<string> IAgenticHost.ListCacheAsync()
+        {
+            await Task.CompletedTask; // keep signature async; cache access is synchronous
+
+            if (NearlineCache == null)
+                return "[list_cache] nearline cache is not available in this host.";
+            return NearlineCache.BuildManifest();
+        }
+
         async Task<string> IAgenticHost.RunSqlAsync(string query, string connectionString, string connectionName, bool allowWrite,
             int maxRows, int commandTimeout)
         {

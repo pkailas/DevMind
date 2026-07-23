@@ -198,6 +198,76 @@ namespace DevMind
         public int Count => _memory.Count + _disk.Count;
 
         /// <summary>
+        /// Builds a human-readable manifest of every cache entry, newest first.
+        /// Format: one line per entry showing handle (or "(no handle)"), key, and breadcrumb.
+        /// Capped at ~20,000 chars with a trailing "(+N more entries)" line if exceeded.
+        /// </summary>
+        public string BuildManifest()
+        {
+            if (Count == 0)
+                return "Nearline cache is empty.";
+
+            // Build a combined list of all entries with their handle info and breadcrumbs,
+            // sorted newest-first by handle number (descending).
+            var entries = new List<(string Handle, string Key, string Breadcrumb)>(Count);
+
+            // Memory-tier entries
+            foreach (var kvp in _memory)
+            {
+                string handle = GetHandleForKey(kvp.Key);
+                entries.Add((handle, kvp.Key, kvp.Value.Breadcrumb));
+            }
+
+            // Disk-tier entries
+            foreach (var kvp in _disk)
+            {
+                string handle = GetHandleForKey(kvp.Key);
+                entries.Add((handle, kvp.Key, kvp.Value.Breadcrumb));
+            }
+
+            // Sort newest-first by handle number (entries without handles go to the end)
+            entries.Sort((a, b) =>
+            {
+                long na = !string.IsNullOrEmpty(a.Handle) ? HandleNumber(a.Handle) : -1;
+                long nb = !string.IsNullOrEmpty(b.Handle) ? HandleNumber(b.Handle) : -1;
+                return nb.CompareTo(na); // descending
+            });
+
+            var sb = new StringBuilder();
+            sb.Append($"Nearline cache manifest — {entries.Count} entries (retrieve any with recall_cache(\"nl-N\") or recall_cache(\"key\")):\n");
+
+            const int maxChars = 20_000;
+            int truncated = 0;
+            for (int i = 0; i < entries.Count; i++)
+            {
+                var e = entries[i];
+                string handlePart = !string.IsNullOrEmpty(e.Handle) ? e.Handle : "(no handle)";
+                string line = $"{handlePart}  {e.Key}  {e.Breadcrumb}\n";
+
+                if (sb.Length + line.Length > maxChars && i < entries.Count - 1)
+                {
+                    truncated = entries.Count - i;
+                    break;
+                }
+                sb.Append(line);
+            }
+
+            if (truncated > 0)
+                sb.Append($"(+{truncated} more entries)\n");
+
+            return sb.ToString();
+        }
+
+        /// <summary>Find the live handle for a given key, or null if none.</summary>
+        private string GetHandleForKey(string key)
+        {
+            foreach (var kvp in _handleToKey)
+                if (string.Equals(kvp.Value, key, StringComparison.OrdinalIgnoreCase))
+                    return kvp.Key;
+            return null;
+        }
+
+        /// <summary>
         /// Rough total cached size in tokens (for diagnostics): in-memory content chars plus
         /// on-disk byte sizes (≈ chars for UTF-8 text), divided by 4.
         /// </summary>
