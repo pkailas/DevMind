@@ -4,6 +4,7 @@
 // Extracts text layers from digital PDFs via Docnet (PDFium).
 // Rejoins wrapped identifiers that PDF extractors split across lines.
 
+using System.Linq;
 using Docnet.Core;
 using Docnet.Core.Models;
 
@@ -82,13 +83,21 @@ namespace DevMind
 
         /// <summary>
         /// Rejoins consecutive "bare identifier fragment" lines into a single line.
-        /// A bare identifier fragment is a line that, after Trim(), matches <c>^[A-Z0-9_]+$</c>
+        /// A bare identifier fragment is a line whose "core" (the line with any leading
+        /// PUA marker prefix stripped, then trimmed) matches <c>^[A-Z0-9_]+$</c>
         /// and contains at least one A-Z letter.
+        ///
+        /// PUA marker prefix: a leading run of characters where each character is EITHER
+        /// a space OR a Unicode Private Use Area character (U+E000..U+F8FF).
+        ///
+        /// When merging, the cores are concatenated and the original marker prefix of the
+        /// first line is re-attached (e.g. "\uE0DA EMBEDDED_PRO" + "CESS_COUNT"
+        /// => "\uE0DA EMBEDDED_PROCESS_COUNT").
         ///
         /// This fixes PDF extractors that wrap long identifiers (e.g. <c>PARENT_CATEGORY_ID</c>)
         /// across physical lines (<c>PARENT_CATEGO</c> / <c>RY_ID</c>).
-        /// Real bulleted items (e.g. <c>• AW_RESOURCE</c>) fail the bare regex because of the
-        /// leading bullet character, so they pass through unchanged.
+        /// Real bulleted items (e.g. <c>• AW_RESOURCE</c>) fail the bare regex because '•' (U+2022)
+        /// is NOT in the PUA range, so the core remains "• AW_RESOURCE" which fails the test.
         /// </summary>
         public static string RejoinWrappedIdentifiers(string pageText)
         {
@@ -97,27 +106,32 @@ namespace DevMind
             string[] lines = normalized.Split('\n');
 
             var result = new System.Collections.Generic.List<string>(lines.Length);
-            var currentRun = new System.Collections.Generic.List<string>();
+            // Each entry: (original line, marker prefix, core)
+            var currentRun = new System.Collections.Generic.List<(string Line, string Prefix, string Core)>();
 
             for (int i = 0; i < lines.Length; i++)
             {
                 string trimmed = lines[i].Trim();
-                bool isBareFragment = IsBareIdentifierFragment(trimmed);
+                string prefix = GetMarkerPrefix(trimmed);
+                string core = trimmed.Substring(prefix.Length).Trim();
+                bool isBareFragment = IsBareIdentifierFragment(core);
 
                 if (isBareFragment)
                 {
-                    currentRun.Add(trimmed);
+                    currentRun.Add((lines[i], prefix, core));
                 }
                 else
                 {
                     // Flush any accumulated bare-fragment run
                     if (currentRun.Count >= 2)
                     {
-                        result.Add(string.Concat(currentRun));
+                        // Concatenate cores and re-attach first line's marker prefix
+                        string joined = currentRun[0].Prefix + string.Concat(currentRun.Select(r => r.Core));
+                        result.Add(joined);
                     }
                     else if (currentRun.Count == 1)
                     {
-                        result.Add(currentRun[0]);
+                        result.Add(currentRun[0].Line);
                     }
                     currentRun.Clear();
 
@@ -129,14 +143,37 @@ namespace DevMind
             // Flush any remaining run at end of input
             if (currentRun.Count >= 2)
             {
-                result.Add(string.Concat(currentRun));
+                string joined = currentRun[0].Prefix + string.Concat(currentRun.Select(r => r.Core));
+                result.Add(joined);
             }
             else if (currentRun.Count == 1)
             {
-                result.Add(currentRun[0]);
+                result.Add(currentRun[0].Line);
             }
 
             return string.Join("\n", result);
+        }
+
+        /// <summary>
+        /// Extracts the marker prefix from a trimmed line.
+        /// The marker prefix is a leading run of characters where each character is EITHER
+        /// a space OR a Unicode Private Use Area character (U+E000..U+F8FF).
+        /// </summary>
+        private static string GetMarkerPrefix(string trimmed)
+        {
+            if (string.IsNullOrEmpty(trimmed))
+                return string.Empty;
+
+            int end = 0;
+            foreach (char c in trimmed)
+            {
+                if (c == ' ' || (c >= '\uE000' && c <= '\uF8FF'))
+                    end++;
+                else
+                    break;
+            }
+
+            return trimmed.Substring(0, end);
         }
 
         private static bool IsBareIdentifierFragment(string trimmed)
