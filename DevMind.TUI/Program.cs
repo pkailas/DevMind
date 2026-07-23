@@ -406,6 +406,56 @@ namespace DevMind
                     return;
                 }
 
+                // ── Shift+navigation — extend selection in OUTPUT pane ──────────
+                //
+                // The output Editor (ReadOnly, CanFocus=false) has native Extend* command
+                // handlers that work perfectly for selection — they are exempt from the
+                // ReadOnly guard (same reason mouse-drag selection works). We invoke them
+                // directly via View.InvokeCommand, which does not require the view to have
+                // focus. The first shifted keypress anchors the selection at the current
+                // caret (end-of-doc when following the stream); subsequent presses extend.
+                //
+                // Routing rules (to avoid stealing keys the input box needs):
+                //   Shift+Up/Down/PageUp/PageDown → ALWAYS forward to outputView
+                //     (the input box is a short multi-line box; vertical shift-select there is not needed)
+                //   Shift+Left/Right/Home/End → forward ONLY when outputView.HasSelection
+                //     (an output-selection session is in progress); otherwise leave them
+                //     for the input box's normal horizontal shift-selection of typed text.
+                if (key.IsShift)
+                {
+                    Command? cmd = null;
+
+                    // Vertical navigation keys: ALWAYS forward to output pane
+                    // (the input box is a short multi-line box; vertical shift-select there is not needed)
+                    if (key.KeyCode == Key.CursorUp.WithShift.KeyCode)
+                        cmd = Command.UpExtend;
+                    else if (key.KeyCode == Key.CursorDown.WithShift.KeyCode)
+                        cmd = Command.DownExtend;
+                    else if (key.KeyCode == Key.PageUp.WithShift.KeyCode)
+                        cmd = Command.PageUpExtend;
+                    else if (key.KeyCode == Key.PageDown.WithShift.KeyCode)
+                        cmd = Command.PageDownExtend;
+                    // Horizontal keys: forward ONLY when an output-selection session is in progress
+                    else if (outputView.HasSelection)
+                    {
+                        if (key.KeyCode == Key.CursorLeft.WithShift.KeyCode)
+                            cmd = Command.LeftExtend;
+                        else if (key.KeyCode == Key.CursorRight.WithShift.KeyCode)
+                            cmd = Command.RightExtend;
+                        else if (key.KeyCode == Key.Home.WithShift.KeyCode)
+                            cmd = Command.LeftStartExtend;
+                        else if (key.KeyCode == Key.End.WithShift.KeyCode)
+                            cmd = Command.RightEndExtend;
+                    }
+
+                    if (cmd.HasValue)
+                    {
+                        key.Handled = true;
+                        outputView.InvokeCommand(cmd.Value);
+                        return;
+                    }
+                }
+
                 // ── Ctrl+C ──────────────────────────────────────────────────────
                 if (key.KeyCode == Key.C.WithCtrl.KeyCode)
                 {
@@ -453,8 +503,12 @@ namespace DevMind
                         return;
                     }
 
-                    // Idle: clear input if non-empty, do NOT exit.
-                    if (!string.IsNullOrEmpty(inputBox.Text?.Trim()))
+                    // Idle: clear output selection if active, otherwise clear input if non-empty.
+                    if (outputView.HasSelection)
+                    {
+                        outputView.ClearSelection();
+                    }
+                    else if (!string.IsNullOrEmpty(inputBox.Text?.Trim()))
                     {
                         inputBox.Clear();
                     }
