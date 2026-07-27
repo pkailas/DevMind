@@ -391,7 +391,7 @@ namespace DevMind
                 }));
 
             RegisterCommand("/image",
-                "Attach an image — or rasterized PDF pages — to your next message (needs a vision model + mmproj); p=N chunks through the document N pages at a time",
+                "Attach an image or rasterized PDF pages to your next message (vision model + mmproj); p=N chunks N pages at a time",
                 "/image <path> [page|first-last|all|p=N]",
                 ImageHandler);
 
@@ -400,7 +400,7 @@ namespace DevMind
             // Registered here only so /help lists it; this handler is a defensive fallback
             // for hosts that don't wire the interception.
             RegisterCommand("/digest",
-                "Chunk-summarize an ENTIRE PDF on a side conversation (vision model + mmproj), then inject the digest into this session",
+                "Chunk-summarize an entire PDF on a side conversation, then inject the digest into this session",
                 "/digest <path-to-pdf> [p=N]",
                 (args, ctx) => Task.FromResult(new CommandResult
                 {
@@ -412,7 +412,7 @@ namespace DevMind
             // vector RAG: ingest drives many model turns; questions become augmented turns).
             // Registered here only so /help lists it.
             RegisterCommand("/library",
-                "RAG over ingested documents (SQL 2025 vector store): add PDFs (vision) or .md/.txt/.docx (text), replace a PDF page range, list/remove, or ask a question against the whole library",
+                "Ask or manage the RAG document library (SQL 2025 vector store): add, replace, list, remove, or question",
                 "/library [add <pdf|md|txt|docx> [p=N] | replace <pdf> r=n-n [p=N] | list | remove <id> | <question>]",
 
                 (args, ctx) => Task.FromResult(new CommandResult
@@ -1028,23 +1028,108 @@ namespace DevMind
 
         // -- /help -----------------------------------------------------------------
 
+        /// <summary>
+        /// Grouping for /help, in display order. A command not listed here falls into
+        /// "Other" — so adding a command never silently drops it from the listing.
+        /// </summary>
+        static readonly (string Title, string[] Commands)[] HelpGroups =
+        {
+            ("Session",    new[] { "/new", "/restart", "/clear", "/cls", "/compact", "/history", "/resume", "/title" }),
+            ("Model",      new[] { "/think", "/t", "/reasoning", "/rules", "/system_prompt" }),
+            ("Context",    new[] { "/depth-cap", "/context-limit", "/cache", "/output-lines" }),
+            ("Workspace",  new[] { "/dir", "/lsp", "/resolve", "/debug" }),
+            ("Documents",  new[] { "/image", "/digest", "/library" }),
+            ("Training",   new[] { "/training-log", "/training-delete-last" }),
+            ("Help",       new[] { "/help" }),
+        };
+
+        /// <summary>Width of the left (usage) column in /help. Usages longer than this
+        /// drop to their own "usage:" line rather than stretching the column for everyone.</summary>
+        const int HelpUsageColumn = 26;
+
+        /// <summary>Total wrap width for /help description text.</summary>
+        const int HelpWrapWidth = 96;
+
        static Task<CommandResult> HelpHandler(string[] args, CommandContext ctx)
         {
             var all = ListCommands();
+            var byName = all.ToDictionary(c => c.Name, StringComparer.OrdinalIgnoreCase);
             var lines = new System.Text.StringBuilder();
             lines.AppendLine("Available commands:");
-            lines.AppendLine();
 
-            // Pad usage column for alignment.
-            int width = all.Max(c => c.Usage.Length);
+            var emitted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            foreach (var c in all)
+            foreach (var (title, names) in HelpGroups)
             {
-                string usage = c.Usage.PadRight(width);
-                lines.AppendLine($"  {usage}  {c.Description}");
+                var group = names.Where(byName.ContainsKey).Select(n => byName[n]).ToArray();
+                if (group.Length == 0) continue;
+
+                lines.AppendLine();
+                lines.AppendLine($"{title}:");
+                foreach (var c in group)
+                {
+                    AppendHelpEntry(lines, c);
+                    emitted.Add(c.Name);
+                }
+            }
+
+            var rest = all.Where(c => !emitted.Contains(c.Name)).ToArray();
+            if (rest.Length > 0)
+            {
+                lines.AppendLine();
+                lines.AppendLine("Other:");
+                foreach (var c in rest)
+                    AppendHelpEntry(lines, c);
             }
 
            return Task.FromResult(new CommandResult { Message = lines.ToString().TrimEnd() });
+        }
+
+        /// <summary>
+        /// Renders one command as "  /name <args>   description", wrapping the description
+        /// under a hanging indent. When the usage string is too wide for the column, the
+        /// command name alone heads the entry and the full usage follows on its own line.
+        /// </summary>
+        static void AppendHelpEntry(System.Text.StringBuilder sb, RegisteredCommand c)
+        {
+            const string indent = "  ";
+            string hanging = new string(' ', indent.Length + HelpUsageColumn + 2);
+            bool usageFits = c.Usage.Length <= HelpUsageColumn;
+            string left = usageFits ? c.Usage : c.Name;
+
+            var desc = WrapText(c.Description, HelpWrapWidth - hanging.Length);
+            sb.AppendLine($"{indent}{left.PadRight(HelpUsageColumn)}  {desc[0]}");
+            for (int i = 1; i < desc.Count; i++)
+                sb.AppendLine($"{hanging}{desc[i]}");
+
+            if (!usageFits)
+            {
+                foreach (string line in WrapText($"usage: {c.Usage}", HelpWrapWidth - hanging.Length))
+                    sb.AppendLine($"{hanging}{line}");
+            }
+        }
+
+        /// <summary>Greedy word wrap. Always returns at least one (possibly empty) line.</summary>
+        static List<string> WrapText(string text, int width)
+        {
+            var result = new List<string>();
+            if (width < 8) width = 8;
+            text = (text ?? string.Empty).Trim();
+            if (text.Length == 0) { result.Add(string.Empty); return result; }
+
+            var current = new System.Text.StringBuilder();
+            foreach (string word in text.Split((char[])null, StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (current.Length > 0 && current.Length + 1 + word.Length > width)
+                {
+                    result.Add(current.ToString());
+                    current.Clear();
+                }
+                if (current.Length > 0) current.Append(' ');
+                current.Append(word);
+            }
+            if (current.Length > 0) result.Add(current.ToString());
+            return result;
         }
 
         // -- /history --------------------------------------------------------------
