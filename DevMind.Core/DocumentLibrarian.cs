@@ -58,12 +58,13 @@ namespace DevMind
             string visionEndpoint = null,
             string visionModel = null,
             string visionApiKey = null,
-            bool allowVisionForScans = false)
+            bool allowVisionForScans = false,
+            int chunkChars = 0)
         {
             if (TextDocumentReader.IsTextDocument(pdfPath))
             {
                 return await IngestTextAsync(
-                    embeddingEndpointUrl, connectionString, pdfPath, progress, ct).ConfigureAwait(false);
+                    embeddingEndpointUrl, connectionString, pdfPath, progress, ct, chunkChars).ConfigureAwait(false);
             }
 
             // PDF handling: try text layer first, fall back to vision or reject
@@ -74,7 +75,7 @@ namespace DevMind
                 {
                     string text = PdfTextReader.ExtractText(pdfPath);
                     return await IngestExtractedTextAsync(
-                        embeddingEndpointUrl, connectionString, pdfPath, text, progress, ct).ConfigureAwait(false);
+                        embeddingEndpointUrl, connectionString, pdfPath, text, progress, ct, chunkChars).ConfigureAwait(false);
                 }
 
                 // No text layer (scanned PDF)
@@ -258,11 +259,12 @@ namespace DevMind
             string connectionString,
             string path,
             Action<string> progress,
-            CancellationToken ct)
+            CancellationToken ct,
+            int chunkChars = 0)
         {
             string text = TextDocumentReader.ExtractText(path);
             return await IngestExtractedTextAsync(
-                embeddingEndpointUrl, connectionString, path, text, progress, ct).ConfigureAwait(false);
+                embeddingEndpointUrl, connectionString, path, text, progress, ct, chunkChars).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -275,11 +277,13 @@ namespace DevMind
             string path,
             string extractedText,
             Action<string> progress,
-            CancellationToken ct)
+            CancellationToken ct,
+            int chunkChars = 0)
         {
             string name = Path.GetFileName(path);
             string sha256 = ComputeSha256(path);
-            var chunks = TextDocumentReader.ChunkText(extractedText);
+            int maxChars = chunkChars > 0 ? chunkChars : TextDocumentReader.ChunkChars;
+            var chunks = TextDocumentReader.ChunkText(extractedText, maxChars);
             if (chunks.Count == 0)
                 throw new InvalidOperationException($"No text extracted from {name} — nothing to ingest.");
 

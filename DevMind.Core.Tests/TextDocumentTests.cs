@@ -9,6 +9,7 @@
 //     chunk storage, section provenance labels in the augmented prompt.
 
 using System.IO.Compression;
+using System.Linq;
 using System.Text;
 using Xunit;
 
@@ -84,6 +85,53 @@ namespace DevMind.Core.Tests
             Assert.Equal(2, chunks.Count);
             Assert.Equal("first", chunks[0]);
             Assert.Equal("second", chunks[1]);
+        }
+
+        [Fact]
+        public void ChunkText_DefaultBudget_AppliedAndLossless()
+        {
+            // Build input of many small paragraphs totalling well over 1200 chars.
+            // Each paragraph is ~80 chars; 20 paragraphs = ~1600 chars + separators.
+            var paragraphs = new List<string>();
+            for (int i = 0; i < 20; i++)
+            {
+                paragraphs.Add($"Paragraph number {i}: this is a line of text that is roughly eighty chars long.");
+            }
+            string input = string.Join("\n\n", paragraphs);
+            Assert.True(input.Length > 1200, $"input should exceed 1200 chars, got {input.Length}");
+
+            // Call ChunkText with no maxChars argument → uses default (ChunkChars = 1200).
+            var chunks = TextDocumentReader.ChunkText(input);
+
+            Assert.True(chunks.Count > 1, "should produce more than one chunk");
+
+            // Every chunk must be <= the default budget.
+            Assert.All(chunks, c => Assert.True(c.Length <= TextDocumentReader.ChunkChars,
+                $"chunk length {c.Length} exceeds default budget {TextDocumentReader.ChunkChars}"));
+
+            // Concatenating chunks must lose no non-whitespace content.
+            string allNonWs = new string(input.Where(char.IsLetterOrDigit).ToArray());
+            string chunksConcat = string.Concat(chunks);
+            string chunksNonWs = new string(chunksConcat.Where(char.IsLetterOrDigit).ToArray());
+            Assert.Equal(allNonWs, chunksNonWs);
+        }
+
+        [Fact]
+        public void ChunkText_SmallerBudget_ProducesMoreChunks()
+        {
+            // Build input large enough that budget matters.
+            var paragraphs = new List<string>();
+            for (int i = 0; i < 30; i++)
+            {
+                paragraphs.Add($"Section {i}: this paragraph has enough text to make the budget choice meaningful for testing.");
+            }
+            string input = string.Join("\n\n", paragraphs);
+
+            var smallChunks = TextDocumentReader.ChunkText(input, maxChars: 500);
+            var largeChunks = TextDocumentReader.ChunkText(input, maxChars: 4000);
+
+            Assert.True(smallChunks.Count > largeChunks.Count,
+                $"500-budget produced {smallChunks.Count} chunks, 4000-budget produced {largeChunks.Count}");
         }
 
         // ── .docx extraction ──────────────────────────────────────────────────

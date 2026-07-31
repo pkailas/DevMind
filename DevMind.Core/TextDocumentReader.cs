@@ -22,10 +22,13 @@ namespace DevMind
     public static class TextDocumentReader
     {
         /// <summary>
-        /// Per-chunk character budget. ~8K chars ≈ 2K tokens — comfortably inside the
-        /// embedding server's 8192-token context even for token-dense text.
+        /// Per-chunk character budget. ~1.2K chars ≈ 300 tokens — keeps each chunk
+        /// semantically focused so single-fact lines stay retrievable. The ceiling is
+        /// precision-driven, not context-driven: the embedding server's 8192-token
+        /// context is not the binding constraint; overly large chunks dilute retrieval
+        /// with repeated boilerplate and bury individual facts.
         /// </summary>
-        public const int ChunkChars = 8_000;
+        public const int ChunkChars = 1_200;
 
         private static readonly string[] TextExtensions =
             { ".md", ".markdown", ".txt", ".docx" };

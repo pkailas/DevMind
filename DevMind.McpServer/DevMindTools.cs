@@ -569,10 +569,14 @@ internal sealed class DevMindTools
         "Accepts .md/.markdown/.txt/.docx (fast: chunked at paragraph boundaries, embedded verbatim — needs only the " +
         "embedding server) and .pdf (digital PDFs with a text layer: fast, verbatim text extraction, embedding server " +
         "only, exact identifiers preserved; scanned PDFs with no text layer are rejected — run OCR first). " +
-        "Re-ingesting the same or a changed file replaces its prior chunks.")]
+        "Re-ingesting the same or a changed file replaces its prior chunks. " +
+        "For text documents, use chunk_chars to tune the character budget per chunk (default 1200).")]
     public async Task<string> LibraryAdd(
         [Description("Path to the document (.pdf/.md/.markdown/.txt/.docx). Relative paths resolve against the working directory.")] string path,
         [Description("PDF only: pages per vision chunk (default 5). Ignored for text documents.")] int pages_per_chunk = 5,
+        [Description("Text documents only (.md/.markdown/.txt/.docx): characters per chunk (default 1200). " +
+                     "Smaller values improve precision on dense reference material; larger values preserve more " +
+                     "surrounding context. Ignored for PDFs.")] int chunk_chars = 0,
         CancellationToken cancellationToken = default)
     {
         return await _svc.EnqueueAsync(async () =>
@@ -604,7 +608,8 @@ internal sealed class DevMindTools
                     config.LibraryEmbeddingEndpoint, config.LibraryConnectionString,
                     fullPath, pages_per_chunk > 0 ? pages_per_chunk : 5,
                     line => Console.Error.Write(line),
-                    cancellationToken);
+                    cancellationToken,
+                    chunkChars: chunk_chars);
 
                 string extent = isPdf
                     ? $"{ingest.Chunks} chunk(s), {ingest.Pages} page(s)"
