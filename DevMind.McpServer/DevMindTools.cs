@@ -100,7 +100,7 @@ internal sealed class DevMindTools
 
     [McpServerTool(Name = "read_file")]
     [Description(
-        "Read a file from the project. Files under 100 lines return full content; " +
+        "Read a file from the project. Files under 400 lines return full content; " +
         "larger files return an outline (class/method/property declarations with line numbers). " +
         "Use start_line/end_line for targeted reads after reviewing the outline. " +
         "Set force_full to true only when you need the entire file regardless of size. " +

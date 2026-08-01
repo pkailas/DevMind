@@ -247,10 +247,10 @@ namespace DevMind
                         calls.Add(new ToolCallEntry { Type = "read", Filename = block.FileName });
                         break;
                     case BlockType.Grep:
-                        calls.Add(new ToolCallEntry { Type = "grep", Filename = block.FileName });
+                        calls.Add(new ToolCallEntry { Type = "grep", Filename = block.FileName, Pattern = block.Pattern });
                         break;
                     case BlockType.Find:
-                        calls.Add(new ToolCallEntry { Type = "find", Filename = block.GlobPattern });
+                        calls.Add(new ToolCallEntry { Type = "find", Filename = block.GlobPattern, Pattern = block.Pattern });
                         break;
                     case BlockType.Delete:
                         calls.Add(new ToolCallEntry { Type = "delete", Filename = block.FileName });
@@ -398,6 +398,12 @@ namespace DevMind
 
         [JsonProperty("command", NullValueHandling = NullValueHandling.Ignore)]
         public string Command { get; set; }
+
+        /// <summary>Search pattern for grep/find calls. Added 2026-08: without it the
+        /// corpus recorded only the scope, making two different searches against the
+        /// same file or glob indistinguishable at analysis time.</summary>
+        [JsonProperty("pattern", NullValueHandling = NullValueHandling.Ignore)]
+        public string Pattern { get; set; }
 
         [JsonProperty("summary", NullValueHandling = NullValueHandling.Ignore)]
         public string Summary { get; set; }

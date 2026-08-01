@@ -16,7 +16,13 @@ namespace DevMind
             { "bin", "obj", ".vs", ".git", "node_modules", "packages", ".idea", "_archive" };
 
         // Files at or above this line count get an outline injection instead of full content
-        private const int ReadOutlineThresholdLines = 100;
+        // Raised from 100 on 2026-08-01. Corpus evidence (909 outline reads,
+        // Apr-Jul 2026): files of 100-400 lines were outlined 528 times and
+        // immediately re-read in full ~73% of the time — the outline cost a
+        // round-trip and saved nothing. With a 262k context sitting at ~10%
+        // median utilisation, full content for a 400-line file is cheap; the
+        // outline only pays for itself on genuinely large files.
+        private const int ReadOutlineThresholdLines = 400;
 
         public static bool IsNoisePath(string fullPath) =>
             fullPath.Replace('\\', '/').Split('/')
