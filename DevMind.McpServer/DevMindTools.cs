@@ -72,6 +72,33 @@ internal sealed class DevMindTools
     // CancellationTokenSource at each call site instead.
     private static readonly HttpClient _http = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
 
+    // Repeated-lookup detector. Static because MCP tool instances are not guaranteed to
+    // persist across calls (same reason _shellJobs is static). Annotates repeats only — it
+    // never suppresses or substitutes a result, so a stale note cannot cause a wrong answer.
+    private static readonly DuplicateCallTracker _dupes = new DuplicateCallTracker();
+
+    private static string WithDupNote(string note, string result) =>
+        string.IsNullOrEmpty(note) ? result : note + "\n\n" + result;
+
+    // Last-write stamp folded into the dedupe key for single-file lookups, so that
+    // re-reading a file AFTER editing it is treated as a new call rather than a
+    // redundant repeat. Without this the tracker would discourage the verify-your-own-
+    // work read that follows every patch. Unresolvable/missing files stamp as empty,
+    // which simply falls back to path-only keying.
+    private string FileStamp(string filename)
+    {
+        try
+        {
+            string? p = ResolveFilePath(filename);
+            if (p == null || !File.Exists(p)) return "";
+            return File.GetLastWriteTimeUtc(p).Ticks.ToString();
+        }
+        catch
+        {
+            return "";
+        }
+    }
+
     public DevMindTools(McpServices svc) => _svc = svc;
 
     // ── Phase A ──────────────────────────────────────────────────────────────
@@ -112,7 +139,8 @@ internal sealed class DevMindTools
         [Description("When true, bypasses the outline threshold and returns full file content.")] bool? force_full = null,
         CancellationToken cancellationToken = default)
     {
-        return await _svc.EnqueueAsync(async () =>
+        string dupNote = _dupes.Note("read_file", $"{filename}|{start_line}|{end_line}|{force_full}|{FileStamp(filename)}");
+        return WithDupNote(dupNote, await _svc.EnqueueAsync(async () =>
         {
             try
             {
@@ -167,7 +195,7 @@ internal sealed class DevMindTools
             {
                 return $"[read_file error] {filename}: {ex.Message}";
             }
-        }, cancellationToken);
+        }, cancellationToken));
     }
 
     [McpServerTool(Name = "list_files")]
@@ -261,7 +289,8 @@ internal sealed class DevMindTools
         [Description("1-based end line to restrict the search window.")] int? end_line = null,
         CancellationToken cancellationToken = default)
     {
-        return await _svc.EnqueueAsync(async () =>
+        string dupNote = _dupes.Note("grep_file", $"{pattern}|{filename}|{start_line}|{end_line}|{FileStamp(filename)}");
+        return WithDupNote(dupNote, await _svc.EnqueueAsync(async () =>
         {
             const int MaxMatches = 50;
             try
@@ -314,7 +343,7 @@ internal sealed class DevMindTools
             {
                 return $"[grep_file error] {filename}: {ex.Message}";
             }
-        }, cancellationToken);
+        }, cancellationToken));
     }
 
     [McpServerTool(Name = "find_in_files")]
@@ -336,7 +365,8 @@ internal sealed class DevMindTools
         [Description("1-based end line to restrict the search window within each file.")] int? end_line = null,
         CancellationToken cancellationToken = default)
     {
-        return await _svc.EnqueueAsync(async () =>
+        string dupNote = _dupes.Note("find_in_files", $"{pattern}|{glob}|{root}|{start_line}|{end_line}");
+        return WithDupNote(dupNote, await _svc.EnqueueAsync(async () =>
         {
             const int MaxMatches = 100;
             try
@@ -432,7 +462,7 @@ internal sealed class DevMindTools
             {
                 return $"[find_in_files error] {ex.Message}";
             }
-        }, cancellationToken);
+        }, cancellationToken));
     }
 
     [McpServerTool(Name = "diff_file")]
