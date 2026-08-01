@@ -289,7 +289,10 @@ internal sealed class DevMindTools
                 }
 
                 if (matches.Count == 0)
-                    return $"grep_file: no matches for \"{pattern}\" in {filename}";
+                {
+                    string baseMsg = $"grep_file: no matches for \"{pattern}\" in {filename}";
+                    return SearchPattern.DescribeSearchMiss(pattern, filename, -1, baseMsg);
+                }
 
                 int totalMatches = matches.Count;
                 bool truncated   = totalMatches > MaxMatches;
@@ -359,12 +362,13 @@ internal sealed class DevMindTools
                     if (Directory.Exists(candidate)) effectiveRoot = candidate;
                 }
 
-                IEnumerable<string> files;
+                List<string> files;
                 try
                 {
                     files = ContextEngine.SafeEnumerateFilesGlob(effectiveRoot, filePattern)
                         .Where(f => !ContextEngine.IsNoisePath(f))
-                        .OrderBy(f => f, StringComparer.OrdinalIgnoreCase);
+                        .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+                        .ToList();
                 }
                 catch (Exception ex)
                 {
@@ -407,7 +411,10 @@ internal sealed class DevMindTools
                 }
 
                 if (allMatches.Count == 0)
-                    return $"find_in_files: no matches for \"{pattern}\" in {glob}";
+                {
+                    string baseMsg = $"find_in_files: no matches for \"{pattern}\" in {glob}";
+                    return SearchPattern.DescribeSearchMiss(pattern, glob, files.Count, baseMsg);
+                }
 
                 int shownCount    = allMatches.Count;
                 string findHeader = hitCap

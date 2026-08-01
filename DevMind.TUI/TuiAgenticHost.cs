@@ -1408,7 +1408,9 @@ namespace DevMind
             if (matches.Count == 0)
             {
                 AppendOutputLocal($"[GREP] no matches for \"{pattern}\" in {filename} {grepScope}\n", OutputColor.Dim);
-                return Task.FromResult($"GREP: no matches for \"{pattern}\" in {filename}");
+                return Task.FromResult(SearchPattern.DescribeSearchMiss(
+                    pattern, $"{filename} {grepScope}", -1,
+                    $"GREP: no matches for \"{pattern}\" in {filename}"));
             }
 
             int totalMatches = matches.Count;
@@ -1451,12 +1453,13 @@ namespace DevMind
                 if (Directory.Exists(candidate)) effectiveRoot = candidate;
             }
 
-            IEnumerable<string> files;
+            List<string> files;
             try
             {
                 files = ContextEngine.SafeEnumerateFilesGlob(effectiveRoot, filePattern)
                     .Where(f => !ContextEngine.IsNoisePath(f))
-                    .OrderBy(f => f, StringComparer.OrdinalIgnoreCase);
+                    .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
             }
             catch (Exception ex)
             {
@@ -1505,7 +1508,9 @@ namespace DevMind
             if (allMatches.Count == 0)
             {
                 AppendOutputLocal($"[FIND] no matches for \"{pattern}\" in {globPattern}\n", OutputColor.Dim);
-                return Task.FromResult($"FIND: no matches for \"{pattern}\" in {globPattern}");
+                return Task.FromResult(SearchPattern.DescribeSearchMiss(
+                    pattern, globPattern, files.Count,
+                    $"FIND: no matches for \"{pattern}\" in {globPattern}"));
             }
 
             int shownCount = allMatches.Count;
