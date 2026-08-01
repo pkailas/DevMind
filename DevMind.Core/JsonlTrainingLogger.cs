@@ -40,7 +40,6 @@ namespace DevMind
     public sealed class JsonlTrainingLogger : ITrainingLogger
     {
         private readonly Func<string> _sessionIdProvider;
-        private readonly string _defaultFolder;
         private readonly object _writeLock = new object();
 
         private string _lastSessionId;
@@ -55,34 +54,62 @@ namespace DevMind
         /// </param>
         /// <param name="enabled">When false, <see cref="LogTurn"/> is a no-op.</param>
         /// <param name="logFolder">
-        /// Folder for JSONL files. Blank uses the default: <c>training_logs/</c> next to the executable.
+        /// Absolute folder for JSONL files. Required when <paramref name="enabled"/> is true;
+        /// set an explicit absolute path in <c>devmind.json</c> (or <c>shell.json</c>).
         /// </param>
         public JsonlTrainingLogger(Func<string> sessionIdProvider, bool enabled, string logFolder = null)
         {
             _sessionIdProvider = sessionIdProvider ?? throw new ArgumentNullException(nameof(sessionIdProvider));
+            if (enabled && string.IsNullOrWhiteSpace(logFolder))
+                throw new ArgumentException(
+                    "trainingLogFolder is not configured. Set an explicit absolute path in devmind.json (or shell.json); " +
+                    "the logger no longer defaults to a folder beside the executable, because that silently follows the exe location.",
+                    nameof(logFolder));
+            _folder = logFolder;
             Enabled = enabled;
-            Folder = logFolder;
-
-            // AppContext.BaseDirectory (not Assembly.Location, which is EMPTY in a single-file
-            // publish — Path.GetDirectoryName("") is null and Path.Combine then throws).
-            string exeDir = AppContext.BaseDirectory;
-            if (string.IsNullOrEmpty(exeDir))
-                exeDir = Directory.GetCurrentDirectory();
-            _defaultFolder = Path.Combine(exeDir, "training_logs");
         }
+
+        private bool _enabled;
 
         /// <inheritdoc />
         /// <remarks>Settable so a host (e.g. the TUI /training-log command) can toggle capture
-        /// live; persisting the new value to config is the host's responsibility.</remarks>
-        public bool Enabled { get; set; }
+        /// live; persisting the new value to config is the host's responsibility. Throws
+        /// <see cref="ArgumentException"/> when enabling with a blank <see cref="Folder"/>.</remarks>
+        public bool Enabled
+        {
+            get => _enabled;
+            set
+            {
+                if (value && string.IsNullOrWhiteSpace(_folder))
+                    throw new ArgumentException(
+                        "Cannot enable the training logger without a configured trainingLogFolder. " +
+                        "Set an explicit absolute path first.",
+                        nameof(value));
+                _enabled = value;
+            }
+        }
 
-        /// <summary>Configured log folder (may be blank → falls back to the default). Settable
-        /// so a host can retarget capture live.</summary>
-        public string Folder { get; set; }
+        private string _folder;
 
-        /// <summary>The folder writes actually land in — the configured <see cref="Folder"/>,
-        /// or <c>training_logs/</c> beside the executable when it is blank.</summary>
-        public string ResolvedFolder => string.IsNullOrWhiteSpace(Folder) ? _defaultFolder : Folder;
+        /// <summary>Configured log folder (absolute path). Settable so a host can retarget
+        /// capture live. Throws <see cref="ArgumentException"/> when the logger is enabled
+        /// and the incoming value is null or whitespace.</summary>
+        public string Folder
+        {
+            get => _folder;
+            set
+            {
+                if (Enabled && string.IsNullOrWhiteSpace(value))
+                    throw new ArgumentException(
+                        "trainingLogFolder cannot be blank while the logger is enabled. " +
+                        "Set an explicit absolute path or disable the logger first.",
+                        nameof(value));
+                _folder = value;
+            }
+        }
+
+        /// <summary>The folder writes actually land in — the configured <see cref="Folder"/>.</summary>
+        public string ResolvedFolder => Folder;
 
         /// <summary>
         /// Newest <c>training_*.jsonl</c> last-write time (UTC) in <see cref="ResolvedFolder"/>,

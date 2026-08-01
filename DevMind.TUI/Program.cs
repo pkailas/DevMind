@@ -297,10 +297,20 @@ namespace DevMind
             var callbacks = new TuiLoopCallbacks(llmClient, statusBar, host, inputBox.View);
             var state = new LoopState();
             // Training-turn capture: Core owns the WHEN/call; the host supplies the logger from
-            // config. Session id resolves at write time (so /new rolls to a fresh file); a blank
-            // folder falls back to training_logs/ beside the exe.
-            var trainingLogger = new JsonlTrainingLogger(
-                SessionId.Get, _config.TrainingLogEnabled, _config.TrainingLogFolder);
+            // config. Session id resolves at write time (so /new rolls to a fresh file).
+            // Fails loudly at startup if enabled with a blank folder.
+            JsonlTrainingLogger trainingLogger;
+            try
+            {
+                trainingLogger = new JsonlTrainingLogger(
+                    SessionId.Get, _config.TrainingLogEnabled, _config.TrainingLogFolder);
+            }
+            catch (ArgumentException ex)
+            {
+                Console.Error.WriteLine($"[ERROR] {ex.Message}");
+                Environment.Exit(1);
+                throw; // unreachable but satisfies flow analysis
+            }
             var driver = new LoopDriver(llmClient, host, callbacks, options, state, trainingLogger);
 
             // Word wrap is set directly at construction (WordWrap = true). Unlike TextView
@@ -1163,13 +1173,27 @@ namespace DevMind
                         TrainingLogLastWriteUtc = trainingLogger.GetLastWriteUtc(),
                         SetTrainingLogEnabled = (on) =>
                         {
-                            trainingLogger.Enabled = on;      // live, this session
+                            try
+                            {
+                                trainingLogger.Enabled = on;      // live, this session
+                            }
+                            catch (ArgumentException ex)
+                            {
+                                throw new InvalidOperationException(ex.Message, ex);
+                            }
                             _config.TrainingLogEnabled = on;  // persist across restart
                             _config.Save();
                         },
                         SetTrainingLogFolder = (path) =>
                         {
-                            trainingLogger.Folder = path;     // live, this session
+                            try
+                            {
+                                trainingLogger.Folder = path;     // live, this session
+                            }
+                            catch (ArgumentException ex)
+                            {
+                                throw new InvalidOperationException(ex.Message, ex);
+                            }
                             _config.TrainingLogFolder = path;
                             _config.Save();
                         },
