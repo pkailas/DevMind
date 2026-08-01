@@ -458,6 +458,22 @@ namespace DevMind
                     string fuzzyFinalReplace = fileUsesCrlf
                         ? fuzzyNormReplace.Replace("\n", "\r\n")
                         : fuzzyNormReplace;
+                    // The fuzzy window always starts at a line boundary, so its span
+                    // includes the line's leading indentation. When the replacement's
+                    // first line arrives with none (models frequently omit it, and
+                    // whitespace-normalized scoring cannot notice), restore the
+                    // original indentation instead of silently deleting it
+                    // (field lesson 2026-08-01: five patched lines landed at column 0
+                    // while the engine reported clean success).
+                    int fuzzyIndentEnd = fuzzy.Value.origStart;
+                    while (fuzzyIndentEnd < fileContent.Length &&
+                           (fileContent[fuzzyIndentEnd] == ' ' || fileContent[fuzzyIndentEnd] == '\t'))
+                        fuzzyIndentEnd++;
+                    if (fuzzyIndentEnd > fuzzy.Value.origStart && fuzzyFinalReplace.Length > 0 &&
+                        fuzzyFinalReplace[0] != ' ' && fuzzyFinalReplace[0] != '\t' &&
+                        fuzzyFinalReplace[0] != '\r' && fuzzyFinalReplace[0] != '\n')
+                        fuzzyFinalReplace = fileContent.Substring(
+                            fuzzy.Value.origStart, fuzzyIndentEnd - fuzzy.Value.origStart) + fuzzyFinalReplace;
                     resolvedBlocks.Add((fuzzy.Value.origStart, fuzzy.Value.origEnd, fuzzyFinalReplace));
                     int fuzzyLine = fileContent.Substring(0, fuzzy.Value.origStart).Count(c => c == '\n') + 1;
                     reporter(
@@ -479,7 +495,8 @@ namespace DevMind
                     return null;
                 }
 
-                origStart = normToOrig[normIdx];
+                int matchStart = normToOrig[normIdx];
+                origStart = matchStart;
                 // Include the line's leading indentation in the replaced span ONLY
                 // when everything before the match on its line is whitespace (the
                 // classic full-line match, where the replacement carries its own
@@ -509,6 +526,18 @@ namespace DevMind
                 string finalReplace = fileUsesCrlf
                     ? normalizedReplace.Replace("\n", "\r\n")
                     : normalizedReplace;
+                // The walk-back above swallowed the line's real indentation into the
+                // replaced span on the assumption the replacement carries its own.
+                // When it does not (models frequently send unindented find/replace,
+                // which whitespace-normalized matching happily accepts), restore the
+                // original indentation instead of silently deleting it (field lesson
+                // 2026-08-01: five patched lines landed at column 0, reported as
+                // success, and the model's own read-back verification missed it).
+                if (onlyIndentationBefore && lineStart < matchStart &&
+                    finalReplace.Length > 0 &&
+                    finalReplace[0] != ' ' && finalReplace[0] != '\t' &&
+                    finalReplace[0] != '\r' && finalReplace[0] != '\n')
+                    finalReplace = fileContent.Substring(lineStart, matchStart - lineStart) + finalReplace;
                 resolvedBlocks.Add((origStart, origEnd, finalReplace));
             }
 
