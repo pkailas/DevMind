@@ -95,11 +95,12 @@ namespace DevMind
 
             // ── grep_file ────────────────────────────────────────────────────
             tools.Add(MakeTool("grep_file",
-                "Search a single file for lines matching a pattern (case-insensitive substring match). " +
+                "Search a single file for lines matching a pattern (case-insensitive substring; " +
+                "'|' separates OR alternatives; no other regex syntax). " +
                 "Returns matching lines with 1-based line numbers. Capped at 50 matches. " +
                 "Use grep_file to locate code, then read_file with a targeted range, then patch_file. " +
                 "Prefer grep_file + targeted read_file over sequential full-file reads.",
-                Required("pattern", "string", "Search pattern (case-insensitive substring match, not regex)"),
+                Required("pattern", "string", "Search text: case-insensitive substring; '|' separates OR alternatives; no other regex. Metacharacters like \\ ^ $ * + ? ( ) [ ] { } . match literally and will usually find nothing."),
                 Required("filename", "string", "Absolute file path — e.g., 'C:\\Projects\\MyApp\\Services\\UserService.cs'. Always pass the full absolute path that list_files or find_in_files returned; do not shorten to just the filename."),
                 Optional("start_line", "integer", "1-based start line to restrict the search window"),
                 Optional("end_line", "integer", "1-based end line to restrict the search window")));
@@ -107,12 +108,14 @@ namespace DevMind
             // ── find_in_files ────────────────────────────────────────────────
             tools.Add(MakeTool("find_in_files",
                 "Search across multiple files by glob pattern for lines matching a text pattern. " +
+                "Pattern is a case-insensitive SUBSTRING with one extension: '|' separates OR " +
+                "alternatives. Other regex syntax is NOT supported. " +
                 "Returns filename:line:content for each hit, capped at 100 results. " +
                 "Use find_in_files when you need to know where something is used across the project. " +
                 "Use grep_file when you already know which file to search. " +
                 "Requires a content search pattern — cannot be used for bare file enumeration; use list_files for that.",
-                Required("pattern", "string", "Search pattern (case-insensitive substring match)"),
-                Required("glob", "string", "Glob pattern to match files (e.g., '*.cs', 'Services/*.cs')"),
+                Required("pattern", "string", "Search text: case-insensitive substring; '|' separates OR alternatives; no other regex. Metacharacters like \\ ^ $ * + ? ( ) [ ] { } . match literally and will usually find nothing."),
+                Required("glob", "string", "Glob pattern to match files (e.g., '*.cs', 'Services/*.cs'). Use '**/*.cs' to recurse."),
                 Optional("start_line", "integer", "1-based start line to restrict the search window within each file"),
                 Optional("end_line", "integer", "1-based end line to restrict the search window within each file")));
 
