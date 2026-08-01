@@ -308,22 +308,35 @@ namespace DevMind
                 {
                     Type = "shell",
                     Success = result.ShellExitCode == 0,
-                    LineCount = result.ShellOutput?.Split('\n').Length ?? 0
+                    LineCount = result.ShellOutput?.Split('\n').Length ?? 0,
+                    // Content was never captured here, so every shell turn — including
+                    // every failed build the agent ever hit — logged as an empty result
+                    // (corpus audit 2026-08-01: 679 of 743 outcome=Error turns were
+                    // blank). Failure output is the training signal; keep it.
+                    Content = TruncateForLog(result.ShellOutput)
                 });
             }
 
             foreach (var kv in result.ToolResultContents)
-            {
-                string content = kv.Value;
-                if (content != null && content.Length > 2000)
-                    content = content.Substring(0, 1500) + $"[...truncated, total {kv.Value.Length} chars]" + kv.Value.Substring(kv.Value.Length - 500);
-                results.Add(new ToolResultEntry { Type = "read", Filename = kv.Key, Success = true, Content = content });
-            }
+                results.Add(new ToolResultEntry { Type = "read", Filename = kv.Key, Success = true, Content = TruncateForLog(kv.Value) });
 
+            // The error text was always in hand here and previously thrown away —
+            // the entry recorded only Success=false with no content.
             foreach (var err in result.Errors)
-                results.Add(new ToolResultEntry { Type = "error", Success = false });
+                results.Add(new ToolResultEntry { Type = "error", Success = false, Content = TruncateForLog(err) });
 
             return results.Count > 0 ? results : null;
+        }
+
+        /// <summary>Caps logged content at ~2000 chars, keeping the head and tail
+        /// (errors put the interesting part at either end).</summary>
+        private static string TruncateForLog(string content)
+        {
+            if (content == null || content.Length <= 2000)
+                return content;
+            return content.Substring(0, 1500) +
+                   $"[...truncated, total {content.Length} chars]" +
+                   content.Substring(content.Length - 500);
         }
 
         #region JSON DTOs

@@ -554,7 +554,10 @@ namespace DevMind
             int nCtx = _llmClient.ServerContextSize > 0 ? _llmClient.ServerContextSize : _llmClient.MaxPromptTokens;
             int nPast = _llmClient.LastContextUsed;
             int pct = nCtx > 0 ? (int)(nPast * 100.0 / nCtx) : 0;
-            double tokPerSec = _llmClient.LastGeneratedMs > 0
+            // Floor at 100ms: sub-millisecond timings on degenerate turns (1 cached
+            // token) produced absurd rates — the corpus recorded 1,000,000 tok/s.
+            // A turn too fast to time meaningfully reports 0, not a fiction.
+            double tokPerSec = _llmClient.LastGeneratedMs >= 100
                 ? _llmClient.LastGeneratedTokens * 1000.0 / _llmClient.LastGeneratedMs
                 : 0;
 
