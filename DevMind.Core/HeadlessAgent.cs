@@ -102,7 +102,8 @@ namespace DevMind
             string apiKey,
             string workingDirectory,
             string buildCommand = null,
-            bool allowCommit = false)
+            bool allowCommit = false,
+            string sessionId = null)
         {
             _options = options;
             _workingDirectory = workingDirectory;
@@ -122,7 +123,39 @@ namespace DevMind
             };
             _callbacks = new HeadlessLoopCallbacks(_llmClient);
             _state = new LoopState();
-            _driver = new LoopDriver(_llmClient, _host, _callbacks, options, _state);
+
+            // Training capture for delegated (headless) runs. Previously only the TUI
+            // passed a logger, so every devmind_task_start job — the long unsupervised
+            // runs where the local model's failure modes actually show up — was invisible
+            // to the corpus. Keyed on the job id so each task lands in its own file with
+            // its own terminal state, which makes per-task analysis trivial.
+            //
+            // Divergence from the TUI on purpose: the TUI fails loud on a bad training
+            // config because a human is right there to fix it. Killing a background job
+            // over logging is disproportionate, so this degrades to a warning on stderr
+            // and runs unlogged — visible, not silent.
+            ITrainingLogger trainingLogger = null;
+            if (!string.IsNullOrWhiteSpace(sessionId))
+            {
+                try
+                {
+                    var cfg = TuiConfig.Load();
+                    if (cfg.TrainingLogEnabled && !string.IsNullOrWhiteSpace(cfg.TrainingLogFolder))
+                        trainingLogger = new JsonlTrainingLogger(
+                            () => sessionId, true, cfg.TrainingLogFolder);
+                    else if (cfg.TrainingLogEnabled)
+                        Console.Error.WriteLine(
+                            "[HeadlessSession] trainingLogEnabled is true but trainingLogFolder " +
+                            "is blank in devmind.json — this job will not be captured.");
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine(
+                        $"[HeadlessSession] training capture disabled for this job: {ex.Message}");
+                }
+            }
+
+            _driver = new LoopDriver(_llmClient, _host, _callbacks, options, _state, trainingLogger);
 
             _resolvedBuildCommand = !string.IsNullOrWhiteSpace(buildCommand)
                 ? buildCommand

@@ -450,7 +450,8 @@ namespace DevMind.McpServer
                             ShowLlmThinking = job.Think,
                         };
                         session = new HeadlessSession(options, EndpointUrl, ApiKey,
-                            job.WorkingDirectory, buildCommand: null, allowCommit: job.AllowCommit);
+                            job.WorkingDirectory, buildCommand: null, allowCommit: job.AllowCommit,
+                            sessionId: job.Id);
                         job.Session = session;
                     }
                     else
