@@ -27,6 +27,7 @@ namespace DevMind.McpServer
     internal sealed class McpServices : IDisposable
     {
         public string WorkingDirectory { get; }
+        public IReadOnlyList<string> AllowedWriteRoots { get; }
         public MemoryManager          Memory    { get; }
         public FileContentCache       FileCache { get; }
         public ShellRunner            Shell     { get; }
@@ -91,7 +92,7 @@ namespace DevMind.McpServer
             return s.Length == 0 ? null : s;
         }
 
-        public McpServices(string workingDirectory)
+        public McpServices(string workingDirectory, IEnumerable<string>? additionalWriteRoots = null)
         {
             WorkingDirectory = string.IsNullOrWhiteSpace(workingDirectory)
                 ? Environment.CurrentDirectory
@@ -100,6 +101,30 @@ namespace DevMind.McpServer
             if (!Directory.Exists(WorkingDirectory))
                 Console.Error.WriteLine(
                     $"[McpServer] Warning: working directory does not exist: {WorkingDirectory}");
+
+            // Build AllowedWriteRoots: WorkingDirectory first, then additional roots,
+            // normalized and de-duplicated case-insensitively.
+            var writeRootsSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            writeRootsSet.Add(Path.GetFullPath(WorkingDirectory));
+            if (additionalWriteRoots != null)
+            {
+                foreach (var root in additionalWriteRoots)
+                {
+                    if (!string.IsNullOrWhiteSpace(root))
+                    {
+                        try
+                        {
+                            string normalized = Path.GetFullPath(root);
+                            writeRootsSet.Add(normalized);
+                        }
+                        catch
+                        {
+                            // Skip invalid paths silently (validation happens at parse time)
+                        }
+                    }
+                }
+            }
+            AllowedWriteRoots = new List<string>(writeRootsSet);
 
             Memory    = new MemoryManager(WorkingDirectory);
             FileCache = new FileContentCache();

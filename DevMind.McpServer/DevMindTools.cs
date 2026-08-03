@@ -1831,24 +1831,49 @@ internal sealed class DevMindTools
     // ── Phase F: Git operations ──
 
    [McpServerTool(Name = "git_commit")]
-    [Description(
-        "Stage files and create a git commit in the working directory. " +
-        "Stages all changes by default, or specific files if provided. " +
-        "Pass \"auto\" as the message to generate one from the staged diff. " +
-        "Optionally pushes to a named remote after committing. " +
-        "Uses conventional commit format: type(scope): description.")]
-    public async Task<string> GitCommit(
-        [Description("Commit message. Pass \"auto\" to generate from staged diff.")] string message,
-        [Description("Files to stage. If omitted, stages all changes (-A).")] string[]? files = null,
-        [Description("Remote name to push to after committing (e.g. \"origin\", \"nas\"). Omit to skip push.")] string? remote = null,
-        CancellationToken cancellationToken = default)
+     [Description(
+         "Stage files and create a git commit in the repository containing the working_dir or staged files. " +
+         "Defaults to the session working directory when working_dir is not specified and files are relative. " +
+         "Pass \"auto\" as the message to generate one from the staged diff. " +
+         "Optionally pushes to a named remote after committing. " +
+         "Uses conventional commit format: type(scope): description.")]
+     public async Task<string> GitCommit(
+         [Description("Commit message. Pass \"auto\" to generate from staged diff.")] string message,
+         [Description("Files to stage. If omitted, stages all changes (-A).")] string[]? files = null,
+         [Description("Remote name to push to after committing (e.g. \"origin\", \"nas\"). Omit to skip push.")] string? remote = null,
+         [Description("Absolute path of the repository (or any directory inside it) to commit in. Defaults to the first entry in `files` when that is an absolute path, otherwise the session working directory.")] string? working_dir = null,
+         CancellationToken cancellationToken = default)
     {
         return await _svc.EnqueueAsync(async () =>
         {
             try
             {
+                // Resolve starting directory for git root lookup.
+                // Precedence: (1) working_dir param, (2) first absolute file in files[], (3) session WorkingDirectory.
+                string? startDir = null;
+
+                if (!string.IsNullOrWhiteSpace(working_dir))
+                {
+                    if (!Path.IsPathRooted(working_dir))
+                        return "[git_commit] working_dir must be an absolute path.";
+                    if (!Directory.Exists(working_dir) && !File.Exists(working_dir))
+                        return $"[git_commit] working_dir does not exist: {working_dir}";
+                    startDir = Directory.Exists(working_dir) ? working_dir : Path.GetDirectoryName(working_dir) ?? Path.GetDirectoryName(working_dir)!;
+                }
+                else if (files != null && files.Length > 0)
+                {
+                    string firstFile = files[0];
+                    if (Path.IsPathRooted(firstFile) && (File.Exists(firstFile) || Directory.Exists(firstFile)))
+                    {
+                        startDir = Directory.Exists(firstFile) ? firstFile : Path.GetDirectoryName(firstFile);
+                    }
+                }
+
+                if (startDir == null)
+                    startDir = _svc.WorkingDirectory;
+
                 // Find git root and set shell working directory.
-                string gitRoot = ContextEngine.FindGitRoot(_svc.WorkingDirectory);
+                string gitRoot = ContextEngine.FindGitRoot(startDir);
                 if (gitRoot == null)
                     return "[git_commit] Not a git repository.";
 
@@ -2411,33 +2436,43 @@ internal sealed class DevMindTools
     }
 
     /// <summary>
-    /// Ensures a resolved path stays within the session WorkingDirectory before any
+    /// Ensures a resolved path stays within one of the allowed write roots before any
     /// file-mutating operation. Normalizes traversals (..\) and absolute paths via
-    /// Path.GetFullPath, then verifies the result is under WorkingDirectory; throws
-    /// InvalidOperationException if it escapes. Returns the normalized full path.
+    /// Path.GetFullPath, then verifies the result is under at least one entry in
+    /// AllowedWriteRoots; throws InvalidOperationException if it escapes all of them.
+    /// Returns the normalized full path.
     /// Applied only to write/delete/rename tools — read-only tools stay unrestricted.
     /// </summary>
     private string PathContainmentCheck(string resolvedFullPath)
     {
         string fullPath = Path.GetFullPath(resolvedFullPath);
-        string root     = Path.GetFullPath(_svc.WorkingDirectory);
 
-        // Append a trailing separator so "C:\WorkDir" does not match "C:\WorkDir2".
-        if (root.Length > 0
-            && root[root.Length - 1] != Path.DirectorySeparatorChar
-            && root[root.Length - 1] != Path.AltDirectorySeparatorChar)
+        foreach (var root in _svc.AllowedWriteRoots)
         {
-            root += Path.DirectorySeparatorChar;
+            string rootWithSep = EnsureTrailingSeparator(root);
+            if (fullPath.StartsWith(rootWithSep, StringComparison.OrdinalIgnoreCase))
+                return fullPath;
         }
 
-        if (!fullPath.StartsWith(root, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidOperationException(
-                $"Path containment violation: '{fullPath}' is outside the working directory " +
-                $"'{root}'. File create/modify/delete/rename is restricted to the working directory.");
-        }
+        string rootsList = string.Join("; ", _svc.AllowedWriteRoots);
+        throw new InvalidOperationException(
+            $"Path containment violation: '{fullPath}' is outside the allowed write roots: {rootsList}. " +
+            "File create/modify/delete/rename is restricted to these directories.");
+    }
 
-        return fullPath;
+    /// <summary>
+    /// Returns the path with a trailing directory separator appended (if not already present).
+    /// Used so "C:\WorkDir" does not match "C:\WorkDir2" during prefix checks.
+    /// </summary>
+    private static string EnsureTrailingSeparator(string path)
+    {
+        if (path.Length > 0
+            && path[path.Length - 1] != Path.DirectorySeparatorChar
+            && path[path.Length - 1] != Path.AltDirectorySeparatorChar)
+        {
+            return path + Path.DirectorySeparatorChar;
+        }
+        return path;
     }
 
     /// <summary>

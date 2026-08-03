@@ -22,9 +22,15 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using DmTrace = DevMind.Trace;
 
-// ── Parse --dir argument ──────────────────────────────────────────────────────
+// ── Parse --dir arguments (repeatable) ────────────────────────────────────────
+// Collect every --dir <value> occurrence. The FIRST value is the primary working
+// directory (memory, shell cwd, defaults). All values together form the write roots
+// list that PathContainmentCheck uses for file-mutating operations.
 
 string workingDirectory = Environment.CurrentDirectory;
+var additionalWriteRoots = new List<string>();
+bool primarySet = false;
+
 for (int i = 0; i < args.Length - 1; i++)
 {
     if (string.Equals(args[i], "--dir", StringComparison.OrdinalIgnoreCase))
@@ -42,12 +48,55 @@ for (int i = 0; i < args.Length - 1; i++)
             Environment.Exit(2);
         }
 
-        workingDirectory = rawValue;
-        break;
+        if (!primarySet)
+        {
+            // First --dir becomes the primary working directory.
+            workingDirectory = rawValue;
+            primarySet = true;
+        }
+        else
+        {
+            // Subsequent --dir values are additional write roots.
+            additionalWriteRoots.Add(rawValue);
+        }
     }
 }
 
-Console.Error.WriteLine($"[McpServer] Starting. Working directory: {workingDirectory}");
+// ── DEVMIND_ALLOWED_WRITE_ROOTS (semicolon-separated absolute paths) ──────────
+var envWriteRootsRaw = Environment.GetEnvironmentVariable("DEVMIND_ALLOWED_WRITE_ROOTS");
+if (!string.IsNullOrWhiteSpace(envWriteRootsRaw))
+{
+    var envEntries = envWriteRootsRaw.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    foreach (var entry in envEntries)
+    {
+        if (string.IsNullOrWhiteSpace(entry))
+            continue;
+
+        if (!System.IO.Path.IsPathRooted(entry))
+        {
+            Console.Error.WriteLine($"[McpServer] Warning: DEVMIND_ALLOWED_WRITE_ROOTS entry is not absolute, skipping: '{entry}'");
+            continue;
+        }
+
+        if (!Directory.Exists(entry) && !File.Exists(entry))
+        {
+            Console.Error.WriteLine($"[McpServer] Warning: DEVMIND_ALLOWED_WRITE_ROOTS entry does not exist, skipping: '{entry}'");
+            continue;
+        }
+
+        additionalWriteRoots.Add(entry);
+    }
+}
+
+// Build the full effective write-roots list (primary + extras) for trace and logging.
+var allWriteRoots = new List<string> { workingDirectory };
+allWriteRoots.AddRange(additionalWriteRoots);
+
+// Startup log: report primary directory and additional roots when present.
+if (additionalWriteRoots.Count > 0)
+    Console.Error.WriteLine($"[McpServer] Starting. Working directory: {workingDirectory} | Additional write roots: {string.Join("; ", additionalWriteRoots)}");
+else
+    Console.Error.WriteLine($"[McpServer] Starting. Working directory: {workingDirectory}");
 
 // ~/.devmind.env is the machine-local config convention (endpoints, DB connections,
 // SSH hosts, opt-in gates like DEVMIND_ALLOW_ELEVATION / DEVMIND_DB_ALLOW_WRITE).
@@ -73,6 +122,7 @@ var startupData = new Dictionary<string, object>
     ["argv"]           = args,
     ["cwd"]            = Environment.CurrentDirectory,
     ["working_dir"]    = workingDirectory,
+    ["write_roots"]    = allWriteRoots,
     ["platform"]       = Environment.OSVersion.Platform.ToString(),
     ["os_version"]     = Environment.OSVersion.VersionString,
     ["clr_version"]    = Environment.Version.ToString(),
@@ -106,7 +156,7 @@ var builder = Host.CreateApplicationBuilder(args);
 builder.Logging.ClearProviders();
 
 // McpServices: session-scoped DI container (one per stdio connection).
-var mcpServices = new McpServices(workingDirectory);
+var mcpServices = new McpServices(workingDirectory, additionalWriteRoots);
 builder.Services.AddSingleton(mcpServices);
 
 // AgentJobManager: the devmind_task_* headless-agent job queue (one job at a time,
