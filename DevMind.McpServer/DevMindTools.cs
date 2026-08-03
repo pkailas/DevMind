@@ -39,6 +39,7 @@ using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -71,6 +72,16 @@ internal sealed class DevMindTools
     // left infinite because it is process-wide; per-call deadlines are applied via a linked
     // CancellationTokenSource at each call site instead.
     private static readonly HttpClient _http = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
+
+    private static readonly JsonSerializerOptions JsonOpts = new JsonSerializerOptions
+    {
+        WriteIndented = true,
+        // JavaScriptEncoder.Default escapes the HTML-sensitive set (+ > < ' ` &) as \uXXXX.
+        // These payloads carry unified diffs, code and shell output to an MCP client, never
+        // HTML, and escaped '+' markers make diffs in transcript_tail unreadable. The relaxed
+        // encoder still escapes everything JSON requires (quotes, backslash, control chars).
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+    };
 
     public DevMindTools(McpServices svc) => _svc = svc;
 
@@ -1387,7 +1398,7 @@ internal sealed class DevMindTools
                 state = "running",
                 timeout_seconds = timeout,
                 hint = "Poll shell_job_status with this id. The command runs detached — later tool calls are not blocked.",
-            });
+            }, JsonOpts);
         }
         catch (Exception ex)
         {
@@ -1423,7 +1434,7 @@ internal sealed class DevMindTools
                     state = cancel == true ? "cancelling" : "running",
                     elapsed_seconds = elapsed,
                     output_tail = job.GetTail(4_000),
-                });
+                }, JsonOpts);
             }
 
             var (output, exitCode) = await job.Run.ConfigureAwait(false);
@@ -1434,7 +1445,7 @@ internal sealed class DevMindTools
                 elapsed_seconds = elapsed,
                 exit_code = exitCode,
                 output = output.Length <= 24_000 ? output : output.Substring(output.Length - 24_000),
-            });
+            }, JsonOpts);
         }
         catch (Exception ex)
         {
@@ -2106,8 +2117,7 @@ internal sealed class DevMindTools
                     try
                     {
                         using var doc = JsonDocument.Parse(responseBody);
-                        responseBody = JsonSerializer.Serialize(doc.RootElement,
-                            new JsonSerializerOptions { WriteIndented = true });
+                        responseBody = JsonSerializer.Serialize(doc.RootElement, JsonOpts);
                     }
                     catch { }
 

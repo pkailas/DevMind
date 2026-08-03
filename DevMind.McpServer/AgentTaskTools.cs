@@ -14,6 +14,7 @@ using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -31,6 +32,11 @@ namespace DevMind.McpServer
         private static readonly JsonSerializerOptions JsonOpts = new JsonSerializerOptions
         {
             WriteIndented = true,
+            // JavaScriptEncoder.Default escapes the HTML-sensitive set (+ > < ' ` &) as \uXXXX.
+            // These payloads carry unified diffs, code and shell output to an MCP client, never
+            // HTML, and escaped '+' markers make diffs in transcript_tail unreadable. The relaxed
+            // encoder still escapes everything JSON requires (quotes, backslash, control chars).
+            Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
         };
 
         public AgentTaskTools(AgentJobManager jobs) => _jobs = jobs;
