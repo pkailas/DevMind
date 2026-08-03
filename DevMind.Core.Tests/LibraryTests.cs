@@ -4,10 +4,12 @@
 // Tests for the /library RAG stack:
 //   * EmbeddingClient — truncation/renormalization math and wire round trip
 //     against the fake embeddings endpoint.
-//   * LibraryStore — INTEGRATION against the real SQL Server 2025 instance
-//     (WIN-SQL002,14330 / DevMindRAG): schema, upsert-replace, KNN ordering via
-//     native VECTOR_DISTANCE. Soft-skipped when the server is unreachable so the
-//     suite still runs on machines without the rig.
+//   * LibraryStore — INTEGRATION against a DEDICATED test database (default
+//     DevMindRAG_Test, overridable via DEVMIND_RAG_TEST_CONNECTION): schema,
+//     upsert-replace, KNN ordering via native VECTOR_DISTANCE. The test database
+//     is created automatically and emptied at the start of each run, so the
+//     production library is never touched. Soft-skipped when the server is
+//     unreachable so the suite still runs on machines without the rig.
 //   * DocumentLibrarian — end-to-end ingest (fake chat SSE + fake embeddings +
 //     real SQL) and query, plus augmented-prompt formatting.
 
@@ -18,8 +20,96 @@ namespace DevMind.Core.Tests
 {
     public class LibraryTests
     {
-        private const string ConnectionString =
-            "Server=WIN-SQL002,14330;Database=DevMindRAG;Integrated Security=true;TrustServerCertificate=true;Connect Timeout=5";
+        private static readonly string ConnectionString;
+        private static readonly string TestDatabaseName;
+        private static readonly SemaphoreSlim _initLock = new SemaphoreSlim(1, 1);
+        private static bool _initialized;
+        private static bool? _initResult;
+
+        static LibraryTests()
+        {
+            string? envConn = Environment.GetEnvironmentVariable("DEVMIND_RAG_TEST_CONNECTION");
+            string resolved = !string.IsNullOrWhiteSpace(envConn)
+                ? envConn
+                : "Server=WIN-SQL002,14330;Database=DevMindRAG_Test;Integrated Security=true;TrustServerCertificate=true;Connect Timeout=5";
+
+            var builder = new Microsoft.Data.SqlClient.SqlConnectionStringBuilder(resolved);
+            string dbName = builder.InitialCatalog;
+
+            if (!dbName.EndsWith("_Test", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    $"LibraryTests refuses to run against database '{dbName}': the test RAG database name must end with '_Test'. " +
+                    "These tests create, mutate and delete rows. Set DEVMIND_RAG_TEST_CONNECTION to a dedicated test database.");
+            }
+
+            ConnectionString = builder.ToString();
+            TestDatabaseName = dbName;
+        }
+
+        private static async Task<bool> EnsureTestDatabaseAsync()
+        {
+            if (_initialized) return _initResult ?? false;
+
+            await _initLock.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                if (_initialized) return _initResult ?? false;
+
+                try
+                {
+                    // Validate database name against injection before interpolating.
+                    if (!System.Text.RegularExpressions.Regex.IsMatch(TestDatabaseName, "^[A-Za-z0-9_]+$"))
+                    {
+                        return false;
+                    }
+
+                    // Create database if absent via master.
+                    var masterBuilder = new Microsoft.Data.SqlClient.SqlConnectionStringBuilder(ConnectionString);
+                    masterBuilder.InitialCatalog = "master";
+                    using (var masterConn = new Microsoft.Data.SqlClient.SqlConnection(masterBuilder.ToString()))
+                    {
+                        await masterConn.OpenAsync().ConfigureAwait(false);
+                        using (var cmd = new Microsoft.Data.SqlClient.SqlCommand(
+                            $"IF DB_ID(@name) IS NULL EXEC('CREATE DATABASE [{TestDatabaseName}]');", masterConn))
+                        {
+                            cmd.Parameters.AddWithValue("@name", TestDatabaseName);
+                            await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
+                        }
+                    }
+
+                    // Ensure schema and clean slate.
+                    var store = new LibraryStore(ConnectionString);
+                    await store.EnsureSchemaAsync(CancellationToken.None).ConfigureAwait(false);
+
+                    using (var conn = new Microsoft.Data.SqlClient.SqlConnection(ConnectionString))
+                    {
+                        await conn.OpenAsync().ConfigureAwait(false);
+                        using (var cmd = new Microsoft.Data.SqlClient.SqlCommand(
+                            "DELETE FROM lib.Chunks; DELETE FROM lib.Documents;", conn))
+                        {
+                            await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
+                        }
+                    }
+
+                    _initResult = true;
+                    return true;
+                }
+                catch
+                {
+                    _initResult = false;
+                    return false;
+                }
+                finally
+                {
+                    _initialized = true;
+                }
+            }
+            finally
+            {
+                _initLock.Release();
+            }
+        }
 
         // ── EmbeddingClient ───────────────────────────────────────────────────
 
@@ -60,7 +150,7 @@ namespace DevMind.Core.Tests
             Assert.Contains("hello library", server.EmbeddingRequestBodies[0]);
         }
 
-        // ── LibraryStore (real SQL Server 2025) ───────────────────────────────
+        // ── LibraryStore (dedicated test database) ────────────────────────────
 
         [Fact]
         public async Task LibraryStore_UpsertSearchListRemove_RoundTrip()
@@ -216,6 +306,14 @@ namespace DevMind.Core.Tests
 
         // ── DocumentLibrarian E2E: fake chat + fake embeddings + real SQL ─────
 
+        /// <summary>
+        /// Covers the VISION ingest path (blank PDF scanned via vision API) and a
+        /// query round-trip against real SQL Server VECTOR_DISTANCE. The dedicated
+        /// test database is emptied at the start of each run, so the only chunks
+        /// present are this test's own and the global KNN is deterministic — retrieval
+        /// IS asserted here. See BuildAugmentedPrompt_FormatsExcerptsWithProvenanceAndQuestion
+        /// for prompt formatting coverage.
+        /// </summary>
         [Fact]
         public async Task Librarian_IngestThenQuery_RetrievesProvenancedChunks()
         {
@@ -229,10 +327,14 @@ namespace DevMind.Core.Tests
             var store = new LibraryStore(ConnectionString);
             try
             {
+                // PdfTestFiles.WriteTempPdf produces a blank PDF with no text layer. Since 89b83b3
+                // that is rejected in verbatim-only mode, so this vision-path test must opt in
+                // explicitly. This test covers the VISION ingest path, not the verbatim one.
                 var result = await DocumentLibrarian.IngestAsync(
                     new FakeLlmOptions(), server.BaseUrl, apiKey: null,
                     embeddingEndpointUrl: server.BaseUrl, connectionString: ConnectionString,
-                    pdfPath: pdf, chunkSize: 1, progress: null, ct: CancellationToken.None);
+                    pdfPath: pdf, chunkSize: 1, progress: null, ct: CancellationToken.None,
+                    allowVisionForScans: true);
                 docId = result.DocumentId;
 
                 Assert.Equal(2, result.Chunks);
@@ -240,15 +342,13 @@ namespace DevMind.Core.Tests
                 Assert.Equal(2, server.RequestBodies.Count);          // one vision call per page
                 Assert.Equal(2, server.EmbeddingRequestBodies.Count); // one embedding per chunk
 
+                // The dedicated test database is emptied at the start of each run, so the only
+                // chunks present are this test's own and the global KNN is deterministic.
                 var hits = await DocumentLibrarian.QueryAsync(
                     server.BaseUrl, ConnectionString, "what are these notes?", 4, CancellationToken.None);
+                Assert.NotNull(hits);
+                Assert.True(hits.Count <= 4, $"topK=4 but got {hits.Count} hits");
                 Assert.Contains(hits, h => h.Notes == "NOTES-FOR-LIBRARY");
-
-                string prompt = DocumentLibrarian.BuildAugmentedPrompt("what are these notes?", hits);
-                Assert.Contains("[LIBRARY EXCERPTS]", prompt);
-                Assert.Contains("pages 1-1", prompt);
-                Assert.Contains("[QUESTION]", prompt);
-                Assert.EndsWith("what are these notes?", prompt);
             }
             finally
             {
@@ -257,6 +357,30 @@ namespace DevMind.Core.Tests
                 if (docId > 0)
                     await store.RemoveDocumentAsync(docId, CancellationToken.None);
             }
+        }
+
+        // Split out of the ingest test so prompt formatting is covered without a database.
+        [Fact]
+        public void BuildAugmentedPrompt_FormatsExcerptsWithProvenanceAndQuestion()
+        {
+            var hits = new List<LibraryHit>
+            {
+                new LibraryHit
+                {
+                    DocumentName = "swap-test.pdf",
+                    FirstPage = 1,
+                    LastPage = 1,
+                    Notes = "NOTES-FOR-LIBRARY",
+                    Distance = 0.1,
+                },
+            };
+
+            string prompt = DocumentLibrarian.BuildAugmentedPrompt("what are these notes?", hits);
+
+            Assert.Contains("[LIBRARY EXCERPTS]", prompt);
+            Assert.Contains("pages 1-1", prompt);
+            Assert.Contains("[QUESTION]", prompt);
+            Assert.EndsWith("what are these notes?", prompt);
         }
 
         // ── Helpers ───────────────────────────────────────────────────────────
@@ -270,16 +394,7 @@ namespace DevMind.Core.Tests
 
         private static async Task<bool> SqlAvailableAsync()
         {
-            try
-            {
-                using var conn = new Microsoft.Data.SqlClient.SqlConnection(ConnectionString);
-                await conn.OpenAsync();
-                return true;
-            }
-            catch
-            {
-                return false; // rig not reachable — integration tests soft-skip
-            }
+            return await EnsureTestDatabaseAsync().ConfigureAwait(false);
         }
     }
 }
