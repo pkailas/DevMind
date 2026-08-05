@@ -370,7 +370,7 @@ namespace DevMind
 
                 // Thrash nudge — replace the neutral re-trigger with a research directive
                 // the first time a failure signature repeats to the nudge threshold.
-                string nextMessage = "Continue with the task.";
+                string nextMessage = SyntheticPrompts.Continue;
                 if (_state.RepeatedFailureCount >= ThrashNudgeThreshold && !_state.ResearchNudgeIssued)
                 {
                     _state.ResearchNudgeIssued = true;
@@ -395,7 +395,7 @@ namespace DevMind
                 MaybeLogTurn(userMessage, assistantResponse, outcome, result, lastToolCalls);
                 return LoopIterationResult.MakeShouldReTrigger(
                     assistantResponse, outcome, result, lastToolCalls,
-                    nextMessage, shouldLog: true);
+                    nextMessage, shouldLog: true, isSyntheticPrompt: true);
             }
            else
             {
@@ -428,13 +428,10 @@ namespace DevMind
                                 $"[DIAG] Narration stall detected (claim: {claimSignal}) — " +
                                 $"retrying with tool_choice=required.\n", OutputColor.Dim);
 
-                        const string NarrationRetryPrompt =
-                            "You described an action but did not call any tool. " +
-                            "Call the appropriate tool now to perform the action you described.";
                         return LoopIterationResult.MakeShouldReTrigger(
                             assistantResponse, outcome, null, null,
-                            NarrationRetryPrompt, shouldLog: false,
-                            forceToolChoiceRequired: true);
+                            SyntheticPrompts.NarrationRetry, shouldLog: false,
+                            forceToolChoiceRequired: true, isSyntheticPrompt: true);
                     }
                 }
 
@@ -447,13 +444,9 @@ namespace DevMind
                     if (_options.ShowDebugOutput)
                         _agenticHost.AppendOutput("[DIAG] Prose-finish detected — re-prompting for task_done.\n", OutputColor.Dim);
 
-                    const string ProsePrompt =
-                        "You produced a prose answer but did not call task_done. " +
-                        "Call task_done now with your answer in the summary parameter. " +
-                        "Do not repeat the answer in prose — only the tool call.";
                     return LoopIterationResult.MakeShouldReTrigger(
                         assistantResponse, outcome, null, null,
-                        ProsePrompt, shouldLog: false);
+                        SyntheticPrompts.ProseFinish, shouldLog: false, isSyntheticPrompt: true);
                 }
 
                 // Stop — question answered, already re-prompted once, or empty response

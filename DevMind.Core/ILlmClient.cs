@@ -62,6 +62,10 @@ namespace DevMind
         /// <summary>The most recent micro-compaction summary, or null when none has occurred.</summary>
         string LastCompactionSummary { get; }
 
+        /// <summary>The raw assistant text from the last LLM response (content only, no TUI decorations).
+        /// Set during <see cref="SendMessageAsync"/>. Null until the first response completes.</summary>
+        string LastAssistantText { get; }
+
         /// <summary>Estimates total history token usage from conversation message lengths.</summary>
         int EstimateHistoryTokens();
 

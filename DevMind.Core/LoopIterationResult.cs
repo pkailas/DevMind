@@ -43,6 +43,13 @@ namespace DevMind
         /// </summary>
         public string TerminalReason { get; }
 
+        /// <summary>
+        /// True when NextContextualMessage was auto-injected by the agentic loop
+        /// (continuation prompt, task_done nag, thrash directive) rather than typed
+        /// by the user. The save site uses this to mark the user row IsSynthetic.
+        /// </summary>
+        public bool IsSyntheticPrompt { get; }
+
        private LoopIterationResult(
             LoopIterationKind kind,
             string assistantResponse,
@@ -52,7 +59,8 @@ namespace DevMind
             string nextContextualMessage,
             bool shouldLogTurn,
             bool forceToolChoiceRequired = false,
-            string terminalReason = null)
+            string terminalReason = null,
+            bool isSyntheticPrompt = false)
         {
             Kind = kind;
             AssistantResponse = assistantResponse;
@@ -63,6 +71,7 @@ namespace DevMind
             ShouldLogTurn = shouldLogTurn;
             ForceToolChoiceRequired = forceToolChoiceRequired;
             TerminalReason = terminalReason;
+            IsSyntheticPrompt = isSyntheticPrompt;
         }
 
         internal static LoopIterationResult MakeTerminal(
@@ -73,8 +82,8 @@ namespace DevMind
 
        internal static LoopIterationResult MakeShouldReTrigger(
             string assistantResponse, ResponseOutcome outcome, ExecutionResult result, List<ToolCallResult> toolCalls,
-            string nextMessage, bool shouldLog, bool forceToolChoiceRequired = false)
-            => new LoopIterationResult(LoopIterationKind.ShouldReTrigger, assistantResponse, outcome, result, toolCalls, nextMessage, shouldLog, forceToolChoiceRequired);
+            string nextMessage, bool shouldLog, bool forceToolChoiceRequired = false, bool isSyntheticPrompt = false)
+            => new LoopIterationResult(LoopIterationKind.ShouldReTrigger, assistantResponse, outcome, result, toolCalls, nextMessage, shouldLog, forceToolChoiceRequired, isSyntheticPrompt: isSyntheticPrompt);
 
         internal static LoopIterationResult MakeCancelled(
             string assistantResponse, ResponseOutcome outcome, ExecutionResult result, List<ToolCallResult> toolCalls)

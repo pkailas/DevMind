@@ -19,6 +19,9 @@ namespace DevMind
         public string Role { get; set; } = ""; // "user" or "assistant"
         public string Content { get; set; } = "";
         public DateTime CreatedAt { get; set; }
+        /// <summary>True when the message was auto-injected by the agentic loop (continuation prompt,
+        /// task_done nag, thrash directive) rather than typed by the user.</summary>
+        public bool IsSynthetic { get; set; }
     }
 
     /// <summary>Summary of a single session returned by ListSessions.</summary>

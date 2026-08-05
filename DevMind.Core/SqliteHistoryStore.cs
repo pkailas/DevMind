@@ -71,6 +71,18 @@ namespace DevMind
             {
                 await cmd.ExecuteNonQueryAsync();
             }
+
+            // Migration: Add IsSynthetic column to DevMindHistory if it does not exist.
+            // Safe to run repeatedly; preserves existing rows.
+            using (var cmd = new SqliteCommand(@"
+                ALTER TABLE DevMindHistory ADD COLUMN IsSynthetic INTEGER NOT NULL DEFAULT 0", _connection))
+            {
+                try { await cmd.ExecuteNonQueryAsync(); }
+                catch (SqliteException ex) when (ex.SqliteErrorCode == 1299 || ex.Message.Contains("duplicate column name"))
+                {
+                    // Column already exists — ignore.
+                }
+            }
         }
 
         public async Task SaveMessagesAsync(HistoryMessage[] messages)
@@ -85,14 +97,15 @@ namespace DevMind
                 foreach (var m in messages)
                 {
                     using var cmd = new SqliteCommand(@"
-                        INSERT INTO DevMindHistory (SessionId, MachineName, TurnIndex, Role, Content, CreatedAt)
-                        VALUES (@sessionId, @machineName, @turnIndex, @role, @content, @createdAt)", _connection, tx);
+                        INSERT INTO DevMindHistory (SessionId, MachineName, TurnIndex, Role, Content, CreatedAt, IsSynthetic)
+                        VALUES (@sessionId, @machineName, @turnIndex, @role, @content, @createdAt, @isSynthetic)", _connection, tx);
                     cmd.Parameters.AddWithValue("@sessionId", m.SessionId);
                     cmd.Parameters.AddWithValue("@machineName", m.MachineName);
                     cmd.Parameters.AddWithValue("@turnIndex", m.TurnIndex);
                     cmd.Parameters.AddWithValue("@role", m.Role);
                     cmd.Parameters.AddWithValue("@content", (object)m.Content ?? DBNull.Value);
                     cmd.Parameters.AddWithValue("@createdAt", m.CreatedAt);
+                    cmd.Parameters.AddWithValue("@isSynthetic", m.IsSynthetic ? 1 : 0);
                     await cmd.ExecuteNonQueryAsync();
                 }
                 await tx.CommitAsync();
@@ -112,7 +125,7 @@ namespace DevMind
             var list = new List<HistoryMessage>();
 
             using var cmd = new SqliteCommand(@"
-                SELECT SessionId, MachineName, TurnIndex, Role, Content, CreatedAt
+                SELECT SessionId, MachineName, TurnIndex, Role, Content, CreatedAt, IsSynthetic
                 FROM DevMindHistory
                 WHERE MachineName = @machine
                 ORDER BY CreatedAt DESC
@@ -131,6 +144,7 @@ namespace DevMind
                     Role = reader.GetString(3),
                     Content = reader.IsDBNull(4) ? "" : reader.GetString(4),
                     CreatedAt = reader.GetDateTime(5),
+                    IsSynthetic = reader.GetInt32(6) != 0,
                 });
             }
 
@@ -207,7 +221,7 @@ namespace DevMind
             var list = new List<HistoryMessage>();
 
             using var cmd = new SqliteCommand(@"
-                SELECT SessionId, MachineName, TurnIndex, Role, Content, CreatedAt
+                SELECT SessionId, MachineName, TurnIndex, Role, Content, CreatedAt, IsSynthetic
                 FROM DevMindHistory
                 WHERE SessionId = @sessionId
                 ORDER BY TurnIndex ASC, CreatedAt ASC", _connection);
@@ -224,6 +238,7 @@ namespace DevMind
                     Role = reader.GetString(3),
                     Content = reader.IsDBNull(4) ? "" : reader.GetString(4),
                     CreatedAt = reader.GetDateTime(5),
+                    IsSynthetic = reader.GetInt32(6) != 0,
                 });
             }
 

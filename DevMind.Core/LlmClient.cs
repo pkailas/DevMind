@@ -247,6 +247,10 @@ namespace DevMind
         /// </summary>
         public List<ToolCallResult> LastToolCalls { get; private set; }
 
+        /// <summary>The raw assistant text from the last LLM response (content only, no TUI decorations).
+        /// Set during <see cref="SendMessageAsync"/>. Null until the first response completes.</summary>
+        public string LastAssistantText { get; private set; }
+
         // ── Server-reported timings from last SSE response ──────────────────
         public int LastPromptTokens { get; private set; }
         public int LastGeneratedTokens { get; private set; }
@@ -1389,6 +1393,9 @@ namespace DevMind
 
                 _conversationHistory.Add(new ChatMessage("assistant", fullResponse.ToString(),
                     _currentTurn, toolCalls: rawToolCalls));
+
+                // Expose raw assistant text for history persistence (no TUI decorations).
+                LastAssistantText = fullResponse.ToString();
 
                 // ── Emit server timings status line ─────────────────────────
                 if (LastGeneratedTokens > 0

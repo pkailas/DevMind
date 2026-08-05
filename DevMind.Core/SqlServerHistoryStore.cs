@@ -102,6 +102,22 @@ namespace DevMind
             {
                 await cmd.ExecuteNonQueryAsync();
             }
+
+            // Migration: Add IsSynthetic column to DevMindHistory if it does not exist.
+            // Safe to run repeatedly; preserves existing rows.
+            using (var cmd = new SqlCommand(@"
+                IF NOT EXISTS (
+                    SELECT 1 FROM sys.columns
+                    WHERE object_id = OBJECT_ID(N'dbo.DevMindHistory')
+                      AND name = N'IsSynthetic'
+                )
+                BEGIN
+                    ALTER TABLE dbo.DevMindHistory
+                    ADD IsSynthetic BIT NOT NULL DEFAULT 0;
+                END", _connection))
+            {
+                await cmd.ExecuteNonQueryAsync();
+            }
         }
 
         public async Task SaveMessagesAsync(HistoryMessage[] messages)
@@ -116,14 +132,15 @@ namespace DevMind
                 foreach (var m in messages)
                 {
                     using var cmd = new SqlCommand(@"
-                        INSERT INTO dbo.DevMindHistory (SessionId, MachineName, TurnIndex, Role, Content, CreatedAt)
-                        VALUES (@sessionId, @machineName, @turnIndex, @role, @content, @createdAt)", _connection, tx);
+                        INSERT INTO dbo.DevMindHistory (SessionId, MachineName, TurnIndex, Role, Content, CreatedAt, IsSynthetic)
+                        VALUES (@sessionId, @machineName, @turnIndex, @role, @content, @createdAt, @isSynthetic)", _connection, tx);
                     cmd.Parameters.Add("@sessionId", SqlDbType.VarChar, 64).Value = m.SessionId;
                     cmd.Parameters.Add("@machineName", SqlDbType.VarChar, 128).Value = m.MachineName;
                     cmd.Parameters.Add("@turnIndex", SqlDbType.Int).Value = m.TurnIndex;
                     cmd.Parameters.Add("@role", SqlDbType.VarChar, 16).Value = m.Role;
                     cmd.Parameters.Add("@content", SqlDbType.NVarChar, -1).Value = (object)m.Content ?? DBNull.Value;
                     cmd.Parameters.Add("@createdAt", SqlDbType.DateTime2).Value = m.CreatedAt;
+                    cmd.Parameters.Add("@isSynthetic", SqlDbType.Bit).Value = m.IsSynthetic;
                     await cmd.ExecuteNonQueryAsync();
                 }
                 await tx.CommitAsync();
@@ -143,7 +160,7 @@ namespace DevMind
             var list = new List<HistoryMessage>();
 
             using var cmd = new SqlCommand(@"
-                SELECT TOP (@limit) SessionId, MachineName, TurnIndex, Role, Content, CreatedAt
+                SELECT TOP (@limit) SessionId, MachineName, TurnIndex, Role, Content, CreatedAt, IsSynthetic
                 FROM dbo.DevMindHistory
                 WHERE MachineName = @machine
                 ORDER BY CreatedAt DESC", _connection);
@@ -161,6 +178,7 @@ namespace DevMind
                     Role = reader.GetString(3),
                     Content = reader.IsDBNull(4) ? "" : reader.GetString(4),
                     CreatedAt = reader.GetDateTime(5),
+                    IsSynthetic = reader.GetBoolean(6),
                 });
             }
 
@@ -245,7 +263,7 @@ namespace DevMind
             var list = new List<HistoryMessage>();
 
             using var cmd = new SqlCommand(@"
-                SELECT SessionId, MachineName, TurnIndex, Role, Content, CreatedAt
+                SELECT SessionId, MachineName, TurnIndex, Role, Content, CreatedAt, IsSynthetic
                 FROM dbo.DevMindHistory
                 WHERE SessionId = @sessionId
                 ORDER BY TurnIndex ASC, CreatedAt ASC", _connection);
@@ -262,6 +280,7 @@ namespace DevMind
                     Role = reader.GetString(3),
                     Content = reader.IsDBNull(4) ? "" : reader.GetString(4),
                     CreatedAt = reader.GetDateTime(5),
+                    IsSynthetic = reader.GetBoolean(6),
                 });
             }
 

@@ -1358,6 +1358,7 @@ namespace DevMind
             string currentPrompt = userInput;
             bool firstIteration = true;
             bool forceToolChoiceRequired = false; // Layer 2 narration-retry flag
+            bool isSyntheticPrompt = false;       // true when currentPrompt was auto-injected by the loop
 
             // A DevMind-internal status/diagnostic line ([CONTEXT], [LLM], [TOOL_USE], [DIAG…],
             // [DROPPED], [SQUEEZED], …) emitted through onToken. The engine injects these — some
@@ -1509,7 +1510,8 @@ namespace DevMind
                     try
                     {
                         string userMsg = currentPrompt;
-                        string assistantMsg = responseBuffer.ToString();
+                        // Use raw assistant text from the LLM client (no TUI decorations).
+                        string assistantMsg = llmClient.LastAssistantText ?? responseBuffer.ToString();
                         var messages = new[]
                         {
                             new HistoryMessage
@@ -1520,6 +1522,7 @@ namespace DevMind
                                 Role = "user",
                                 Content = userMsg,
                                 CreatedAt = DateTime.UtcNow,
+                                IsSynthetic = isSyntheticPrompt,
                             },
                             new HistoryMessage
                             {
@@ -1565,6 +1568,9 @@ namespace DevMind
                    case LoopIterationKind.ShouldReTrigger:
                         if (cts.Token.IsCancellationRequested) return;
                         currentPrompt = iter.NextContextualMessage ?? callbacks.GetInputText();
+                        // Only treat as synthetic when the prompt actually came from NextContextualMessage;
+                        // if it fell back to GetInputText (user typed input), never mark it synthetic.
+                        isSyntheticPrompt = iter.NextContextualMessage != null && iter.IsSyntheticPrompt;
                         forceToolChoiceRequired = iter.ForceToolChoiceRequired;
                         callbacks.SetInputText(string.Empty);
                         break;
