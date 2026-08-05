@@ -1,4 +1,4 @@
-// File: DevMindTools.cs  v5.3
+// File: DevMindTools.cs  v5.4
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Diagnostic policy: never write to Console.Out / Console.WriteLine in this file.
@@ -575,6 +575,40 @@ internal sealed class DevMindTools
                 return $"[search_memory error] {ex.Message}";
             }
        }, cancellationToken);
+    }
+
+    // ── Write-root reload ───────────────────────────────────────────────────
+    // SECURITY: this tool takes NO parameters by design. The only way to grant a
+    // new write root at runtime is for the HUMAN to edit allowedWriteRoots in
+    // %APPDATA%\devmind\devmind.json; this tool merely re-reads that file. Never
+    // add a path/root parameter here — it would let the model grant itself write
+    // access and defeat the containment guardrail entirely.
+
+    [McpServerTool(Name = "reload_write_roots")]
+    [Description(
+        "Re-read the allowedWriteRoots array from the user's global devmind.json config file " +
+        "(%APPDATA%\\devmind\\devmind.json) and return the resulting effective write-root list. " +
+        "Takes no parameters: new roots can only be granted by the user editing that file — " +
+        "call this afterwards to pick up the change without restarting the host application. " +
+        "The working directory and any --dir / DEVMIND_ALLOWED_WRITE_ROOTS startup roots are " +
+        "a permanent floor that a config reload never removes.")]
+    public async Task<string> ReloadWriteRoots(CancellationToken cancellationToken = default)
+    {
+        return await _svc.EnqueueAsync(() =>
+        {
+            try
+            {
+                var roots = _svc.ReloadWriteRootsFromConfig();
+                var sb = new StringBuilder($"Write roots reloaded from devmind.json. Effective roots ({roots.Count}):\n");
+                foreach (var root in roots)
+                    sb.AppendLine($"  {root}");
+                return Task.FromResult(sb.ToString().TrimEnd());
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult($"[reload_write_roots error] {ex.Message}");
+            }
+        }, cancellationToken);
     }
 
     // ── Document library (RAG) ──────────────────────────────────────────────
@@ -2454,36 +2488,7 @@ internal sealed class DevMindTools
     /// Applied only to write/delete/rename tools — read-only tools stay unrestricted.
     /// </summary>
     private string PathContainmentCheck(string resolvedFullPath)
-    {
-        string fullPath = Path.GetFullPath(resolvedFullPath);
-
-        foreach (var root in _svc.AllowedWriteRoots)
-        {
-            string rootWithSep = EnsureTrailingSeparator(root);
-            if (fullPath.StartsWith(rootWithSep, StringComparison.OrdinalIgnoreCase))
-                return fullPath;
-        }
-
-        string rootsList = string.Join("; ", _svc.AllowedWriteRoots);
-        throw new InvalidOperationException(
-            $"Path containment violation: '{fullPath}' is outside the allowed write roots: {rootsList}. " +
-            "File create/modify/delete/rename is restricted to these directories.");
-    }
-
-    /// <summary>
-    /// Returns the path with a trailing directory separator appended (if not already present).
-    /// Used so "C:\WorkDir" does not match "C:\WorkDir2" during prefix checks.
-    /// </summary>
-    private static string EnsureTrailingSeparator(string path)
-    {
-        if (path.Length > 0
-            && path[path.Length - 1] != Path.DirectorySeparatorChar
-            && path[path.Length - 1] != Path.AltDirectorySeparatorChar)
-        {
-            return path + Path.DirectorySeparatorChar;
-        }
-        return path;
-    }
+        => _svc.WriteRoots.EnsureContained(resolvedFullPath);
 
     /// <summary>
     /// Loads a file into FileCache if it is not already present.

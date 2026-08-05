@@ -1,4 +1,4 @@
-﻿// File: TuiConfig.cs  v1.0
+﻿// File: TuiConfig.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Global TUI config persisted to %APPDATA%\devmind\devmind.json.
@@ -87,6 +87,14 @@ namespace DevMind
         [JsonPropertyName("autoAttachImages")]
         public bool AutoAttachImages { get; set; } = true;
 
+        /// <summary>Additional directories the MCP server may write under, on top of the
+        /// working directory and any --dir / DEVMIND_ALLOWED_WRITE_ROOTS startup roots.
+        /// Absolute paths only. Re-read by the reload_write_roots MCP tool, so entries
+        /// added here take effect without restarting the host application. Absent or
+        /// empty grants nothing beyond the startup roots.</summary>
+        [JsonPropertyName("allowedWriteRoots")]
+        public List<string> AllowedWriteRoots { get; set; } = new List<string>();
+
         private static string ConfigPath
  => Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
@@ -96,10 +104,15 @@ namespace DevMind
         /// Loads the config from disk. Returns defaults if the file does not exist
         /// or if parsing fails silently.
         /// </summary>
-        public static TuiConfig Load()
+        public static TuiConfig Load() => LoadFrom(ConfigPath);
+
+        /// <summary>
+        /// Loads the config from an explicit path. Exposed for tests; production code
+        /// uses <see cref="Load()"/> which reads the global config path.
+        /// </summary>
+        public static TuiConfig LoadFrom(string path)
         {
             var config = new TuiConfig();
-            string path = ConfigPath;
 
             if (!File.Exists(path))
                 return config;
@@ -149,6 +162,19 @@ namespace DevMind
                 if (root.TryGetProperty("autoAttachImages", out var aai)
                     && (aai.ValueKind == JsonValueKind.True || aai.ValueKind == JsonValueKind.False))
                     config.AutoAttachImages = aai.GetBoolean();
+
+                if (root.TryGetProperty("allowedWriteRoots", out var awr) && awr.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var el in awr.EnumerateArray())
+                    {
+                        if (el.ValueKind == JsonValueKind.String)
+                        {
+                            string entry = el.GetString();
+                            if (!string.IsNullOrWhiteSpace(entry))
+                                config.AllowedWriteRoots.Add(entry);
+                        }
+                    }
+                }
 
                 if (root.TryGetProperty("sqlConnections", out var sc) && sc.ValueKind == JsonValueKind.Object)
                 {

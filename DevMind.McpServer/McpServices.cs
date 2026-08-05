@@ -1,4 +1,4 @@
-// File: McpServices.cs  v2.5
+// File: McpServices.cs  v2.6
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Diagnostic policy: all Console.Write / Console.WriteLine calls in this project
@@ -27,7 +27,16 @@ namespace DevMind.McpServer
     internal sealed class McpServices : IDisposable
     {
         public string WorkingDirectory { get; }
-        public IReadOnlyList<string> AllowedWriteRoots { get; }
+
+        /// <summary>
+        /// Reloadable write-root policy. Baseline (working directory + --dir / env roots)
+        /// is fixed at startup; devmind.json allowedWriteRoots entries are merged on top
+        /// and re-read by <see cref="ReloadWriteRootsFromConfig"/>.
+        /// </summary>
+        public WriteRootPolicy WriteRoots { get; }
+
+        /// <summary>Current effective write roots (immutable snapshot).</summary>
+        public IReadOnlyList<string> AllowedWriteRoots => WriteRoots.Current;
         public MemoryManager          Memory    { get; }
         public FileContentCache       FileCache { get; }
         public ShellRunner            Shell     { get; }
@@ -102,29 +111,11 @@ namespace DevMind.McpServer
                 Console.Error.WriteLine(
                     $"[McpServer] Warning: working directory does not exist: {WorkingDirectory}");
 
-            // Build AllowedWriteRoots: WorkingDirectory first, then additional roots,
-            // normalized and de-duplicated case-insensitively.
-            var writeRootsSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            writeRootsSet.Add(Path.GetFullPath(WorkingDirectory));
-            if (additionalWriteRoots != null)
-            {
-                foreach (var root in additionalWriteRoots)
-                {
-                    if (!string.IsNullOrWhiteSpace(root))
-                    {
-                        try
-                        {
-                            string normalized = Path.GetFullPath(root);
-                            writeRootsSet.Add(normalized);
-                        }
-                        catch
-                        {
-                            // Skip invalid paths silently (validation happens at parse time)
-                        }
-                    }
-                }
-            }
-            AllowedWriteRoots = new List<string>(writeRootsSet);
+            // Write roots: WorkingDirectory + --dir/env roots form the permanent baseline;
+            // devmind.json allowedWriteRoots entries are merged on top at startup and on
+            // every reload_write_roots call. A config reload can never remove the baseline.
+            WriteRoots = new WriteRootPolicy(WorkingDirectory, additionalWriteRoots);
+            ReloadWriteRootsFromConfig();
 
             Memory    = new MemoryManager(WorkingDirectory);
             FileCache = new FileContentCache();
@@ -229,6 +220,21 @@ namespace DevMind.McpServer
                 : null;
 
             _consumerTask = DrainChannelAsync();
+        }
+
+        /// <summary>
+        /// Re-reads allowedWriteRoots from the global devmind.json and atomically
+        /// publishes the recomputed effective root set (baseline roots always retained).
+        /// The config file is the ONLY runtime source of new roots — deliberately no
+        /// parameter-based way to add one, so only the human editing the file can
+        /// grant write access. Returns the new effective root list.
+        /// </summary>
+        public IReadOnlyList<string> ReloadWriteRootsFromConfig()
+        {
+            var config = TuiConfig.Load();
+            return WriteRoots.Reload(
+                config.AllowedWriteRoots,
+                msg => Console.Error.WriteLine($"[McpServer] Warning: {msg}"));
         }
 
         public void Dispose()
