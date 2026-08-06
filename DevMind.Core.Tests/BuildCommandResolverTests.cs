@@ -208,6 +208,44 @@ EndGlobal
         }
 
         [Fact]
+        public void IsClassicFramework_SlnxWithPropsFileSolutionItem_ReturnsFalse()
+        {
+            // Regression: .slnx files contain solution items like
+            // <File Path="Directory.Build.props" /> — the props file's root
+            // <Project> element has no Sdk= attribute, so IsProjectClassic
+            // returns true. Without filtering by project extension, an
+            // all-SDK solution is misclassified as classic .NET Framework.
+            string csproj = Path.Combine(_dir, "Modern.csproj");
+            File.WriteAllText(csproj,
+                @"<Project Sdk=""Microsoft.NET.Sdk"">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+</Project>");
+
+            string propsFile = Path.Combine(_dir, "Directory.Build.props");
+            File.WriteAllText(propsFile,
+                @"<Project>
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+</Project>");
+
+            string slnx = Path.Combine(_dir, "Solution.slnx");
+            File.WriteAllText(slnx,
+                @"<Solution>
+  <Projects>
+    <Project Path=""Modern.csproj"" />
+  </Projects>
+  <Folder Include=""."">
+    <File Path=""Directory.Build.props"" />
+  </Folder>
+</Solution>");
+
+            Assert.False(BuildCommandResolver.IsClassicFramework(slnx));
+        }
+
+        [Fact]
         public void Resolve_SdkStyleSlnx_StillDotnetBuild()
         {
             // SDK-style .slnx with no classic projects → dotnet build (unchanged behavior).

@@ -231,6 +231,18 @@ namespace DevMind
         }
 
         /// <summary>
+        /// Returns true when the path ends with a recognized project file extension.
+        /// </summary>
+        private static bool HasProjectExtension(string path)
+        {
+            if (string.IsNullOrEmpty(path))
+                return false;
+            return path.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase)
+                || path.EndsWith(".vbproj", StringComparison.OrdinalIgnoreCase)
+                || path.EndsWith(".fsproj", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
         /// Parses a .sln file for Project("GUID", "Name", "Path") lines and checks
         /// whether any referenced project is classic. Returns false if the file
         /// cannot be read.
@@ -250,7 +262,7 @@ namespace DevMind
                         if (trimmed.StartsWith("Project("))
                         {
                             string projPath = ExtractSlnProjectPath(trimmed);
-                            if (projPath != null)
+                            if (projPath != null && HasProjectExtension(projPath))
                             {
                                 string absolute = Path.IsPathRooted(projPath)
                                     ? projPath
@@ -270,6 +282,8 @@ namespace DevMind
                     // .slnx typically contains elements like <Project Path="..." />
                     foreach (string projPath in ExtractSlnxProjectPaths(content))
                     {
+                        if (!HasProjectExtension(projPath))
+                            continue;
                         string absolute = Path.IsPathRooted(projPath)
                             ? projPath
                             : Path.Combine(slnxDir, projPath);
