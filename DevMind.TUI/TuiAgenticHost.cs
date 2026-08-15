@@ -852,7 +852,7 @@ namespace DevMind
                 // (bare-name keying let an unread same-named file pass; see TaskReadSet).
                 if (!_taskReadFiles.IsKnown(fullPath))
                 {
-                    bool approved = await ConfirmUnreadFileWriteAsync(fileNameOnly);
+                    bool approved = await ConfirmUnreadFileWriteAsync(fullPath);
                     if (!approved)
                     {
                         AppendOutputLocal($"[WRITE GUARD] File write to \"{fileNameOnly}\" blocked.\n", OutputColor.Dim);
@@ -948,7 +948,7 @@ namespace DevMind
                 // (bare-name keying let an unread same-named file pass; see TaskReadSet).
                 if (!_taskReadFiles.IsKnown(resolvedPath))
                 {
-                    bool approved = await ConfirmUnreadFileWriteAsync(fileNameOnly);
+                    bool approved = await ConfirmUnreadFileWriteAsync(resolvedPath);
                     if (!approved)
                     {
                         AppendOutputLocal($"[WRITE GUARD] File append to \"{fileNameOnly}\" blocked.\n", OutputColor.Dim);
@@ -1717,7 +1717,7 @@ namespace DevMind
                 // (bare-name keying let an unread same-named file pass; see TaskReadSet).
                 if (!_taskReadFiles.IsKnown(fullPath))
                 {
-                    bool approved = await ConfirmUnreadFileWriteAsync(fileNameOnly);
+                    bool approved = await ConfirmUnreadFileWriteAsync(fullPath);
                     if (!approved)
                     {
                         AppendOutputLocal($"[WRITE GUARD] Patch to \"{fileNameOnly}\" blocked.\n", OutputColor.Dim);
@@ -2059,9 +2059,15 @@ namespace DevMind
             }
         }
 
-        private Task<bool> ConfirmUnreadFileWriteAsync(string fileNameOnly)
+        /// <summary>Write guard for files never read this task. The TUI auto-approves —
+        /// a human is watching — but still echoes the resolved path so an unread write
+        /// (e.g. to a hallucinated absolute path) is visible in the transcript, which is
+        /// the only audit surface this host has. Mirrors the headless journal line.</summary>
+        private Task<bool> ConfirmUnreadFileWriteAsync(string resolvedPath)
         {
-            // Auto-approve all writes — no interactive prompt.
+            AppendOutputLocal(
+                $"[WRITE GUARD] \"{resolvedPath}\" was not read during this task — auto-approved.\n",
+                OutputColor.Warning);
             return Task.FromResult(true);
         }
 
