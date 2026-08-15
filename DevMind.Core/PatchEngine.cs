@@ -1,4 +1,4 @@
-﻿// File: PatchEngine.cs  v1.1
+// File: PatchEngine.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -118,7 +118,7 @@ namespace DevMind
         /// The first line (PATCH filename) is skipped.
         /// </summary>
         public static List<(string findText, string replaceText)> ParsePatchBlocks(
-            string input, bool fromToolCall = false)
+            string input, bool fromToolCall = false, Action<string, OutputColor> reporter = null)
         {
             var results = new List<(string, string)>();
             // Skip first line (PATCH <filename>)
@@ -134,7 +134,21 @@ namespace DevMind
                 int replaceIdx = input.IndexOf("REPLACE:", findIdx, StringComparison.OrdinalIgnoreCase);
                 if (replaceIdx < 0) break;
 
-                int findContentStart = input.IndexOf('\n', findIdx) + 1;
+                // The FIND: marker must be alone on its line; the text to find starts on the
+                // next line. If no newline follows the marker, the block is malformed.
+                int findNl = input.IndexOf('\n', findIdx);
+                if (findNl < 0)
+                {
+                    if (reporter != null)
+                        reporter(
+                            "[PATCH] Malformed block: no newline after the FIND: marker. Each " +
+                            "FIND:/REPLACE: marker must sit on its own line - the marker, then the " +
+                            "text to find on following lines. Rewrite the block so each marker is " +
+                            "on a line by itself.\n",
+                            OutputColor.Error);
+                    return results;
+                }
+                int findContentStart = findNl + 1;
                 // Skip an opening markdown fence line (e.g. ```csharp) immediately after FIND:
                 // In tool_use mode, backticks are legitimate content — skip this stripping.
                 if (!fromToolCall)
@@ -146,6 +160,21 @@ namespace DevMind
                         if (Regex.IsMatch(peekLine, @"^\s*```[a-zA-Z]*\s*$"))
                             findContentStart = peekEnd + 1;
                     }
+                }
+                // REPLACE: must come at or after the first line of the FIND content. If it was
+                // located before findContentStart (e.g. both markers on one line), the Substring
+                // length below would go negative and throw ArgumentOutOfRangeException.
+                if (replaceIdx < findContentStart)
+                {
+                    if (reporter != null)
+                        reporter(
+                            "[PATCH] Malformed block: REPLACE: appears on the same line as the " +
+                            "preceding FIND: marker (the FIND: content must occupy its own line(s) " +
+                            "first). In a PATCH block each marker sits on its own line: FIND: alone, " +
+                            "then the text to find, then REPLACE: alone, then the replacement. " +
+                            "Rewrite the block so FIND: and REPLACE: are on separate lines.\n",
+                            OutputColor.Error);
+                    return results;
                 }
                 string findText = input.Substring(findContentStart, replaceIdx - findContentStart);
                 if (findText.EndsWith("\r\n", StringComparison.Ordinal)) findText = findText.Substring(0, findText.Length - 2);
@@ -431,7 +460,7 @@ namespace DevMind
                 }
             }
 
-            var rawBlocks = ParsePatchBlocks(patchInput, fromToolCall);
+            var rawBlocks = ParsePatchBlocks(patchInput, fromToolCall, reporter);
             if (rawBlocks.Count == 0)
             {
                 reporter("[PATCH] Invalid syntax — must contain at least one FIND: and REPLACE: pair.\n",
