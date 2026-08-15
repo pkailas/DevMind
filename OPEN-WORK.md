@@ -1,0 +1,111 @@
+﻿# Open work — DevMind
+
+Written 2026-08-15 after a day of harness fixes (commits d559491..81e626a).
+Tests at time of writing: Core 410, McpServer 20. Deployed: 1.0.370 (one commit behind master).
+
+---
+
+## 1. Shell timeout does not reap runaway processes  <- START HERE
+
+**Severity: high.** This nearly took BEAST down twice today — a `dotnet` test host
+reached 64 GB and then 45 GB, leaving 1.5 GB free on a 128 GB machine.
+
+**Diagnosed in job-503. My first hypothesis was WRONG and is recorded here so it
+isn't repeated:** I assumed the timeout path never killed the process tree. It
+does — `ShellRunner.cs:301-314` runs `taskkill /F /T /PID {proc.Id}` for both
+`timedOut` and `cancelled`.
+
+**Actual cause:** `ExecuteAsync` wraps every command in `powershell.exe`
+(`ShellRunner.cs:91`), so `proc.Id` is the *shell's* PID. The runaway `dotnet`
+had left that tree by the time taskkill walked it — almost certainly the MSBuild
+build-server / node-reuse pool, which deliberately outlives the invoking command.
+Supporting evidence: several `dotnet` processes shared a start time of 11:55:27,
+consistent with a worker pool.
+
+**Also found:** `ShellRunner.cs:303-313` swallows every taskkill exception with a
+bare `catch { }` and never reads taskkill's exit code. A failed reap is currently
+invisible to DevMind.
+
+**Recommended fixes, in priority order (from job-503):**
+1. Job Object with `KILL_ON_JOB_CLOSE` on every spawned process. .NET 9+ makes
+   this small on net10.0 and removes the fragile taskkill entirely. Belongs in
+   `ShellRunner.RunProcessAsync` — the gap is general, not dotnet-specific: any
+   process that detaches or re-parents escapes the same way.
+2. `MSBUILDDISABLENODEREUSE=1` / `-nodeReuse:false` for DevMind-spawned dotnet
+   build/test. Low risk, additive to (1).
+3. Verify the process actually died after taskkill; log/retry survivors.
+4. Optional: memory watchdog on spawned children.
+
+**Rejected:** "do nothing, node reuse is intended and the hung test was the
+fault." Half right — but the reaping contract is silently broken, and a runaway
+is still a DevMind child whose timeout-kill promised to reap it.
+
+**Could not determine:** whether the survivor was the build-server pool or a
+re-parented testhost. Same class either way. To settle on next occurrence:
+capture the runaway's `ParentProcessId` at kill time, check whether
+`dotnet build-server shutdown` reaps it, and capture taskkill's own exit code.
+
+**Reproducer:** disable the `PatchEngine` malformed-input guards (8b04cb7) and
+run the mutation test. NOTE the malformed input does not reliably throw when
+unguarded — twice it consumed memory without bound instead. That non-termination
+was never separately diagnosed.
+
+---
+
+## 2. Cosmetic leftovers from the FilePathResolver review (job-487)
+
+- **Double-resolve on the not-found path** — the failure path resolves twice.
+- **`Candidates.Count == 1` message branch** — says "The directory portion of the
+  hint did not match it" even when the hint has no directory portion.
+- **Null guard** missing in the host-side `BuildFileNotFoundMessage` wrappers.
+
+---
+
+## 3. Known-and-deliberate — do NOT "fix" these
+
+Each was investigated today and found correct as-is. Recorded so they don't get
+re-raised as findings.
+
+- **MCP write tools have no read-first guard** (job-504). The guard is a
+  prompt-nudge by design, not an interlock. There is no human to prompt in the
+  MCP path, `run_shell` bypasses any read-set gate anyway, and `WriteRoots` is
+  the right control there. Recommendation was: do nothing.
+- **TUI has no write sandbox** (job-505). Deliberate and documented at
+  `BufferedAgenticHost.cs:140-145`. The TUI's whole posture is no-prompt —
+  `ShowDiffPreviewAsync` auto-approves patches too.
+- **Delete/rename bypass the read-first guard** (job-505). Sound: the guard's
+  threat model is clobbering unseen content, which delete and rename don't do.
+- **`LspToolService.cs:116` catch-all** (job-506). Passes `ex.Message` through
+  verbatim, so every cause already yields a distinguishable message. Adding catch
+  blocks would manufacture a distinction.
+- **`TaskReadSet`'s `|| Count == 0` clause.** Commit 41afb6e's message shows the
+  original guard also allowed writes to files "mentioned in the user's prompt"
+  via a `_pendingResubmitPrompt` check that no longer exists. Whether Count==0 is
+  the deliberate remainder or an artifact of the ba4cdbe rewrite is UNRESOLVED.
+  Left as-is with a comment. Paul is the only one who can settle it.
+- **`TuiAgenticHost` does not inherit `BufferedAgenticHost`** — it implements
+  `IAgenticHost` directly. Anything describing its methods as "shadowing" the
+  base is working from a false premise (mine, originally).
+
+---
+
+## 4. The pattern worth remembering
+
+Nearly every fix today was the *harness* feeding the model something false or
+withholding something it needed — not the model failing. Run C concluded a source
+project didn't exist because the not-found message listed the working directory's
+files as "Project files:". An agent stopped investigating because the prompt said
+absolute paths were blocked when only writes are. Five FIND retries chased advice
+that normalization made impossible.
+
+The model's behaviour was correct given its inputs every time.
+
+The principle that came out of the audit, and which should govern any new
+diagnostic message:
+
+> A prescription is something an LLM will execute; a bare failure is something it
+> will investigate.
+
+So: report the cause you actually determined. Prescribe an action only where that
+action is correct for that cause. Where the cause is unknown, say so — a
+confident half-truth is worse than a vague message, because the agent acts on it.
