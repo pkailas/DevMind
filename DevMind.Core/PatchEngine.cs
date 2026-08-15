@@ -309,11 +309,31 @@ namespace DevMind
         }
 
         /// <summary>
+        /// Why FindFuzzyMatch refused to return a match. Carried out so the caller's
+        /// error message can tell the agent WHICH check fired — "closest match below
+        /// the similarity threshold" and "two near-equal candidates" need opposite
+        /// responses (re-read the file vs. extend the FIND with surrounding context).
+        /// </summary>
+        public enum FuzzyRejectReason
+        {
+            /// <summary>Best candidate's similarity is below the threshold.</summary>
+            BelowThreshold,
+            /// <summary>Best candidate is within 0.05 of the runner-up — ambiguous.</summary>
+            AmbiguousMatch,
+        }
+
+        /// <summary>
         /// Slides an N-line window over content (N = line count of findText) and scores
         /// each window against normFind using Levenshtein similarity.
-        /// Returns the best match only when it exceeds the threshold AND is unambiguous.
+        /// On success: reason is null, (origStart, origEnd, similarity) locate the best
+        /// window, secondStart/secondSimilarity score the runner-up (useful diagnostics).
+        /// On rejection: reason names WHY, and (origStart, origEnd, similarity) point at
+        /// the NEAREST candidate (the best window, even though it was rejected) so the
+        /// caller can show the agent what was actually closest — secondStart/second
+        /// Similarity carry the runner-up for the ambiguity message.
         /// </summary>
-        public static (int origStart, int origEnd, double similarity)? FindFuzzyMatch(
+        public static (int origStart, int origEnd, double similarity,
+            int secondStart, double secondSimilarity, FuzzyRejectReason? reason)? FindFuzzyMatch(
             string content, string findText, string normFind, double threshold = 0.85)
         {
             int windowSize = findText.Split('\n').Length;
@@ -330,7 +350,7 @@ namespace DevMind
             }
 
             double bestSim = -1, secondSim = -1;
-            int bestStart = -1, bestEnd = -1;
+            int bestStart = -1, bestEnd = -1, secondStart = -1;
 
             for (int i = 0; i <= lines.Count - windowSize; i++)
             {
@@ -346,6 +366,7 @@ namespace DevMind
                 if (sim > bestSim)
                 {
                     secondSim = bestSim;
+                    secondStart = bestStart;
                     bestSim   = sim;
                     bestStart = wStart;
                     bestEnd   = wEnd;
@@ -353,14 +374,25 @@ namespace DevMind
                 else if (sim > secondSim)
                 {
                     secondSim = sim;
+                    secondStart = wStart;
                 }
             }
 
-            if (bestSim < threshold) return null;
+            if (bestSim < threshold)
+            {
+                // The best window is the closest thing in the file — return it flagged
+                // so the caller can point the agent at it.
+                return (bestStart, bestEnd, bestSim, secondStart, secondSim,
+                    FuzzyRejectReason.BelowThreshold);
+            }
             // Require a meaningful gap over the runner-up to avoid ambiguous fuzzy matches.
-            if (bestSim - secondSim < 0.05) return null;
+            if (bestSim - secondSim < 0.05)
+            {
+                return (bestStart, bestEnd, bestSim, secondStart, secondSim,
+                    FuzzyRejectReason.AmbiguousMatch);
+            }
 
-            return (bestStart, bestEnd, bestSim);
+            return (bestStart, bestEnd, bestSim, secondStart, secondSim, null);
         }
 
         // ── Core operations ───────────────────────────────────────────────────
@@ -447,9 +479,52 @@ namespace DevMind
                 if (normIdx < 0)
                 {
                     var fuzzy = FindFuzzyMatch(fileContent, findText, normFind);
-                    if (fuzzy == null)
+                    if (fuzzy == null || fuzzy.Value.reason != null)
                     {
-                        reporter($"[PATCH] Block {i + 1}: FIND text not found in {fileName} — no changes made.\n",
+                        // Distinguish WHY the match was refused — the two cases need
+                        // opposite responses: below-threshold says "your FIND differs
+                        // from what's really there" (re-read the file), ambiguity says
+                        // "extend the FIND with surrounding lines". Naming the reason
+                        // plus the nearest candidate's line and content stops agents
+                        // from thrashing on a vague "not found" (field: 5 retries).
+                        string why, context;
+                        if (fuzzy == null)
+                        {
+                            why = "no candidate in the file at all";
+                            context = "";
+                        }
+                        else
+                        {
+                            int bestLine = fileContent.Substring(0, fuzzy.Value.origStart).Count(c => c == '\n') + 1;
+                            int secondLine = fuzzy.Value.secondStart >= 0
+                                ? fileContent.Substring(0, fuzzy.Value.secondStart).Count(c => c == '\n') + 1
+                                : 0;
+                            if (fuzzy.Value.reason == FuzzyRejectReason.AmbiguousMatch)
+                            {
+                                why = secondLine > 0
+                                    ? $"ambiguous — best {fuzzy.Value.similarity:P0} at line {bestLine}, " +
+                                      $"runner-up {fuzzy.Value.secondSimilarity:P0} at line {secondLine} (need a 5% gap)"
+                                    : $"ambiguous — best {fuzzy.Value.similarity:P0} at line {bestLine} " +
+                                      "(runner-up too close to score separately, need a 5% gap)";
+                            }
+                            else // BelowThreshold
+                            {
+                                why = $"closest match {fuzzy.Value.similarity:P0} at line {bestLine} " +
+                                      "(below the 85% threshold)";
+                            }
+                            // Reuse the ambiguous-FIND context renderer: nearest candidate
+                            // with visible whitespace, '>>' marking the candidate line.
+                            context =
+                                $"  Context around line {bestLine} (spaces shown as '·', tabs as '→'):\n" +
+                                GetLineContext(fileContent, bestLine, 2, 2);
+                        }
+                        string remedy = fuzzy.Value.reason == FuzzyRejectReason.AmbiguousMatch
+                            ? "  To disambiguate, extend the FIND to include lines ABOVE or BELOW the block\n"
+                              + "  whose text is genuinely different at the two sites.\n"
+                            : "  READ the file and copy the actual text verbatim into the FIND.\n";
+                        reporter(
+                            $"[PATCH] Block {i + 1}: FIND text not found in {fileName} — no changes made.\n" +
+                            $"  Reason: {why}\n{context}{remedy}",
                             OutputColor.Error);
                         return null;
                     }

@@ -52,9 +52,10 @@ public sealed class FindFuzzyMatchTests
 
     // ── Similarity threshold: just below 0.85 ────────────────────────────────
     // 200-char strings, 32 substitutions → dist=32, sim=0.845
-    // Below 0.85 → should return null
+    // Below 0.85 → rejected with BelowThreshold; the closest candidate is still
+    // carried out so the caller's error message can point at it.
     [Fact]
-    public void Similarity_BelowThreshold_ReturnsNull()
+    public void Similarity_BelowThreshold_ReturnsRejectReason()
     {
         string normFind = "a" + new string('b', 199);
         // 32 substitutions → dist=32, sim=0.845
@@ -63,14 +64,20 @@ public sealed class FindFuzzyMatchTests
 
         var result = PatchEngine.FindFuzzyMatch(content, findText, normFind);
 
-        Assert.Null(result);
+        Assert.NotNull(result);
+        Assert.Equal(PatchEngine.FuzzyRejectReason.BelowThreshold, result.Value.reason);
+        // The rejected candidate is still reported at the correct position.
+        Assert.Equal(0, result.Value.origStart);
+        Assert.Equal(0.84, result.Value.similarity, 4);
+        Assert.True(result.Value.similarity < 0.85);
     }
 
     // ── Ambiguity gap: best and second-best within 0.05 → reject ─────────────
     // Two windows: best sim=0.905 (dist=19), second sim=0.885 (dist=23)
-    // gap = 0.020 < 0.05 → should return null (ambiguous)
+    // gap = 0.020 < 0.05 → rejected as ambiguous; both candidates' positions
+    // are carried out for the diagnostic message.
     [Fact]
-    public void AmbiguityGap_TooSmall_ReturnsNull()
+    public void AmbiguityGap_TooSmall_ReturnsRejectReason()
     {
         string normFind = "a" + new string('b', 199);
         // Window 1: 19 subs → sim=0.905
@@ -85,7 +92,13 @@ public sealed class FindFuzzyMatchTests
 
         var result = PatchEngine.FindFuzzyMatch(content, findText, normFind);
 
-        Assert.Null(result);
+        Assert.NotNull(result);
+        Assert.Equal(PatchEngine.FuzzyRejectReason.AmbiguousMatch, result.Value.reason);
+        Assert.Equal(0.905, result.Value.similarity, 4);
+        // Best is line 1, runner-up is line 2.
+        Assert.Equal(0, result.Value.origStart);
+        Assert.Equal(line1.Length + 1, result.Value.secondStart);
+        Assert.Equal(0.885, result.Value.secondSimilarity, 4);
     }
 
     // ── Ambiguity gap: clear gap > 0.05 → accept ─────────────────────────────
