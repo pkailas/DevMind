@@ -2417,66 +2417,19 @@ internal sealed class DevMindTools
     // ── Private helpers ──────────────────────────────────────────────────────
 
     /// <summary>
-    /// Resolves a filename to a full absolute path.
-    /// Priority: (1) already absolute and exists; (2) hint-relative to WorkingDirectory;
-    /// (3) recursive basename search under WorkingDirectory (noise paths excluded), using any
-    ///     directory portion of the hint to disambiguate same-named files. Returns null rather
-    ///     than guessing an arbitrary same-named file when the hint does not uniquely identify one.
+    /// Resolves a filename to a full absolute path. Delegates to the shared
+    /// <see cref="DevMind.FilePathResolver"/>: (1) already absolute and exists;
+    /// (2) hint-relative to WorkingDirectory; (3) recursive basename search under the
+    /// WorkingDirectory AND the git root (repo-root-relative hints resolve even when the
+    /// working directory is a subdirectory of the repo). Returns null rather than guessing
+    /// an arbitrary same-named file when the hint does not uniquely identify one.
     /// </summary>
     private string? ResolveFilePath(string filename)
     {
         if (string.IsNullOrWhiteSpace(filename)) return null;
-
-        // Absolute path that exists — use directly.
-        if (Path.IsPathRooted(filename) && File.Exists(filename))
-            return filename;
-
-        string wd = _svc.WorkingDirectory;
-
-        // Hint-relative: combine with WorkingDirectory.
-        string byHint = Path.Combine(wd, filename.Replace('/', Path.DirectorySeparatorChar));
-        if (File.Exists(byHint)) return byHint;
-
-        // Directory-aware fallback: recursive search by basename, then use any directory
-        // information in the hint to disambiguate. We never return an arbitrary same-named
-        // file — a silently wrong file is worse than "not found" (the caller can recover via
-        // run_shell). Normalize: forward slashes, strip leading "./", strip leading "/".
-        string normalizedHint = filename.Replace('\\', '/');
-        while (normalizedHint.StartsWith("./", StringComparison.Ordinal))
-            normalizedHint = normalizedHint.Substring(2);
-        normalizedHint = normalizedHint.TrimStart('/');
-
-        string fileNameOnly = Path.GetFileName(normalizedHint);
-        if (string.IsNullOrEmpty(fileNameOnly)) return null;
-        bool hintHasDirectory = normalizedHint.Contains('/');
-
-        try
-        {
-            string[] found = Directory.GetFiles(wd, fileNameOnly, SearchOption.AllDirectories);
-            string[] clean = found.Where(f => !ContextEngine.IsNoisePath(f)).ToArray();
-            if (clean.Length == 0) return null;
-
-            if (hintHasDirectory)
-            {
-                // Match candidates whose path ENDS WITH the hint's directory+name suffix.
-                // Plain (substring) EndsWith so a partial/abbreviated directory in the hint
-                // still matches — e.g. "TestHarness/Program.cs" matches a real directory named
-                // ".../VLink.PSCPConnector.TestHarness/Program.cs".
-                string[] suffixMatches = clean
-                    .Where(f => f.Replace('\\', '/')
-                        .EndsWith(normalizedHint, StringComparison.OrdinalIgnoreCase))
-                    .ToArray();
-                // Exactly one → use it. Zero (directory portion matched nothing) or more than
-                // one (still ambiguous) → not found; never guess an arbitrary same-named file.
-                return suffixMatches.Length == 1 ? suffixMatches[0] : null;
-            }
-
-            // Bare basename with no directory to disambiguate: resolve only a unique match.
-            return clean.Length == 1 ? clean[0] : null;
-        }
-        catch { }
-
-        return null;
+        string normalized = filename.Replace('\\', '/');
+        string fileNameOnly = Path.GetFileName(normalized) ?? filename;
+        return FilePathResolver.Resolve(fileNameOnly, filename, _svc.WorkingDirectory).Path;
     }
 
     /// <summary>
@@ -2587,34 +2540,19 @@ internal sealed class DevMindTools
     }
 
     /// <summary>
-    /// Returns a descriptive "file not found" message, listing available .cs files in
-    /// WorkingDirectory so the caller can identify the correct filename.
+    /// Returns a "file not found" message that states the resolution SCOPE (which
+    /// directories were searched recursively) and lists same-named candidates when the
+    /// name matched more than one file. It deliberately does NOT list the working
+    /// directory's top-level files as "the project" — the model has been observed
+    /// reading that listing as ground truth and concluding source files are missing
+    /// (live failure, job-471: "the working tree contains only the test file").
     /// </summary>
     private string BuildFileNotFoundMessage(string tool, string filename)
     {
-        const int MaxFiles = 50;
-        string searchDir = _svc.WorkingDirectory;
-
-        List<string>? csFiles = null;
-        try
-        {
-            csFiles = Directory.GetFiles(searchDir, "*.cs", SearchOption.TopDirectoryOnly)
-                .Select(f => Path.GetFileName(f) ?? f)
-                .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
-                .ToList();
-        }
-        catch { }
-
-        if (csFiles == null || csFiles.Count == 0)
-            return $"{tool}: file not found — {filename}";
-
-        var sb = new StringBuilder();
-        sb.AppendLine($"{tool}: file not found — {filename}");
-        sb.AppendLine("C# files in project root:");
-        int shown = Math.Min(csFiles.Count, MaxFiles);
-        for (int i = 0; i < shown; i++) sb.AppendLine($"  {csFiles[i]}");
-        if (csFiles.Count > MaxFiles) sb.AppendLine($"  ... and {csFiles.Count - MaxFiles} more");
-        return sb.ToString().TrimEnd('\r', '\n');
+        string normalized = filename.Replace('\\', '/');
+        string fileNameOnly = Path.GetFileName(normalized) ?? filename;
+        var resolution = FilePathResolver.Resolve(fileNameOnly, filename, _svc.WorkingDirectory);
+        return FilePathResolver.BuildFileNotFoundMessage(tool, filename, resolution);
     }
 
     /// <summary>

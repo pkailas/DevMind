@@ -2062,64 +2062,30 @@ namespace DevMind
             return Path.Combine(_shellRunner.WorkingDirectory ?? Directory.GetCurrentDirectory(), fileName);
         }
 
+        /// <summary>
+        /// Resolves a filename to its full path. Delegates to the shared
+        /// <see cref="FilePathResolver"/> (same rules as the MCP server and headless host):
+        /// absolute path → hint-relative to workingDir → bare name in workingDir →
+        /// git-root fallback (repo-root-relative hints) → recursive basename search
+        /// that refuses to guess an arbitrary same-named file.
+        /// </summary>
         private string FindFile(string fileNameOnly, string hintPath)
-        {
-            if (Path.IsPathRooted(hintPath) && File.Exists(hintPath)) return hintPath;
+            => FilePathResolver.Resolve(fileNameOnly, hintPath,
+                _shellRunner.WorkingDirectory).Path;
 
-            if (!string.IsNullOrEmpty(_shellRunner.WorkingDirectory))
-            {
-                string byHint = Path.Combine(_shellRunner.WorkingDirectory,
-                    hintPath.Replace('/', Path.DirectorySeparatorChar));
-                if (File.Exists(byHint)) return byHint;
-
-                string byName = Path.Combine(_shellRunner.WorkingDirectory, fileNameOnly);
-                if (File.Exists(byName)) return byName;
-
-                try
-                {
-                    string[] found = Directory.GetFiles(_shellRunner.WorkingDirectory, fileNameOnly,
-                        SearchOption.AllDirectories);
-                    string[] clean = found.Where(f => !ContextEngine.IsNoisePath(f)).ToArray();
-                    if (clean.Length == 1) return clean[0];
-                    if (clean.Length > 1)
-                    {
-                        string normalized = hintPath.Replace('\\', '/');
-                        string best = clean.FirstOrDefault(f =>
-                            f.Replace('\\', '/').EndsWith(normalized, StringComparison.OrdinalIgnoreCase));
-                        return best ?? clean[0];
-                    }
-                }
-                catch { }
-            }
-
-            return null;
-        }
-
+        /// <summary>
+        /// "File not found" message that states the resolution SCOPE (which directories
+        /// were searched, including the git root) and lists same-named candidates. Never
+        /// presents the working directory's top-level files as the project — the model
+        /// reads that as ground truth and concludes source files are missing (job-471).
+        /// </summary>
         private string BuildFileNotFoundMessage(string directive, string filename)
         {
-            const int MaxFiles = 50;
-            string searchDir = _shellRunner.WorkingDirectory;
-
-            List<string> csFiles = null;
-            try
-            {
-                csFiles = Directory.GetFiles(searchDir, "*.cs", SearchOption.TopDirectoryOnly)
-                    .Select(Path.GetFileName)
-                    .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
-                    .ToList();
-            }
-            catch { }
-
-            if (csFiles == null || csFiles.Count == 0)
-                return $"{directive}: file not found — {filename}";
-
-            var sb = new StringBuilder();
-            sb.AppendLine($"{directive}: file not found — {filename}");
-            sb.AppendLine("Project files:");
-            int shown = Math.Min(csFiles.Count, MaxFiles);
-            for (int i = 0; i < shown; i++) sb.AppendLine($"  {csFiles[i]}");
-            if (csFiles.Count > MaxFiles) sb.AppendLine($"  ... and {csFiles.Count - MaxFiles} more");
-            return sb.ToString().TrimEnd('\r', '\n');
+            string normalized = filename.Replace('\\', '/');
+            string fileNameOnly = Path.GetFileName(normalized) ?? filename;
+            var resolution = FilePathResolver.Resolve(fileNameOnly, filename,
+                _shellRunner.WorkingDirectory);
+            return FilePathResolver.BuildFileNotFoundMessage(directive, filename, resolution);
         }
 
         private static string ComputePatchedContent(PatchResolveResult r)
