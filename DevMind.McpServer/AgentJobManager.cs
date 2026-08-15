@@ -383,6 +383,50 @@ namespace DevMind.McpServer
         public static string TranscriptDir =>
             Path.Combine(Path.GetTempPath(), "devmind", "tasks");
 
+        /// <summary>Cap for devmind_task_status wait_seconds — beyond this the
+        /// caller is polling faster than a task ever finishes anyway, and a stuck
+        /// MCP tool call is worse than a short wait. Values above the cap are
+        /// CLAMPED, not rejected: a caller asking for 300s gets 60s, not an error.</summary>
+        public const int MaxWaitSeconds = 60;
+
+        /// <summary>Clamps a requested wait_seconds to [0, MaxWaitSeconds] (0 =
+        /// return immediately, the long-standing default). Public static so the
+        /// tests pin the clamp without spinning up a job queue.</summary>
+        public static int ClampWaitSeconds(int requested)
+            => requested <= 0 ? 0 : Math.Min(requested, MaxWaitSeconds);
+
+        /// <summary>
+        /// The devmind_task_status wait: with waitSeconds 0 (or negative — the
+        /// omit/zero default) returns immediately, observing the state once. With
+        /// waitSeconds > 0, polls roughly every second (never busy-waiting, always
+        /// honoring cancellation) until the observed state STRING differs from the
+        /// first observation or the clamped budget elapses. Returns true when the
+        /// state changed within the budget. The string probe (not the raw enum) is
+        /// what callers pass so queued->running and done->needs_input both count
+        /// as changes. Pure on the probe — no job access — so tests drive it with
+        /// a fake sequence of states.
+        /// </summary>
+        public static async Task<bool> WaitForStateChangeAsync(
+            Func<string> observeState, int waitSeconds, CancellationToken cancellationToken)
+        {
+            if (ClampWaitSeconds(waitSeconds) <= 0) return false;
+
+            string initial = observeState();
+            var deadline = DateTime.UtcNow.AddSeconds(ClampWaitSeconds(waitSeconds));
+            while (true)
+            {
+                var remaining = deadline - DateTime.UtcNow;
+                if (remaining <= TimeSpan.Zero) return observeState() != initial;
+                // Race the 1s poll against the remaining budget so the wait ends
+                // exactly at the deadline (not at deadline + one more poll).
+                await Task.WhenAny(
+                    Task.Delay(TimeSpan.FromMilliseconds(1000), cancellationToken),
+                    Task.Delay(remaining, cancellationToken)).ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (observeState() != initial) return true;
+            }
+        }
+
         /// <summary>0 when running/next up; N when N jobs are ahead of it in the queue.</summary>
         public int QueuePosition(AgentJob job)
         {

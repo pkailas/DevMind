@@ -5,6 +5,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Test access to internal types (AgentJobManager.ClampWaitSeconds / the
+         task-status wait helper) — see DevMind.McpServer.Tests. -->
+    <InternalsVisibleTo Include="DevMind.McpServer.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="ModelContextProtocol" Version="1.4.0" />
    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.8" />
    <PackageReference Include="SSH.NET" Version="2025.1.0" />

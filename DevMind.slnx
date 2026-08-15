@@ -7,4 +7,5 @@
  <Project Path="DevMind.McpServer/DevMind.McpServer.csproj" />
  <Project Path="DevMind.TUI/DevMind.TUI.csproj" />
   <Project Path="DevMind.Core.Tests/DevMind.Core.Tests.csproj" />
+  <Project Path="DevMind.McpServer.Tests/DevMind.McpServer.Tests.csproj" />
 </Solution>

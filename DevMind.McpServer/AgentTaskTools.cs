@@ -147,31 +147,47 @@ namespace DevMind.McpServer
             "the iteration cap mid-task, thrashed on a repeating failure, or build/test verification " +
             "failed) — check incomplete_reasons and usually devmind_task_continue it. needs_input means " +
             "the agent paused with specific questions (in the result answer) — answer them via " +
-            "devmind_task_continue.")]
-        public Task<string> TaskStatus(
+            "devmind_task_continue. Optional wait_seconds: when > 0, blocks until the job's state " +
+            "CHANGES (e.g. running -> done/needs_input/failed) or that many seconds elapse, then " +
+            "returns the same payload — a waiter gets the fresh state in one call instead of " +
+            "re-polling. Omitted or 0 returns immediately (the default, unchanged); values above " +
+            "60 are clamped to 60, not rejected. Use it in place of your own sleep-and-retry loop.")]
+        public async Task<string> TaskStatus(
             [Description("The job_id returned by devmind_task_start.")] string job_id,
+            [Description("Optional: seconds to wait for the job's state to change before returning " +
+                        "(returns the moment it does; clamped to 60). Omitted or 0 = return " +
+                        "immediately, as before.")] int? wait_seconds = null,
             CancellationToken cancellationToken = default)
         {
             var job = _jobs.Get(job_id);
+            if (job != null)
+            {
+                // Optional blocking wait: poll ~1s (never busy-wait) and return the
+                // moment the DISPLAY state changes — queued -> running is worth
+                // waking on, as is done-with-questions -> needs_input. The payload
+                // below recomputes DisplayState(job), so it reflects the fresh state.
+                _ = await AgentJobManager.WaitForStateChangeAsync(
+                    () => DisplayState(job), wait_seconds ?? 0, cancellationToken).ConfigureAwait(false);
+            }
             if (job == null)
             {
                 var (diedMidRun, startedAt) = CheckStaleActiveMarker(job_id);
                 if (diedMidRun)
-                    return Task.FromResult(Err(
+                    return Err(
                         $"Job {job_id} was RUNNING when its server process died or was killed" +
                         $"{(startedAt != null ? $" (started {startedAt} UTC)" : "")}. Its conversation and " +
                         "result are gone; at most a partial transcript survives — devmind_task_result " +
-                        "will serve it. Re-delegate with a fresh brief."));
-                return Task.FromResult(Err(
+                        "will serve it. Re-delegate with a fresh brief.");
+                return Err(
                     $"Unknown job_id: {job_id} — not in this server process. Finished jobs persist a " +
-                    "result sidecar + transcript on disk: try devmind_task_result, or devmind_task_list."));
+                    "result sidecar + transcript on disk: try devmind_task_result, or devmind_task_list.");
             }
 
             double? elapsed = job.StartedAtUtc.HasValue
                 ? Math.Round(((job.EndedAtUtc ?? DateTime.UtcNow) - job.StartedAtUtc.Value).TotalSeconds, 0)
                 : null;
 
-            return Task.FromResult(JsonSerializer.Serialize(new
+            return JsonSerializer.Serialize(new
             {
                 job_id = job.Id,
                 state = DisplayState(job),
@@ -181,7 +197,7 @@ namespace DevMind.McpServer
                 working_dir = job.WorkingDirectory,
                 error = job.Error,
                 transcript_tail = job.GetTail(),
-            }, JsonOpts));
+            }, JsonOpts);
         }
 
         /// <summary>"done" only when the work is actually trustworthy — a depth-capped or
