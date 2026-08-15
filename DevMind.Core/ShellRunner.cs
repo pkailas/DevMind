@@ -339,11 +339,11 @@ namespace DevMind
                 try { exitCode = (timedOut || cancelled) ? -1 : proc.ExitCode; }
                 catch { exitCode = -1; }
 
-                if (timedOut)        onLine?.Report(new ShellOutputLine("[SHELL] Command timed out after 120 seconds.", isError: true));
+                if (timedOut)        onLine?.Report(new ShellOutputLine($"[SHELL] Command timed out after {timeoutSeconds} seconds.", isError: true));
                 else if (cancelled)  onLine?.Report(new ShellOutputLine("[SHELL] Command cancelled.", isError: true));
 
                 var sb = new StringBuilder();
-                if (timedOut)        sb.AppendLine("[SHELL] Command timed out after 120 seconds.");
+                if (timedOut)        sb.AppendLine($"[SHELL] Command timed out after {timeoutSeconds} seconds.");
                 else if (cancelled)  sb.AppendLine("[SHELL] Command cancelled.");
                 string buffered = outputBuffer.ToString().TrimEnd();
                 if (!string.IsNullOrEmpty(buffered)) sb.Append(buffered);

@@ -160,6 +160,37 @@ namespace DevMind
                 });
                 return "[web_search] Cancelled by caller.";
             }
+            catch (HttpRequestException hre)
+            {
+                long elapsedMs = sw.ElapsedMilliseconds;
+                string truncatedQuery = query.Length > 200 ? query.Substring(0, 200) : query;
+                DmTrace.Event("info", "web_search.transport_error", new Dictionary<string, object>
+                {
+                    ["query"] = truncatedQuery,
+                    ["elapsed_ms"] = elapsedMs,
+                    ["message"] = hre.Message,
+                });
+                // Transport failure: the SearXNG backend is unreachable (down, DNS, connection
+                // refused). This is distinct from a malformed query — stop retrying, fix the backend.
+                return $"[web_search error] Search backend unreachable (transport failure): {hre.Message}. " +
+                       "The SearXNG service at DEVMIND_SEARCH_URL is down or unreachable; retrying the same " +
+                       "query will keep failing until the service is restored.";
+            }
+            catch (JsonException jex)
+            {
+                long elapsedMs = sw.ElapsedMilliseconds;
+                string truncatedQuery = query.Length > 200 ? query.Substring(0, 200) : query;
+                DmTrace.Event("info", "web_search.parse_error", new Dictionary<string, object>
+                {
+                    ["query"] = truncatedQuery,
+                    ["elapsed_ms"] = elapsedMs,
+                    ["message"] = jex.Message,
+                });
+                // Parse failure: the backend responded but the response was not valid/expected JSON.
+                // This is distinct from a down backend — try a different query or check the response.
+                return $"[web_search error] Search backend returned an unparseable response (not valid JSON): {jex.Message}. " +
+                       "The SearXNG service IS reachable; the response format was unexpected. Try rewording the query or verify the service version.";
+            }
             catch (Exception ex)
             {
                 long elapsedMs = sw.ElapsedMilliseconds;
@@ -171,7 +202,8 @@ namespace DevMind
                     ["exception"] = ex.GetType().Name,
                     ["message"] = ex.Message,
                 });
-                return $"[web_search error] {ex.Message}";
+                // Unclassified: we do not know the cause — say so rather than implying one.
+                return $"[web_search error] Unclassified error (cause undetermined): {ex.Message}";
             }
         }
 
@@ -312,6 +344,35 @@ namespace DevMind
                 });
                 return "[web_fetch] Cancelled by caller.";
             }
+            catch (HttpRequestException hre)
+            {
+                long elapsedMs = sw.ElapsedMilliseconds;
+                DmTrace.Event("info", "web_fetch.transport_error", new Dictionary<string, object>
+                {
+                    ["url"] = url,
+                    ["elapsed_ms"] = elapsedMs,
+                    ["message"] = hre.Message,
+                });
+                // Transport failure: the fetcher service is unreachable (down, DNS, connection refused).
+                // Distinct from a page the fetcher could not parse — stop retrying, fix the fetcher.
+                return $"[web_fetch error] Fetcher service unreachable (transport failure): {hre.Message}. " +
+                       "The fetcher at DEVMIND_FETCH_URL is down or unreachable; retrying will keep failing " +
+                       "until the service is restored.";
+            }
+            catch (JsonException jex)
+            {
+                long elapsedMs = sw.ElapsedMilliseconds;
+                DmTrace.Event("info", "web_fetch.parse_error", new Dictionary<string, object>
+                {
+                    ["url"] = url,
+                    ["elapsed_ms"] = elapsedMs,
+                    ["message"] = jex.Message,
+                });
+                // Parse failure: the fetcher responded but its response was not valid/expected JSON.
+                // Distinct from a down fetcher — the fetcher IS up, its response was malformed.
+                return $"[web_fetch error] Fetcher returned an unparseable response (not valid JSON): {jex.Message}. " +
+                       "The fetcher service IS reachable; the response format was unexpected. Verify the fetcher version or try a different URL.";
+            }
             catch (Exception ex)
             {
                 long elapsedMs = sw.ElapsedMilliseconds;
@@ -322,7 +383,8 @@ namespace DevMind
                     ["exception"] = ex.GetType().Name,
                     ["message"] = ex.Message,
                 });
-                return $"[web_fetch error] {ex.Message}";
+                // Unclassified: we do not know the cause — say so rather than implying one.
+                return $"[web_fetch error] Unclassified error (cause undetermined): {ex.Message}";
             }
         }
     }

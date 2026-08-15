@@ -1540,9 +1540,9 @@ internal sealed class DevMindTools
             {
                 proc = Process.Start(psi)!;
             }
-            catch (System.ComponentModel.Win32Exception)
+            catch (System.ComponentModel.Win32Exception ex)
             {
-                return "[elevated_shell] UAC prompt was declined (or elevation is blocked by policy).";
+                return DescribeElevationFailure(ex);
             }
 
             using (proc)
@@ -2728,5 +2728,22 @@ internal sealed class DevMindTools
     {
         string ext = Path.GetExtension(path)?.ToLowerInvariant() ?? "";
        return ext == ".cmd" || ext == ".bat" || ext == ".sh" || ext == ".ps1";
+    }
+
+    /// <summary>
+    /// Describes a Win32Exception raised when starting an elevated ("runas") process.
+    /// Distinguishes the one cause we can actually confirm — ERROR_CANCELLED (1223), the
+    /// genuine user-declined-at-the-UAC-prompt case — from everything else (no interactive
+    /// desktop / no session to prompt in, elevation blocked by policy, …), where the cause
+    /// is undetermined and we report the error code rather than asserting intent.
+    /// </summary>
+    internal static string DescribeElevationFailure(System.ComponentModel.Win32Exception ex)
+    {
+        if (ex.NativeErrorCode == 1223) // ERROR_CANCELLED: user hit Cancel/Decline on the UAC prompt.
+            return "[elevated_shell] UAC prompt was declined by the user (Windows error 1223, ERROR_CANCELLED).";
+        return $"[elevated_shell] Elevation failed (Windows error {ex.NativeErrorCode}: {ex.Message}); " +
+               "the cause could not be determined — this may mean there is no interactive desktop to " +
+               "show a UAC prompt in (e.g. running headless), or elevation is blocked by policy. Do not " +
+               "assume the user rejected a prompt; none may have been shown.";
     }
 }
