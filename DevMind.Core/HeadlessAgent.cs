@@ -544,9 +544,9 @@ namespace DevMind
             "recurring after real research, call ask_caller with 1-3 specific questions and\n" +
             "what you already tried — the caller answers and resumes this conversation with\n" +
             "full context. NEVER guess at facts you could not verify; a good question is\n" +
-            "cheap, a confident wrong answer is expensive. Operate ONLY within the working directory, and\n" +
-            "always refer to files by paths RELATIVE to it — absolute paths outside the\n" +
-            "working directory are blocked. Do NOT spend iterations verifying the full build\n" +
+            "cheap, a confident wrong answer is expensive. Write operations (create, patch, delete, rename, append) are confined\n" +
+            "to the working directory. Read operations are not — use an absolute path to reach a file outside it if\n" +
+            "a relative lookup misses. Do NOT spend iterations verifying the full build\n" +
             "or wrestling shell timeouts to do so — the job runner builds the project itself\n" +
             "after you finish and reports the result to the caller; use the run_build tool\n" +
             "only for a quick compile check when you genuinely need one mid-task. Do not\n" +

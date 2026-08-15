@@ -293,14 +293,17 @@ namespace DevMind
 
         /// <summary>
         /// Walks up from startDir looking for a directory containing .git.
-        /// Returns the git root directory, or null if not found.
+        /// .git may be a directory (normal clone) or a file (worktree/submodule
+        /// containing a "gitdir:" pointer). Returns the git root directory, or
+        /// null if not found.
         /// </summary>
         public static string FindGitRoot(string startDir)
         {
             string dir = startDir;
             while (!string.IsNullOrEmpty(dir))
             {
-                if (Directory.Exists(Path.Combine(dir, ".git")))
+                string gitPath = Path.Combine(dir, ".git");
+                if (Directory.Exists(gitPath) || File.Exists(gitPath))
                     return dir;
                 string parent = Path.GetDirectoryName(dir);
                 if (parent == dir) break;
