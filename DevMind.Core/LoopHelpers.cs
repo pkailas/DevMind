@@ -17,8 +17,12 @@ namespace DevMind
         private static string _cachedMSBuildPath;
 
         /// <summary>
-        /// Returns true if the shell command is a run/exec invocation (not a build command).
-        /// These commands complete a task when they exit 0 and should not trigger agentic continuation.
+        /// Returns true if the shell command is an explicit run/exec invocation
+        /// (dotnet run / dotnet exec). Bare "*.exe" commands are deliberately NOT
+        /// classified here: running a built exe is typically a follow-up verification
+        /// step ("run this and report on it"), not the task's deliverable, and
+        /// treating it as terminal truncated such tasks. See LoopDriver's
+        /// run/exec fallback, which additionally requires a pure-shell turn.
         /// </summary>
         public static bool IsRunOrExecCommand(string command)
         {
@@ -26,8 +30,7 @@ namespace DevMind
                 return false;
             string cmd = command.Trim().ToLowerInvariant();
             return cmd.Contains("dotnet run")
-                || cmd.Contains("dotnet exec")
-                || (cmd.EndsWith(".exe") && !cmd.Contains("msbuild") && !cmd.Contains("dotnet build"));
+                || cmd.Contains("dotnet exec");
         }
 
         /// <summary>

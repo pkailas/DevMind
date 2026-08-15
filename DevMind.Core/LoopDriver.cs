@@ -191,6 +191,13 @@ namespace DevMind
 
                 LoopHelpers.InjectToolResultMessages(_llmClient, lastToolCalls, result, outcome.Blocks);
 
+                // Run/exec fallback gate: any file mutation this turn marks the run/exec
+                // fallback as a verification step, not the deliverable (see LoopState).
+                if (result.FilesCreated.Count > 0 || result.FilesDeleted.Count > 0
+                    || result.FilesRenamed.Count > 0 || result.PatchedPaths.Count > 0
+                    || result.FilesAppended.Count > 0)
+                    _state.HadFileMutationThisTurn = true;
+
                 // Update consecutive-error counter for stuck-loop detection.
                 string primaryTool = lastToolCalls.Count > 0 ? lastToolCalls[0].Name : null;
                 bool turnHadError  = result.Errors.Count > 0
@@ -255,15 +262,36 @@ namespace DevMind
                     return MakeTerminal(userMessage, assistantResponse, outcome, result, lastToolCalls);
                 }
 
-                // Run/exec command succeeded — treat as task complete
-                if (result.ShellExitCode.HasValue && result.ShellExitCode == 0
+                // Run/exec command succeeded — implicit DONE fallback for models that
+                // never emit task_done. Fires ONLY when the run/exec looks like the task's
+                // deliverable: the turn so far was pure shell (no file mutations) and no
+                // run/exec already succeeded this turn. A run after scaffolding/patching,
+                // or a second successful run, is an intermediate verification step — the
+                // model must call task_done itself, otherwise we truncate
+                // "run this and report on it" tasks.
+                bool runExecSucceeded = result.ShellExitCode.HasValue && result.ShellExitCode == 0
                     && !string.IsNullOrEmpty(result.LastShellCommand)
-                    && LoopHelpers.IsRunOrExecCommand(result.LastShellCommand))
+                    && LoopHelpers.IsRunOrExecCommand(result.LastShellCommand);
+                if (runExecSucceeded)
                 {
-                    _agenticHost.AppendOutput("[AGENTIC] Run/exec command succeeded — treating as task complete.\n", OutputColor.Success);
-                    _state.AgenticDepth = 0;
-                    return MakeTerminal(userMessage, assistantResponse, outcome, result, lastToolCalls);
+                    if (_state.HadFileMutationThisTurn || _state.RunExecSucceededThisTurn)
+                    {
+                        if (_options.ShowDebugOutput)
+                            _agenticHost.AppendOutput(
+                                "[DIAG] Run/exec succeeded after prior work this turn — not treating as done.\n", OutputColor.Dim);
+                    }
+                    else
+                    {
+                        _agenticHost.AppendOutput("[AGENTIC] Run/exec command succeeded — treating as task complete.\n", OutputColor.Success);
+                        _state.AgenticDepth = 0;
+                        return MakeTerminal(userMessage, assistantResponse, outcome, result, lastToolCalls);
+                    }
                 }
+
+                // Remember a successful run/exec this turn even when the fallback did not
+                // fire, so a LATER run/exec in the same turn never terminates implicitly.
+                if (runExecSucceeded)
+                    _state.RunExecSucceededThisTurn = true;
 
                 // Consecutive-error abort — same tool failing without resolution
                 if (_state.ConsecutiveErrorCount >= ConsecutiveErrorAbortThreshold)
