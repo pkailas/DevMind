@@ -283,9 +283,9 @@ namespace DevMind.Core.Tests
             public Task<string> RenameFileAsync(string oldFilename, string newFilename) => Task.FromResult("Renamed");
             public Task<string> GetFileDiffAsync(string filename) => Task.FromResult("");
             public Task<string> RunTestsAsync(string project, string filter, int? timeoutSeconds = null) => Task.FromResult("");
-            public Task<PatchResolveResult> ResolvePatchAsync(string patchContent, bool fromToolCall = false) =>
+            public Task<(PatchResolveResult, string)> ResolvePatchAsync(string patchContent, bool fromToolCall = false) =>
                 throw new NotImplementedException("tests avoid patch blocks");
-            public Task<string> ApplyResolvedPatchAsync(PatchResolveResult resolved) =>
+            public Task<(string, string)> ApplyResolvedPatchAsync(PatchResolveResult resolved) =>
                 throw new NotImplementedException("tests avoid patch blocks");
             public Task<List<int>> ShowDiffPreviewAsync(List<PatchResolveResult> resolvedPatches, CancellationToken cancellationToken) =>
                 Task.FromResult(new List<int>());

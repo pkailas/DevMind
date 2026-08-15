@@ -99,9 +99,10 @@ namespace DevMind.Core.Tests
             async Task PatchAsync(string find, string replace)
             {
                 string patch = $"PATCH victim.txt\nFIND:\n{find}\nREPLACE:\n{replace}\nEND_PATCH";
-                var resolved = await agenticHost.ResolvePatchAsync(patch, fromToolCall: true);
+                var (resolved, _) = await agenticHost.ResolvePatchAsync(patch, fromToolCall: true);
                 Assert.NotNull(resolved);
-                Assert.NotNull(await agenticHost.ApplyResolvedPatchAsync(resolved));
+                var (patched, _) = await agenticHost.ApplyResolvedPatchAsync(resolved);
+                Assert.NotNull(patched);
             }
 
             await PatchAsync("alpha", "ALPHA");
@@ -139,9 +140,10 @@ namespace DevMind.Core.Tests
             for (int i = 5; i <= 50; i += 5)
             {
                 string patch = $"PATCH big.txt\nFIND:\nline {i:D2} original\nREPLACE:\nline {i:D2} PATCHED\nEND_PATCH";
-                var resolved = await agenticHost.ResolvePatchAsync(patch, fromToolCall: true); // must NOT throw
+                var (resolved, _) = await agenticHost.ResolvePatchAsync(patch, fromToolCall: true); // must NOT throw
                 Assert.NotNull(resolved);
-                Assert.NotNull(await agenticHost.ApplyResolvedPatchAsync(resolved));
+                var (patched, _) = await agenticHost.ApplyResolvedPatchAsync(resolved);
+                Assert.NotNull(patched);
             }
 
             string final = File.ReadAllText(file);
@@ -160,9 +162,9 @@ namespace DevMind.Core.Tests
             File.WriteAllText(file, "one\ntwo\nthree\nfour\nfive\n");
             await agenticHost.LoadFileContentAsync("echo.txt", forceFullRead: true);
 
-            var resolved = await agenticHost.ResolvePatchAsync(
+            var (resolved, _) = await agenticHost.ResolvePatchAsync(
                 "PATCH echo.txt\nFIND:\nthree\nREPLACE:\nTHREE_EDITED\nEND_PATCH", fromToolCall: true);
-            string patchedPath = await agenticHost.ApplyResolvedPatchAsync(resolved);
+            var (patchedPath, _) = await agenticHost.ApplyResolvedPatchAsync(resolved);
             Assert.NotNull(patchedPath);
 
             string echo = agenticHost.TakePatchContextEcho(patchedPath);

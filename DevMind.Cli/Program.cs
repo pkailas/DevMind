@@ -264,10 +264,12 @@ namespace DevMind
         {
             IAgenticHost agenticHost = host;
 
-            var resolved = await agenticHost.ResolvePatchAsync(patchInput, fromToolCall: false);
+            var (resolved, resolveFailure) = await agenticHost.ResolvePatchAsync(patchInput, fromToolCall: false);
             if (resolved == null)
             {
-                Console.Error.WriteLine("[PATCH] Resolve failed — check file name and FIND/REPLACE syntax.");
+                Console.Error.WriteLine(string.IsNullOrEmpty(resolveFailure)
+                    ? "[PATCH] Resolve failed — check file name and FIND/REPLACE syntax."
+                    : $"[PATCH] Resolve failed: {resolveFailure}");
                 return;
             }
 

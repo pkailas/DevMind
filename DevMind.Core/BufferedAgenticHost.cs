@@ -1255,7 +1255,7 @@ namespace DevMind
 
         // ── IAgenticHost.ResolvePatchAsync ────────────────────────────────────────
 
-        async Task<PatchResolveResult> IAgenticHost.ResolvePatchAsync(string patchContent, bool fromToolCall)
+        async Task<(PatchResolveResult, string)> IAgenticHost.ResolvePatchAsync(string patchContent, bool fromToolCall)
         {
             // Staleness guard (headless): too many patches since the last read means the
             // model's view of the file has drifted — the precondition for overlapping-
@@ -1287,7 +1287,7 @@ namespace DevMind
                 if (string.IsNullOrEmpty(blockFileName))
                 {
                     AppendOutput("[PATCH] No filename specified.\n", OutputColor.Error);
-                    return null;
+                    return (null, "No filename specified in the PATCH header — the first line must be 'PATCH <filename>'.");
                 }
 
                 string normalizedHint = blockFileName.Replace('\\', '/');
@@ -1300,7 +1300,7 @@ namespace DevMind
                 if (!File.Exists(fullPath))
                 {
                     AppendOutput($"[PATCH] File not found: {fullPath}\n", OutputColor.Warning);
-                    return null;
+                    return (null, $"File not found: {fullPath}");
                 }
 
                 // Write guard — AFTER resolution, on the path that will actually be written
@@ -1311,13 +1311,16 @@ namespace DevMind
                     if (!approved)
                     {
                         AppendOutput($"[WRITE GUARD] Patch to \"{fileNameOnly}\" blocked.\n", OutputColor.Dim);
-                        return null;
+                        return (null, $"Write guard declined — READ {fileNameOnly} first, then retry the patch against its current content.");
                     }
                     _taskReadFiles.MarkKnown(fullPath);
                 }
 
                 if (!IsWriteAllowed(fullPath, "patch"))
-                    return null;
+                {
+                    AppendOutput($"[PATCH] Write not allowed: {fullPath}\n", OutputColor.Error);
+                    return (null, $"Write not allowed — {fileNameOnly} is outside the allowed write root. This patch cannot be applied; use another approach.");
+                }
 
                 _fileCache.InvalidateIfStale(FileCacheKey(fullPath), fullPath); // out-of-band writes
                 if (!_fileCache.Contains(FileCacheKey(fullPath)))
@@ -1332,19 +1335,22 @@ namespace DevMind
                 CaptureFileSnapshot(fullPath);
 
                 var (content, encoding) = PatchEngine.ReadFilePreservingEncoding(fullPath);
-                return PatchEngine.ResolvePatch(patchContent, fullPath, blockFileName, content, encoding,
+                var patchResult = PatchEngine.ResolvePatch(patchContent, fullPath, blockFileName, content, encoding,
                     fromToolCall, AppendOutput);
+                return (patchResult, patchResult == null
+                    ? "FIND/REPLACE could not be resolved against the file (FIND text not matching, ambiguous, or no-op). The diagnostic above names the cause; act on it — do not retry the identical patch."
+                    : null);
             }
             catch (Exception ex)
             {
                 AppendOutput($"[PATCH] Error: {ex.Message}\n", OutputColor.Error);
-                return null;
+                return (null, $"Resolve error: {ex.Message}");
             }
         }
 
         // ── IAgenticHost.ApplyResolvedPatchAsync ──────────────────────────────────
 
-        Task<string> IAgenticHost.ApplyResolvedPatchAsync(PatchResolveResult resolved)
+        Task<(string, string)> IAgenticHost.ApplyResolvedPatchAsync(PatchResolveResult resolved)
         {
             try
             {
@@ -1352,7 +1358,8 @@ namespace DevMind
                 if (_pendingConflict != null)
                 {
                     AppendOutput($"[MERGE CONFLICT] Cannot apply patch — pending conflict on \"{_pendingConflict.FilePath}\" must be resolved first. Use /resolve accept_proposed, /resolve accept_current, or /resolve cancel.\n", OutputColor.Error);
-                    return Task.FromResult<string>(null);
+                    return Task.FromResult<(string, string)>((null,
+                        $"Blocked by a pending merge conflict on {_pendingConflict.FilePath} — that conflict must be resolved before this patch can apply."));
                 }
 
                 string fileNameOnly = SafeGetFileName(resolved.FullPath);
@@ -1395,7 +1402,8 @@ namespace DevMind
                         AppendOutput($"    Current:   {ThreeWayMergeCheck.Truncate(c.CurrentText, 60)}\n", OutputColor.Error);
                     }
                     AppendOutput($"  Resolution: type /resolve accept_proposed, /resolve accept_current, or /resolve cancel\n\n", OutputColor.Warning);
-                    return Task.FromResult<string>(null);
+                    return Task.FromResult<(string, string)>((null,
+                        $"Merge conflict — the file changed outside this patch since it was read. The conflict regions are shown above; re-READ {fileNameOnly} and re-issue the patch against its current content."));
                 }
 
                 // No conflicts — apply patch to disk
@@ -1405,7 +1413,7 @@ namespace DevMind
                 if (!result.Success)
                 {
                     AppendOutput($"[PATCH] Error: {result.Error}\n", OutputColor.Error);
-                    return Task.FromResult<string>(null);
+                    return Task.FromResult<(string, string)>((null, $"Write failed: {result.Error}"));
                 }
 
                 if (result.BackupPath != null)
@@ -1434,12 +1442,12 @@ namespace DevMind
                 if (RestrictWritesToWorkingDirectory)
                     UpdatePatchLocalityAndEcho(fileNameOnly, resolved, result.UpdatedContent);
 
-                return Task.FromResult(resolved.FullPath);
+                return Task.FromResult((resolved.FullPath, (string)null));
             }
             catch (Exception ex)
             {
                 AppendOutput($"[PATCH] Error: {ex.Message}\n", OutputColor.Error);
-                return Task.FromResult<string>(null);
+                return Task.FromResult<(string, string)>((null, $"Apply error: {ex.Message}"));
             }
         }
 

@@ -117,15 +117,19 @@ namespace DevMind
 
         /// <summary>
         /// Resolves a PATCH block without applying it. Returns a
-        /// <see cref="PatchResolveResult"/> with confidence and match data,
-        /// or null if resolution failed.
+        /// <see cref="PatchResolveResult"/> with confidence and match data.
+        /// On failure the result is null and <c>failureReason</c> carries a compact,
+        /// cause-specific description the executor relays to the LLM.
         /// </summary>
-        Task<PatchResolveResult> ResolvePatchAsync(string patchContent, bool fromToolCall = false);
+        Task<(PatchResolveResult result, string failureReason)> ResolvePatchAsync(
+            string patchContent, bool fromToolCall = false);
 
         /// <summary>
-        /// Applies a previously resolved PATCH. Returns the full path on success, null on failure.
+        /// Applies a previously resolved PATCH. Returns the full path on success.
+        /// On failure the path is null and <c>failureReason</c> carries a compact,
+        /// cause-specific description the executor relays to the LLM.
         /// </summary>
-        Task<string> ApplyResolvedPatchAsync(PatchResolveResult resolved);
+        Task<(string fullPath, string failureReason)> ApplyResolvedPatchAsync(PatchResolveResult resolved);
 
         /// <summary>
         /// Optional (headless): returns and clears a fresh numbered content window around the region

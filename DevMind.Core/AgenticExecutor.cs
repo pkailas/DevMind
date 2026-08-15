@@ -719,7 +719,7 @@ namespace DevMind
                 var block = patchBlocks[i];
                 try
                 {
-                    var resolveResult = await _host.ResolvePatchAsync(block.Content, block.FromToolCall);
+                    var (resolveResult, failureReason) = await _host.ResolvePatchAsync(block.Content, block.FromToolCall);
                     if (resolveResult != null)
                     {
                         resolved.Add(resolveResult);
@@ -730,15 +730,17 @@ namespace DevMind
                         result.PatchesFailed++;
                         string failedFile = string.IsNullOrEmpty(block.FileName)
                             ? "unknown" : System.IO.Path.GetFileName(block.FileName);
+                        string cause = string.IsNullOrEmpty(failureReason) ? "unknown" : failureReason;
                         result.Errors.Add(
-                            $"[PATCH-FAILED:{failedFile}] FIND text not found — file was NOT modified. " +
-                            "READ the file to get exact current content, then retry PATCH with correct FIND text.");
+                            $"[PATCH-FAILED:{failedFile}] Resolve failed: {cause} File was NOT modified.");
                     }
                 }
                 catch (Exception ex)
                 {
                     result.PatchesFailed++;
-                    result.Errors.Add(ex.Message);
+                    string failedFile = string.IsNullOrEmpty(block.FileName)
+                        ? "unknown" : System.IO.Path.GetFileName(block.FileName);
+                    result.Errors.Add($"[PATCH-FAILED:{failedFile}] Resolve error: {ex.Message}");
                     _host.AppendOutput($"[PATCH ERROR] {block.FileName}: {ex.Message}\n", OutputColor.Error);
                 }
             }
@@ -757,7 +759,7 @@ namespace DevMind
                     // Auto-apply immediately — no card, no await
                     try
                     {
-                        string patchedPath = await _host.ApplyResolvedPatchAsync(r);
+                        var (patchedPath, failureReason) = await _host.ApplyResolvedPatchAsync(r);
                         if (patchedPath != null)
                         {
                             result.PatchesApplied++;
@@ -773,15 +775,17 @@ namespace DevMind
                             result.PatchesFailed++;
                             string failedFile = string.IsNullOrEmpty(r.FileName)
                                 ? "unknown" : System.IO.Path.GetFileName(r.FileName);
+                            string cause = string.IsNullOrEmpty(failureReason) ? "unknown" : failureReason;
                             result.Errors.Add(
-                                $"[PATCH-FAILED:{failedFile}] FIND text not found — file was NOT modified. " +
-                                "READ the file to get exact current content, then retry PATCH with correct FIND text.");
+                                $"[PATCH-FAILED:{failedFile}] Apply failed: {cause} File was NOT modified.");
                         }
                     }
                     catch (Exception ex)
                     {
                         result.PatchesFailed++;
-                        result.Errors.Add(ex.Message);
+                        string failedFile = string.IsNullOrEmpty(r.FileName)
+                            ? "unknown" : System.IO.Path.GetFileName(r.FileName);
+                        result.Errors.Add($"[PATCH-FAILED:{failedFile}] Apply error: {ex.Message}");
                         _host.AppendOutput($"[PATCH ERROR] {r.FileName}: {ex.Message}\n", OutputColor.Error);
                     }
                 }
@@ -819,7 +823,7 @@ namespace DevMind
                     {
                         try
                         {
-                            string patchedPath = await _host.ApplyResolvedPatchAsync(needPreview[i]);
+                            var (patchedPath, failureReason) = await _host.ApplyResolvedPatchAsync(needPreview[i]);
                             if (patchedPath != null)
                             {
                                 result.PatchesApplied++;
@@ -833,13 +837,15 @@ namespace DevMind
                             else
                             {
                                 result.PatchesFailed++;
-                                result.Errors.Add($"[PATCH-FAILED:{needPreview[i].FileName}] Apply failed after approval.");
+                                string cause = string.IsNullOrEmpty(failureReason) ? "unknown" : failureReason;
+                                result.Errors.Add(
+                                    $"[PATCH-FAILED:{needPreview[i].FileName}] Apply failed: {cause} File was NOT modified.");
                             }
                         }
                         catch (Exception ex)
                         {
                             result.PatchesFailed++;
-                            result.Errors.Add(ex.Message);
+                            result.Errors.Add($"[PATCH-FAILED:{needPreview[i].FileName}] Apply error: {ex.Message}");
                             _host.AppendOutput($"[PATCH ERROR] {needPreview[i].FileName}: {ex.Message}\n", OutputColor.Error);
                         }
                     }
