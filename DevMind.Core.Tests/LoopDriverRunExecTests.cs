@@ -133,6 +133,64 @@ namespace DevMind.Core.Tests
             Assert.Contains("Task complete.", env.Host.Output);
         }
 
+        // ── Prose-finish re-prompt: task_done vs ask_caller ─────────────────────────
+        // The signalling gap: a model that ends in prose with questions buried in it,
+        // instead of calling ask_caller, terminates as "done" and the caller never learns
+        // input is wanted. The structural hook is the no-tool-call terminal gate. These
+        // tests pin that the one-shot re-prompt (a) fires for a long prose ending and
+        // (b) presents BOTH terminal tools — task_done AND ask_caller — so the model
+        // makes the done-vs-needs_input decision at the exact point where it stops.
+
+        [Fact]
+        public async Task ProseFinish_NoToolCall_FiresOneShotRePromptWithBothTerminalTools()
+        {
+            using var env = new Env();
+            // A prose ending with no tool call (the "2 of 4 runs" failure mode — the
+            // model writes numbered questions in the final text and stops).
+            string prose = "I need to clarify a couple of things before proceeding: " +
+                           "1. Should the endpoint use SQL or an ORM? 2. What auth is expected?";
+
+            var turn = await env.RunProseTurn(prose);
+
+            Assert.Equal(LoopIterationKind.ShouldReTrigger, turn.Kind);
+            Assert.True(env.State.PromptedForTaskDone);          // one-shot consumed
+            Assert.True(env.State.ShellLoopPending);
+            // The re-prompt must name BOTH terminal tools so the decision is explicit.
+            Assert.Contains("task_done", turn.NextContextualMessage);
+            Assert.Contains("ask_caller", turn.NextContextualMessage);
+            Assert.Equal(SyntheticPrompts.ProseFinish, turn.NextContextualMessage);
+        }
+
+        [Fact]
+        public async Task ProseFinish_ShortQuestionOnlyAlso_FiresRePrompt()
+        {
+            using var env = new Env();
+            // Regression for the loosened gate: a SHORT question-only ending (fewer
+            // than the old 40-char threshold) must still reach the decision prompt,
+            // not terminate as "done" with the question buried in the answer.
+            var turn = await env.RunProseTurn("Should I use SQL or ORM?");
+
+            Assert.Equal(LoopIterationKind.ShouldReTrigger, turn.Kind);
+            Assert.True(env.State.PromptedForTaskDone);
+            Assert.Contains("ask_caller", turn.NextContextualMessage);
+            Assert.Contains("task_done", turn.NextContextualMessage);
+        }
+
+        [Fact]
+        public async Task ProseFinish_RePromptIsOneShot_SecondProseTerminates()
+        {
+            using var env = new Env();
+            var first = await env.RunProseTurn("I need to clarify: which database should I target here?");
+            Assert.Equal(LoopIterationKind.ShouldReTrigger, first.Kind);
+
+            // The model STILL answers in prose (ignores the re-prompt) — the loop must
+            // not loop forever: PromptedForTaskDone is already set, so it accepts
+            // prose-finish and terminates (reason null → caller sees "done").
+            var second = await env.RunProseTurn("I'll make a reasonable assumption and note it.");
+            Assert.Equal(LoopIterationKind.Terminal, second.Kind);
+            Assert.Null(second.TerminalReason);
+        }
+
         // ── Test harness ──────────────────────────────────────────────────────────
 
         private static ToolCallResult Tool(string name, string argumentsJson)
@@ -176,6 +234,19 @@ namespace DevMind.Core.Tests
                 _llm.LastToolCalls = calls.ToList();
                 return _driver.ProcessIterationAsync(
                     "task", "working on it", buildCommand: "dotnet build", CancellationToken.None);
+            }
+
+            /// <summary>
+            /// Drives one NO-TOOL-CALL iteration: the model answered in plain prose.
+            /// <paramref name="prose"/> is the assistant response; ShellLoopPending is set so
+            /// the loop is inside an agentic cycle (the real precondition — a tool turn just ran).
+            /// </summary>
+            public Task<LoopIterationResult> RunProseTurn(string prose)
+            {
+                _llm.LastToolCalls = null;
+                State.ShellLoopPending = true;
+                return _driver.ProcessIterationAsync(
+                    "task", prose, buildCommand: "dotnet build", CancellationToken.None);
             }
 
             public void Dispose() => Directory.Delete(_dir, recursive: true);

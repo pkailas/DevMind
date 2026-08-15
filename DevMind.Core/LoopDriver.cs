@@ -433,7 +433,11 @@ namespace DevMind
 
                 string trimmedResponse = assistantResponse?.Trim() ?? "";
                 bool insideAgenticCycle = _state.AgenticDepth > 0 || _state.ShellLoopPending;
-                bool prosePresent       = trimmedResponse.Length > 40 && !outcome.HasAnyDirective && !outcome.IsDone;
+                // ">= 20" (was "> 40"): the re-prompt below is a terminal DECISION
+                // (task_done vs ask_caller), so a SHORT question-only ending — e.g.
+                // "Should I use SQL or ORM?" — must reach it too. A pure one-word
+                // ack ("ok"/"done", < 20 chars) still terminates without re-prompting.
+                bool prosePresent       = trimmedResponse.Length >= 20 && !outcome.HasAnyDirective && !outcome.IsDone;
 
                 // ── Layer 2: Narration-stall retry guard ─────────────────────────
                 // When inside an agentic cycle, no tool calls were made, but the prose
@@ -465,12 +469,15 @@ namespace DevMind
 
                 if (insideAgenticCycle && prosePresent && !_state.PromptedForTaskDone)
                 {
-                    // One-shot re-prompt asking for task_done.
+                    // One-shot re-prompt: the model ended in prose with no terminal tool
+                    // call — the exact point where it must choose task_done (done) vs
+                    // ask_caller (needs_input). The prompt presents both so a blocked run
+                    // is not pushed to bury its questions in a task_done summary.
                     _state.PromptedForTaskDone = true;
                     _state.ShellLoopPending    = true;
 
                     if (_options.ShowDebugOutput)
-                        _agenticHost.AppendOutput("[DIAG] Prose-finish detected — re-prompting for task_done.\n", OutputColor.Dim);
+                        _agenticHost.AppendOutput("[DIAG] Prose-finish detected — re-prompting for task_done or ask_caller.\n", OutputColor.Dim);
 
                     return LoopIterationResult.MakeShouldReTrigger(
                         assistantResponse, outcome, null, null,

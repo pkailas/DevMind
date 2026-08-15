@@ -175,6 +175,55 @@ namespace DevMind.Core.Tests
         }
 
         [Fact]
+        public async Task RunAsync_ProseQuestionsThenAskCaller_ReportsNeedsInput()
+        {
+            // The signalling gap, end-to-end: the agent does some work, then ends in PROSE
+            // with open questions (no terminal tool call). LoopDriver's one-shot re-prompt
+            // (task_done vs ask_caller) nudges the decision; here the model calls ask_caller,
+            // so the caller-visible state is needs_input — NOT done with questions buried in
+            // the answer. This is the outcome the MCP job runner surfaces as needs_input.
+            using var server = new FakeSseServer();
+            // Iteration 1: do some real work (file tool → loop is inside an agentic cycle).
+            server.SseQueue.Add(FakeSseServer.BuildToolCallSse("create_file",
+                "{\"filename\":\"notes.txt\",\"content\":\"draft\"}"));
+            // Iteration 2: prose ending with questions, NO terminal tool (the 2-of-4 bug).
+            // Avoids the Layer-2 narration-claim signals so it hits the prose-finish gate.
+            server.SseQueue.Add(FakeSseServer.BuildTextSse(
+                "Before I proceed, I need to clarify two things: " +
+                "1. Should the endpoint use SQL or an ORM? " +
+                "2. What authentication is expected for this service?"));
+            // Iteration 3: nudged by the re-prompt, the model pauses for the caller.
+            server.SseQueue.Add(FakeSseServer.BuildToolCallSse("ask_caller",
+                "{\"questions\":\"1. Should the endpoint use SQL or an ORM? 2. What authentication is expected?\",\"tried\":\"Read the brief and the existing endpoint code.\"}"));
+
+            string? prior = Environment.GetEnvironmentVariable("DEVMIND_SERVER_TYPE");
+            Environment.SetEnvironmentVariable("DEVMIND_SERVER_TYPE", "llama");
+            try
+            {
+                using var console = new ConsoleGuard();
+                var result = await HeadlessAgent.RunAsync(
+                    "Scaffold an endpoint and note any open questions.",
+                    Options(maxDepth: 8), server.BaseUrl, apiKey: null!,
+                    workingDirectory: _dir, buildCommand: "dotnet build",
+                    ct: CancellationToken.None);
+
+                Assert.Equal("", console.Captured);
+                Assert.Null(result.Error);
+                Assert.False(result.Cancelled);
+                Assert.False(result.HitDepthCap);
+                // 3 LLM calls: file work → prose questions → ask_caller.
+                Assert.Equal(3, result.Iterations);
+                // The caller-visible contract: the run PAUSES for input, it is not "done".
+                Assert.True(result.NeedsInput);
+                Assert.Contains("Should the endpoint use SQL or an ORM?", result.Answer);
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("DEVMIND_SERVER_TYPE", prior);
+            }
+        }
+
+        [Fact]
         public async Task RestrictedHost_BlocksWritesOutsideWorkingDirectory()
         {
             // Regression: a live headless run hallucinated /home/user/greeting.txt —
