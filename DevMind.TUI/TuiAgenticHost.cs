@@ -52,7 +52,7 @@ namespace DevMind
         private readonly FileContentCache _fileCache = new FileContentCache();
 
         private readonly HashSet<string> _filesRead = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        private readonly HashSet<string> _taskReadFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly TaskReadSet _taskReadFiles = new TaskReadSet();
 
         private readonly Dictionary<string, string> _fileSnapshots =
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -835,17 +835,6 @@ namespace DevMind
         {
             string fileNameOnly = SafeGetFileName(fileName);
 
-            if (!IsFileKnownToTask(fileNameOnly))
-            {
-                bool approved = await ConfirmUnreadFileWriteAsync(fileNameOnly);
-                if (!approved)
-                {
-                    AppendOutputLocal($"[WRITE GUARD] File write to \"{fileNameOnly}\" blocked.\n", OutputColor.Dim);
-                    return null;
-                }
-                _taskReadFiles.Add(fileNameOnly);
-            }
-
             // Block if a conflict is pending
             if (_pendingConflict != null)
             {
@@ -858,6 +847,20 @@ namespace DevMind
             try
             {
                 string fullPath = ResolveWritePath(fileName);
+
+                // Write guard — AFTER resolution, on the path that will actually be written
+                // (bare-name keying let an unread same-named file pass; see TaskReadSet).
+                if (!_taskReadFiles.IsKnown(fullPath))
+                {
+                    bool approved = await ConfirmUnreadFileWriteAsync(fileNameOnly);
+                    if (!approved)
+                    {
+                        AppendOutputLocal($"[WRITE GUARD] File write to \"{fileNameOnly}\" blocked.\n", OutputColor.Dim);
+                        return null;
+                    }
+                    _taskReadFiles.MarkKnown(fullPath);
+                }
+
                 string dir = Path.GetDirectoryName(fullPath);
                 if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                     Directory.CreateDirectory(dir);
@@ -929,17 +932,6 @@ namespace DevMind
         {
             string fileNameOnly = SafeGetFileName(fileName);
 
-            if (!IsFileKnownToTask(fileNameOnly))
-            {
-                bool approved = await ConfirmUnreadFileWriteAsync(fileNameOnly);
-                if (!approved)
-                {
-                    AppendOutputLocal($"[WRITE GUARD] File append to \"{fileNameOnly}\" blocked.\n", OutputColor.Dim);
-                    return null;
-                }
-                _taskReadFiles.Add(fileNameOnly);
-            }
-
             // Block if a conflict is pending
             if (_pendingConflict != null)
             {
@@ -951,6 +943,19 @@ namespace DevMind
             {
                 string resolvedPath = FindFile(fileNameOnly, fileName.Replace('\\', '/'))
                     ?? Path.Combine(_shellRunner.WorkingDirectory, fileName);
+
+                // Write guard — AFTER resolution, on the path that will actually be written
+                // (bare-name keying let an unread same-named file pass; see TaskReadSet).
+                if (!_taskReadFiles.IsKnown(resolvedPath))
+                {
+                    bool approved = await ConfirmUnreadFileWriteAsync(fileNameOnly);
+                    if (!approved)
+                    {
+                        AppendOutputLocal($"[WRITE GUARD] File append to \"{fileNameOnly}\" blocked.\n", OutputColor.Dim);
+                        return null;
+                    }
+                    _taskReadFiles.MarkKnown(resolvedPath);
+                }
 
                 // New file — no merge gate needed
                 if (!File.Exists(resolvedPath))
@@ -1429,7 +1434,7 @@ namespace DevMind
             foreach (var (lineNum, lineText) in matches)
                 sb.AppendLine($"  {lineNum.ToString().PadLeft(numWidth)}: {lineText.TrimEnd()}");
 
-            _taskReadFiles.Add(fileNameOnly);
+            _taskReadFiles.MarkKnown(resolvedPath);
             AppendOutputLocal($"[GREP] {totalMatches} match{(totalMatches == 1 ? "" : "es")} for \"{pattern}\" in {filename} {grepScope}\n", OutputColor.Success);
             return Task.FromResult(sb.ToString().TrimEnd('\r', '\n'));
         }
@@ -1699,17 +1704,6 @@ namespace DevMind
                 string normalizedHint = blockFileName.Replace('\\', '/');
                 string fileNameOnly   = SafeGetFileName(blockFileName);
 
-                if (!IsFileKnownToTask(fileNameOnly))
-                {
-                    bool approved = await ConfirmUnreadFileWriteAsync(fileNameOnly);
-                    if (!approved)
-                    {
-                        AppendOutputLocal($"[WRITE GUARD] Patch to \"{fileNameOnly}\" blocked.\n", OutputColor.Dim);
-                        return null;
-                    }
-                    _taskReadFiles.Add(fileNameOnly);
-                }
-
                 string fullPath = FindFile(fileNameOnly, normalizedHint)
                     ?? Path.Combine(_shellRunner.WorkingDirectory, fileNameOnly);
 
@@ -1719,6 +1713,19 @@ namespace DevMind
                     return null;
                 }
 
+                // Write guard — AFTER resolution, on the path that will actually be written
+                // (bare-name keying let an unread same-named file pass; see TaskReadSet).
+                if (!_taskReadFiles.IsKnown(fullPath))
+                {
+                    bool approved = await ConfirmUnreadFileWriteAsync(fileNameOnly);
+                    if (!approved)
+                    {
+                        AppendOutputLocal($"[WRITE GUARD] Patch to \"{fileNameOnly}\" blocked.\n", OutputColor.Dim);
+                        return null;
+                    }
+                    _taskReadFiles.MarkKnown(fullPath);
+                }
+
                 _fileCache.InvalidateIfStale(FileCacheKey(fullPath), fullPath); // out-of-band writes
                 if (!_fileCache.Contains(FileCacheKey(fullPath)))
                 {
@@ -1726,7 +1733,7 @@ namespace DevMind
                     var (cached, _enc) = PatchEngine.ReadFilePreservingEncoding(fullPath);
                     _fileCache.Store(FileCacheKey(fullPath), cached);
                     _filesRead.Add(fileNameOnly);
-                    _taskReadFiles.Add(fileNameOnly);
+                    _taskReadFiles.MarkKnown(fullPath); // same keying as the guard above
                 }
 
                 CaptureFileSnapshot(fullPath);
@@ -2047,9 +2054,6 @@ namespace DevMind
             }
         }
 
-        private bool IsFileKnownToTask(string fileNameOnly)
-            => _taskReadFiles.Contains(fileNameOnly) || _taskReadFiles.Count == 0;
-
         private Task<bool> ConfirmUnreadFileWriteAsync(string fileNameOnly)
         {
             // Auto-approve all writes — no interactive prompt.
@@ -2180,7 +2184,7 @@ namespace DevMind
                         _fileCache.Store(cacheKey, diskContent);
                     }
 
-                    _taskReadFiles.Add(fileNameOnly);
+                    _taskReadFiles.MarkKnown(fullPath);
                     int totalLines = _fileCache.GetLineCount(cacheKey);
 
                     if (rangeStart > rangeEnd) { int t = rangeStart; rangeStart = rangeEnd; rangeEnd = t; }
@@ -2215,7 +2219,7 @@ namespace DevMind
 
                 var (content, _enc) = PatchEngine.ReadFilePreservingEncoding(fullPath);
                 _fileCache.Store(FileCacheKey(fullPath), content);
-                _taskReadFiles.Add(fileNameOnly);
+                _taskReadFiles.MarkKnown(fullPath);
                 int lineCount = content.Split('\n').Length;
 
                 bool alreadyRead = _filesRead.Contains(fileNameOnly);

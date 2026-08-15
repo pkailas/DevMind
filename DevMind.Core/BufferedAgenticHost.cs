@@ -85,8 +85,8 @@ namespace DevMind
         // Tracks which filenames have been read this session — controls outline vs. full on re-read.
         private readonly HashSet<string> _filesRead = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        // Tracks which filenames were accessed during the current user turn — feeds write guard.
-        private readonly HashSet<string> _taskReadFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Tracks which files (resolved full paths) were accessed during the current user turn — feeds write guard.
+        private readonly TaskReadSet _taskReadFiles = new TaskReadSet();
 
         // Baseline content keyed by full path, captured before first mutation — powers DIFF.
         private readonly Dictionary<string, string> _fileSnapshots =
@@ -319,17 +319,6 @@ namespace DevMind
         {
             string fileNameOnly = SafeGetFileName(fileName);
 
-            if (!IsFileKnownToTask(fileNameOnly))
-            {
-                bool approved = await ConfirmUnreadFileWriteAsync(fileNameOnly);
-                if (!approved)
-                {
-                    AppendOutput($"[WRITE GUARD] File write to \"{fileNameOnly}\" blocked.\n", OutputColor.Dim);
-                    return null;
-                }
-                _taskReadFiles.Add(fileNameOnly);
-            }
-
             // Block if a conflict is pending from a previous write attempt
             if (_pendingConflict != null)
             {
@@ -342,6 +331,20 @@ namespace DevMind
             try
             {
                 string fullPath = ResolveWritePath(fileName);
+
+                // Write guard — AFTER resolution, on the path that will actually be written
+                // (bare-name keying let an unread same-named file pass; see TaskReadSet).
+                if (!_taskReadFiles.IsKnown(fullPath))
+                {
+                    bool approved = await ConfirmUnreadFileWriteAsync(fileNameOnly);
+                    if (!approved)
+                    {
+                        AppendOutput($"[WRITE GUARD] File write to \"{fileNameOnly}\" blocked.\n", OutputColor.Dim);
+                        return null;
+                    }
+                    _taskReadFiles.MarkKnown(fullPath);
+                }
+
                 if (!IsWriteAllowed(fullPath, "write"))
                     return null;
                 string dir = Path.GetDirectoryName(fullPath);
@@ -434,17 +437,6 @@ namespace DevMind
         {
             string fileNameOnly = SafeGetFileName(fileName);
 
-            if (!IsFileKnownToTask(fileNameOnly))
-            {
-                bool approved = await ConfirmUnreadFileWriteAsync(fileNameOnly);
-                if (!approved)
-                {
-                    AppendOutput($"[WRITE GUARD] File append to \"{fileNameOnly}\" blocked.\n", OutputColor.Dim);
-                    return null;
-                }
-                _taskReadFiles.Add(fileNameOnly);
-            }
-
             // Block if a conflict is pending
             if (_pendingConflict != null)
             {
@@ -456,6 +448,20 @@ namespace DevMind
             {
                 string resolvedPath = FindFile(fileNameOnly, fileName.Replace('\\', '/'))
                     ?? Path.Combine(_shellRunner.WorkingDirectory, fileName);
+
+                // Write guard — AFTER resolution, on the path that will actually be written
+                // (bare-name keying let an unread same-named file pass; see TaskReadSet).
+                if (!_taskReadFiles.IsKnown(resolvedPath))
+                {
+                    bool approved = await ConfirmUnreadFileWriteAsync(fileNameOnly);
+                    if (!approved)
+                    {
+                        AppendOutput($"[WRITE GUARD] File append to \"{fileNameOnly}\" blocked.\n", OutputColor.Dim);
+                        return null;
+                    }
+                    _taskReadFiles.MarkKnown(resolvedPath);
+                }
+
                 if (!IsWriteAllowed(resolvedPath, "append"))
                     return null;
 
@@ -994,7 +1000,7 @@ namespace DevMind
             foreach (var (lineNum, lineText) in matches)
                 sb.AppendLine($"  {lineNum.ToString().PadLeft(numWidth)}: {lineText.TrimEnd()}");
 
-            _taskReadFiles.Add(fileNameOnly);
+            _taskReadFiles.MarkKnown(resolvedPath);
             AppendOutput($"[GREP] {totalMatches} match{(totalMatches == 1 ? "" : "es")} for \"{pattern}\" in {filename} {grepScope}\n", OutputColor.Success);
             return Task.FromResult(sb.ToString().TrimEnd('\r', '\n'));
         }
@@ -1287,18 +1293,6 @@ namespace DevMind
                 string normalizedHint = blockFileName.Replace('\\', '/');
                 string fileNameOnly   = SafeGetFileName(blockFileName);
 
-                // Write guard
-                if (!IsFileKnownToTask(fileNameOnly))
-                {
-                    bool approved = await ConfirmUnreadFileWriteAsync(fileNameOnly);
-                    if (!approved)
-                    {
-                        AppendOutput($"[WRITE GUARD] Patch to \"{fileNameOnly}\" blocked.\n", OutputColor.Dim);
-                        return null;
-                    }
-                    _taskReadFiles.Add(fileNameOnly);
-                }
-
                 // Resolve file path; load into cache if absent
                 string fullPath = FindFile(fileNameOnly, normalizedHint)
                     ?? Path.Combine(_shellRunner.WorkingDirectory, fileNameOnly);
@@ -1307,6 +1301,19 @@ namespace DevMind
                 {
                     AppendOutput($"[PATCH] File not found: {fullPath}\n", OutputColor.Warning);
                     return null;
+                }
+
+                // Write guard — AFTER resolution, on the path that will actually be written
+                // (bare-name keying let an unread same-named file pass; see TaskReadSet).
+                if (!_taskReadFiles.IsKnown(fullPath))
+                {
+                    bool approved = await ConfirmUnreadFileWriteAsync(fileNameOnly);
+                    if (!approved)
+                    {
+                        AppendOutput($"[WRITE GUARD] Patch to \"{fileNameOnly}\" blocked.\n", OutputColor.Dim);
+                        return null;
+                    }
+                    _taskReadFiles.MarkKnown(fullPath);
                 }
 
                 if (!IsWriteAllowed(fullPath, "patch"))
@@ -1319,7 +1326,7 @@ namespace DevMind
                     var (cached, _enc) = PatchEngine.ReadFilePreservingEncoding(fullPath);
                     _fileCache.Store(FileCacheKey(fullPath), cached);
                     _filesRead.Add(fileNameOnly);
-                    _taskReadFiles.Add(fileNameOnly);
+                    _taskReadFiles.MarkKnown(fullPath); // same keying as the guard above
                 }
 
                 CaptureFileSnapshot(fullPath);
@@ -1588,9 +1595,6 @@ namespace DevMind
 
         // ── Private helpers ───────────────────────────────────────────────────────
 
-        private bool IsFileKnownToTask(string fileNameOnly)
-            => _taskReadFiles.Contains(fileNameOnly) || _taskReadFiles.Count == 0;
-
         /// <summary>Write guard for files never read this task. Headless default: approve
         /// and journal it (full-auto within the working directory by design — the
         /// journal is the audit trail). Interactive hosts override with a y/N prompt.</summary>
@@ -1701,7 +1705,7 @@ namespace DevMind
                         _fileCache.Store(cacheKey, diskContent);
                     }
 
-                    _taskReadFiles.Add(fileNameOnly);
+                    _taskReadFiles.MarkKnown(fullPath);
                     _patchesSinceRead.Remove(fileNameOnly);      // model refreshed its view
                 _editedSpansSinceRead.Remove(fileNameOnly);  // stale-overlap tracking reset with it
                     int totalLines = _fileCache.GetLineCount(cacheKey);
@@ -1735,7 +1739,7 @@ namespace DevMind
                 // Full / outline path
                 var (content, _enc) = PatchEngine.ReadFilePreservingEncoding(fullPath);
                 _fileCache.Store(FileCacheKey(fullPath), content);
-                _taskReadFiles.Add(fileNameOnly);
+                _taskReadFiles.MarkKnown(fullPath);
                 _patchesSinceRead.Remove(fileNameOnly);      // model refreshed its view
                 _editedSpansSinceRead.Remove(fileNameOnly);  // stale-overlap tracking reset with it
                 int lineCount = content.Split('\n').Length;
