@@ -224,6 +224,116 @@ namespace DevMind.Core.Tests
         }
 
         [Fact]
+        public async Task RunAsync_NarrationStall_FollowUpRequestSendsForcedToolChoiceThenClears()
+        {
+            // The flag round-trip, end-to-end. A headless model that does some real work
+            // and then STALLS in a narration claim ("let me check the build") with no tool
+            // call trips LoopDriver's Layer 2 narration retry, which re-issues the turn
+            // with forceToolChoiceRequired=true. RunTurnAsync must forward that onto the
+            // FOLLOW-UP request as tool_choice="required" — the only way it can be forced
+            // here, since tool results already exist and cold-start (Layer 1) is off.
+            // The next normal iteration (task_done) must send tool_choice="auto" again:
+            // the flag is ASSIGNED per re-trigger, so it must not latch.
+            using var server = new FakeSseServer();
+            // 1. Real work: a file tool → agentic cycle starts, tool results enter context.
+            server.SseQueue.Add(FakeSseServer.BuildToolCallSse("create_file",
+                "{\"filename\":\"notes.txt\",\"content\":\"draft\"}"));
+            // 2. Narration stall: matches the announced_action claim pattern ("let me check").
+            server.SseQueue.Add(FakeSseServer.BuildTextSse(
+                "The change is in place, so let me check the build to confirm nothing broke."));
+            // 3. The forced retry: this body must carry tool_choice=\"required\" (the fix).
+            server.SseQueue.Add(FakeSseServer.BuildToolCallSse("run_shell",
+                "{\"command\":\"echo build\"}"));
+            // 4. Normal iteration: tool results exist and no retry is pending — the flag
+            //    must be CLEARED, so this body must carry tool_choice=\"auto\".
+            server.SseQueue.Add(FakeSseServer.BuildToolCallSse("task_done",
+                "{\"summary\":\"Done.\"}"));
+
+            string? prior = Environment.GetEnvironmentVariable("DEVMIND_SERVER_TYPE");
+            Environment.SetEnvironmentVariable("DEVMIND_SERVER_TYPE", "llama");
+            try
+            {
+                using var console = new ConsoleGuard();
+                var result = await HeadlessAgent.RunAsync(
+                    "Create notes.txt and check the build.",
+                    Options(maxDepth: 8), server.BaseUrl, apiKey: null!,
+                    workingDirectory: _dir, buildCommand: "dotnet build",
+                    ct: CancellationToken.None);
+
+                Assert.Equal("", console.Captured);
+                Assert.Null(result.Error);
+                Assert.False(result.Cancelled);
+                Assert.Equal(4, result.Iterations);
+                Assert.Equal(4, server.RequestBodies.Count);
+
+                // LlmClient always emits tool_choice: cold-start (zero tool results) sends
+                // \"required\", established rhythm sends \"auto\" — so a mid-session
+                // \"required\" below can ONLY come from the forwarded narration-retry flag.
+                Assert.Contains("\"tool_choice\":\"required\"", server.RequestBodies[0]); // cold start
+                Assert.Contains("\"tool_choice\":\"auto\"",     server.RequestBodies[1]); // post-tool, no retry
+                Assert.Contains("\"tool_choice\":\"required\"", server.RequestBodies[2]); // narration retry — THE FIX
+                Assert.Contains("\"tool_choice\":\"auto\"",     server.RequestBodies[3]); // flag cleared — no latch
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("DEVMIND_SERVER_TYPE", prior);
+            }
+        }
+
+        [Fact]
+        public async Task RunAsync_NarrationClaimAfterForcedRetry_SendsNoSecondForcedRequest()
+        {
+            // Reset semantics on the retry's own follow-up: if the model still answers the
+            // forced retry in a narration claim (one retry per turn is the guard's cap), the
+            // turn terminates and NO further request issues a forced tool choice — a
+            // latching flag would instead force it again on the next re-trigger.
+            using var server = new FakeSseServer();
+            server.SseQueue.Add(FakeSseServer.BuildToolCallSse("create_file",
+                "{\"filename\":\"notes.txt\",\"content\":\"draft\"}"));
+            server.SseQueue.Add(FakeSseServer.BuildTextSse(
+                "The change is in place, so let me check the build to confirm nothing broke."));
+            // The forced retry STILL returns a claim ("0 errors") with no tool call.
+            // NarrationRetryUsed is already spent, so the driver falls through to the
+            // one-shot ProseFinish re-prompt (not a second forced retry — the flag reset
+            // is exactly what we are asserting). The model then ends the turn.
+            server.SseQueue.Add(FakeSseServer.BuildTextSse(
+                "build: 0 errors, everything looks good, nothing else to do."));
+            server.SseQueue.Add(FakeSseServer.BuildToolCallSse("task_done",
+                "{\"summary\":\"Done.\"}"));
+
+            string? prior = Environment.GetEnvironmentVariable("DEVMIND_SERVER_TYPE");
+            Environment.SetEnvironmentVariable("DEVMIND_SERVER_TYPE", "llama");
+            try
+            {
+                using var console = new ConsoleGuard();
+                var result = await HeadlessAgent.RunAsync(
+                    "Create notes.txt and check the build.",
+                    Options(maxDepth: 8), server.BaseUrl, apiKey: null!,
+                    workingDirectory: _dir, buildCommand: "dotnet build",
+                    ct: CancellationToken.None);
+
+                Assert.Equal("", console.Captured);
+                Assert.Null(result.Error);
+                Assert.Equal(4, result.Iterations);
+                Assert.Equal(4, server.RequestBodies.Count);
+
+                // Exactly TWO forced requests: cold start + the single narration retry.
+                // The retry's follow-ups (ProseFinish re-prompt, task_done) must send
+                // \"auto\" — a latching flag would force them too.
+                Assert.Contains("\"tool_choice\":\"required\"", server.RequestBodies[0]); // cold start
+                Assert.Contains("\"tool_choice\":\"auto\"",     server.RequestBodies[1]); // post-tool, pre-retry
+                Assert.Contains("\"tool_choice\":\"required\"", server.RequestBodies[2]); // the one narration retry
+                Assert.Contains("\"tool_choice\":\"auto\"",     server.RequestBodies[3]); // flag cleared — no latch
+                Assert.Equal(2, server.RequestBodies.Count(
+                    b => b.Contains("\"tool_choice\":\"required\"")));
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("DEVMIND_SERVER_TYPE", prior);
+            }
+        }
+
+        [Fact]
         public async Task RestrictedHost_BlocksWritesOutsideWorkingDirectory()
         {
             // Regression: a live headless run hallucinated /home/user/greeting.txt —

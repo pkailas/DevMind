@@ -228,6 +228,7 @@ namespace DevMind
             var thinkFilter = new ThinkFilter();
             string currentPrompt = prompt;
             bool firstIteration = true;
+            bool forceToolChoiceRequired = false; // Layer 2 narration-retry flag (mirrors TUI Program.cs)
             string lastResponse = "";
             string lastTerminalReason = null;
 
@@ -272,6 +273,7 @@ namespace DevMind
 
                     await _llmClient.SendMessageAsync(
                         currentPrompt,
+                        forceToolChoiceRequired: forceToolChoiceRequired,
                         onToken: token =>
                         {
                             string visible = thinkFilter.Process(token, showThinking, out string thinkText);
@@ -374,6 +376,9 @@ namespace DevMind
                         break;
                     }
                     currentPrompt = iter.NextContextualMessage ?? _callbacks.GetInputText();
+                    // Assign (not OR) so a later non-forcing re-trigger clears the flag —
+                    // it must not latch across iterations.
+                    forceToolChoiceRequired = iter.ForceToolChoiceRequired;
                     _callbacks.SetInputText(string.Empty);
                 }
             }
