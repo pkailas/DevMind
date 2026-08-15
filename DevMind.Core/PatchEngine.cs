@@ -488,9 +488,29 @@ namespace DevMind
                 {
                     int line1 = fileContent.Substring(0, normToOrig[normIdx]).Count(c => c == '\n') + 1;
                     int line2 = fileContent.Substring(0, normToOrig[secondNormIdx]).Count(c => c == '\n') + 1;
+
+                    // Show context around BOTH match sites with whitespace made visible
+                    // (spaces → '·', tabs → '→') so a whitespace-only difference is not
+                    // invisible. Then state the consequence the old message hid: because
+                    // normalization collapses every whitespace run (including leading
+                    // indentation) to a single space, an EXACT ambiguous match means the
+                    // two regions differ ONLY in whitespace, so context added WITHIN the
+                    // block normalizes identically at both sites and can never
+                    // disambiguate. Only lines ABOVE or BELOW the block that are genuinely
+                    // different in non-whitespace text can make the match unique.
+                    string ctx1 = GetLineContext(fileContent, line1, 3, 3);
+                    string ctx2 = GetLineContext(fileContent, line2, 3, 3);
+
                     reporter(
-                        $"[PATCH] Block {i + 1}: Ambiguous FIND — matched at line {line1} and line {line2} in {fileName}. " +
-                        $"Add more surrounding context to make the match unique.\n",
+                        $"[PATCH] Block {i + 1}: Ambiguous FIND — matched at line {line1} and line {line2} in {fileName}.\n" +
+                        $"  Context around line {line1} (spaces shown as '·', tabs as '→'):\n{ctx1}" +
+                        $"  Context around line {line2} (spaces shown as '·', tabs as '→'):\n{ctx2}" +
+                        $"  The matcher normalizes ALL whitespace (including leading indentation) to a single space,\n" +
+                        $"  so these two regions differ only in whitespace — the '·' columns above are the ONLY difference.\n" +
+                        $"  Adding context WITHIN the block will not help: it too normalizes away and matches both.\n" +
+                        $"  To disambiguate, extend the FIND to include one or more lines ABOVE or BELOW the block\n" +
+                        $"  whose text is genuinely different at the two sites (a surrounding method, field, or\n" +
+                        $"  brace that appears on one side but not the other).\n",
                         OutputColor.Error);
                     return null;
                 }
@@ -602,5 +622,48 @@ namespace DevMind
                 return new PatchApplyResult { Success = false, Error = ex.Message };
             }
         }
+
+        // ── Ambiguity diagnostics ─────────────────────────────────────────────
+
+        /// <summary>
+        /// Extracts up to <paramref name="linesBefore"/> lines above and
+        /// <paramref name="linesAfter"/> lines below <paramref name="lineNumber"/>
+        /// (1-based), with visible line numbers and whitespace made visible
+        /// (spaces → '·', tabs → '→'). Used in the ambiguous-FIND diagnostic so
+        /// a whitespace-only difference between two match sites is not invisible.
+        /// </summary>
+        private static string GetLineContext(string fileContent, int lineNumber, int linesBefore, int linesAfter)
+        {
+            var lines = fileContent.Split('\n');
+            int first = Math.Max(1, lineNumber - linesBefore);
+            int last = Math.Min(lines.Length, lineNumber + linesAfter);
+            var sb = new StringBuilder();
+            for (int ln = first; ln <= last; ln++)
+            {
+                string raw = lines[ln - 1].TrimEnd('\r');
+                string visible = MakeWhitespaceVisible(raw);
+                // '>>' marks the match's own line so it stands out in the block.
+                string marker = ln == lineNumber ? " >>" : "   ";
+                sb.Append(marker).Append(ln.ToString().PadLeft(5)).Append(':').Append(visible).Append('\n');
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// Renders whitespace visibly: spaces become '·' (U+00B7) and tabs become
+        /// '→' (U+2192). All other characters pass through unchanged.
+        /// </summary>
+        private static string MakeWhitespaceVisible(string text)
+        {
+            var sb = new StringBuilder(text.Length);
+            foreach (char c in text)
+            {
+                if (c == ' ') sb.Append('\u00B7');
+                else if (c == '\t') sb.Append('\u2192');
+                else sb.Append(c);
+            }
+            return sb.ToString();
+        }
+
     }
 }

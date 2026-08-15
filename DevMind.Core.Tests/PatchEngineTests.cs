@@ -51,6 +51,28 @@ internal static class PatchFixtures
         "        return \"Hello, \" + name + \"!\";\n" +
         "    }\n" +
         "}\n";
+
+    // Same statement (RunTask();) appearing twice at DIFFERENT leading indentation
+    // (line 6 = 12 spaces, line 12 = 8 spaces). After whitespace normalization the
+    // two are identical, so a FIND on "RunTask();" is ambiguous. The surrounding
+    // lines (SetupAlpha/TeardownAlpha vs SetupBeta/TeardownBeta) are the only real
+    // difference. Used to verify the ambiguous-FIND diagnostic is actionable.
+    public static string AmbiguousIndentSource =>
+        "public class Worker\n" +          // 1
+        "{\n" +                             // 2
+        "    public void Alpha()\n" +       // 3
+        "    {\n" +                         // 4
+        "        SetupAlpha();\n" +         // 5
+        "            RunTask();\n" +        // 6  (12-space indent)
+        "        TeardownAlpha();\n" +      // 7
+        "    }\n" +                         // 8
+        "    public void Beta()\n" +        // 9
+        "    {\n" +                         // 10
+        "        SetupBeta();\n" +          // 11
+        "        RunTask();\n" +            // 12  (8-space indent)
+        "        TeardownBeta();\n" +       // 13
+        "    }\n" +                         // 14
+        "}\n";                              // 15
 }
 
 internal static class TempHelpers
