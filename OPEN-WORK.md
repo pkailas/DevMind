@@ -5,9 +5,33 @@ Tests at time of writing: Core 410, McpServer 20. Deployed: 1.0.370 (one commit 
 
 ---
 
-## 1. Shell timeout does not reap runaway processes  <- START HERE
+## 1. Shell timeout does not reap runaway processes  — PARTIALLY FIXED
 
-**Severity: high.** This nearly took BEAST down twice today — a `dotnet` test host
+**UPDATE 2026-08-16 (commit b2ba5af, deployed 1.0.373).** Three of the four
+recommendations are done:
+- `MSBUILDDISABLENODEREUSE=1` is now set on every spawned shell. This should
+  prevent the SPECIFIC runaway we hit, since the node-reuse pool was the likely
+  survivor. Verified live: `cmd /c set` shows it in the child environment.
+- taskkill's exit code and exceptions are classified instead of swallowed
+  (`ClassifyReapResult`). Exit 0 and 128 = success; anything else reports
+  `[SHELL] Failed to reap process tree (PID n): <reason>`.
+- a process still alive after the 5s wait + 1s grace is now stated explicitly.
+  `mcp.shell.exit` carries `reap_result`.
+
+**STILL OPEN: the Job Object.** A genuinely detached child can still escape
+`taskkill /F /T` — the two observability changes make that visible, they do not
+prevent it. That fix needs `CreateJobObject` / `AssignProcessToJobObject` /
+`SetInformationJobObject` with `KILL_ON_JOB_CLOSE`, which would be the FIRST
+P/Invoke in this codebase (job-503 called it "small on net10.0" — that was wrong,
+.NET has no managed Job Object API). Deferred deliberately: ShellRunner backs
+`run_shell`, so the first native interop here wants its own careful change with a
+redeploy check before relying on it.
+
+Also still unexplored: `Process.Kill(entireProcessTree: true)` (managed, .NET 5+)
+would at least replace the taskkill shell-out, though it has the same
+re-parenting limitation.
+
+**Severity: high.** This nearly took BEAST down twice — a `dotnet` test host
 reached 64 GB and then 45 GB, leaving 1.5 GB free on a 128 GB machine.
 
 **Diagnosed in job-503. My first hypothesis was WRONG and is recorded here so it
