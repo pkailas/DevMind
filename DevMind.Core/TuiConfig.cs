@@ -19,7 +19,6 @@ namespace DevMind
     /// </summary>
     public sealed class TuiConfig
     {
-        private const string ConfigDirName = "devmind";
         private const string ConfigFileName = "devmind.json";
 
         [JsonPropertyName("behavioralRules")]
@@ -95,10 +94,11 @@ namespace DevMind
         [JsonPropertyName("allowedWriteRoots")]
         public List<string> AllowedWriteRoots { get; set; } = new List<string>();
 
-        private static string ConfigPath
- => Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            ConfigDirName, ConfigFileName);
+        // Path derived from DevMindPaths (single source of truth for the
+        // %APPDATA%\devmind state directory) so it cannot drift from the
+        // machine-level memory layer's directory.
+        private static string ConfigPath =>
+            Path.Combine(DevMindPaths.GlobalDir, ConfigFileName);
 
         /// <summary>
         /// Loads the config from disk. Returns defaults if the file does not exist

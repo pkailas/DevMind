@@ -90,21 +90,55 @@ internal sealed class DevMindTools
     [McpServerTool(Name = "list_memory_topics")]
     [Description(
         "List all available memory topics with their descriptions from the memory index. " +
+        "Machine-level (global) topics, when any exist, are appended in a labelled section " +
+        "as \"global:<slug>\" — recall one of those with recall_memory \"global:<slug>\". " +
         "Use this to see what knowledge has been saved in previous sessions before " +
         "recalling a specific topic with recall_memory.")]
     public async Task<string> ListMemoryTopics(CancellationToken cancellationToken = default)
     {
         return await _svc.EnqueueAsync(async () =>
         {
+            var globalTopics = _svc.Memory.ListGlobalTopics();
+
             string index = _svc.Memory.LoadIndex();
             if (!string.IsNullOrWhiteSpace(index))
-                return index;
+                // Labelled global section appended ONLY when a global topic exists —
+                // byte-identical to the legacy repo-only index otherwise.
+                return globalTopics.Count == 0 ? index : index + GlobalTopicSection(globalTopics);
 
             var topics = _svc.Memory.ListTopics();
-            return topics.Count == 0
-                ? "No memory topics found. Use save_memory to create one."
-                : string.Join("\n", topics.Select(t => $"- [{t}]"));
+            if (globalTopics.Count == 0)
+                return topics.Count == 0
+                    ? "No memory topics found. Use save_memory to create one."
+                    : string.Join("\n", topics.Select(t => $"- [{t}]"));
+
+            // Global layer present: emit both layers, labelled, repo first.
+            var sb = new StringBuilder();
+            if (topics.Count > 0)
+            {
+                sb.AppendLine("Repo topics:");
+                sb.Append(string.Join("\n", topics.Select(t => $"- [{t}]")));
+            }
+            sb.Append(GlobalTopicSection(globalTopics));
+            return sb.ToString().TrimEnd();
         }, cancellationToken);
+    }
+
+    /// <summary>
+    /// The labelled machine-level topic section for list_memory_topics output. Only
+    /// ever appended when at least one global topic exists, so output stays
+    /// byte-identical to the legacy repo-only list on machines without a global memory
+    /// directory. This output is model-facing prose (no code parses it) — the only
+    /// in-repo consumer stores it verbatim as a tool result (AgenticExecutor ListMemory).
+    /// </summary>
+    private static string GlobalTopicSection(List<string> globalTopics)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine();
+        sb.AppendLine($"Global (machine-level) topics — recall with recall_memory \"{MemoryManager.GlobalTopicPrefix}<slug>\":");
+        foreach (var t in globalTopics)
+            sb.AppendLine($"- [{MemoryManager.GlobalTopicPrefix}{t}]");
+        return sb.ToString().TrimEnd('\n');
     }
 
     // ── Phase B: read-only tools ─────────────────────────────────────────────
@@ -499,21 +533,30 @@ internal sealed class DevMindTools
         "Recall previously saved knowledge about a topic. Returns the content of a memory " +
         "topic file. Call list_memory_topics first if you are not sure what topics are available.")]
     public async Task<string> RecallMemory(
-        [Description("The topic slug to recall (e.g., 'auth-system', 'build-quirks').")] string topic,
+        [Description(
+            "The topic slug to recall (e.g., 'auth-system', 'build-quirks'). Default scope is " +
+            "the repo; machine-level topics are recalled with the 'global:' prefix (e.g., " +
+            "'global:build-quirks'). When the same slug exists in both layers the note at the " +
+            "end of the result tells you how to recall the other one.")] string topic,
         CancellationToken cancellationToken = default)
     {
         return await _svc.EnqueueAsync(async () =>
         {
-            string content = _svc.Memory.LoadTopic(topic);
-            if (content == null)
+            // Layered, EXPLICIT scope — repo-default, global:<slug> for the machine-level
+            // version. A slug present in BOTH layers resolves to the requested layer and
+            // gets a visible collision note; it is never silently first-matched.
+            var result = _svc.Memory.RecallTopic(topic);
+            if (result == null)
             {
-                var available = _svc.Memory.ListTopics();
+                var available = _svc.Memory.ListTopicsForRecall();
                 if (available.Count == 0)
                     return $"recall_memory: topic \"{topic}\" not found — no memory topics exist yet.";
                 string list = string.Join(", ", available.Select(t => $"[{t}]"));
                 return $"recall_memory: topic \"{topic}\" not found. Available topics: {list}";
             }
-           return content;
+            if (string.IsNullOrEmpty(result.CollisionNote))
+                return result.Content;
+            return result.Content + "\n\n" + result.CollisionNote;
         }, cancellationToken);
     }
 
@@ -530,7 +573,10 @@ internal sealed class DevMindTools
         {
             try
             {
-                var topics = _svc.Memory.ListTopics();
+                // BOTH layers: repo topics first, global topics prefixed with "global:"
+                // so the layer of every hit (and group header) is visible. When no global
+                // topics exist this is the same list as the legacy repo-only search.
+                var topics = _svc.Memory.ListTopicsForRecall();
                 if (topics.Count == 0)
                     return "search_memory: no memory topics found.";
 
@@ -540,7 +586,9 @@ internal sealed class DevMindTools
                 foreach (var topic in topics)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    string content = _svc.Memory.LoadTopic(topic);
+                    string content = topic.StartsWith(MemoryManager.GlobalTopicPrefix, StringComparison.OrdinalIgnoreCase)
+                        ? _svc.Memory.LoadGlobalTopic(topic.Substring(MemoryManager.GlobalTopicPrefix.Length))
+                        : _svc.Memory.LoadTopic(topic);
                     if (string.IsNullOrWhiteSpace(content)) continue;
 
                     var lines = content.Split('\n');

@@ -711,15 +711,21 @@ namespace DevMind
             if (_memoryManager == null)
                 return Task.FromResult("Memory not available: no working directory");
 
-            string content = _memoryManager.LoadTopic(topic);
-            if (content == null)
+            // Layered recall (repo-default; "global:<slug>" for the machine-level
+            // version). A same-slug collision resolves to the requested layer and
+            // appends a visible note — never silently first-matched.
+            var result = _memoryManager.RecallTopic(topic);
+            if (result == null)
             {
                 AppendOutput($"[MEMORY] Topic not found: {topic}\n", OutputColor.Dim);
                 return Task.FromResult($"Topic not found: {topic}");
             }
 
             AppendOutput($"[MEMORY] Recalled: {topic}\n", OutputColor.Dim);
-            return Task.FromResult(content);
+            return Task.FromResult(
+                string.IsNullOrEmpty(result.CollisionNote)
+                    ? result.Content
+                    : result.Content + "\n\n" + result.CollisionNote);
         }
 
         // ── IAgenticHost.SaveMemoryAsync ──────────────────────────────────────────
@@ -742,22 +748,50 @@ namespace DevMind
             if (_memoryManager == null)
                 return Task.FromResult("Memory not available: no working directory");
 
+            // Machine-level topics, when any exist, are appended in a labelled
+            // "global:<slug>" section — byte-identical to the legacy repo-only
+            // listing when none do.
+            var globalTopics = _memoryManager.ListGlobalTopics();
+
             string index = _memoryManager.LoadIndex();
             if (string.IsNullOrWhiteSpace(index))
             {
                 var topics = _memoryManager.ListTopics();
-                if (topics.Count == 0)
+                if (topics.Count == 0 && globalTopics.Count == 0)
                 {
                     AppendOutput("[MEMORY] No memory topics found.\n", OutputColor.Dim);
                     return Task.FromResult("No memory topics found. Use save_memory to create one.");
                 }
-                string list = string.Join("\n", topics.Select(t => $"- [{t}]"));
-                AppendOutput($"[MEMORY] {topics.Count} topic(s) available.\n", OutputColor.Dim);
-                return Task.FromResult(list);
+                var sb = new StringBuilder();
+                if (topics.Count > 0)
+                {
+                    if (globalTopics.Count > 0) sb.AppendLine("Repo topics:");
+                    sb.Append(string.Join("\n", topics.Select(t => $"- [{t}]")));
+                }
+                if (globalTopics.Count > 0)
+                    sb.Append(BuildGlobalTopicSection(globalTopics));
+                AppendOutput($"[MEMORY] {topics.Count + globalTopics.Count} topic(s) available.\n", OutputColor.Dim);
+                return Task.FromResult(sb.ToString().TrimEnd());
             }
 
             AppendOutput("[MEMORY] Topics listed.\n", OutputColor.Dim);
-            return Task.FromResult(index);
+            return Task.FromResult(globalTopics.Count == 0 ? index : index + BuildGlobalTopicSection(globalTopics));
+        }
+
+        /// <summary>
+        /// The labelled machine-level topic section for list_memory_topics output
+        /// (host-side mirror of the MCP tool's section). Appended only when a global
+        /// topic exists, so output stays byte-identical to the legacy repo-only list
+        /// otherwise. Model-facing prose — no code parses it.
+        /// </summary>
+        private static string BuildGlobalTopicSection(List<string> globalTopics)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine();
+            sb.AppendLine($"Global (machine-level) topics — recall with recall_memory \"{MemoryManager.GlobalTopicPrefix}<slug>\":");
+            foreach (var t in globalTopics)
+                sb.AppendLine($"- [{MemoryManager.GlobalTopicPrefix}{t}]");
+            return sb.ToString().TrimEnd('\n');
         }
 
         // ── IAgenticHost.SearchMemoryAsync ────────────────────────────────────────
@@ -767,7 +801,10 @@ namespace DevMind
             if (_memoryManager == null)
                 return Task.FromResult("Memory not available: no working directory");
 
-            string result = _memoryManager.SearchTopics(pattern);
+            // BOTH layers: repo topics first, global topics tagged "global:<slug>"
+            // so every hit's layer is visible. Byte-identical to the legacy
+            // repo-only result when no global topics exist.
+            string result = _memoryManager.SearchTopicsAllLayers(pattern);
             if (result == null)
             {
                 AppendOutput("[MEMORY] No memory topics to search.\n", OutputColor.Dim);

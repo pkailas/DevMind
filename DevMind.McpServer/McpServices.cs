@@ -102,6 +102,17 @@ namespace DevMind.McpServer
         }
 
         public McpServices(string workingDirectory, IEnumerable<string>? additionalWriteRoots = null)
+            : this(workingDirectory, additionalWriteRoots, memoryManager: null)
+        {
+        }
+
+        /// <summary>
+        /// Test seam: accepts a pre-built <see cref="MemoryManager"/> (e.g. one rooted
+        /// at a temp global dir) instead of constructing one from the working directory.
+        /// Internal so only DevMind.McpServer.Tests (via InternalsVisibleTo) can use it.
+        /// </summary>
+        internal McpServices(string workingDirectory, IEnumerable<string>? additionalWriteRoots,
+            MemoryManager memoryManager)
         {
             WorkingDirectory = string.IsNullOrWhiteSpace(workingDirectory)
                 ? Environment.CurrentDirectory
@@ -117,7 +128,7 @@ namespace DevMind.McpServer
             WriteRoots = new WriteRootPolicy(WorkingDirectory, additionalWriteRoots);
             ReloadWriteRootsFromConfig();
 
-            Memory    = new MemoryManager(WorkingDirectory);
+            Memory    = memoryManager ?? new MemoryManager(WorkingDirectory);
             FileCache = new FileContentCache();
            Shell     = new ShellRunner(WorkingDirectory);
 
