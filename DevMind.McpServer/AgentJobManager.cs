@@ -54,8 +54,19 @@ namespace DevMind.McpServer
         public BuildVerification? Build;
 
         /// <summary>Post-run test verification outcome (null when skipped: verify_tests
-        /// false, no file changes, or the build verification failed).</summary>
-        public BuildVerification? Tests;
+        /// false, no file changes, or the build verification failed). Carries the
+        /// harness-measured total test count parsed from this run's own output.</summary>
+        public TestVerification? Tests;
+
+        /// <summary>Before-agent baseline test run (null when test_baseline was "off"
+        /// or the run was never performed). Harness-measured, like Tests.</summary>
+        public TestVerification? BaselineTests;
+
+        /// <summary>Whether the harness runs the test suite ONCE before the agent starts
+        /// (so the result can report a real "before -> after" delta). Default true —
+        /// "before-run"; callers with a slow suite opt out via "off". Only meaningful
+        /// when VerifyTests is on.</summary>
+        public bool RunTestBaseline { get; init; }
 
         /// <summary>
         /// True when the job technically finished but its work is NOT trustworthy as-is:
@@ -159,6 +170,15 @@ namespace DevMind.McpServer
         // any file, and stale cached content produced false reads/greps in the field.
         private readonly Action _onJobFinished;
 
+        /// <summary>
+        /// Test seam: when set, test-suite runs (baseline and after) go through this
+        /// instead of a real `dotnet test`. Lets tests COUNT the invocations ("off
+        /// skips the before-run" must mean no second call, not merely that it was fast)
+        /// and shape the output hermetically. Null = production path. Per-instance, so
+        /// test classes cannot interfere with each other or with a live server.
+        /// </summary>
+        internal Func<string /*workingDirectory*/, CancellationToken, Task<TestVerification>>? TestRunnerOverride { get; set; }
+
         public AgentJobManager(Action? onJobFinished = null)
         {
             _onJobFinished = onJobFinished ?? (() => { });
@@ -247,7 +267,7 @@ namespace DevMind.McpServer
 
         public AgentJob Start(string prompt, string workingDirectory, int maxDepth, int timeoutMinutes,
             bool allowCommit, bool verifyBuild, bool think = false, bool verifyTests = false,
-            bool noExecute = false)
+            bool noExecute = false, bool runTestBaseline = true)
         {
             var job = new AgentJob
             {
@@ -261,6 +281,7 @@ namespace DevMind.McpServer
                 Think = think,
                 VerifyTests = verifyTests,
                 NoExecute = noExecute,
+                RunTestBaseline = runTestBaseline,
                 State = AgentJobState.Queued,
             };
 
@@ -290,7 +311,8 @@ namespace DevMind.McpServer
         /// user-presentable error when the parent cannot be continued.
         /// </summary>
         public AgentJob? Continue(string parentJobId, string prompt, int maxDepth, int timeoutMinutes,
-            bool verifyBuild, out string error, bool verifyTests = false, bool? noExecute = null)
+            bool verifyBuild, out string error, bool verifyTests = false, bool? noExecute = null,
+            bool runTestBaseline = true)
         {
             error = null!;
             AgentJob parent;
@@ -336,6 +358,7 @@ namespace DevMind.McpServer
                 VerifyTests = verifyTests,
                 Think = parent.Think, // continuation inherits the parent's reasoning mode
                 NoExecute = ResolveContinuationNoExecute(parent.NoExecute, noExecute),
+                RunTestBaseline = runTestBaseline,
                 State = AgentJobState.Queued,
                 ParentJobId = parentJobId,
                 Session = session,
@@ -501,6 +524,20 @@ namespace DevMind.McpServer
 
                 try
                 {
+                    // Test baseline (tier 1, opt-in via verify_tests): the harness runs
+                    // the suite ONCE before the agent starts so the result can report a
+                    // real "before -> after" delta the agent never claimed. Gated on
+                    // verify_tests ALONE — HasFileChanges is not known until afterwards,
+                    // and a baseline on a no-change job is just wasted time, never a wrong
+                    // number. "off" (RunTestBaseline false) skips the run entirely.
+                    if (job.VerifyTests && job.RunTestBaseline)
+                    {
+                        job.BaselineTests = await RunTestSuiteAsync(job).ConfigureAwait(false);
+                        var b = job.BaselineTests;
+                        job.AppendTail($"\n[job] test baseline: exit {b.ExitCode}, " +
+                            (b.Total.HasValue ? $"total {b.Total} (harness-measured)" : $"no parseable total ({b.ParseFailure})") + "\n");
+                    }
+
                     // Fresh task → new session; continuation → the parent's session
                     // (conversation intact). Sessions are RETAINED on the job after the
                     // turn so devmind_task_continue can resume them.
@@ -552,7 +589,7 @@ namespace DevMind.McpServer
                     if (job.VerifyTests && job.State == AgentJobState.Done && HasFileChanges(result)
                         && job.Build is not { Succeeded: false })
                     {
-                        job.Tests = await VerifyTestsAsync(job).ConfigureAwait(false);
+                        job.Tests = await RunTestSuiteAsync(job).ConfigureAwait(false);
                     }
                 }
                 catch (Exception ex)
@@ -610,30 +647,36 @@ namespace DevMind.McpServer
             => result.Actions.Any(a =>
                 a.Kind is "save" or "append" or "patch" or "delete" or "rename");
 
-        /// <summary>Runs `dotnet test` in the working directory (opt-in via verify_tests).
-        /// Never throws — a verification failure is data.</summary>
-        private static async Task<BuildVerification?> VerifyTestsAsync(AgentJob job)
+        /// <summary>Runs `dotnet test` in the working directory (opt-in via verify_tests),
+        /// and derives the total test count from the output it captured itself. Never
+        /// throws — a verification failure is data. Used for BOTH the before-agent
+        /// baseline (tier 1) and the after-run verification, so both counts come from
+        /// the same instrument.</summary>
+        private async Task<TestVerification> RunTestSuiteAsync(AgentJob job)
         {
             const int TestTimeoutSeconds = 900;
-            const int TailChars = 2_000;
             const string command = "dotnet test";
+
+            // Test seam: when set, suite runs go through this instead of a real
+            // `dotnet test` — lets tests count and shape the invocations hermetically
+            // (no dotnet process, no user-level paths resolved). Null = production path.
+            if (TestRunnerOverride is { } override_)
+                return await override_(job.WorkingDirectory, job.Cts.Token).ConfigureAwait(false);
 
             try
             {
                 var runner = new ShellRunner(job.WorkingDirectory);
                 var (output, exitCode) = await runner.ExecuteAsync(
-                    command, CancellationToken.None, TestTimeoutSeconds).ConfigureAwait(false);
-                string tail = output.Length <= TailChars ? output : output.Substring(output.Length - TailChars);
-                return new BuildVerification { Command = command, ExitCode = exitCode, OutputTail = tail };
+                    command, job.Cts.Token, TestTimeoutSeconds).ConfigureAwait(false);
+                return TestVerification.FromRun(command, exitCode, output);
+            }
+            catch (OperationCanceledException)
+            {
+                return TestVerification.FromRun(command, -1, "test run cancelled");
             }
             catch (Exception ex)
             {
-                return new BuildVerification
-                {
-                    Command = command,
-                    ExitCode = -1,
-                    OutputTail = $"test verification crashed: {ex.Message}",
-                };
+                return TestVerification.FromRun(command, -1, $"test verification crashed: {ex.Message}");
             }
         }
 
@@ -673,13 +716,7 @@ namespace DevMind.McpServer
                         exit_code = job.Build.ExitCode,
                         output_tail = job.Build.OutputTail,
                     },
-                    test_verification = job.Tests == null ? null : new
-                    {
-                        command = job.Tests.Command,
-                        succeeded = job.Tests.Succeeded,
-                        exit_code = job.Tests.ExitCode,
-                        output_tail = job.Tests.OutputTail,
-                    },
+                    test_verification = TestVerificationPayload.Create(job),
                 });
                 File.WriteAllText(Path.Combine(TranscriptDir, $"{job.Id}.result.json"), json);
             }
