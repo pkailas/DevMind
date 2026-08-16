@@ -27,6 +27,12 @@ using DmTrace = DevMind.Trace;
 //        are now reported instead of swallowed, and a process still alive after the reap
 //        is flagged in the output. Observability + node-reuse prevention only — no Job
 //        Objects, no P/Invoke, no retry/escalation.
+// v1.11: per-command Windows Job Object (KILL_ON_JOB_CLOSE) around every command —
+//        lineage-based containment so orphaned/re-parented grandchildren (the MSBuild
+//        escapee) are killed by closing the job handle, which taskkill /F /T cannot reach.
+//        Strictly additive and strictly degradable: if ANY part of the job setup fails
+//        (non-Windows, API error, nested-job access-denied, process already gone) the
+//        command runs exactly as it did in v1.10. See WindowsJobObject.cs.
 
 namespace DevMind
 {
@@ -186,6 +192,17 @@ namespace DevMind
             int timeoutSeconds,
             IProgress<ShellOutputLine> onLine)
         {
+            // Per-command containment: a Job Object with KILL_ON_JOB_CLOSE, assigned to
+            // the child right after Start(). Job membership is inherited by descendants
+            // and is LINEAGE-based — unlike taskkill /F /T it reaches grandchildren that
+            // orphaned or re-parented (the MSBuild node-reuse escapee). Strictly
+            // degradable: any failure leaves jobHandle == IntPtr.Zero and the command runs
+            // with exactly the pre-job behavior (taskkill reap + ClassifyReapResult + the
+            // still-alive message below). The handle is closed in the finally below, AFTER
+            // the wait/reap sequence — that close is the authoritative kill for anything
+            // still contained. Never throws, by construction (WindowsJobObject.cs).
+            IntPtr jobHandle = IntPtr.Zero;
+
             try
             {
                 psi.WorkingDirectory       = WorkingDirectory;
@@ -284,6 +301,26 @@ namespace DevMind
                 // timeout. Closing it here generalizes the git-specific GIT_REDIRECT_STDIN fix.
                 try { proc.StandardInput.Close(); } catch { /* best effort */ }
 
+                // Assign the child to its per-command job. The accepted CREATE_SUSPENDED race:
+                // a grandchild spawned in the sub-millisecond window between proc.Start() and
+                // the assignment would not be contained — practically unreachable for a shell
+                // child (first grandchild appears seconds later) and a conservative
+                // trade-off against re-implementing CreateProcess here. On failure (most
+                // commonly Win32 5 when DevMind itself is a member of a no-breakaway parent
+                // job, e.g. some CI runners) we trace mcp.shell.job.degraded and continue with
+                // the v1.10 behavior — the command is NEVER blocked by the job layer.
+                if (jobHandle == IntPtr.Zero)
+                {
+                    var job = WindowsJobObject.TryCreateAndAssignJob(proc);
+                    jobHandle = job.jobHandle;
+                    if (job.jobHandle == IntPtr.Zero && job.reason != null)
+                        DmTrace.Event("info", "mcp.shell.job.degraded",
+                            new Dictionary<string, object>
+                            {
+                                ["reason"] = job.reason
+                            });
+                }
+
                 proc.BeginOutputReadLine();
                 proc.BeginErrorReadLine();
 
@@ -327,6 +364,15 @@ namespace DevMind
                     reapMessage = reap.Succeeded ? null : $"[SHELL] Failed to reap process tree (PID {proc.Id}): {reap.Reason}";
                     if (reapMessage != null)
                         onLine?.Report(new ShellOutputLine(reapMessage, isError: true));
+
+                    // Authoritative kill: closing the job handle (KILL_ON_JOB_CLOSE) tears
+                    // down the ENTIRE contained tree in one OS operation — including the
+                    // orphaned grandchildren that taskkill /F /T already failed to reach.
+                    // IN ADDITION TO the taskkill reap above, never instead of it (the taskkill
+                    // path is still the only mechanism on the degraded/no-job path).
+                    if (jobHandle != IntPtr.Zero)
+                        WindowsJobObject.ReleaseJob(jobHandle);
+                    jobHandle = IntPtr.Zero;
                 }
 
                 // WaitForExit() ensures all pending OutputDataReceived/ErrorDataReceived events drain.
@@ -390,11 +436,22 @@ namespace DevMind
             }
             catch (OperationCanceledException)
             {
+                WindowsJobObject.ReleaseJob(jobHandle);
                 return ("[SHELL] Command cancelled.", -1);
             }
             catch (Exception ex)
             {
+                WindowsJobObject.ReleaseJob(jobHandle);
                 return ($"(error: {ex.Message})", -1);
+            }
+            finally
+            {
+                // Release on every path. Normal completion: closing an empty job is a no-op.
+                // Timeout/cancel: already released above (handle zeroed). Early throws
+                // (proc.Start() failed after the job was armed): kills any child that
+                // started inside the job before the exception surfaced.
+                if (jobHandle != IntPtr.Zero)
+                    WindowsJobObject.ReleaseJob(jobHandle);
             }
         }
 
