@@ -5,7 +5,37 @@ Tests at time of writing: Core 410, McpServer 20. Deployed: 1.0.370 (one commit 
 
 ---
 
-## 1. Shell timeout does not reap runaway processes  — PARTIALLY FIXED
+## 1. Shell timeout does not reap runaway processes  — DONE (f2e59b4)
+
+**CLOSED 2026-08-16.** The Job Object landed. `WindowsJobObject.cs` creates a
+per-command job with `KILL_ON_JOB_CLOSE`, assigns the child right after
+`Start()`, and closes the handle in the finally — an additional authoritative
+kill on top of the taskkill path, which is untouched. Strictly degradable: any
+failure (non-Windows, API error, no-breakaway parent job) traces
+`mcp.shell.job.degraded` and runs exactly as before. Core 421, McpServer 20.
+
+Containment is VERIFIED, not assumed — production self-check queries the
+SPECIFIC job handle immediately after assignment and traces
+`assigned_immediately`, plus a ground-truth test asserting membership via two
+handles.
+
+Accepted and documented trade: a grandchild spawned in the sub-millisecond
+window between `Start()` and assignment is uncontained. Closing it needs
+`CREATE_SUSPENDED` via manual `CreateProcess` — more native surface than the
+containment itself.
+
+**Worth remembering — four of the five bugs were in the MEASURING INSTRUMENT,
+not the feature.** `IsProcessInJob` was declared with two parameters instead of
+three, so it read the success-bool as the membership answer. Both a human and
+the agent then produced confident wrong diagnoses from its output ("the
+environment restricts job objects", "the test is querying a dead process"). The
+lesson is the one already in §4, one level down: when a measurement disagrees
+with expectations, suspect the measurement before the world. Also: the answer
+was one `learn_search` away the whole time, and neither of us looked.
+
+### Historical record (superseded, kept for context)
+
+## 1b. Original diagnosis — PARTIALLY FIXED at b2ba5af
 
 **UPDATE 2026-08-16 (commit b2ba5af, deployed 1.0.373).** Three of the four
 recommendations are done:
