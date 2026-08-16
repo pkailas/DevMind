@@ -22,6 +22,12 @@ using System.Threading;
 using System.Threading.Tasks;
 using DmTrace = DevMind.Trace;
 
+// v1.10: MSBUILDDISABLENODEREUSE=1 on every spawned shell so dotnet build/test does
+//        not leave a persistent MSBuild worker pool behind; reap (taskkill /F /T) failures
+//        are now reported instead of swallowed, and a process still alive after the reap
+//        is flagged in the output. Observability + node-reuse prevention only — no Job
+//        Objects, no P/Invoke, no retry/escalation.
+
 namespace DevMind
 {
     public readonly struct ShellOutputLine
@@ -196,6 +202,17 @@ namespace DevMind
                 psi.EnvironmentVariables["GIT_REDIRECT_STDIN"] = "off";
                 psi.EnvironmentVariables["GIT_REDIRECT_STDERR"] = "2>&1";
 
+                // MSBuild's build-server / node-reuse pool deliberately outlives the invoking
+                // command — a timed-out `dotnet test` leaves a persistent MSBuild worker behind
+                // that kept growing (64 GB observed in the field) while the invoking shell's
+                // taskkill /F /T tree was already gone. Setting MSBUILDDISABLENODEREUSE on
+                // every spawned shell makes dotnet build/test exit with its worker pool, so the
+                // tree kill actually reaches everything. Set unconditionally: the var is inert
+                // for any process that does not read it, so the cost for non-MSBuild commands
+                // is zero. Scoped to this shell's child (ProcessStartInfo.EnvironmentVariables
+                // inherits + overrides), not the McpServer process itself.
+                psi.EnvironmentVariables["MSBUILDDISABLENODEREUSE"] = "1";
+
                 long spawnStartTicks = Stopwatch.GetTimestamp();
                 long stdoutBytes = 0;
                 long stderrBytes = 0;
@@ -278,6 +295,8 @@ namespace DevMind
                 // cross-platform shell support (Phase C.10+).
                 cancellationToken.Register(() =>
                 {
+                    // Best-effort early kill on cancel. The authoritative reap — with outcome
+                    // reporting — happens below in the timeout/cancel branch (ReapProcessTree).
                     try
                     {
                         Process.Start(new ProcessStartInfo
@@ -298,23 +317,39 @@ namespace DevMind
                 bool timedOut  = winner == timeoutTask;
                 bool cancelled = winner == cancelTask || cancellationToken.IsCancellationRequested;
 
+                // Reap the process tree on timeout/cancel and report the outcome. A failed
+                // reap used to be invisible (bare catch + exit code never checked) — the
+                // survivor kept growing while the caller was told "timed out" and moved on.
+                string reapMessage = null;
                 if (timedOut || cancelled)
                 {
-                    try
-                    {
-                        Process.Start(new ProcessStartInfo
-                        {
-                            FileName        = "taskkill",
-                            Arguments       = $"/F /T /PID {proc.Id}",
-                            CreateNoWindow  = true,
-                            UseShellExecute = false
-                        })?.WaitForExit(2000);
-                    }
-                    catch { }
+                    var reap = ReapProcessTree(proc.Id);
+                    reapMessage = reap.Succeeded ? null : $"[SHELL] Failed to reap process tree (PID {proc.Id}): {reap.Reason}";
+                    if (reapMessage != null)
+                        onLine?.Report(new ShellOutputLine(reapMessage, isError: true));
                 }
 
                 // WaitForExit() ensures all pending OutputDataReceived/ErrorDataReceived events drain.
-                await Task.Run(() => proc.WaitForExit(5_000));
+                // Its return value is the verification signal for CHANGE 3: false means the 5s
+                // window elapsed and the process had not exited yet.
+                bool waitTimedOut = !(await Task.Run(() => proc.WaitForExit(5_000)));
+
+                // Verify the process actually died. Report it as a fact ("still alive after the
+                // 5s wait") — do not assert a cause we do not have. A 1s grace window on the
+                // exit event catches a slow exit before declaring the process a survivor.
+                // Only reachable on the reap path: a normally completing process exits within
+                // the 5s window, so waitTimedOut is false and this block never runs.
+                if ((timedOut || cancelled) && waitTimedOut)
+                {
+                    var exitGate = await Task.WhenAny(exitTcs.Task, Task.Delay(1_000));
+                    if (!ReferenceEquals(exitGate, exitTcs.Task))
+                    {
+                        string trigger = timedOut ? "the timeout" : "cancellation";
+                        string stillAliveMsg = $"[SHELL] Process (PID {proc.Id}) is still alive 5 seconds after {trigger} and the reap attempt — it may be a detached child that outlived the tree (e.g. an MSBuild worker). Consider killing it manually.";
+                        onLine?.Report(new ShellOutputLine(stillAliveMsg, isError: true));
+                        reapMessage = reapMessage != null ? $"{reapMessage} {stillAliveMsg}" : stillAliveMsg;
+                    }
+                }
 
                 long durationTicks = Stopwatch.GetTimestamp() - spawnStartTicks;
                 long durationMs    = durationTicks * 1000L / Stopwatch.Frequency;
@@ -329,6 +364,7 @@ namespace DevMind
                         ["duration_ms"]  = durationMs,
                         ["timed_out"]    = timedOut,
                         ["cancelled"]    = cancelled,
+                        ["reap_result"]  = reapMessage ?? (timedOut || cancelled ? "ok" : "not_needed"),
                         ["stdout_lines"] = stdoutLines,
                         ["stderr_lines"] = stderrLines,
                         ["stdout_bytes"] = stdoutBytes,
@@ -345,6 +381,7 @@ namespace DevMind
                 var sb = new StringBuilder();
                 if (timedOut)        sb.AppendLine($"[SHELL] Command timed out after {timeoutSeconds} seconds.");
                 else if (cancelled)  sb.AppendLine("[SHELL] Command cancelled.");
+                if (reapMessage != null) sb.AppendLine(reapMessage);
                 string buffered = outputBuffer.ToString().TrimEnd();
                 if (!string.IsNullOrEmpty(buffered)) sb.Append(buffered);
                 if (sb.Length == 0) { sb.Append("(no output)"); onLine?.Report(new ShellOutputLine("(no output)", isError: false)); }
@@ -361,7 +398,73 @@ namespace DevMind
             }
         }
 
-       /// <summary>
+        /// <summary>
+        /// Outcome of a <c>taskkill /F /T</c> reap attempt. <see cref="Succeeded"/> is true when
+        /// the reap succeeded (exit 0) OR the target was already gone (exit 128 "not found" —
+        /// normal right after a process exits naturally). A non-zero exit code other than 128,
+        /// an exception, or a null exit code (taskkill never produced one) is a failure: the
+        /// caller must report it so a runaway survivor is no longer invisible.
+        /// </summary>
+        public sealed class ReapResult
+        {
+            public bool   Succeeded { get; }
+            public string Reason    { get; }
+            ReapResult(bool succeeded, string reason) { Succeeded = succeeded; Reason = reason; }
+            public static ReapResult Ok(string reason)   => new ReapResult(true,  reason);
+            public static ReapResult Fail(string reason) => new ReapResult(false, reason);
+        }
+
+        /// <summary>
+        /// Classify a <c>taskkill /F /T</c> outcome as a success or a failure.
+        /// Exit 0 (killed) and exit 128 (process not found — already exited) are BOTH
+        /// non-failures. Anything else is a failure: we do not assert a cause, only
+        /// report the observed code/exception.
+        /// </summary>
+        public static ReapResult ClassifyReapResult(int? taskkillExitCode, Exception exception = null)
+        {
+            if (exception != null)
+                return ReapResult.Fail($"taskkill threw: {exception.Message}");
+            if (taskkillExitCode == null)
+                return ReapResult.Fail("taskkill produced no exit code");
+            if (taskkillExitCode == 0)
+                return ReapResult.Ok("process tree killed");
+            if (taskkillExitCode == 128)
+                return ReapResult.Ok("process not found (already exited)");
+            return ReapResult.Fail($"taskkill exited with code {taskkillExitCode}");
+        }
+
+        /// <summary>
+        /// Kill the process tree rooted at <paramref name="pid"/> via <c>taskkill /F /T</c> and
+        /// report the outcome. The previous implementation swallowed every failure (bare catch,
+        /// exit code never read) so a runaway survivor was invisible — this is the observability
+        /// half of the fix. The other half is <c>MSBUILDDISABLENODEREUSE=1</c> (see above), which
+        /// prevents the common MSBuild-worker-leaves-the-tree case in the first place. Windows
+        /// only; on other platforms taskkill is unavailable and the failure is reported honestly.
+        /// </summary>
+        private static ReapResult ReapProcessTree(int pid)
+        {
+            try
+            {
+                using var tk = Process.Start(new ProcessStartInfo
+                {
+                    FileName        = "taskkill",
+                    Arguments       = $"/F /T /PID {pid}",
+                    CreateNoWindow  = true,
+                    UseShellExecute = false
+                });
+                if (tk == null) return ReapResult.Fail("taskkill did not start");
+                tk.WaitForExit(2000);
+                int? code;
+                try { code = tk.ExitCode; } catch { code = null; }
+                return ClassifyReapResult(code);
+            }
+            catch (Exception ex)
+            {
+                return ClassifyReapResult(null, ex);
+            }
+        }
+
+        /// <summary>
         /// Resolves the effective timeout in seconds for a shell command.
         /// Precedence: explicit value (if > 0) > DEVMIND_SHELL_TIMEOUT env var > 120s fallback.
         /// A value of 0 or negative from <paramref name="explicit"/> means "use the default."
