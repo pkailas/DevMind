@@ -132,13 +132,43 @@ capability to add later, not a side effect.
 
 ---
 
-## 2. Cosmetic leftovers from the FilePathResolver review (job-487)
+## 2. FilePathResolver review leftovers — DONE (1be3060)
 
-- **Double-resolve on the not-found path** — the failure path resolves twice.
-- **`Candidates.Count == 1` message branch** — says "The directory portion of the
-  hint did not match it" even when the hint has no directory portion.
-- **Null guard** missing in the host-side `BuildFileNotFoundMessage` wrappers.
+All three closed. The third turned out to be more than cosmetic: the wrappers used
+an unguarded `Path.GetFileName` where the first-resolve helpers use
+`SafeGetFileName`, so an empty or invalid-character filename THREW in the wrapper
+while the first call returned null gracefully — a clean not-found became an
+exception. The original review had only said "missing null guard" without saying
+what was unguarded; a read-only probe found the actual asymmetry.
 
+Core 479 -> 488, McpServer 61 -> 64.
+
+NOTE: `DevMind.Core.Tests` now has an `xunit.runner.json` with
+`parallelizeTestCollections: false`, needed because the resolve-count assertions
+use a counter. That takes the Core suite from ~15s to ~40s, and `verify_tests`
+runs it twice.
+
+---
+
+## 2b. Watch item: turns ending mid-generation
+
+Twice on 2026-08-16 a delegated job ended with an empty answer, zero actions, and a
+transcript whose last line was `[LLM] reasoning… ~N think tokens, 30s into this
+response` — no tool call, no completion marker, no error. job-581 (~2,511 think
+tokens) and job-860 (~2,240).
+
+NOT reproduced deliberately: a read-only probe (job-886) with a comparable
+reasoning-heavy brief passed straight through that range and completed normally.
+llama-server logged no errors on either occasion, and reported `truncated = 0`.
+
+Note a cancelled job (job-873) leaves an IDENTICAL transcript signature, with no
+"cancelled" marker, so the log alone cannot distinguish a cancel from a genuine
+truncation. That made the first instances harder to read than they should have been
+and is worth fixing on its own.
+
+Recorded rather than chased: two instances against one clean probe is not enough to
+act on. If it recurs, capture whether `--reasoning-budget` (4096 at the time) is
+implicated, and consider marking cancellations explicitly in the transcript.
 ---
 
 ## 3. Known-and-deliberate — do NOT "fix" these
