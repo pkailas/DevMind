@@ -106,6 +106,32 @@ was never separately diagnosed.
 
 ---
 
+## 1c. Global memory layer — DONE and LIVE (af6abdf, deployed 1.0.380)
+
+Standing conventions used to be per-repo only, because MemoryManager is rooted
+at the working directory. Tooling conventions ("check learn_search before an
+unfamiliar P/Invoke", "use append_file to append") are not repo facts and should
+bind everywhere.
+
+`%APPDATA%\devmind\memory\` is now a second layer, composed global-first then
+repo, each with its own budget (global 8 KB, repo keeps its 24 KB) so a long
+global file can never starve a repo topic.
+
+`standing-conventions.md` lives there now, NOT in this repo. Five rules, each
+derived from a real field failure. Verified live in DevMindTestBed, which has no
+`.devmind` directory at all: the task received all five rules labelled
+`## GLOBAL (machine-level) conventions` and correctly reported no repo-level
+topics.
+
+Repo-level `.devmind/memory` remains the right home for genuine repo facts. The
+four topics in this repo are per-repo incident notes and correctly stay here.
+
+Global is read-only at the tool surface: `save_memory` still writes to the repo.
+Letting a model author machine-wide standing rules for itself is a deliberate
+capability to add later, not a side effect.
+
+---
+
 ## 2. Cosmetic leftovers from the FilePathResolver review (job-487)
 
 - **Double-resolve on the not-found path** — the failure path resolves twice.
