@@ -5,6 +5,12 @@
 // convention topics must be injected IN FULL into headless briefs — delegated
 // agents repeatedly tripped rules (warnings-as-errors, LoggerMessage, test naming)
 // that sat un-recalled in .devmind/memory.
+//
+// Uses the MemoryManager(repoRoot, globalDir) test seam so the real
+// %APPDATA%\devmind\memory is never read — a machine-level standing-conventions.md
+// on the developer's machine must not leak into these repo-layer assertions.
+// _global is deliberately NOT created: every test exercises the "no global dir"
+// state, which is the byte-identical legacy output under test here.
 
 using Xunit;
 
@@ -12,23 +18,34 @@ namespace DevMind.Core.Tests
 {
     public class StandingContextTests : IDisposable
     {
-        private readonly string _dir;
+        private readonly string _repo;
+        private readonly string _global;
 
         public StandingContextTests()
         {
-            _dir = Path.Combine(Path.GetTempPath(), $"devmind_stand_{Guid.NewGuid():N}");
-            Directory.CreateDirectory(_dir);
+            string baseDir = Path.Combine(Path.GetTempPath(), $"devmind_stand_{Guid.NewGuid():N}");
+            _repo = Path.Combine(baseDir, "repo");
+            _global = Path.Combine(baseDir, "global");
+            Directory.CreateDirectory(_repo);
+            // NOTE: _global is deliberately NOT created — these tests assert the
+            // repo-layer behaviour in isolation ("no global dir" state).
         }
 
         public void Dispose()
         {
-            try { Directory.Delete(_dir, recursive: true); } catch { }
+            try
+            {
+                string baseDir = Path.GetDirectoryName(_repo)!;
+                if (Directory.Exists(baseDir))
+                    Directory.Delete(baseDir, recursive: true);
+            }
+            catch { }
         }
 
         [Fact]
         public void ConventionAndStandingTopicsAreInjectedOthersAreNot()
         {
-            var memory = new MemoryManager(_dir);
+            var memory = new MemoryManager(_repo, _global);
             memory.SaveTopic("parsely-backend-conventions", "warnings are errors; LoggerMessage pattern", "conventions");
             memory.SaveTopic("standing-deploy-rules", "republish all four services after schema changes", "deploy");
             memory.SaveTopic("random-debug-notes", "one-off investigation notes", "notes");
@@ -44,7 +61,7 @@ namespace DevMind.Core.Tests
         [Fact]
         public void NoStandingTopicsReturnsNull()
         {
-            var memory = new MemoryManager(_dir);
+            var memory = new MemoryManager(_repo, _global);
             memory.SaveTopic("scratch", "nothing standing here", "scratch");
 
             Assert.Null(memory.LoadStandingContext());
@@ -53,7 +70,7 @@ namespace DevMind.Core.Tests
         [Fact]
         public void BudgetExhaustionOmitsWithPointerInsteadOfTruncatingMidFile()
         {
-            var memory = new MemoryManager(_dir);
+            var memory = new MemoryManager(_repo, _global);
             memory.SaveTopic("a-conventions", new string('x', 2_000), "big");
             memory.SaveTopic("b-conventions", new string('y', 2_000), "big");
 
