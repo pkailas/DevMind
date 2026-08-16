@@ -23,4 +23,10 @@
     <ProjectReference Include="..\DevMind.McpServer\DevMind.McpServer.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- xunit config (disables parallel collections — see the file's header); must
+         sit next to the test assembly, so copy it to the output. -->
+    <None Include="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

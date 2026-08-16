@@ -179,6 +179,16 @@ namespace DevMind.McpServer
         /// </summary>
         internal Func<string /*workingDirectory*/, CancellationToken, Task<TestVerification>>? TestRunnerOverride { get; set; }
 
+        /// <summary>
+        /// Test seam: when set, the post-agent build verification goes through this
+        /// instead of a real build on the working directory. Lets tests drive a
+        /// verify_build job hermetically — a temp dir with no .slnx/.csproj makes the
+        /// real resolver return null so job.Build would never populate (the exact
+        /// shape the verification-race tests need to observe and assert on).
+        /// Null = production path. Mirrors TestRunnerOverride.
+        /// </summary>
+        internal Func<string /*workingDirectory*/, CancellationToken, Task<BuildVerification?>>? BuildRunnerOverride { get; set; }
+
         public AgentJobManager(Action? onJobFinished = null)
         {
             _onJobFinished = onJobFinished ?? (() => { });
@@ -571,26 +581,62 @@ namespace DevMind.McpServer
                         progress: job.AppendTail,
                         ct: job.Cts.Token).ConfigureAwait(false);
 
+                    // The RESULT is set as soon as the turn ends — devmind_task_result
+                    // reads it once the job is Done, and it's needed to compute the
+                    // terminal state below. But the STATE is deliberately NOT published
+                    // yet when verification is requested: a caller that sees
+                    // State == Done treats the job as final and serializes job.Build /
+                    // job.Tests (devmind_task_result) with no synchronization against
+                    // this worker. Publishing Done before the verification fields
+                    // settled let a concurrent reader observe the in-memory result
+                    // mid-verification (build populated, test_verification null). We
+                    // hold the job in Running through verification and publish the
+                    // terminal state only once both have settled (end of the try block).
                     job.Result = result;
-                    job.State = result.Cancelled ? AgentJobState.Cancelled
+                    job.Error = result.Error;
+
+                    // The state the job will report once nothing is left to verify.
+                    var terminalState = result.Cancelled ? AgentJobState.Cancelled
                         : result.Error != null ? AgentJobState.Failed
                         : AgentJobState.Done;
-                    job.Error = result.Error;
 
                     // Post-agent build verification: the job runner checks the build so
                     // agents don't burn iterations fighting shell timeouts/PATH to do it
                     // themselves (two live delegations lost most of their depth to this).
                     // Only when the agent actually changed files, and never on cancel.
-                    if (job.VerifyBuild && job.State == AgentJobState.Done && HasFileChanges(result))
+                    if (job.VerifyBuild && terminalState == AgentJobState.Done && HasFileChanges(result))
+                    {
+                        // Keep a poller informed the job is still working (a real build
+                        // can take seconds): the transcript tail is the live signal, not
+                        // a new state value. Held in Running until the result is final.
+                        job.AppendTail("\n[job] build verification: running...\n");
                         job.Build = await VerifyBuildAsync(job).ConfigureAwait(false);
+                    }
 
                     // Test verification (opt-in): only when the build verification did
                     // not already fail — red tests on a broken build are noise.
-                    if (job.VerifyTests && job.State == AgentJobState.Done && HasFileChanges(result)
+                    if (job.VerifyTests && terminalState == AgentJobState.Done && HasFileChanges(result)
                         && job.Build is not { Succeeded: false })
                     {
+                        // Same as build: a real `dotnet test` can take a long time, so
+                        // surface it in the tail while the job stays Running.
+                        job.AppendTail("\n[job] test verification: running...\n");
                         job.Tests = await RunTestSuiteAsync(job).ConfigureAwait(false);
                     }
+
+                    // Publish the terminal state. Invariant this line guards: a job
+                    // observed as Done never carries a verification field that is still
+                    // going to change. If verify_build / verify_tests was requested, the
+                    // corresponding field was populated (or explicitly null with a stated
+                    // reason) on the lines above, BEFORE this point — so devmind_task_result
+                    // and the persisted sidecar can never serve a Done job with a
+                    // half-set verification. This also closes the pre-existing
+                    // build_verification window: before this fix a job published Done
+                    // right after the turn, so a concurrent reader could observe
+                    // build_verification still null while the build ran. For a job with
+                    // neither verify flag, terminalState is published exactly as before
+                    // (no verification ran, no tail lines) — byte-for-byte unchanged.
+                    job.State = terminalState;
                 }
                 catch (Exception ex)
                 {
@@ -725,10 +771,16 @@ namespace DevMind.McpServer
 
         /// <summary>Runs the working directory's resolved build command with a
         /// build-sized timeout. Never throws — a verification failure is data.</summary>
-        private static async Task<BuildVerification?> VerifyBuildAsync(AgentJob job)
+        private async Task<BuildVerification?> VerifyBuildAsync(AgentJob job)
         {
             const int BuildTimeoutSeconds = 600;
             const int TailChars = 2_000;
+
+            // Test seam: when set, build verification goes through this instead of a
+            // real build (hermetic — a temp dir resolves to no build command). Null =
+            // production path. Mirrors the TestRunnerOverride pattern below.
+            if (BuildRunnerOverride is { } buildOverride)
+                return await buildOverride(job.WorkingDirectory, job.Cts.Token).ConfigureAwait(false);
 
             string command;
             try
