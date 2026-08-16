@@ -62,6 +62,7 @@ namespace DevMind.McpServer
             [Description("After the agent finishes, the job runner builds the working_dir itself and attaches build_verification to the result (default true).")] bool? verify_build = null,
             [Description("After a successful build verification, also run `dotnet test` in working_dir and attach test_verification (default false — tests can be slow).")] bool? verify_tests = null,
             [Description("Enable model reasoning (think blocks) for this task (default false). Leave off for briefed mechanical tasks — thinking runs UNBOUNDED on the local server and can add minutes per iteration. Turn on only for genuinely hard design/debugging tasks. Continuations inherit this setting.")] bool? think = null,
+            [Description("Restrict the agent to no execution (default false): it may still build (dotnet build / run_build) for compile verification, but running executables, `dotnet run`/`dotnet exec`, the test suite (run_tests / dotnet test), and debug launch/attach are blocked at the harness. This is NOT a sandbox — it blocks a named set of execution invocations, not every conceivable way to start a process; use it to stop an agent from launching (or re-launching) something that hangs or spawns runaway children, not as a security boundary. Continuations inherit this setting.")] bool? no_execute = null,
             CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(prompt))
@@ -84,7 +85,8 @@ namespace DevMind.McpServer
                 allowCommit: allow_commit ?? false,
                 verifyBuild: verify_build ?? true,
                 think: think ?? false,
-                verifyTests: verify_tests ?? false);
+                verifyTests: verify_tests ?? false,
+                noExecute: no_execute ?? false);
 
             return JsonSerializer.Serialize(new
             {
@@ -109,8 +111,10 @@ namespace DevMind.McpServer
             [Description("Instruction for the resumed agent. Default: 'Continue the task from where you left off.'")] string? prompt = null,
             [Description("Max agentic iterations for this continuation (default 40).")] int? max_depth = null,
             [Description("Wall-clock kill timeout in minutes (default 30).")] int? timeout_minutes = null,
-            [Description("Run build verification after this turn (default true).")] bool? verify_build = null,
-            [Description("After a successful build verification, also run `dotnet test` and attach test_verification (default false).")] bool? verify_tests = null,
+            [Description("Run build verification after this turn (default true). Note: post-turn build verification by the job runner is independent of no_execute and unaffected by it.")] bool? verify_build = null,
+            [Description("After a successful build verification, also run `dotnet test` and attach test_verification (default false).")]
+            bool? verify_tests = null,
+            [Description("Restrict this continuation to no execution (default: inherit the parent task's setting). When inherited or set, running executables, the test suite, and debug launch/attach are blocked at the harness; builds stay allowed. Cannot be used to relax a parent's restriction — start a fresh task for that.")] bool? no_execute = null,
             CancellationToken cancellationToken = default)
         {
             string? health = await ProbeModelServerAsync(cancellationToken).ConfigureAwait(false);
@@ -124,7 +128,8 @@ namespace DevMind.McpServer
                 timeoutMinutes: Math.Clamp(timeout_minutes ?? 30, 1, 240),
                 verifyBuild: verify_build ?? true,
                 out string error,
-                verifyTests: verify_tests ?? false);
+                verifyTests: verify_tests ?? false,
+                noExecute: no_execute);
 
             if (job == null)
                 return Err(error);

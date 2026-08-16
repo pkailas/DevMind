@@ -39,6 +39,11 @@ namespace DevMind.McpServer
         /// <summary>Enable model reasoning (think blocks) for this task. Default false:
         /// briefed mechanical tasks iterate faster without unbounded thinking.</summary>
         public bool Think { get; init; }
+        /// <summary>Caller-imposed no-execution restriction for this task (default false):
+        /// the agent may build but not run executables, tests, or a debugger. Continuations
+        /// inherit this from their parent — a constraint set on turn 1 must not evaporate
+        /// on turn 2 (the failure mode this exists to prevent).</summary>
+        public bool NoExecute { get; init; }
 
         public AgentJobState State;
         public HeadlessAgentResult? Result;
@@ -241,7 +246,8 @@ namespace DevMind.McpServer
         }
 
         public AgentJob Start(string prompt, string workingDirectory, int maxDepth, int timeoutMinutes,
-            bool allowCommit, bool verifyBuild, bool think = false, bool verifyTests = false)
+            bool allowCommit, bool verifyBuild, bool think = false, bool verifyTests = false,
+            bool noExecute = false)
         {
             var job = new AgentJob
             {
@@ -254,6 +260,7 @@ namespace DevMind.McpServer
                 VerifyBuild = verifyBuild,
                 Think = think,
                 VerifyTests = verifyTests,
+                NoExecute = noExecute,
                 State = AgentJobState.Queued,
             };
 
@@ -263,13 +270,27 @@ namespace DevMind.McpServer
         }
 
         /// <summary>
+        /// The no-execution restriction is inherited from the parent by default: a
+        /// constraint the caller set on turn 1 must survive to turn N (the failure mode
+        /// that motivated no_execute). An explicit noExecute: true can turn it ON for a
+        /// continuation that didn't have it; it CANNOT be relaxed by a continuation —
+        /// passing false is treated the same as omitting it, and the restriction, once
+        /// set, can only be lifted by starting a fresh task. Extracted as a pure static
+        /// so the inheritance decision is unit-testable without a live job queue.
+        /// </summary>
+        internal static bool ResolveContinuationNoExecute(bool parentNoExecute, bool? requestedNoExecute)
+        {
+            return parentNoExecute || requestedNoExecute == true;
+        }
+
+        /// <summary>
         /// Resumes a finished job's conversation as a new job: the session (LlmClient
         /// history, caches, scratchpad) transfers to the continuation, so a bare
         /// "continue" picks up exactly where the parent stopped. Returns null with a
         /// user-presentable error when the parent cannot be continued.
         /// </summary>
         public AgentJob? Continue(string parentJobId, string prompt, int maxDepth, int timeoutMinutes,
-            bool verifyBuild, out string error, bool verifyTests = false)
+            bool verifyBuild, out string error, bool verifyTests = false, bool? noExecute = null)
         {
             error = null!;
             AgentJob parent;
@@ -314,6 +335,7 @@ namespace DevMind.McpServer
                 VerifyBuild = verifyBuild,
                 VerifyTests = verifyTests,
                 Think = parent.Think, // continuation inherits the parent's reasoning mode
+                NoExecute = ResolveContinuationNoExecute(parent.NoExecute, noExecute),
                 State = AgentJobState.Queued,
                 ParentJobId = parentJobId,
                 Session = session,
@@ -495,12 +517,15 @@ namespace DevMind.McpServer
                         };
                         session = new HeadlessSession(options, EndpointUrl, ApiKey,
                             job.WorkingDirectory, buildCommand: null, allowCommit: job.AllowCommit,
-                            sessionId: job.Id);
+                            noExecute: job.NoExecute, sessionId: job.Id);
                         job.Session = session;
                     }
                     else
                     {
                         session.SetMaxDepth(job.MaxDepth);
+                        // A continuation's job may differ from the session it reuses
+                        // (e.g. noExecute newly opted in), so re-sync the host guard.
+                        session.SetNoExecute(job.NoExecute);
                     }
 
                     var result = await session.RunTurnAsync(

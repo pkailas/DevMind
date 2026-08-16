@@ -147,6 +147,35 @@ namespace DevMind
         public bool RestrictWritesToWorkingDirectory { get; set; }
 
         /// <summary>
+        /// When true (set only by headless delegation that requested no_execute), this
+        /// host refuses to spawn a process on any of its execution surfaces: run_shell
+        /// commands matching the <c>LoopHelpers.IsExecutableCommand</c> denylist, run_tests
+        /// (the test host is itself a running process — the hung-test-host incident is why
+        /// this is blocked, not carve-out-able), and debug launch/attach. Build commands
+        /// (dotnet build, npm run build, …) are NOT execution and stay allowed. Default
+        /// false: the false path is byte-for-byte the pre-change behavior — these are
+        /// guard clauses only, nothing else in these methods moves. Not a sandbox: the
+        /// denylist is named and bypassable; the guarantee is that these three surfaces
+        /// are gated, said plainly in the error text the model sees.
+        /// </summary>
+        public bool NoExecute { get; set; }
+
+        /// <summary>Standard text for a caller-imposed no_execute block: names the
+        /// restriction as the caller's, corrects the false premise (DevMind CAN run
+        /// programs — this task may not), and prescribes the only next step (build,
+        /// never a workaround that would re-trigger execution).</summary>
+        private static string NoExecuteBlockMessage(string surface)
+        {
+            return "[BLOCKED] " + surface + " is not permitted for THIS task: the delegating caller "
+                + "set no_execute, so no process may be started. This is a restriction the caller "
+                + "applied to this specific task, not a missing DevMind capability — DevMind runs "
+                + "executables all the time, they are simply disallowed for this job. Still allowed: "
+                + "build commands (dotnet build / run_build) for compile verification. Do NOT try a "
+                + "workaround that would start a process. Verify by building, and note in your final "
+                + "summary that execution was blocked by the caller.";
+        }
+
+        /// <summary>
         /// Headless shell blocklist. Field evidence (job-11): a confused agent ran
         /// "git show HEAD~1:file | Set-Content file", overwriting a working-tree file
         /// and destroying two earlier tasks' uncommitted changes; another job taskkilled
@@ -292,8 +321,17 @@ namespace DevMind
 
         // ── IAgenticHost.RunShellAsync ────────────────────────────────────────────
 
-       async Task<(int exitCode, string output)> IAgenticHost.RunShellAsync(string command, int? timeoutSeconds)
+        async Task<(int exitCode, string output)> IAgenticHost.RunShellAsync(string command, int? timeoutSeconds)
         {
+            // no_execute: denylist the execution invocations. Guard clause only — when the
+            // flag is false this check is a no-op and the rest of the method is untouched.
+            if (NoExecute && LoopHelpers.IsExecutableCommand(command))
+            {
+                RecordAction("blocked", $"shell (no_execute): {command}", success: false);
+                AppendOutput($"[SHELL GUARD] Blocked (no_execute): {command}\n", OutputColor.Error);
+                return (1, NoExecuteBlockMessage("execution of shell command '" + command + "'"));
+            }
+
             if (RestrictWritesToWorkingDirectory && IsBlockedHeadlessCommand(command, out string blockReason))
             {
                 RecordAction("blocked", $"shell ({blockReason}): {command}", success: false);
@@ -861,6 +899,17 @@ namespace DevMind
 
         Task<string> IAgenticHost.RunDebugAsync(string command, IReadOnlyDictionary<string, string> args)
         {
+            // no_execute: debug launch/attach starts a process (netcoredbg + the target app).
+            // Guard clause only — placed before the TUI-unavailable check so a blocked headless
+            // task sees the caller-imposed reason, and an unrestricted host is byte-for-byte
+            // unchanged.
+            if (NoExecute)
+            {
+                RecordAction("blocked", $"debug (no_execute): {command}", success: false);
+                AppendOutput($"[DEBUG GUARD] Blocked (no_execute): {command}\n", OutputColor.Error);
+                return Task.FromResult(NoExecuteBlockMessage("debug launch/attach"));
+            }
+
             // DAP debugging is wired into the TUI host only (it drives a netcoredbg session and
             // streams stop/output events to the transcript). The console skin has no debugger.
             const string msg = "The debug tool is only available in the DevMind TUI, not the console skin.";
@@ -1159,8 +1208,17 @@ namespace DevMind
         // ── IAgenticHost.RunTestsAsync ────────────────────────────────────────────
         // v1: raw console output. TRX parsing deferred until ParseTrxSummary moves to Core.
 
-       async Task<string> IAgenticHost.RunTestsAsync(string project, string filter, int? timeoutSeconds)
+        async Task<string> IAgenticHost.RunTestsAsync(string project, string filter, int? timeoutSeconds)
         {
+            // no_execute: the test host is itself a running process (the hung-test-host
+            // incident is the reason this surface is gated). Guard clause only.
+            if (NoExecute)
+            {
+                RecordAction("blocked", "test (no_execute)", success: false);
+                AppendOutput("[TEST GUARD] Blocked (no_execute): dotnet test\n", OutputColor.Error);
+                return NoExecuteBlockMessage("running the test suite (dotnet test)");
+            }
+
             if (string.IsNullOrWhiteSpace(project))
             {
                 try

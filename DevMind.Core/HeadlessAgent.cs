@@ -87,6 +87,8 @@ namespace DevMind
         private readonly string _workingDirectory;
         private readonly string _resolvedBuildCommand;
         private readonly bool _allowCommit;
+        // Mutable: re-synced by SetNoExecute on a reused (continuation) session.
+        private bool _noExecute;
 
         // The CTS of the turn currently executing — the host's cancel-turn callback
         // (patch preview 'q', etc.) must always target the ACTIVE turn.
@@ -103,11 +105,13 @@ namespace DevMind
             string workingDirectory,
             string buildCommand = null,
             bool allowCommit = false,
+            bool noExecute = false,
             string sessionId = null)
         {
             _options = options;
             _workingDirectory = workingDirectory;
             _allowCommit = allowCommit;
+            _noExecute = noExecute;
 
             _llmClient = new LlmClient(options);
             _llmClient.Configure(endpointUrl, apiKey);
@@ -119,6 +123,10 @@ namespace DevMind
                 // Local models sometimes hallucinate absolute paths (/home/user/…);
                 // headless writes are hard-confined to the working directory.
                 RestrictWritesToWorkingDirectory = true,
+                // Caller-imposed no-execution restriction (default false — interactive
+                // and ordinary jobs are untouched). Enforced at the host's three spawn
+                // surfaces; the system prompt below steers the model away first.
+                NoExecute = noExecute,
                 NearlineCache = _llmClient.NearlineCache, // for the recall_cache tool
             };
             _callbacks = new HeadlessLoopCallbacks(_llmClient);
@@ -443,6 +451,15 @@ namespace DevMind
         /// <summary>Adjusts the per-turn iteration cap for a continuation.</summary>
         public void SetMaxDepth(int maxDepth) => _options.AgenticLoopMaxDepth = maxDepth;
 
+        /// <summary>Re-syncs the no-execution guard on a REUSED (continuation) session. The
+        /// job's flag wins: a continuation that opted in must block, and an inherited one
+        /// must keep blocking. Idempotent — calling it with the constructor's value is a no-op.</summary>
+        public void SetNoExecute(bool noExecute)
+        {
+            _noExecute = noExecute;
+            _host.NoExecute = noExecute;
+        }
+
         private string BuildSystemPrompt()
         {
             string llmDirective = LoopHelpers.BuildToolUsePrompt(_resolvedBuildCommand, projectNamespace: null);
@@ -475,6 +492,8 @@ namespace DevMind
             combined += HeadlessAgent.HeadlessAddendum;
             if (!_allowCommit)
                 combined += HeadlessAgent.NoCommitRule;
+            if (_noExecute)
+                combined += HeadlessAgent.NoExecuteRule;
             return combined;
         }
 
@@ -584,6 +603,22 @@ namespace DevMind
         internal const string NoCommitRule =
             "Do NOT run git commit, git push, or any other git command that rewrites history\n" +
             "or publishes changes — the delegating agent handles version control.\n";
+
+        /// <summary>Appended every iteration (BuildSystemPrompt runs per turn, and the session
+        /// is retained across continuations, so the rule cannot be forgotten on turn N+1).
+        /// Mirrors the harness-level block: the model is steered away before it even tries,
+        /// and the host guard is the backstop if it does.</summary>
+        internal const string NoExecuteRule =
+            "\n" +
+            "--- NO-EXECUTION RESTRICTION (set by the delegating caller for THIS task) ---\n" +
+            "The caller restricted this task to no-execution: attempting to run a built\n" +
+            "executable or `dotnet run` / `dotnet exec` (run_shell), run the test suite\n" +
+            "(run_tests / `dotnet test`), or launch/attach a debugger (debug) will be BLOCKED\n" +
+            "by the harness — do not try it and do not try workarounds that start a process.\n" +
+            "This is a restriction on THIS task, not a DevMind limitation. Build commands\n" +
+            "(dotnet build / run_build) remain allowed for compile verification — verify\n" +
+            "your work by building, and note in your final summary that execution was\n" +
+            "blocked by the caller.\n";
 
         /// <summary>
         /// Runs one agentic task to completion in a throwaway session. Never throws for

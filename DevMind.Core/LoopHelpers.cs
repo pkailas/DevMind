@@ -34,6 +34,80 @@ namespace DevMind
         }
 
         /// <summary>
+        /// Returns true if the shell command would execute (run) a program or test host.
+        /// This is the denylist used by <c>BufferedAgenticHost.NoExecute</c>: when set, these
+        /// specific invocations are blocked. Build commands are NOT considered execution.
+        ///
+        /// The denylist is deliberately named and bypassable (cmd /c, encoded commands,
+        /// Start-Process). The guarantee is the LAYER (three spawn surfaces gated), not
+        /// an exhaustive pattern — callers should state the denylist plainly in the tool
+        /// description and error message.
+        /// </summary>
+        public static bool IsExecutableCommand(string command)
+        {
+            if (string.IsNullOrEmpty(command)) return false;
+            string cmd = command.Trim().ToLowerInvariant();
+
+            // dotnet run / dotnet exec / dotnet test — explicit run/exec/test invocations.
+            if (cmd.Contains("dotnet run") || cmd.Contains("dotnet exec") || cmd.Contains("dotnet test"))
+                return true;
+
+            // Script interpreters — ANY invocation. `python --version` is technically
+            // inspection, but any invocation of a script interpreter can execute code, so
+            // we err on the safe side and deny all (see the classifier tests for this
+            // deliberately-ambiguous case). First-word prefix so unrelated prose that
+            // merely contains the word later does not match.
+            if (WordPrefix(cmd, "python") || WordPrefix(cmd, "node") || WordPrefix(cmd, "deno")
+                || WordPrefix(cmd, "bun") || WordPrefix(cmd, "npx"))
+                return true;
+
+            // npm/yarn dev-server and test runs — `npm run build` is a BUILD and must stay
+            // allowed (see the classifier tests); only test/start/serve are execution.
+            if (cmd.StartsWith("npm test") || cmd.StartsWith("npm run test")
+                || cmd.StartsWith("npm run start") || cmd.StartsWith("npm run serve")
+                || cmd.StartsWith("yarn test") || cmd.StartsWith("yarn start") || cmd.StartsWith("yarn serve"))
+                return true;
+
+            // Executables / scripts run directly. A per-token extension check, NOT a raw
+            // substring: a substring match on ".exe" would fire on a path anywhere in the
+            // argument list (e.g. `git log --grep foo.exe`), while a command token that
+            // ends in an executable/script extension is what we actually want to deny
+            // (`.\foo.exe`, `dotnet foo.dll`, `powershell .\script.ps1`).
+            foreach (string tok in TokenizeForExecCheck(cmd))
+            {
+                if (tok.EndsWith(".exe", StringComparison.Ordinal)
+                    || tok.EndsWith(".dll", StringComparison.Ordinal)
+                    || tok.EndsWith(".apphost", StringComparison.Ordinal)
+                    || tok.EndsWith(".ps1", StringComparison.Ordinal)
+                    || tok.EndsWith(".bat", StringComparison.Ordinal)
+                    || tok.EndsWith(".cmd", StringComparison.Ordinal))
+                    return true;
+            }
+
+            // Download-then-execute patterns (PowerShell).
+            if ((cmd.Contains("iwr") || cmd.Contains("invoke-webrequest"))
+                && (cmd.Contains("iex") || cmd.Contains("invoke-expression")))
+                return true;
+
+            return false;
+        }
+
+        private static bool WordPrefix(string lowerCmd, string word)
+        {
+            int firstSpace = lowerCmd.IndexOf(' ');
+            string firstWord = firstSpace < 0 ? lowerCmd : lowerCmd.Substring(0, firstSpace);
+            return firstWord.StartsWith(word, StringComparison.Ordinal);
+        }
+
+        private static string[] TokenizeForExecCheck(string lowerCmd)
+        {
+            // Strip quotes so "C:\path\with space\app.exe" tokenizes as one token.
+            return lowerCmd
+                .Replace("\"", " ")
+                .Split(new[] { ' ', '\t', '\r', '\n', ';', '|' }, StringSplitOptions.RemoveEmptyEntries);
+        }
+
+        /// <summary>
         /// After the executor processes tool calls, injects tool result messages into
         /// conversation history so the model sees the outcome on the next turn.
         /// </summary>
