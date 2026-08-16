@@ -2476,7 +2476,12 @@ internal sealed class DevMindTools
     {
         if (string.IsNullOrWhiteSpace(filename)) return null;
         string normalized = filename.Replace('\\', '/');
-        string fileNameOnly = Path.GetFileName(normalized) ?? filename;
+        // Guarded like the host skins' SafeGetFileName — Path.GetFileName throws on
+        // empty/invalid-character names (e.g. a hallucinated "C:\"), and the caller
+        // then expects a clean "not found", not an exception.
+        string fileNameOnly;
+        try { fileNameOnly = Path.GetFileName(normalized) ?? filename; }
+        catch { fileNameOnly = filename; }
         return FilePathResolver.Resolve(fileNameOnly, filename, _svc.WorkingDirectory).Path;
     }
 
@@ -2596,12 +2601,15 @@ internal sealed class DevMindTools
     /// (live failure, job-471: "the working tree contains only the test file").
     /// </summary>
     private string BuildFileNotFoundMessage(string tool, string filename)
-    {
-        string normalized = filename.Replace('\\', '/');
-        string fileNameOnly = Path.GetFileName(normalized) ?? filename;
-        var resolution = FilePathResolver.Resolve(fileNameOnly, filename, _svc.WorkingDirectory);
-        return FilePathResolver.BuildFileNotFoundMessage(tool, filename, resolution);
-    }
+        => FilePathResolver.BuildFileNotFoundMessage(tool, filename, _svc.WorkingDirectory);
+
+    /// <summary>
+    /// Builds the message from a caller-side <see cref="FileResolution"/> without
+    /// re-resolving — the redundant second resolution used to re-run git-root
+    /// discovery plus the AllDirectories scan for no new information.
+    /// </summary>
+    private string BuildFileNotFoundMessage(string tool, string filename, FileResolution resolution)
+        => FilePathResolver.BuildFileNotFoundMessage(tool, filename, resolution);
 
     /// <summary>
     /// Truncates shell output to at most 1000 lines or 50 KB (whichever is hit first),

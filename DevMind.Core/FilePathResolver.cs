@@ -68,8 +68,16 @@ namespace DevMind
 
     public static class FilePathResolver
     {
+        // Test seam: counts every entry to <see cref="Resolve"/> so a fix that must
+        // eliminate a redundant second resolution (the not-found message builder used
+        // to re-resolve after the caller's first resolve — re-running git-root
+        // discovery, the AllDirectories scan and the O(m²) dedup) can be verified by
+        // count, not just message text.
+        internal static int ResolveCallCount;
+
         public static FileResolution Resolve(string fileNameOnly, string hintPath, string workingDirectory)
         {
+            System.Threading.Interlocked.Increment(ref ResolveCallCount);
             // 1. Absolute path that exists — use directly.
             if (!string.IsNullOrWhiteSpace(hintPath)
                 && Path.IsPathRooted(hintPath) && File.Exists(hintPath))
@@ -175,7 +183,10 @@ namespace DevMind
 
             if (resolution.Candidates.Count > 1)
             {
-                sb.AppendLine($"Files named \"{Path.GetFileName(filename.Replace('\\', '/'))}\" exist at:");
+                string baseName;
+                try { baseName = Path.GetFileName(filename.Replace('\\', '/')); }
+                catch { baseName = filename; }
+                sb.AppendLine($"Files named \"{baseName}\" exist at:");
                 int shown = Math.Min(resolution.Candidates.Count, MaxCandidates);
                 for (int i = 0; i < shown; i++) sb.AppendLine($"  {resolution.Candidates[i]}");
                 if (resolution.Candidates.Count > MaxCandidates)
@@ -186,10 +197,25 @@ namespace DevMind
             }
             else if (resolution.Candidates.Count == 1)
             {
-                // Unique basename match, but the hint's directory portion matched nothing —
-                // the directory in the hint is likely wrong, not the file itself.
-                sb.AppendLine($"A file named \"{Path.GetFileName(filename.Replace('\\', '/'))}\" exists at: {resolution.Candidates[0]}");
-                sb.AppendLine("The directory portion of the hint did not match it — check the path and retry.");
+                // Unique basename match. State only what is true:
+                //  - the hint carried a directory portion → that portion matched
+                //    nothing; the directory is likely wrong, not the file.
+                //  - the hint was a bare name → a unique file of that name exists;
+                //    the old wording claimed "the directory portion did not match"
+                //    even though there was no directory portion to match.
+                string baseName;
+                try { baseName = Path.GetFileName(filename.Replace('\\', '/')); }
+                catch { baseName = filename; }
+                string dirProbe = (filename ?? "").Replace('\\', '/');
+                while (dirProbe.StartsWith("./", StringComparison.Ordinal))
+                    dirProbe = dirProbe.Substring(2);
+                dirProbe = dirProbe.TrimStart('/');
+
+                sb.AppendLine($"A file named \"{baseName}\" exists at: {resolution.Candidates[0]}");
+                if (dirProbe.Contains('/'))
+                    sb.AppendLine("The directory portion of the hint did not match it — check the path and retry.");
+                else
+                    sb.AppendLine("A unique file of that name exists — use that path.");
             }
             else
             {
@@ -197,6 +223,25 @@ namespace DevMind
             }
 
             return sb.ToString().TrimEnd('\r', '\n');
+        }
+
+        /// <summary>
+        /// Re-resolving convenience for callers whose resolution helper returns only
+        /// the path (e.g. the MCP tool surface, where threading the
+        /// <see cref="FileResolution"/> through would touch every tool call site).
+        /// Normalizes the filename with the same guard as the first-resolve helpers
+        /// — an empty or invalid-character name must produce a clean "not found"
+        /// message, not throw (the wrappers used an unguarded <see cref="Path.GetFileName"/>
+        /// where the first-resolve helpers tolerated such input, so the two calls
+        /// diverged by throwing).
+        /// </summary>
+        public static string BuildFileNotFoundMessage(string directive, string filename, string workingDirectory)
+        {
+            string fileNameOnly;
+            try { fileNameOnly = Path.GetFileName((filename ?? "").Replace('\\', '/')); }
+            catch { fileNameOnly = filename ?? ""; }
+            var resolution = Resolve(fileNameOnly, filename ?? "", workingDirectory);
+            return BuildFileNotFoundMessage(directive, filename ?? "", resolution);
         }
 
         /// <summary>

@@ -484,7 +484,8 @@ namespace DevMind
 
             try
             {
-                string resolvedPath = FindFile(fileNameOnly, fileName.Replace('\\', '/'))
+                FileResolution res = FindFile(fileNameOnly, fileName.Replace('\\', '/'));
+                string resolvedPath = res.Path
                     ?? Path.Combine(_shellRunner.WorkingDirectory, fileName);
 
                 // Write guard — AFTER resolution, on the path that will actually be written
@@ -641,11 +642,12 @@ namespace DevMind
         Task<string> IAgenticHost.DeleteFileAsync(string filename)
         {
             string fileNameOnly = SafeGetFileName(filename);
-            string resolvedPath = FindFile(fileNameOnly, filename.Replace('\\', '/'))
+            FileResolution res = FindFile(fileNameOnly, filename.Replace('\\', '/'));
+            string resolvedPath = res.Path
                 ?? Path.Combine(_shellRunner.WorkingDirectory, filename);
 
             if (!File.Exists(resolvedPath))
-                return Task.FromResult(BuildFileNotFoundMessage("DELETE", filename));
+                return Task.FromResult(BuildFileNotFoundMessage("DELETE", filename, res));
 
             if (!IsWriteAllowed(resolvedPath, "delete"))
                 return Task.FromResult(
@@ -668,11 +670,12 @@ namespace DevMind
         Task<string> IAgenticHost.RenameFileAsync(string oldFilename, string newFilename)
         {
             string oldNameOnly = SafeGetFileName(oldFilename);
-            string oldPath = FindFile(oldNameOnly, oldFilename.Replace('\\', '/'))
+            FileResolution res = FindFile(oldNameOnly, oldFilename.Replace('\\', '/'));
+            string oldPath = res.Path
                 ?? Path.Combine(_shellRunner.WorkingDirectory, oldFilename);
 
             if (!File.Exists(oldPath))
-                return Task.FromResult(BuildFileNotFoundMessage("RENAME", oldFilename));
+                return Task.FromResult(BuildFileNotFoundMessage("RENAME", oldFilename, res));
 
             bool newHasDir = newFilename.Contains('/') || newFilename.Contains('\\');
             string newPath = newHasDir
@@ -830,32 +833,36 @@ namespace DevMind
 
         async Task<string> IAgenticHost.GetDiagnosticsAsync(string filename)
         {
-            string fullPath = ResolveLspPath(filename);
-            if (fullPath == null) return BuildFileNotFoundMessage("get_diagnostics", filename);
+            FileResolution lspRes = ResolveLspPath(filename);
+            string fullPath = lspRes.Path;
+            if (fullPath == null) return BuildFileNotFoundMessage("get_diagnostics", filename, lspRes);
             AppendOutput($"[LSP] get_diagnostics {SafeGetFileName(fullPath)}\n", OutputColor.Dim);
             return await _lspTools.GetDiagnosticsAsync(fullPath, CancellationToken);
         }
 
         async Task<string> IAgenticHost.GoToDefinitionAsync(string filename, int line, int character)
         {
-            string fullPath = ResolveLspPath(filename);
-            if (fullPath == null) return BuildFileNotFoundMessage("go_to_definition", filename);
+            FileResolution lspRes = ResolveLspPath(filename);
+            string fullPath = lspRes.Path;
+            if (fullPath == null) return BuildFileNotFoundMessage("go_to_definition", filename, lspRes);
             AppendOutput($"[LSP] go_to_definition {SafeGetFileName(fullPath)}:{line}:{character}\n", OutputColor.Dim);
             return await _lspTools.GoToDefinitionAsync(fullPath, line, character, CancellationToken);
         }
 
         async Task<string> IAgenticHost.FindReferencesAsync(string filename, int line, int character)
         {
-            string fullPath = ResolveLspPath(filename);
-            if (fullPath == null) return BuildFileNotFoundMessage("find_references", filename);
+            FileResolution lspRes = ResolveLspPath(filename);
+            string fullPath = lspRes.Path;
+            if (fullPath == null) return BuildFileNotFoundMessage("find_references", filename, lspRes);
             AppendOutput($"[LSP] find_references {SafeGetFileName(fullPath)}:{line}:{character}\n", OutputColor.Dim);
             return await _lspTools.FindReferencesAsync(fullPath, line, character, CancellationToken);
         }
 
         async Task<string> IAgenticHost.HoverAsync(string filename, int line, int character)
         {
-            string fullPath = ResolveLspPath(filename);
-            if (fullPath == null) return BuildFileNotFoundMessage("hover", filename);
+            FileResolution lspRes = ResolveLspPath(filename);
+            string fullPath = lspRes.Path;
+            if (fullPath == null) return BuildFileNotFoundMessage("hover", filename, lspRes);
             AppendOutput($"[LSP] hover {SafeGetFileName(fullPath)}:{line}:{character}\n", OutputColor.Dim);
             return await _lspTools.HoverAsync(fullPath, line, character, CancellationToken);
         }
@@ -1005,7 +1012,7 @@ namespace DevMind
         }
 
         /// <summary>Resolves an LSP tool's filename argument to an existing full path, or null.</summary>
-        private string ResolveLspPath(string filename)
+        private FileResolution ResolveLspPath(string filename)
         {
             if (string.IsNullOrWhiteSpace(filename)) return null;
             return FindFile(SafeGetFileName(filename), filename.Replace('\\', '/'));
@@ -1029,9 +1036,10 @@ namespace DevMind
             const int MaxMatches = 50;
 
             string fileNameOnly = SafeGetFileName(filename);
-            string resolvedPath = FindFile(fileNameOnly, filename.Replace('\\', '/'));
+            FileResolution res = FindFile(fileNameOnly, filename.Replace('\\', '/'));
+            string resolvedPath = res.Path;
             if (resolvedPath == null || !File.Exists(resolvedPath))
-                return Task.FromResult(BuildFileNotFoundMessage("GREP", filename));
+                return Task.FromResult(BuildFileNotFoundMessage("GREP", filename, res));
 
             string cacheKey = FileCacheKey(resolvedPath);
             _fileCache.InvalidateIfStale(cacheKey, resolvedPath); // out-of-band writes
@@ -1317,7 +1325,8 @@ namespace DevMind
         Task<string> IAgenticHost.GetFileDiffAsync(string filename)
         {
             string fileNameOnly = SafeGetFileName(filename);
-            string resolvedPath = FindFile(fileNameOnly, filename.Replace('\\', '/'))
+            FileResolution res = FindFile(fileNameOnly, filename.Replace('\\', '/'));
+            string resolvedPath = res.Path
                 ?? Path.Combine(_shellRunner.WorkingDirectory, filename);
 
             if (!_fileSnapshots.ContainsKey(resolvedPath))
@@ -1389,7 +1398,8 @@ namespace DevMind
                 string fileNameOnly   = SafeGetFileName(blockFileName);
 
                 // Resolve file path; load into cache if absent
-                string fullPath = FindFile(fileNameOnly, normalizedHint)
+                FileResolution res = FindFile(fileNameOnly, normalizedHint);
+                string fullPath = res.Path
                     ?? Path.Combine(_shellRunner.WorkingDirectory, fileNameOnly);
 
                 if (!File.Exists(fullPath))
@@ -1722,24 +1732,29 @@ namespace DevMind
         /// git-root fallback (repo-root-relative hints) → recursive basename search
         /// that refuses to guess an arbitrary same-named file.
         /// </summary>
-        private string FindFile(string fileNameOnly, string hintPath)
+        private FileResolution FindFile(string fileNameOnly, string hintPath)
             => FilePathResolver.Resolve(fileNameOnly, hintPath,
-                _shellRunner.WorkingDirectory).Path;
+                _shellRunner.WorkingDirectory);
 
         /// <summary>
-        /// "File not found" message that states the resolution SCOPE (which directories
-        /// were searched, including the git root) and lists same-named candidates. Never
-        /// presents the working directory's top-level files as the project — the model
-        /// reads that as ground truth and concludes source files are missing (job-471).
+        /// "File not found" message built from the caller's OWN resolution — no second
+        /// resolve (which used to re-run git-root discovery plus the AllDirectories
+        /// scan for no new information). Never presents the working directory's
+        /// top-level files as the project — the model reads that as ground truth and
+        /// concludes source files are missing (job-471).
+        /// </summary>
+        private string BuildFileNotFoundMessage(string directive, string filename, FileResolution resolution)
+            => FilePathResolver.BuildFileNotFoundMessage(directive, filename, resolution);
+
+        /// <summary>
+        /// Fallback for call sites that only hold a path — delegates to the shared
+        /// re-resolving overload, whose normalization is guarded so an empty or
+        /// invalid-character filename yields a clean "not found" instead of throwing
+        /// (SafeGetFileName already tolerated such input at the first-resolve sites).
         /// </summary>
         private string BuildFileNotFoundMessage(string directive, string filename)
-        {
-            string normalized = filename.Replace('\\', '/');
-            string fileNameOnly = Path.GetFileName(normalized) ?? filename;
-            var resolution = FilePathResolver.Resolve(fileNameOnly, filename,
+            => FilePathResolver.BuildFileNotFoundMessage(directive, filename,
                 _shellRunner.WorkingDirectory);
-            return FilePathResolver.BuildFileNotFoundMessage(directive, filename, resolution);
-        }
 
         // Applies resolved patch blocks to OriginalContent in memory — used by ShowDiffPreviewAsync
         // to generate the before/after diff without writing to disk.
@@ -1788,12 +1803,13 @@ namespace DevMind
             try
             {
                 string fileNameOnly = SafeGetFileName(fileName);
-                string fullPath = FindFile(fileNameOnly, fileName.Replace('\\', '/'));
+                FileResolution res = FindFile(fileNameOnly, fileName.Replace('\\', '/'));
+                string fullPath = res.Path;
 
                 if (fullPath == null || !File.Exists(fullPath))
                 {
                     AppendOutput($"[READ] File not found: {fileName}\n", OutputColor.Warning);
-                    return BuildFileNotFoundMessage("READ", fileName);
+                    return BuildFileNotFoundMessage("READ", fileName, res);
                 }
 
                 CaptureFileSnapshot(fullPath);

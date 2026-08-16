@@ -23,4 +23,11 @@
     <ProjectReference Include="..\DevMind.Core\DevMind.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Serial test execution: FilePathResolver.ResolveCallCount is assembly-global
+         and asserted by delta, which is only sound when no other test collection is
+         calling Resolve concurrently. Same config as DevMind.McpServer.Tests. -->
+    <None Include="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>
