@@ -6,14 +6,47 @@
     <AssemblyName>DevMind.TUI.Tests</AssemblyName>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
-   <IsTestProject>true</IsTestProject>
+    <IsTestProject>true</IsTestProject>
     <ImplicitUsings>enable</ImplicitUsings>
+
+    <!-- xUnit.net v3 (2026-08-18): the .NET 10 SDK ships Microsoft.Testing.Platform.MSBuild
+         2.3.3, which — because Microsoft.NET.Test.Sdk 18.9.0 forces OutputType=Exe on test
+         projects — auto-generates TestingPlatformEntryPoint.cs AND SelfRegisteredExtensions.cs.
+         This project is intentionally VSTest-only (xunit.v3.core.mtp-off ships no MTP
+         references), so all three files must be suppressed or the build dies with CS0234
+         (Microsoft.Testing not found) plus a duplicate Main() next to VSTest's Program.cs.
+         All three properties are verified against the .NET 10.0.302 SDK: the first two flip
+         IsTestingPlatformApplication and stop the entry point / reference injection; the
+         third is the documented opt-out in Microsoft.Testing.Platform.MSBuild 2.3.3's own
+         targets for the self-registered extensions file. Do NOT remove them. -->
+    <TestingPlatformDontUseFramework>true</TestingPlatformDontUseFramework>
+    <TestingPlatformDontInjectReferences>true</TestingPlatformDontInjectReferences>
+    <GenerateSelfRegisteredExtensions>false</GenerateSelfRegisteredExtensions>
   </PropertyGroup>
 
+  <!-- v3 serial-execution (2026-08-18): v3 does NOT read xunit.runner.json for
+       test-discovery/parallelism config (only xunit.v3.config.json is read for
+       that); the in-test static lock in CommandEnumPairingTests is the replacement
+       for the v2-era config. The v2-era xunit.runner.json file is no longer copied
+       to the output — v3's in-proc runner would otherwise parse it and emit a
+       spurious "Couldn't parse config file" warning (its only v3-era reader), and
+       v2's runner is no longer used by this project. -->
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.9.0" />
-    <PackageReference Include="xunit" Version="2.9.3" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
+    <!-- xUnit.net v3, VSTest-only (2026-08-18). Deliberate composition:
+         • NO `xunit.v3` / `xunit.v3.mtp-off` metapackage — the metapackage's core
+           dependency would drag in a Microsoft.Testing.Platform reference and fight
+           the escape hatch above.
+         • xunit.v3.assert supplies Assert (must NOT get ExcludeAssets="compile" —
+           the previous migration attempt did exactly that and died with CS0103 on
+           every Assert.* call).
+         • xunit.v3.core.mtp-off supplies xunit.v3.core.dll (Fact, Theory, …) with
+           NO MTP support — the only v3 core variant safe under VSTest here.
+         • xunit.runner.visualstudio 4.0.0 is the v3-compatible VSTest adapter (runs
+           v1/v2/v3); 3.1.5 is v2-era. -->
+    <PackageReference Include="xunit.v3.assert" Version="4.0.0" />
+    <PackageReference Include="xunit.v3.core.mtp-off" Version="4.0.0" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="4.0.0">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
@@ -28,9 +61,14 @@
     <ProjectReference Include="..\DevMind.TUI\DevMind.TUI.csproj" />
   </ItemGroup>
 
+  <!-- xunit.runner.json is intentionally NOT copied to the output (2026-08-18):
+       v3 ignores it for parallelism config and only reads xunit.v3.config.json.
+       The in-test static lock in CommandEnumPairingTests enforces serial
+       execution instead. Keeping the file in the source tree (not copied) lets
+       the v2-era config remain visible to developers without polluting the
+       v3 runner's output directory. -->
   <ItemGroup>
-    <!-- Serial test execution (mirrors the other test projects). -->
-    <None Include="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="xunit.runner.json" />
   </ItemGroup>
 
 </Project>

@@ -100,10 +100,44 @@ using Terminal.Gui.ViewBase;
 using Document = Terminal.Gui.Editor.Document.TextDocument;
 using GuiEditor = Terminal.Gui.Editor.Editor;
 using Xunit;
+using Xunit.Sdk;   // v3 (2026-08-18): xunit.v3.assert.dll is signed against xunit.v3.core's
+                    // Xunit.Sdk.ITestOutputHelper; without this alias the two TestOutputHelper
+                    // interfaces (Abstractions vs Sdk) silently don't match and the test class
+                    // fails to compile the implicit interface implementation.
 
 namespace DevMind.TUI.Tests
 {
-    public class CommandEnumPairingTests
+    // v3 (2026-08-18): ITestOutputHelper moved from Xunit.Abstractions to Xunit.Sdk;
+    // implementing it also makes xunit.v3.assert's Assert.* overload set that takes
+    // ITestOutputHelper resolve to the right one. (v2 had the interface in
+    // Xunit.Abstractions via xunit.abstractions.dll.)
+    //
+    // ── v3 serial-execution strategy (2026-08-18) ────────────────────────────
+    //
+    // xUnit.net v3 does NOT read xunit.runner.json — the v2-era
+    // "parallelizeTestCollections: false" convention this repo uses to serialize
+    // every test project is INERT under v3 (empirically proven 2026-08-18 by
+    // the in-flight-counter canary below: with the v2-era xunit.runner.json in
+    // place, the v3 runner still ran all 8 tests of this project concurrently
+    // and the canary fired with "8 tests in flight"). The v3 replacement is
+    // xunit.v3.config.json; rather than ship a new config file for a single-class
+    // suite, serialization is enforced IN-TEST by a static lock held across the
+    // entire body of every test: each test runs to completion before the next
+    // one starts, so the suite is serial BY CONSTRUCTION and cannot flake.
+    //
+    // The [CollectionDefinition]/[Collection] attributes below are kept for
+    // DISCOVERY grouping (one collection = this project's tests are listed
+    // together, and if a future xUnit release ever honours
+    // DisableParallelization for the in-process runner, the attributes become
+    // load-bearing). Empirically (2026-08-18) the DisableParallelization=true
+    // flag did NOT stop concurrent scheduling on its own — hence the lock.
+    [CollectionDefinition("CommandEnumPairing", DisableParallelization = true)]
+    public sealed class CommandEnumPairingCollection
+    {
+    }
+
+    [Collection("CommandEnumPairing")]
+    public class CommandEnumPairingTests : ITestOutputHelper
     {
         // ── Shared context for every failure message ─────────────────────────
         //
@@ -169,71 +203,131 @@ namespace DevMind.TUI.Tests
 
         // ── Boundary pin: detect a core REVERT even if Editor bindings line up ─
 
+        // ── v3 serial-execution lock (2026-08-18) ──────────────────────────────
+        //
+        // The v2-era xunit.runner.json (parallelizeTestCollections=false) is
+        // INERT under v3 — proven empirically during the migration: with the
+        // file in place, the v3 runner still ran all 8 tests of this project
+        // concurrently (the in-flight-counter canary fired with "8 tests in
+        // flight"). The [CollectionDefinition(DisableParallelization=true)]
+        // attribute does NOT stop concurrent scheduling either (empirically
+        // verified 2026-08-18). The -parallelMode none runner flag is
+        // documented but was observed to have no effect under the VSTest
+        // adapter path in this configuration (2026-08-18) — so it is NOT
+        // relied on; the lock below is the only mechanism that actually
+        // serializes.
+        //
+        // IMPORTANT: the lock is held across the TEST BODY, not the constructor.
+        // Empirically (2026-08-18) the v3 runner constructs ALL test cases of a
+        // class in parallel before running any of them — so a constructor-time
+        // lock would just serialize construction, not execution, and the
+        // in-flight counter would still see all 8 tests "in flight" at once
+        // (construction complete, Dispose not yet called). Holding the lock
+        // inside the body is what actually serializes the work that matters.
+        //
+        // _testsInFlight is a DIAGNOSTIC counter (the lock already guarantees
+        // mutual exclusion — it is kept to name the concurrency count in the
+        // failure message if a future change ever regresses the lock discipline,
+        // e.g. a test body that swallows an exception and skips Monitor.Exit,
+        // or a new test added without going through RunSerialized).
+        private static readonly object _serialLock = new();
+        private static int _testsInFlight;
+
+        private static void RunSerialized(Action body)
+        {
+            Monitor.Enter(_serialLock);
+            int n = Interlocked.Increment(ref _testsInFlight);
+            try
+            {
+                body();
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _testsInFlight);
+                Monitor.Exit(_serialLock);
+            }
+        }
+
+        // ITestOutputHelper implementation (required by the v3 interface above).
+        // xunit.v3.assert's Assert.* overloads that take ITestOutputHelper resolve
+        // to Xunit.Sdk.ITestOutputHelper — the same interface this class now
+        // implements — which is what lets v2-era assertion calls keep compiling
+        // unchanged against the v3 assert library.
+        // (The IDE0005 "unnecessary using" note on `using Xunit.Sdk;` is a
+        // FALSE POSITIVE here: the using is required to bind the interface
+        // name — the compiler resolves it against exactly this type.)
+        public void Write(string message) { }
+        public void Write(string format, params object[] args) { }
+        public void WriteLine(string message) { }
+        public void WriteLine(string format, params object[] args) { }
+        public string Output => "";
+
         [Fact]
         public void Core_Command_Insert_Is_PostInsertion_Ordinal_38()
-        {
-            // CANARY, not the inserted member: Command.Insert sits at ordinal 37 in
-            // core 2.4.3 and at 38 in 2.4.17 because the `Home` insertion at ordinal 15
-            // (plus three tail additions) shifted every later member. This is a
-            // cheap, stable marker of "core enum pre- or post-drift": the CURRENT
-            // pin (core 2.4.17 + Editor 2.5.7) is post-insertion on BOTH sides,
-            // so this core must have Insert at 38. It fails the moment the core
-            // is reverted to the pre-insertion layout (≤ 2.4.3), even if the
-            // Editor is still a post-insertion release — a pre-insertion core is
-            // never a valid pairing partner for Editor ≥ 2.5.3.
-            int insertOrdinal = (int)Command.Insert;
-            Assert.True(insertOrdinal == 38,
-                $"{VersionContext}\n" +
-                $"\nBoundary check: this process's core has Command.Insert at ordinal " +
-                $"{insertOrdinal}. Insert is 37 in core 2.4.3 (pre-drift) and 38 in 2.4.17 " +
-                "(the `Home` insertion at ordinal 15 shifted it +1). The current pin " +
-                "(core 2.4.17 + Editor 2.5.7) is post-insertion on both sides, so this " +
-                "core is OLDER than the pairing rule allows — a pre-insertion core cannot " +
-                "be paired with any Editor ≥ 2.5.3.\n" +
-                "If you have deliberately reverted both packages to a mutually aligned " +
-                "older pairing (core ≤ 2.4.3 + Editor ≤ 2.5.2), update the pairing rule " +
-                "in DevMind.TUI.csproj AND the expected ordinals in this test — " +
-                "deliberately, not accidentally.");
-        }
+            => RunSerialized(() =>
+            {
+                // CANARY, not the inserted member: Command.Insert sits at ordinal 37 in
+                // core 2.4.3 and at 38 in 2.4.17 because the `Home` insertion at ordinal 15
+                // (plus three tail additions) shifted every later member. This is a
+                // cheap, stable marker of "core enum pre- or post-drift": the CURRENT
+                // pin (core 2.4.17 + Editor 2.5.7) is post-insertion on BOTH sides,
+                // so this core must have Insert at 38. It fails the moment the core
+                // is reverted to the pre-insertion layout (≤ 2.4.3), even if the
+                // Editor is still a post-insertion release — a pre-insertion core is
+                // never a valid pairing partner for Editor ≥ 2.5.3.
+                int insertOrdinal = (int)Command.Insert;
+                Assert.True(insertOrdinal == 38,
+                    $"{VersionContext}\n" +
+                    $"\nBoundary check: this process's core has Command.Insert at ordinal " +
+                    $"{insertOrdinal}. Insert is 37 in core 2.4.3 (pre-drift) and 38 in 2.4.17 " +
+                    "(the `Home` insertion at ordinal 15 shifted it +1). The current pin " +
+                    "(core 2.4.17 + Editor 2.5.7) is post-insertion on both sides, so this " +
+                    "core is OLDER than the pairing rule allows — a pre-insertion core cannot " +
+                    "be paired with any Editor ≥ 2.5.3.\n" +
+                    "If you have deliberately reverted both packages to a mutually aligned " +
+                    "older pairing (core ≤ 2.4.3 + Editor ≤ 2.5.2), update the pairing rule " +
+                    "in DevMind.TUI.csproj AND the expected ordinals in this test — " +
+                    "deliberately, not accidentally.");
+            });
 
         // ── Cross-check: Editor's stock ordinals vs this process's core enum ─
 
         [Fact]
         public void Editor_StockEnter_Binds_Core_NewLine()
-            => CheckEditorStockBinding(MakeStockEditor(), Key.Enter, Command.NewLine, "Enter");
+            => RunSerialized(() => CheckEditorStockBinding(MakeStockEditor(), Key.Enter, Command.NewLine, "Enter"));
 
         [Fact]
         public void Editor_StockBackspace_Binds_Core_DeleteCharLeft()
-            => CheckEditorStockBinding(MakeStockEditor(), Key.Backspace, Command.DeleteCharLeft, "Backspace");
+            => RunSerialized(() => CheckEditorStockBinding(MakeStockEditor(), Key.Backspace, Command.DeleteCharLeft, "Backspace"));
 
         [Fact]
         public void Editor_StockDelete_Binds_Core_DeleteCharRight()
-            => CheckEditorStockBinding(MakeStockEditor(), Key.Delete, Command.DeleteCharRight, "Delete");
+            => RunSerialized(() => CheckEditorStockBinding(MakeStockEditor(), Key.Delete, Command.DeleteCharRight, "Delete"));
 
         [Fact]
         public void Editor_StockPaste_CtrlV_Binds_Core_Paste()
-            => CheckEditorStockBinding(MakeStockEditor(), Key.V.WithCtrl, Command.Paste, "Ctrl+V (paste)");
+            => RunSerialized(() => CheckEditorStockBinding(MakeStockEditor(), Key.V.WithCtrl, Command.Paste, "Ctrl+V (paste)"));
 
         // The paste cluster includes the cut/copy side too — under a drifted
         // pairing the right-click context menu renders core's names for
         // Editor's ordinals ("Cut" where Paste belongs, no Paste item).
         [Fact]
         public void Editor_StockCopy_CtrlC_Binds_Core_Copy()
-            => CheckEditorStockBinding(MakeStockEditor(), Key.C.WithCtrl, Command.Copy, "Ctrl+C (copy)");
+            => RunSerialized(() => CheckEditorStockBinding(MakeStockEditor(), Key.C.WithCtrl, Command.Copy, "Ctrl+C (copy)"));
 
         [Fact]
         public void Editor_StockCut_CtrlX_Binds_Core_Cut()
-            => CheckEditorStockBinding(MakeStockEditor(), Key.X.WithCtrl, Command.Cut, "Ctrl+X (cut)");
+            => RunSerialized(() => CheckEditorStockBinding(MakeStockEditor(), Key.X.WithCtrl, Command.Cut, "Ctrl+X (cut)"));
 
         // SelectAll is the Backspace cross-wire victim named in §5 ("backspace
         // highlights the row" → Editor's Backspace lands on SelectAll).
         [Fact]
         public void Editor_StockSelectAll_CtrlA_Binds_Core_SelectAll()
-            => CheckEditorStockBinding(MakeStockEditor(), Key.A.WithCtrl, Command.SelectAll, "Ctrl+A (select-all)");
+            => RunSerialized(() => CheckEditorStockBinding(MakeStockEditor(), Key.A.WithCtrl, Command.SelectAll, "Ctrl+A (select-all)"));
 
         // ── The check itself ──────────────────────────────────────────────────
 
-        private static void CheckEditorStockBinding(GuiEditor editor, Key key, Command expectedCoreMember, string keyLabel)
+        private void CheckEditorStockBinding(GuiEditor editor, Key key, Command expectedCoreMember, string keyLabel)
         {
             // 1. The Editor must register a stock binding for this key. If it
             //    doesn't, the pairing test can't run — fail loudly rather than
