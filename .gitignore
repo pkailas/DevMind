@@ -28,6 +28,9 @@ CodeReviewBenchmarkWithBugs/
 # DevMind trace output
 .dm-trace/
 
+# DevMind local memory store (agent-written, machine-local)
+.devmind/
+
 # DevMind agent scratch/report output accidentally written into the working tree
 dm_out*.txt
 dm_output.txt
@@ -39,9 +42,13 @@ dm_output.txt
 # Compiled output — never commit binaries
 publish/
 
+# dotnet test output
+TestResults/
+
 # dist build/runtime output — keep ONLY the launchers + deploy script, ignore the rest
 dist/*
 !dist/devmind.cmd
+!dist/dm.cmd
 !dist/deploy-devmind.ps1
 !dist/dm-watch.cmd
 !dist/dm-watch.ps1
