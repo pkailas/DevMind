@@ -68,7 +68,7 @@
        the v2-era config remain visible to developers without polluting the
        v3 runner's output directory. -->
   <ItemGroup>
-    <None Include="xunit.runner.json" />
+    <None Include="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

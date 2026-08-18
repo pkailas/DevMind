@@ -1,12 +1,5 @@
 {
   "$schema": "https://xunit.net/schema/current/xunit.runner.schema.json",
-  "parallelizeTestCollections": false
-  // NOTE (2026-08-18): this file is v2-era configuration. xUnit.net v3 does NOT
-  // read xunit.runner.json (only xunit.v3.config.json), so "parallelizeTestCollections"
-  // above is INERT under the v3 runner — verified empirically during the v3
-  // migration (the in-flight-counter canary in CommandEnumPairingTests.cs fired
-  // with 8 tests concurrent while this file was in place). Serial execution for
-  // this project is now enforced in-test by a static lock in
-  // CommandEnumPairingTests (see the file's header comment). The file is kept
-  // for the v2-era convention and for documentation purposes only.
+  "parallelizeTestCollections": false,
+  "maxParallelThreads": 1
 }
