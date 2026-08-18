@@ -22,10 +22,11 @@
 //   Per-release attribution (which release introduced which insertion) is
 //   UNVERIFIED — the dump compares 2.4.3 against 2.4.17, not each release.
 //
-//   The ENTIRE Terminal.Gui.Editor 2.5.x line (2.5.0–2.5.2 checked) is compiled
-//   against the PRE-insertion enum (core ≤ 2.4.3), despite its nuspec claiming
-//   `>= 2.4.0`. Pairing Editor 2.5.x with a drifted core therefore cross-wires
-//   EVERY editing key:
+//   The pairing boundary sits INSIDE the Editor 2.5.x line (verified 2026-08-20):
+//
+//     • Editor ≤ 2.5.2 is compiled against the PRE-insertion enum (core ≤ 2.4.3),
+//       despite its nuspec claiming `>= 2.4.0`. Pairing it with a drifted core
+//       cross-wires EVERY editing key:
 //
 //     • Enter     → core's DeleteAll   (text deleted instead of newline)
 //     • Backspace → core's SelectAll   ("backspace highlights the row")
@@ -33,11 +34,18 @@
 //     • Ctrl+V    → lands in a dead handler (paste silently dropped)
 //     • context menu renders core's names for Editor's ordinals
 //       ("Cut" where Paste belongs, no Paste item)
+//     • Editor ≥ 2.5.3 is compiled against the POST-insertion enum (requires core
+//       ≥ 2.4.6; 2.5.7 requires ≥ 2.4.17 — the package nuspecs enforce the lower
+//       bound). Pairing a post-insertion Editor with a PRE-drift core (≤ 2.4.3)
+//       cross-wires the same way, in the opposite direction.
 //
 //   ALL of these failures are SILENT: KeyBindings.TryGet still returns a
 //   binding; only the dispatch target is wrong. That is why this rule used to
 //   be guarded by a manual offline dispatch harness — and why it is guarded
 //   here by a test that runs in CI.
+//
+//   CURRENT PIN: core 2.4.17 + Editor 2.5.7 (post-insertion on both sides).
+//   NEVER mix across the boundary — bump both packages together.
 //
 // TECHNIQUE (same rule DevMind.TUI/TuiInputBox.cs applies at runtime):
 //
@@ -56,15 +64,15 @@
 // full-range dumps):
 //
 //   • Editor_StockEnter_Binds_Core_NewLine — LOAD-BEARING. The Editor bakes
-//     Enter's ordinal in at ITS compile time (stays 43), while core's
-//     NewLine moves 43→44. The only Editor-vs-core comparison that must
-//     diverge under a drifted core.
-//   • Core_Command_Insert_Is_PreInsertion_Ordinal_Not_38 — LOAD-BEARING
-//     canary on the core enum itself: pinning Insert at 37 (≠38) fails the
-//     moment the core is bumped past 2.4.3, even if the Editor ever caught
-//     up.
-//   • Editor_StockSelectAll_CtrlA_Binds_Core_SelectAll — catches a bumped
-//     core INCIDENTALLY: Ctrl+A comes up NOT BOUND under a drifted core, so
+//     Enter's ordinal in at ITS compile time (Editor ≤ 2.5.2 keeps 43, while
+//     core's NewLine moves 43→44 under a post-insertion core). The only
+//     Editor-vs-core comparison that must diverge across the boundary.
+//   • Core_Command_Insert_Is_PostInsertion_Ordinal_38 — LOAD-BEARING canary on
+//     the core enum itself: pinning Insert at 38 (≠37) fails the moment the
+//     core is reverted to the pre-insertion layout, even if the Editor still
+//     matched.
+//   • Editor_StockSelectAll_CtrlA_Binds_Core_SelectAll — catches a mismatched
+//     core INCIDENTALLY: Ctrl+A comes up NOT BOUND across the boundary, so
 //     the "no stock binding" branch fires before the ordinal compare runs.
 //   • Backspace, Delete, Ctrl+C, Ctrl+X, Ctrl+V — these keys are registered
 //     by CORE's base View, so their stock ordinals move WITH core (40→41,
@@ -73,10 +81,14 @@
 //     Editor-side binding regressions (a binding disappearing or retargeted
 //     inside an Editor release) — keep them; they are not drift coverage.
 //
+//   Post-insertion ordinals in core 2.4.17 (for reference): Backspace 41,
+//   Delete 40, Copy 60, Cut 61, Paste 62, SelectAll 42, NewLine 44, Insert 38.
+//
 // HEADLESS: constructing the Editor and reading its KeyBindings works WITHOUT
-// Application.Init (verified against 2.4.3 + 2.5.2) — no console driver, no
-// TTY, no global Application state, nothing to shut down. The tests below
-// must stay that way: they run in shared CI alongside other test projects.
+// Application.Init (verified against 2.4.3 + 2.5.2 and 2.4.17 + 2.5.7) — no
+// console driver, no TTY, no global Application state, nothing to shut down.
+// The tests below must stay that way: they run in shared CI alongside other
+// test projects.
 
 using System;
 using System.Diagnostics;
@@ -111,17 +123,19 @@ namespace DevMind.TUI.Tests
                     "════════ TERMINAL.GUI VERSION-PAIRING RULE VIOLATED ════════\n" +
                     $"  Loaded core:   Terminal.Gui        {coreVer}\n" +
                     $"  Loaded Editor: Terminal.Gui.Editor {editorVer}\n" +
-                    "  Pairing rule:  Terminal.Gui.Editor 2.5.x is compiled against the\n" +
-                    "                 PRE-insertion Command enum (core ≤ 2.4.3). Between 2.4.3\n" +
-                    "                 and 2.4.17 core added Home at ordinal 15 (shifting\n" +
-                    "                 members 15+ by +1) and Center/ZoomIn/ZoomOut after Edit\n" +
-                    "                 (the last four members shift +4) — so Editor 2.5.x + a\n" +
-                    "                 drifted core silently cross-wires EVERY editing key\n" +
+                    "  Pairing rule:  The Command enum grew between core 2.4.3 and 2.4.17 —\n" +
+                    "                 Home inserted at ordinal 15 (shifting members 15+ by +1)\n" +
+                    "                 and Center/ZoomIn/ZoomOut after Edit (the last four\n" +
+                    "                 members shift +4). Editor ≤ 2.5.2 is compiled against the\n" +
+                    "                 PRE-insertion enum (requires core ≤ 2.4.3); Editor ≥ 2.5.3\n" +
+                    "                 is compiled against the POST-insertion enum (requires core\n" +
+                    "                 ≥ 2.4.6; 2.5.7 requires ≥ 2.4.17). Pairing across the\n" +
+                    "                 boundary silently cross-wires EVERY editing key\n" +
                     "                 (Enter→DeleteAll, Backspace→SelectAll, Delete deletes\n" +
                     "                 leftward, Ctrl+V lands in a dead handler, context menu\n" +
                     "                 shows wrong labels). All failures are SILENT — dispatch\n" +
                     "                 still \"succeeds\" into the wrong handler.\n" +
-                    "  Fix:          pin Terminal.Gui 2.4.3 + Terminal.Gui.Editor 2.5.2 in\n" +
+                    "  Fix:          pin Terminal.Gui 2.4.17 + Terminal.Gui.Editor 2.5.7 in\n" +
                     "                 DevMind.TUI/DevMind.TUI.csproj. Never bump either\n" +
                     "                 package without re-running THIS test.\n" +
                     "  Full analysis: DEVMIND_STATUS.md §5 (\"Command-enum ORDINAL DRIFT\").";
@@ -153,36 +167,33 @@ namespace DevMind.TUI.Tests
             CanFocus = true,
         };
 
-        // ── Boundary pin: detect a core bump even if Editor bindings line up ─
+        // ── Boundary pin: detect a core REVERT even if Editor bindings line up ─
 
         [Fact]
-        public void Core_Command_Insert_Is_PreInsertion_Ordinal_Not_38()
+        public void Core_Command_Insert_Is_PostInsertion_Ordinal_38()
         {
             // CANARY, not the inserted member: Command.Insert sits at ordinal 37 in
             // core 2.4.3 and at 38 in 2.4.17 because the `Home` insertion at ordinal 15
             // (plus three tail additions) shifted every later member. This is a
-            // cheap, stable marker of "core enum pre- or post-drift": any bump of the
-            // core past 2.4.3 moves Insert off 37 and breaks the pairing — EVEN IF a
-            // future Editor were recompiled against the new enum, the pinned
-            // 2.5.x Editor line is compiled against the pre-insertion enum, so the
-            // core must stay pre-drift too.
+            // cheap, stable marker of "core enum pre- or post-drift": the CURRENT
+            // pin (core 2.4.17 + Editor 2.5.7) is post-insertion on BOTH sides,
+            // so this core must have Insert at 38. It fails the moment the core
+            // is reverted to the pre-insertion layout (≤ 2.4.3), even if the
+            // Editor is still a post-insertion release — a pre-insertion core is
+            // never a valid pairing partner for Editor ≥ 2.5.3.
             int insertOrdinal = (int)Command.Insert;
-            Assert.True(insertOrdinal != 38,
+            Assert.True(insertOrdinal == 38,
                 $"{VersionContext}\n" +
                 $"\nBoundary check: this process's core has Command.Insert at ordinal " +
                 $"{insertOrdinal}. Insert is 37 in core 2.4.3 (pre-drift) and 38 in 2.4.17 " +
-                "(the `Home` insertion at ordinal 15 shifted it +1). The pinned Editor line " +
-                "(2.5.0–2.5.2) is compiled against the pre-insertion enum, so this core is " +
-                "NEWER than the pairing rule allows.\n" +
-                "If you have deliberately bumped both packages to a mutually aligned newer " +
-                "pairing, update the pairing rule in DevMind.TUI.csproj AND the expected " +
-                "ordinals in this test — deliberately, not accidentally.");
-
-            // Stronger pin for the CURRENT pairing (Editor 2.5.2 requires core ≤ 2.4.3):
-            Assert.True(insertOrdinal == 37,
-                $"{VersionContext}\n" +
-                $"\nBoundary check: Command.Insert is at ordinal {insertOrdinal}; the pinned " +
-                "pairing (Terminal.Gui.Editor 2.5.2) requires core ≤ 2.4.3, where Insert is 37.");
+                "(the `Home` insertion at ordinal 15 shifted it +1). The current pin " +
+                "(core 2.4.17 + Editor 2.5.7) is post-insertion on both sides, so this " +
+                "core is OLDER than the pairing rule allows — a pre-insertion core cannot " +
+                "be paired with any Editor ≥ 2.5.3.\n" +
+                "If you have deliberately reverted both packages to a mutually aligned " +
+                "older pairing (core ≤ 2.4.3 + Editor ≤ 2.5.2), update the pairing rule " +
+                "in DevMind.TUI.csproj AND the expected ordinals in this test — " +
+                "deliberately, not accidentally.");
         }
 
         // ── Cross-check: Editor's stock ordinals vs this process's core enum ─
@@ -241,8 +252,9 @@ namespace DevMind.TUI.Tests
 
             // 2. The ordinal the Editor compiled in must mean the SAME command in
             //    THIS process's core enum. This is the entire test: under the
-            //    pinned pairing (Editor 2.5.2 + core 2.4.3) they agree; under a
-            //    drifted pairing (Editor 2.5.x + core ≥ 2.4.4) they diverge by
+            //    pinned pairing (Editor 2.5.7 + core 2.4.17) they agree; under a
+            //    mismatched pairing (Editor ≤ 2.5.2 with core ≥ 2.4.6, or
+            //    Editor ≥ 2.5.3 with core ≤ 2.4.3) they diverge by
             //    +1 for members at or above the `Home` insertion (ordinal 15),
             //    and by +4 for the tail band (InsertCaretAbove through
             //    StartRectangleSelection). NOTE: the five keys registered by

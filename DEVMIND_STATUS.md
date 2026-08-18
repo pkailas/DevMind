@@ -232,7 +232,7 @@ this list current as more are found._
 - **Submit event:** `Accepting` (EventHandler<CommandEventArgs>) is the correct "user pressed
   Enter" event for a focused TextField (Enter → `Command.Accept` via `SetupKeyboard`). Set
   `e.Handled = true` to stop the command bubbling to the SuperView.
-- **Shift+Enter is NOT distinguishable from Enter (2.4.4, verified empirically 2026-06-11):**
+- **Shift+Enter is NOT distinguishable from Enter (2.4.4, verified empirically 2026-06-11 — RE-VERIFY AGAINST 2.4.17):**
   a key-logger spike on `app.Keyboard.KeyDown` (run under both the default host and explicit
   Windows Terminal, keys injected via SendKeys) shows Shift+Enter arrives as plain `Enter`
   (0x0000000D — shift bit stripped somewhere in the host→driver chain), while **Ctrl+Enter
@@ -263,24 +263,34 @@ this list current as more are found._
    SelectAll 41→42, NewLine 43→44, Copy 59→60, Cut 60→61, Paste 61→62. `Command.Insert` moving
    37→38 is a **consequence** of the `Home` insertion, not the cause.
 
-   The ENTIRE Editor 2.5.x line (2.5.0–2.5.2 checked) is compiled against the PRE-insertion enum
-   (core ≤ 2.4.3) despite a nuspec claiming `>= 2.4.0`. Pairing Editor 2.5.x with a drifted core
-   cross-wires EVERY editing key, not just Enter: Backspace dispatches Editor's SelectAll
-   ("backspace highlights the row"), Delete deletes leftward, the bracketed-paste pipeline lands in
-   a dead handler, and the right-click context menu renders core's names for Editor's ordinals
-   ("Cut" where Paste belongs, no Paste item). All failures are silent (`KeyBindings.TryGet` still
-   returns the binding; only the dispatch target is wrong). **The tail band is worse than the rest:
-   if the Editor ever binds `InsertCaretAbove`/`InsertCaretBelow`/`StartSelection`/
-   `StartRectangleSelection`, those commands drift +4 against a drifted core, not +1.**
-   **Fix: pin core 2.4.3 + Editor 2.5.2** — the newest aligned pairing; 2.4.3 already has the full
-   paste pipeline (`View.Pasting`/`Pasted`, `IApplication.Paste`). **Rule: when binding keys to
-   Editor-implemented commands, recover the command id from the Editor's own stock binding** (e.g.
-   `KeyBindings.TryGet(Key.Enter, out var b); b.Commands[0]`), never from this process's enum
-   names — the rule holds under any pairing and stays in the code. CI guard:
-   **`DevMind.TUI.Tests/CommandEnumPairingTests.cs`** (xUnit, added 2026-08-18 — replaces the lost
-   manual harness that used to live in `%TEMP%\tg-keyspike\BindTest\`; it fails loudly if the
-   pinned pair's Command-enum ordinals drift). Never bump either package without re-running it.
-- **WT paste (Ctrl+V) — BROKEN (2026-06-14):** Windows Terminal binds Ctrl+V itself and
+    **RESOLVED 2026-08-20 (freeze lifted, pin moved forward): the pairing boundary sits INSIDE
+    the Editor 2.5.x line.** Editor 2.5.0–2.5.2 is compiled against the PRE-insertion enum (core
+    ≤ 2.4.3) despite the nuspec claiming `>= 2.4.0`; Editor was RECOMPILED against the POST-insertion
+    enum starting at 2.5.3 (verified 2026-08-20, measured Enter binding vs core `Command.NewLine`:
+    2.4.3+2.5.2 → 43/43 aligned; 2.4.17 + any of Editor 2.5.3–2.5.7 → 44/44 aligned). The nuspecs
+    now enforce the lower bound (2.5.3 requires core ≥ 2.4.6; 2.5.7 requires ≥ 2.4.17), so the
+    package itself refuses a bad pairing. **Current pin: core 2.4.17 + Editor 2.5.7** — both sides
+    post-insertion. **NEVER mix across the boundary**: Editor ≤ 2.5.2 requires core ≤ 2.4.3;
+    Editor ≥ 2.5.3 requires core ≥ 2.4.6 (2.5.7 requires ≥ 2.4.17). Pairing across the boundary —
+    in EITHER direction — cross-wires EVERY editing key, not just Enter: Backspace dispatches
+    Editor's SelectAll ("backspace highlights the row"), Delete deletes leftward, the
+    bracketed-paste pipeline lands in a dead handler, and the right-click context menu renders
+    core's names for Editor's ordinals ("Cut" where Paste belongs, no Paste item). All failures
+    are silent (`KeyBindings.TryGet` still returns the binding; only the dispatch target is
+    wrong). **The tail band is worse than the rest: if the Editor ever binds
+    `InsertCaretAbove`/`InsertCaretBelow`/`StartSelection`/`StartRectangleSelection`, those
+    commands drift +4 against a mismatched core, not +1.** The earlier conclusion "the entire
+    Editor 2.5.x line is pre-insertion" was only ever true for 2.5.0–2.5.2 (what was checked in
+    June 2026); it was resolved by moving BOTH packages forward together, not by holding them
+    back. **Rule: when binding keys to Editor-implemented commands, recover the command id from
+    the Editor's own stock binding** (e.g. `KeyBindings.TryGet(Key.Enter, out var b);
+    b.Commands[0]`), never from this process's enum names — the rule holds under any pairing and
+    stays in the code. CI guard:
+    **`DevMind.TUI.Tests/CommandEnumPairingTests.cs`** (xUnit, added 2026-08-18 — replaces the lost
+    manual harness that used to live in `%TEMP%\tg-keyspike\BindTest\`; it fails loudly if the
+    pinned pair's Command-enum ordinals drift; re-pointed to the post-insertion layout 2026-08-20).
+    Never bump either package without re-running it.
+- **WT paste (Ctrl+V) — BROKEN (2026-06-14 — observed on the OLD pin; RE-VERIFY AGAINST 2.4.17):** Windows Terminal binds Ctrl+V itself and
   injects the clipboard as a bracketed paste (`ESC[200~…201~`), shown with WT's own multi-line
   warning dialog when applicable. Editor 2.5.0 has no `OnPaste` override — `View.OnPaste` returns
   false, payload silently dropped. The enum-drift also affects the paste cluster (Editor's
@@ -290,7 +300,7 @@ this list current as more are found._
   Paste absent). **Next step:** run with `DEVMIND_TUI_DIAG` set, paste trace to Fable for
   ground-truth-before-fix. A real Ctrl+V keystroke only occurs under conhost or a WT profile
   with the paste keybinding unbound.
-- **TextView WordWrap (2.4.4)** re-wraps the ENTIRE document on every grapheme insert
+- **TextView WordWrap (2.4.4 — RE-VERIFY AGAINST 2.4.17)** re-wraps the ENTIRE document on every grapheme insert
   (`WrapModel()` unconditional) — O(n) per token, causes streaming sluggishness that grows with
   transcript length. Also has an upstream bug in the wrap-rebuild attribute copy (indexes source
   line by segment index instead of cumulative offset) that breaks colors at wrap points. **This

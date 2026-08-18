@@ -11,21 +11,24 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- VERSION PAIRING RULE (verified 2026-06-11, offline dispatch harness — see
-         DEVMIND_STATUS.md §5): between Terminal.Gui 2.4.3 and 2.4.17 the Command
+    <!-- VERSION PAIRING RULE (drift verified 2026-06-11, offline dispatch harness —
+         see DEVMIND_STATUS.md §5): between Terminal.Gui 2.4.3 and 2.4.17 the Command
          enum grew — Home was inserted at ordinal 15 (shifting every later member +1;
          Command.Insert moving 37→38 is a consequence, not the cause) and
-         Center/ZoomIn/ZoomOut after Edit (the last four members shift +4). The whole
-         Terminal.Gui.Editor 2.5.x line is compiled against the PRE-insertion enum
-         (core ≤ 2.4.3), so pairing Editor 2.5.x with a drifted core cross-wires EVERY
-         editing key (Backspace → SelectAll, Enter → DeleteAll, Paste → Cut, corrupted
-         context menu). Core must stay ≤ 2.4.3 until an Editor release is compiled
-         against the new enum. Do not bump either package without re-running the
-         pairing test: DevMind.TUI.Tests/CommandEnumPairingTests.cs (CI-enforced;
-         replaced the lost manual harness %TEMP%\tg-keyspike\BindTest). -->
-    <PackageReference Include="Terminal.Gui.Editor" Version="2.5.2" />
+         Center/ZoomIn/ZoomOut after Edit (the last four members shift +4). Pairing
+         Editor and core across that boundary silently cross-wires EVERY editing key
+         (Backspace → SelectAll, Enter → DeleteAll, Paste → Cut, corrupted context
+         menu). The freeze is now LIFTED: Editor 2.5.0–2.5.2 is compiled against the
+         PRE-insertion enum (requires core ≤ 2.4.3); Editor ≥ 2.5.3 is compiled
+         against the POST-insertion enum (requires core ≥ 2.4.6; 2.5.7 requires
+         ≥ 2.4.17 — the package nuspecs enforce the lower bound). Current pin:
+         Terminal.Gui 2.4.17 + Terminal.Gui.Editor 2.5.7. NEVER mix across the
+         boundary. Do not bump either package without re-running the pairing test:
+         DevMind.TUI.Tests/CommandEnumPairingTests.cs (CI-enforced; replaced the lost
+         manual harness %TEMP%\tg-keyspike\BindTest). -->
+    <PackageReference Include="Terminal.Gui.Editor" Version="2.5.7" />
     <ProjectReference Include="..\DevMind.Core\DevMind.Core.csproj" />
-    <PackageReference Include="Terminal.Gui" Version="2.4.3" />
+    <PackageReference Include="Terminal.Gui" Version="2.4.17" />
   </ItemGroup>
 
 </Project>
