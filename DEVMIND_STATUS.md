@@ -263,10 +263,10 @@ this list current as more are found._
    SelectAll 41→42, NewLine 43→44, Copy 59→60, Cut 60→61, Paste 61→62. `Command.Insert` moving
    37→38 is a **consequence** of the `Home` insertion, not the cause.
 
-    **RESOLVED 2026-08-20 (freeze lifted, pin moved forward): the pairing boundary sits INSIDE
+    **RESOLVED 2026-08-18 (freeze lifted, pin moved forward): the pairing boundary sits INSIDE
     the Editor 2.5.x line.** Editor 2.5.0–2.5.2 is compiled against the PRE-insertion enum (core
     ≤ 2.4.3) despite the nuspec claiming `>= 2.4.0`; Editor was RECOMPILED against the POST-insertion
-    enum starting at 2.5.3 (verified 2026-08-20, measured Enter binding vs core `Command.NewLine`:
+    enum starting at 2.5.3 (verified 2026-08-18, measured Enter binding vs core `Command.NewLine`:
     2.4.3+2.5.2 → 43/43 aligned; 2.4.17 + any of Editor 2.5.3–2.5.7 → 44/44 aligned). The nuspecs
     now enforce the lower bound (2.5.3 requires core ≥ 2.4.6; 2.5.7 requires ≥ 2.4.17), so the
     package itself refuses a bad pairing. **Current pin: core 2.4.17 + Editor 2.5.7** — both sides
@@ -288,7 +288,7 @@ this list current as more are found._
     stays in the code. CI guard:
     **`DevMind.TUI.Tests/CommandEnumPairingTests.cs`** (xUnit, added 2026-08-18 — replaces the lost
     manual harness that used to live in `%TEMP%\tg-keyspike\BindTest\`; it fails loudly if the
-    pinned pair's Command-enum ordinals drift; re-pointed to the post-insertion layout 2026-08-20).
+    pinned pair's Command-enum ordinals drift; re-pointed to the post-insertion layout 2026-08-18).
     Never bump either package without re-running it.
 - **WT paste (Ctrl+V) — BROKEN (2026-06-14 — observed on the OLD pin; RE-VERIFY AGAINST 2.4.17):** Windows Terminal binds Ctrl+V itself and
   injects the clipboard as a bracketed paste (`ESC[200~…201~`), shown with WT's own multi-line

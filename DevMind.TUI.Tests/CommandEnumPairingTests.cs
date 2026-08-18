@@ -22,7 +22,7 @@
 //   Per-release attribution (which release introduced which insertion) is
 //   UNVERIFIED — the dump compares 2.4.3 against 2.4.17, not each release.
 //
-//   The pairing boundary sits INSIDE the Editor 2.5.x line (verified 2026-08-20):
+//   The pairing boundary sits INSIDE the Editor 2.5.x line (verified 2026-08-18):
 //
 //     • Editor ≤ 2.5.2 is compiled against the PRE-insertion enum (core ≤ 2.4.3),
 //       despite its nuspec claiming `>= 2.4.0`. Pairing it with a drifted core
