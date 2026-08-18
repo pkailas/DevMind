@@ -12,14 +12,17 @@
 
   <ItemGroup>
     <!-- VERSION PAIRING RULE (verified 2026-06-11, offline dispatch harness — see
-         DEVMIND_STATUS.md §5): Terminal.Gui 2.4.4 inserted Command.Insert at ordinal
-         38, shifting every later Command member +1. The whole Terminal.Gui.Editor
-         2.5.x line is compiled against the PRE-insertion enum (core ≤ 2.4.3), so
-         pairing Editor 2.5.x with core 2.4.4+ cross-wires EVERY editing key
-         (Backspace → SelectAll, Enter → DeleteAll, Paste → Cut, corrupted context
-         menu). Core must stay ≤ 2.4.3 until an Editor release is compiled against
-         the new enum. Do not bump either package without re-running the harness
-         (%TEMP%\tg-keyspike\BindTest). -->
+         DEVMIND_STATUS.md §5): between Terminal.Gui 2.4.3 and 2.4.17 the Command
+         enum grew — Home was inserted at ordinal 15 (shifting every later member +1;
+         Command.Insert moving 37→38 is a consequence, not the cause) and
+         Center/ZoomIn/ZoomOut after Edit (the last four members shift +4). The whole
+         Terminal.Gui.Editor 2.5.x line is compiled against the PRE-insertion enum
+         (core ≤ 2.4.3), so pairing Editor 2.5.x with a drifted core cross-wires EVERY
+         editing key (Backspace → SelectAll, Enter → DeleteAll, Paste → Cut, corrupted
+         context menu). Core must stay ≤ 2.4.3 until an Editor release is compiled
+         against the new enum. Do not bump either package without re-running the
+         pairing test: DevMind.TUI.Tests/CommandEnumPairingTests.cs (CI-enforced;
+         replaced the lost manual harness %TEMP%\tg-keyspike\BindTest). -->
     <PackageReference Include="Terminal.Gui.Editor" Version="2.5.2" />
     <ProjectReference Include="..\DevMind.Core\DevMind.Core.csproj" />
     <PackageReference Include="Terminal.Gui" Version="2.4.3" />

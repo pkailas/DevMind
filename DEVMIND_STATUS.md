@@ -239,29 +239,47 @@ this list current as more are found._
   arrives correctly distinct** (0x4000000D) and Alt+Enter never arrives at all (host consumes
   it, likely fullscreen toggle). Consequence: any "Shift+Enter = newline" UX must use
   **Ctrl+Enter** instead. Spike artifacts: `%TEMP%\tg-keyspike\` + `%TEMP%\tg-keyspike.log`.
-- **Command-enum ORDINAL DRIFT between Terminal.Gui.Editor 2.5.0 and core 2.4.4 (verified
-  2026-06-11, offline dispatch harness):** Editor 2.5.0 is compiled against a newer core whose
-  `Command` enum reordered — Editor registers its newline handler under literal **43**, but core
-  2.4.4's `Command.NewLine` is **44** (43 = `DeleteAll` there). Binding `Command.NewLine` to a key
-  on the Editor dispatches into a missing handler ("not supported by this View" → NotBound →
-  silently swallowed; `KeyBindings.TryGet` still returns the binding, so the failure is invisible
-  until dispatch). `Command.Accept` (=1) agrees across versions and its handler lives in core's
-  View, so Enter→Accept rebinds work. **Rule: when binding keys to Editor-implemented commands,
-  recover the command id from the Editor's own stock binding** (e.g.
-  `KeyBindings.TryGet(Key.Enter, out var b); b.Commands[0]`), never from this process's enum
-  names. Repro/fix harness: `%TEMP%\tg-keyspike\BindTest\`.
-  **SUPERSEDED 2026-06-11 (same day, fuller bisection): the drift direction was BACKWARDS.**
-  Editor 2.5.x is not "newer" — **core 2.4.4 inserted `Command.Insert` at ordinal 38**, shifting
-  every later member +1 (NewLine 43→44, SelectAll 41→42, Paste 61→62, …). The ENTIRE Editor 2.5.x
-  line (2.5.0–2.5.2 checked) is compiled against the PRE-insertion enum (core ≤ 2.4.3) despite a
-  nuspec claiming `>= 2.4.0`. Pairing Editor 2.5.x with core 2.4.4+ cross-wires EVERY editing
-  key, not just Enter: Backspace dispatches Editor's SelectAll ("backspace highlights the row"),
-  Delete deletes leftward, the bracketed-paste pipeline lands in a dead handler, and the
-  right-click context menu renders core's names for Editor's ordinals ("Cut" where Paste belongs,
-  no Paste item). All failures are silent. **Fix: pin core 2.4.3 + Editor 2.5.2** — the newest
-  aligned pairing; 2.4.3 already has the full paste pipeline (`View.Pasting`/`Pasted`,
-  `IApplication.Paste`). Never bump either package without re-running the BindTest harness. The
-  stock-binding-recovery rule above remains correct under any pairing and stays in the code.
+ - **Command-enum ORDINAL DRIFT between Terminal.Gui.Editor 2.5.x and core ≥ 2.4.4 (verified
+   2026-06-11, offline dispatch harness; full-range enum dump of 2.4.3 vs 2.4.17 re-verified the
+   drift shape):** The `Command` enum **grew between 2.4.3 and 2.4.17** — 88 members → 92, with
+   FOUR members added and none removed. There are TWO separate insertion points, in 2.4.3 ordinal
+   terms:
+
+   1. **`Home` inserted at ordinal 15** — the mid-list insertion that causes the damage. 2.4.3:
+      `13 EndOfPage, 14 Start, 15 End, 16 LeftStart, …`; 2.4.17: `13 EndOfPage, 14 Start,
+      15 Home, 16 End, 17 LeftStart, …`. Everything from ordinal 15 upward shifts +1.
+      **CAVEAT (per-release attribution):** this dump compares 2.4.3 against 2.4.17 and does NOT
+      establish which specific release introduced which insertion. The earlier note attributes the
+      mid-list insertion to core 2.4.4 — plausible but unverified; it cannot be extended to the tail
+      additions below, and no per-release bisection was run.
+   2. **`Center`, `ZoomIn`, `ZoomOut` inserted after `Edit`, near the tail.** 2.4.3:
+      `83 Edit, 84 InsertCaretAbove, 85 InsertCaretBelow, 86 StartSelection, 87
+      StartRectangleSelection`; 2.4.17: `84 Edit, 85 Center, 86 ZoomIn, 87 ZoomOut, 88
+      InsertCaretAbove, …, 91 StartRectangleSelection`.
+
+   Net shift (in 2.4.3 ordinal terms): **0–14 unchanged; 15–83 +1; 84–87 +4** (the tail band:
+   `InsertCaretAbove`, `InsertCaretBelow`, `StartSelection`, `StartRectangleSelection`). Confirmed
+   key ordinals, 2.4.3 → 2.4.17: Insert 37→38, DeleteCharRight 39→40, DeleteCharLeft 40→41,
+   SelectAll 41→42, NewLine 43→44, Copy 59→60, Cut 60→61, Paste 61→62. `Command.Insert` moving
+   37→38 is a **consequence** of the `Home` insertion, not the cause.
+
+   The ENTIRE Editor 2.5.x line (2.5.0–2.5.2 checked) is compiled against the PRE-insertion enum
+   (core ≤ 2.4.3) despite a nuspec claiming `>= 2.4.0`. Pairing Editor 2.5.x with a drifted core
+   cross-wires EVERY editing key, not just Enter: Backspace dispatches Editor's SelectAll
+   ("backspace highlights the row"), Delete deletes leftward, the bracketed-paste pipeline lands in
+   a dead handler, and the right-click context menu renders core's names for Editor's ordinals
+   ("Cut" where Paste belongs, no Paste item). All failures are silent (`KeyBindings.TryGet` still
+   returns the binding; only the dispatch target is wrong). **The tail band is worse than the rest:
+   if the Editor ever binds `InsertCaretAbove`/`InsertCaretBelow`/`StartSelection`/
+   `StartRectangleSelection`, those commands drift +4 against a drifted core, not +1.**
+   **Fix: pin core 2.4.3 + Editor 2.5.2** — the newest aligned pairing; 2.4.3 already has the full
+   paste pipeline (`View.Pasting`/`Pasted`, `IApplication.Paste`). **Rule: when binding keys to
+   Editor-implemented commands, recover the command id from the Editor's own stock binding** (e.g.
+   `KeyBindings.TryGet(Key.Enter, out var b); b.Commands[0]`), never from this process's enum
+   names — the rule holds under any pairing and stays in the code. CI guard:
+   **`DevMind.TUI.Tests/CommandEnumPairingTests.cs`** (xUnit, added 2026-08-18 — replaces the lost
+   manual harness that used to live in `%TEMP%\tg-keyspike\BindTest\`; it fails loudly if the
+   pinned pair's Command-enum ordinals drift). Never bump either package without re-running it.
 - **WT paste (Ctrl+V) — BROKEN (2026-06-14):** Windows Terminal binds Ctrl+V itself and
   injects the clipboard as a bracketed paste (`ESC[200~…201~`), shown with WT's own multi-line
   warning dialog when applicable. Editor 2.5.0 has no `OnPaste` override — `View.OnPaste` returns
