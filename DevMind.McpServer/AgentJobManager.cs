@@ -199,6 +199,12 @@ namespace DevMind.McpServer
             ApiKey = Environment.GetEnvironmentVariable("DEVMIND_API_KEY") ?? "";
 
             _nextId = LoadPersistedIdCounter();
+            // Best-effort: make sure the transcript location exists before the worker
+            // thread starts writing. Production default is always creatable; a
+            // test-set DEVMIND_TASKS_DIR may not be, and the individual writers
+            // (WriteActiveMarker, WriteResultSidecar) are themselves best-effort, so a
+            // failure here must never take the manager down with it.
+            try { Directory.CreateDirectory(TranscriptDir); } catch { /* best-effort */ }
             _workerTask = Task.Run(WorkerLoopAsync);
         }
 
@@ -434,9 +440,21 @@ namespace DevMind.McpServer
         }
 
         /// <summary>Where job transcripts are written. Transcripts OUTLIVE the server
-        /// process — the disk-fallback in devmind_task_result depends on this path.</summary>
+        /// process — the disk-fallback in devmind_task_result depends on this path.
+        ///
+        /// Overridable via DEVMIND_TASKS_DIR (2026-08-18): the test suite spins real
+        /// agent jobs against stub LLM servers, and when they wrote their transcripts,
+        /// _active.json, _jobcounter.txt and .result.json sidecars into this GLOBAL
+        /// folder they yanked dm-watch off the live job's transcript (it follows the
+        /// newest job-*.log), poisoned its BUSY header with test job ids, and burned
+        /// the global job-id counter (~340 ids/hour, mostly tests). Tests set the var
+        /// to a private per-run dir in a ModuleInitializer; production (unset) keeps
+        /// the default below, so nothing outside tests changes behaviour. Re-evaluated
+        /// per access so an override set at process start is always picked up.</summary>
         public static string TranscriptDir =>
-            Path.Combine(Path.GetTempPath(), "devmind", "tasks");
+            string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("DEVMIND_TASKS_DIR"))
+                ? Path.Combine(Path.GetTempPath(), "devmind", "tasks")
+                : Environment.GetEnvironmentVariable("DEVMIND_TASKS_DIR")!;
 
         /// <summary>Cap for devmind_task_status wait_seconds — beyond this the
         /// caller is polling faster than a task ever finishes anyway, and a stuck
