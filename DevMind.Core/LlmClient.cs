@@ -4109,6 +4109,8 @@ namespace DevMind
         {
             if (toolCalls == null) return null;
 
+            bool wantObject = UseObjectToolArguments;
+
             var clone = (JArray)toolCalls.DeepClone();
             foreach (var tc in clone)
             {
@@ -4134,11 +4136,37 @@ namespace DevMind
                     }
                 }
 
-                fn["arguments"] = normalized;
+                if (wantObject)
+                {
+                    // Muse Glimmer's atem chat template raises if arguments is a JSON string;
+                    // it requires a mapping. Emit the parsed object instead.
+                    JToken asObject;
+                    try { asObject = JToken.Parse(normalized); }
+                    catch { asObject = new JObject(); }
+                    if (asObject.Type != JTokenType.Object && asObject.Type != JTokenType.Array)
+                        asObject = new JObject();
+                    fn["arguments"] = asObject;
+                }
+                else
+                {
+                    fn["arguments"] = normalized;
+                }
             }
 
             return clone;
         }
+
+        /// <summary>
+        /// When true, <see cref="SanitizeToolCallArguments"/> emits <c>function.arguments</c> as a
+        /// JSON object rather than a JSON string. Required by chat templates that parse arguments
+        /// as a mapping (Meta Muse Glimmer / "atem" template); vLLM and the OpenAI spec want the
+        /// string form, which remains the default. Set DEVMIND_TOOL_ARGS_FORMAT=object to enable.
+        /// </summary>
+        private static bool UseObjectToolArguments =>
+            string.Equals(
+                Environment.GetEnvironmentVariable("DEVMIND_TOOL_ARGS_FORMAT"),
+                "object",
+                StringComparison.OrdinalIgnoreCase);
 
         /// <summary>
         /// Parses a pre-built tool_calls JArray into <see cref="ToolCallResult"/> list.
