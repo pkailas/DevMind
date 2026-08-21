@@ -774,6 +774,11 @@ internal sealed class DevMindTools
     public async Task<string> LibraryQuery(
         [Description("Natural-language question to retrieve reference excerpts for.")] string question,
         [Description("Number of excerpts to retrieve (default 6).")] int top_k = 6,
+        [Description("Optional case-insensitive document-name filter. Restricts candidates to documents whose " +
+                    "name contains the value (top_k is computed over the filtered set, not trimmed afterward). " +
+                    "A leading '!' inverts: exclude documents whose name contains the remainder. " +
+                    "Examples: doc_filter: \"InstallationGuide\" (only that doc family), " +
+                    "doc_filter: \"!SDK\" (everything except the SDK corpus). Omit or leave empty for the whole library.")] string doc_filter = null,
         CancellationToken cancellationToken = default)
     {
         return await _svc.EnqueueAsync(async () =>
@@ -781,7 +786,7 @@ internal sealed class DevMindTools
             var config = TuiConfig.Load();
             return await DocumentLibrarian.QueryAsTextAsync(
                 config.LibraryEmbeddingEndpoint, config.LibraryConnectionString,
-                question, top_k, cancellationToken);
+                question, top_k, doc_filter, cancellationToken);
         }, cancellationToken);
     }
 

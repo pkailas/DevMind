@@ -181,6 +181,14 @@ namespace DevMind
         Task<string> QueryLibraryAsync(string question, int topK, CancellationToken cancellationToken = default);
 
         /// <summary>
+        /// As <see cref="QueryLibraryAsync(string, int, CancellationToken)"/>, restricted to
+        /// documents whose name matches <paramref name="docFilter"/> (case-insensitive
+        /// substring; a leading "!" inverts the match). Null/empty searches the whole
+        /// library. Applied before top-K ranking.
+        /// </summary>
+        Task<string> QueryLibraryAsync(string question, int topK, string docFilter, CancellationToken cancellationToken = default);
+
+        /// <summary>
         /// Enumerates files matching a glob pattern under the project root.
         /// Returns absolute paths, alphabetically sorted, capped at 200 results.
         /// Skips bin/, obj/, .vs/, .git/, node_modules/, packages/ directories.

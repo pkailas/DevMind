@@ -265,6 +265,8 @@ namespace DevMind.Core.Tests
             public Task<string> SearchMemoryAsync(string pattern) => Task.FromResult("");
             public Task<string> QueryLibraryAsync(string question, int topK, CancellationToken cancellationToken = default)
                 => Task.FromResult("");
+            public Task<string> QueryLibraryAsync(string question, int topK, string docFilter, CancellationToken cancellationToken = default)
+                => Task.FromResult("");
             public Task<string> ListFilesAsync(string glob, bool recursive, CancellationToken cancellationToken = default)
                 => Task.FromResult("");
             public int GetPatchBackupCount() => 0;

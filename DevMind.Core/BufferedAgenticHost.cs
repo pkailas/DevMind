@@ -826,7 +826,16 @@ namespace DevMind
             AppendOutput($"[LIBRARY] Query: \"{question}\"\n", OutputColor.Dim);
             return await DocumentLibrarian.QueryAsTextAsync(
                 config.LibraryEmbeddingEndpoint, config.LibraryConnectionString,
-                question, topK, cancellationToken).ConfigureAwait(false);
+                question, topK, docFilter: null, cancellationToken).ConfigureAwait(false);
+        }
+
+        async Task<string> IAgenticHost.QueryLibraryAsync(string question, int topK, string docFilter, CancellationToken cancellationToken)
+        {
+            var config = TuiConfig.Load();
+            AppendOutput($"[LIBRARY] Query: \"{question}\" (doc_filter: {docFilter ?? "-"})\n", OutputColor.Dim);
+            return await DocumentLibrarian.QueryAsTextAsync(
+                config.LibraryEmbeddingEndpoint, config.LibraryConnectionString,
+                question, topK, docFilter, cancellationToken).ConfigureAwait(false);
         }
 
         // ── IAgenticHost LSP tools (delegate to shared Core LspToolService) ───────

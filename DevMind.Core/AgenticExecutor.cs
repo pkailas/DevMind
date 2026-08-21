@@ -499,7 +499,7 @@ namespace DevMind
                         try
                         {
                             string libraryResult = await _host.QueryLibraryAsync(
-                                block.LibraryQuestion, block.LibraryTopK, _cancellationToken);
+                                block.LibraryQuestion, block.LibraryTopK, block.LibraryDocFilter, _cancellationToken);
                             result.ToolResultContents["query_library"] = libraryResult;
                         }
                         catch (OperationCanceledException)

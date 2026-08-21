@@ -243,7 +243,8 @@ namespace DevMind
                     {
                         Type = BlockType.QueryLibrary,
                         LibraryQuestion = GetArg(tc, "question"),
-                        LibraryTopK = GetIntArg(tc, "top_k")
+                        LibraryTopK = GetIntArg(tc, "top_k"),
+                        LibraryDocFilter = GetArg(tc, "doc_filter")
                     };
 
                 case "list_files":

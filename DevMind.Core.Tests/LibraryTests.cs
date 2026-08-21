@@ -359,6 +359,93 @@ namespace DevMind.Core.Tests
             }
         }
 
+        // ── LibraryStore: doc_filter (document-name substring filter) ──────────
+
+        [Fact]
+        public async Task LibraryStore_Search_DocFilter_IncludeAndExcludeAndNoFilter()
+        {
+            if (!await SqlAvailableAsync()) return; // soft-skip off-rig
+
+            var store = new LibraryStore(ConnectionString);
+            await store.EnsureSchemaAsync(CancellationToken.None);
+
+            string sha1 = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+            string sha2 = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+            int sdkId = await store.UpsertDocumentAsync(
+                "SDK Reference.pdf", $"X:\\tests\\{sha1}.pdf", 2, sha1, CancellationToken.None);
+            int guideId = await store.UpsertDocumentAsync(
+                "InstallationGuide.pdf", $"X:\\tests\\{sha2}.pdf", 2, sha2, CancellationToken.None);
+            string sha3 = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+            int wildId = await store.UpsertDocumentAsync(
+                "SDK-Notes_v2.pdf", $"X:\\tests\\{sha3}.pdf", 2, sha3, CancellationToken.None);
+            string sha4 = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+            int oBrienId = await store.UpsertDocumentAsync(
+                "OBrien's-Guide.pdf", $"X:\\tests\\{sha4}.pdf", 2, sha4, CancellationToken.None);
+            try
+            {
+                await store.AddChunkAsync(sdkId, 1, 2, "sdk-chunk", Unit(900), CancellationToken.None);
+                await store.AddChunkAsync(guideId, 1, 2, "guide-chunk", Unit(901), CancellationToken.None);
+                await store.AddChunkAsync(wildId, 1, 2, "wild-chunk", Unit(902), CancellationToken.None);
+                await store.AddChunkAsync(oBrienId, 1, 2, "obrien-chunk", Unit(903), CancellationToken.None);
+
+                // 1) Include filter: matches names containing "InstallationGuide".
+                var inc = await store.SearchAsync(Unit(900), 10, "InstallationGuide", CancellationToken.None);
+                Assert.NotEmpty(inc);
+                Assert.All(inc, h => Assert.Equal("InstallationGuide.pdf", h.DocumentName));
+                Assert.Contains(inc, h => h.Notes == "guide-chunk");
+                // OBrien's-Guide.pdf also contains "Guide" but NOT "InstallationGuide".
+                Assert.DoesNotContain(inc, h => h.Notes == "obrien-chunk");
+
+                // 2) Exclude filter: SDK chunks excluded; InstallationGuide + OBrien's-Guide remain.
+                var exc = await store.SearchAsync(Unit(900), 10, "!SDK", CancellationToken.None);
+                Assert.NotEmpty(exc);
+                Assert.All(exc, h => Assert.True(
+                    h.DocumentName == "InstallationGuide.pdf" || h.DocumentName == "OBrien's-Guide.pdf",
+                    $"unexpected doc: {h.DocumentName}"));
+                Assert.Contains(exc, h => h.Notes == "guide-chunk");
+                Assert.Contains(exc, h => h.Notes == "obrien-chunk");
+
+                // 3) No filter (null): all documents' chunks are eligible (regression).
+                var all = await store.SearchAsync(Unit(900), 10, null, CancellationToken.None);
+                Assert.Contains(all, h => h.Notes == "sdk-chunk");
+                Assert.Contains(all, h => h.Notes == "guide-chunk");
+                Assert.Contains(all, h => h.Notes == "wild-chunk");
+                Assert.Contains(all, h => h.Notes == "obrien-chunk");
+
+                // 4) Wildcard escape: "_" matches only the literal "_" in the name,
+                //    not any single character, so SDK.pdf (no underscore) is excluded.
+                var wild = await store.SearchAsync(Unit(900), 10, "_", CancellationToken.None);
+                Assert.NotEmpty(wild);
+                Assert.All(wild, h => Assert.Equal("SDK-Notes_v2.pdf", h.DocumentName));
+                Assert.Contains(wild, h => h.Notes == "wild-chunk");
+
+                // 5) Degenerate filter "!" alone is a no-op, same as no filter.
+                var bang = await store.SearchAsync(Unit(900), 10, "!", CancellationToken.None);
+                Assert.Contains(bang, h => h.Notes == "sdk-chunk");
+                Assert.Contains(bang, h => h.Notes == "guide-chunk");
+                Assert.Contains(bang, h => h.Notes == "wild-chunk");
+                Assert.Contains(bang, h => h.Notes == "obrien-chunk");
+
+                // 6) Single quote in doc name: filter containing the quote matches it.
+                var quote = await store.SearchAsync(Unit(900), 10, "Brien's", CancellationToken.None);
+                Assert.NotEmpty(quote);
+                Assert.All(quote, h => Assert.Equal("OBrien's-Guide.pdf", h.DocumentName));
+                Assert.Contains(quote, h => h.Notes == "obrien-chunk");
+
+                // 7) Filter ending in a quote: the quote is escaped, so the trailing
+                //    % wildcard is NOT neutralized. No doc name ends with "Guide'".
+                var trailingQuote = await store.SearchAsync(Unit(900), 10, "Guide'", CancellationToken.None);
+                Assert.Empty(trailingQuote);
+            }
+            finally
+            {
+                await store.RemoveDocumentAsync(sdkId, CancellationToken.None);
+                await store.RemoveDocumentAsync(guideId, CancellationToken.None);
+                await store.RemoveDocumentAsync(wildId, CancellationToken.None);
+                await store.RemoveDocumentAsync(oBrienId, CancellationToken.None);
+            }
+        }
+
         // Split out of the ingest test so prompt formatting is covered without a database.
         [Fact]
         public void BuildAugmentedPrompt_FormatsExcerptsWithProvenanceAndQuestion()

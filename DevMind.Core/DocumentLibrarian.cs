@@ -383,18 +383,33 @@ namespace DevMind
         }
 
         /// <summary>Embeds the question and returns the nearest library chunks.</summary>
+        public static Task<List<LibraryHit>> QueryAsync(
+            string embeddingEndpointUrl,
+            string connectionString,
+            string question,
+            int topK,
+            CancellationToken ct)
+            => QueryAsync(embeddingEndpointUrl, connectionString, question, topK, docFilter: null, ct);
+
+        /// <summary>
+        /// Embeds the question and returns the nearest library chunks, restricted to
+        /// documents whose name matches <paramref name="docFilter"/> (case-insensitive
+        /// substring; a leading "!" inverts the match). Null/empty searches the whole
+        /// library. Filtered before top-K ranking.
+        /// </summary>
         public static async Task<List<LibraryHit>> QueryAsync(
             string embeddingEndpointUrl,
             string connectionString,
             string question,
             int topK,
+            string docFilter,
             CancellationToken ct)
         {
             using (var embedder = new EmbeddingClient(embeddingEndpointUrl))
             {
                 float[] queryEmbedding = await embedder.EmbedAsync(question, ct).ConfigureAwait(false);
                 var store = new LibraryStore(connectionString);
-                return await store.SearchAsync(queryEmbedding, topK, ct).ConfigureAwait(false);
+                return await store.SearchAsync(queryEmbedding, topK, docFilter, ct).ConfigureAwait(false);
             }
         }
 
@@ -406,11 +421,20 @@ namespace DevMind
         /// (embedding server down, SQL unreachable) come back as [ERROR] text the
         /// model can react to.
         /// </summary>
+        public static Task<string> QueryAsTextAsync(
+            string embeddingEndpointUrl,
+            string connectionString,
+            string question,
+            int topK,
+            CancellationToken ct)
+            => QueryAsTextAsync(embeddingEndpointUrl, connectionString, question, topK, docFilter: null, ct);
+
         public static async Task<string> QueryAsTextAsync(
             string embeddingEndpointUrl,
             string connectionString,
             string question,
             int topK,
+            string docFilter,
             CancellationToken ct)
         {
             if (string.IsNullOrWhiteSpace(connectionString))
@@ -420,7 +444,7 @@ namespace DevMind
             try
             {
                 var hits = await QueryAsync(embeddingEndpointUrl, connectionString, question,
-                    topK > 0 ? topK : DefaultTopK, ct).ConfigureAwait(false);
+                    topK > 0 ? topK : DefaultTopK, docFilter, ct).ConfigureAwait(false);
                 if (hits.Count == 0)
                     return $"query_library: no matches for \"{question}\" — the library may not cover this topic.";
 

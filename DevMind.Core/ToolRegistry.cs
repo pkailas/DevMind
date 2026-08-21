@@ -225,7 +225,13 @@ namespace DevMind
                 "instead of guessing from memory. If the library is not configured or has no coverage, " +
                 "the result says so — then proceed with your own knowledge or web_search.",
                 Required("question", "string", "Natural-language question to retrieve reference excerpts for"),
-                Optional("top_k", "integer", "Number of excerpts to retrieve (default 6)")));
+                Optional("top_k", "integer", "Number of excerpts to retrieve (default 6)"),
+                Optional("doc_filter", "string",
+                    "Optional case-insensitive document-name filter. Restricts candidates to documents whose name contains " +
+                    "the value (top_k is computed over the filtered set, not trimmed afterward). A leading '!' inverts: " +
+                    "exclude documents whose name contains the remainder. " +
+                    "Examples: doc_filter: \"InstallationGuide\" (only that doc family), doc_filter: \"!SDK\" " +
+                    "(everything except the SDK corpus). Omit or leave empty for the whole library.")));
 
             // ── list_files ───────────────────────────────────────────────────
             tools.Add(MakeTool("list_files",

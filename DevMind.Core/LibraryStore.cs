@@ -133,14 +133,65 @@ VALUES (@doc, @first, @last, @notes, CAST(@emb AS VECTOR(1024)));";
         }
 
         /// <summary>Nearest chunks to the query embedding across the whole library.</summary>
-        public async Task<List<LibraryHit>> SearchAsync(float[] queryEmbedding, int topK, CancellationToken ct)
+        public Task<List<LibraryHit>> SearchAsync(float[] queryEmbedding, int topK, CancellationToken ct)
+            => SearchAsync(queryEmbedding, topK, docFilter: null, ct);
+
+        /// <summary>
+        /// Nearest chunks to the query embedding, restricted to documents whose name
+        /// matches <paramref name="docFilter"/> (case-insensitive substring). A leading
+        /// "!" inverts the match (exclude documents whose name contains the remainder).
+        /// Null/empty filter searches the whole library. The filter is applied to the
+        /// candidate set BEFORE <c>TOP</c> ranking, so topK is computed over the
+        /// filtered set, not trimmed from a full-library ranking.
+        /// </summary>
+        public async Task<List<LibraryHit>> SearchAsync(
+            float[] queryEmbedding, int topK, string docFilter, CancellationToken ct)
         {
-            const string sql = @"
+            // Degenerate filters ("!", "  ", "! ") behave as no-filter rather than
+            // matching/everything or excluding everything.
+            string needle = string.IsNullOrWhiteSpace(docFilter)
+                ? null
+                : (docFilter[0] == '!' ? docFilter.Substring(1) : docFilter).Trim();
+            bool hasFilter = !string.IsNullOrEmpty(needle);
+            // Escape the LIKE escape character (single-quote) itself first, then LIKE
+            // wildcards, so the needle matches as a literal substring.
+            string escaped = hasFilter
+                ? needle.Replace("'", "''")
+                    .Replace("%", "'%")
+                    .Replace("_", "'_")
+                    .Replace("[", "'[")
+                : string.Empty;
+
+            string sql;
+            if (!hasFilter)
+            {
+                sql = @"
 SELECT TOP (@k) d.Name, c.FirstPage, c.LastPage, c.Notes,
        VECTOR_DISTANCE('cosine', c.Embedding, CAST(@q AS VECTOR(1024))) AS Dist
 FROM lib.Chunks c
 JOIN lib.Documents d ON d.Id = c.DocumentId
 ORDER BY Dist ASC;";
+            }
+            else if (docFilter[0] == '!' && hasFilter)
+            {
+                sql = @"
+SELECT TOP (@k) d.Name, c.FirstPage, c.LastPage, c.Notes,
+       VECTOR_DISTANCE('cosine', c.Embedding, CAST(@q AS VECTOR(1024))) AS Dist
+FROM lib.Chunks c
+JOIN lib.Documents d ON d.Id = c.DocumentId
+WHERE NOT (d.Name COLLATE Latin1_General_CI_AI LIKE @f ESCAPE '''')
+ORDER BY Dist ASC;";
+            }
+            else
+            {
+                sql = @"
+SELECT TOP (@k) d.Name, c.FirstPage, c.LastPage, c.Notes,
+       VECTOR_DISTANCE('cosine', c.Embedding, CAST(@q AS VECTOR(1024))) AS Dist
+FROM lib.Chunks c
+JOIN lib.Documents d ON d.Id = c.DocumentId
+WHERE d.Name COLLATE Latin1_General_CI_AI LIKE @f ESCAPE ''''
+ORDER BY Dist ASC;";
+            }
             var hits = new List<LibraryHit>();
             using (var conn = new SqlConnection(_connectionString))
             {
@@ -149,6 +200,10 @@ ORDER BY Dist ASC;";
                 {
                     cmd.Parameters.AddWithValue("@k", topK);
                     cmd.Parameters.AddWithValue("@q", EmbeddingClient.ToJsonArray(queryEmbedding));
+                    if (hasFilter)
+                    {
+                        cmd.Parameters.AddWithValue("@f", "%" + escaped + "%");
+                    }
                     using (var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false))
                     {
                         while (await reader.ReadAsync(ct).ConfigureAwait(false))

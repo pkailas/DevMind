@@ -46,5 +46,6 @@ namespace DevMind
         public string MemorySearchPattern { get; set; }                   // for SearchMemory — search pattern ('|' OR-alternation, same as grep_file)
         public string LibraryQuestion { get; set; }                       // for QueryLibrary — natural-language question for the document library
         public int    LibraryTopK { get; set; }                           // for QueryLibrary — excerpts to retrieve (0 = default)
+        public string LibraryDocFilter { get; set; }                      // for QueryLibrary — case-insensitive document-name substring filter; "!" prefix inverts (null/empty = whole library)
     }
 }
