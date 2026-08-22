@@ -115,26 +115,31 @@ namespace DevMind
                     command = Environment.ExpandEnvironmentVariables(command);
             }
 
+            // Multi-line test is computed on the ORIGINAL command, before wrapping,
+            // because WrapForPowerShell injects newlines itself. SanitizeCommand is
+            // applied to single-line commands only and is deliberately bypassed for
+            // multi-line ones (it destroys here-strings).
             bool multiLine = command.IndexOf('\n') >= 0;
 
             string sanitized;
             string args;
-            if (usePowerShell && multiLine)
+            if (usePowerShell)
             {
-                // Multi-line command (script block, here-string): encode verbatim so
-                // newlines and quotes survive intact. SanitizeCommand is deliberately
-                // bypassed — it exists to rescue single-line commands with embedded
-                // newlines in string literals, and it destroys here-strings.
-                sanitized = command;
-                string encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(command));
+                // Wrap FIRST, then encode: WrapForPowerShell injects newlines, so a
+                // wrapped command is always multi-line and must travel via
+                // -EncodedCommand (the old -Command + quote-escaping branch is
+                // gone — it was the source of repeated escaping bugs).
+                // The same wrapped text is base64-encoded for execution AND
+                // passed as the trace argument, so trace and execution always agree.
+                string body = multiLine ? command : SanitizeCommand(command);
+                sanitized = WrapForPowerShell(body);
+                string encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(sanitized));
                 args = $"-NoProfile -NonInteractive -EncodedCommand {encoded}";
             }
             else
             {
                 sanitized = SanitizeCommand(command);
-                args = usePowerShell
-                    ? $"-NoProfile -NonInteractive -Command \"{sanitized.Replace("\"", "\\\"")}\""
-                    : $"/c \"{sanitized}\"";
+                args = @"/c " + @"""" + sanitized + @"""";
             }
 
             var psi = new ProcessStartInfo(shell, args);
@@ -551,6 +556,29 @@ namespace DevMind
                 return File.Exists(ps);
             }
             catch { return false; }
+        }
+
+        /// <summary>
+        /// Wraps a PowerShell command body so that a native executable writing to stderr
+        /// does not make the whole script exit non-zero (PowerShell's
+        /// <c>NativeCommandError</c> trap). Without this, a successful Python/tqdm run
+        /// whose progress bar goes to stderr reports exit code 1, the loop classifies it
+        /// as a failure, and retries identical work — observed burning ~90 min of GPU.
+        /// <para>
+        /// <c>$ErrorActionPreference='Continue'</c> demotes <c>NativeCommandError</c> to a
+        /// warning (non-fatal). <c>$Error.Clear()</c> empties the PowerShell automatic
+        /// error-collection list so a non-fatal <c>NativeCommandError</c> does not
+        /// accumulate in it. The final <c>exit $LASTEXITCODE</c> propagates the real
+        /// exit code when the body's last statement was a native executable; when the
+        /// body ends in a PowerShell statement ($LASTEXITCODE is $null) this is a no-op.
+        /// </para>
+        /// </summary>
+        private static string WrapForPowerShell(string command)
+        {
+            return "$ErrorActionPreference = 'Continue';\n" +
+                   "$Error.Clear();\n" +
+                   command + "\n" +
+                   "if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }\n";
         }
 
         private static readonly HashSet<string> _cmdShims = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
