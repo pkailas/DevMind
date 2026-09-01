@@ -735,35 +735,33 @@ internal sealed class DevMindTools
         "Use to verify what reference material is available before relying on library queries.")]
     public async Task<string> LibraryList(CancellationToken cancellationToken = default)
     {
-        return await _svc.EnqueueAsync(async () =>
+        // Off the dispatcher: own LibraryStore instance over SQL, no shared host state (see web_search).
+        try
         {
-            try
-            {
-                var config = TuiConfig.Load();
-                if (string.IsNullOrWhiteSpace(config.LibraryConnectionString))
-                    return "library_list: the library is not configured — set libraryConnectionString " +
-                           "(SQL Server 2025+) in devmind.json.";
+            var config = TuiConfig.Load();
+            if (string.IsNullOrWhiteSpace(config.LibraryConnectionString))
+                return "library_list: the library is not configured — set libraryConnectionString " +
+                       "(SQL Server 2025+) in devmind.json.";
 
-                var store = new LibraryStore(config.LibraryConnectionString);
-                await store.EnsureSchemaAsync(cancellationToken);
-                var docs = await store.ListDocumentsAsync(cancellationToken);
-                if (docs.Count == 0)
-                    return "library_list: the library is empty. Ingest with library_add.";
+            var store = new LibraryStore(config.LibraryConnectionString);
+            await store.EnsureSchemaAsync(cancellationToken);
+            var docs = await store.ListDocumentsAsync(cancellationToken);
+            if (docs.Count == 0)
+                return "library_list: the library is empty. Ingest with library_add.";
 
-                var sb = new StringBuilder($"Library documents ({docs.Count}):\n");
-                foreach (var d in docs)
-                    sb.AppendLine($"  [{d.Id}] {d.Name} — {d.Pages} page(s), {d.ChunkCount} chunk(s), ingested {d.IngestedAtUtc:yyyy-MM-dd HH:mm}Z");
-                return sb.ToString().TrimEnd();
-            }
-            catch (OperationCanceledException)
-            {
-                return "[library_list] Cancelled.";
-            }
-            catch (Exception ex)
-            {
-                return $"[library_list error] {ex.Message}";
-            }
-        }, cancellationToken);
+            var sb = new StringBuilder($"Library documents ({docs.Count}):\n");
+            foreach (var d in docs)
+                sb.AppendLine($"  [{d.Id}] {d.Name} — {d.Pages} page(s), {d.ChunkCount} chunk(s), ingested {d.IngestedAtUtc:yyyy-MM-dd HH:mm}Z");
+            return sb.ToString().TrimEnd();
+        }
+        catch (OperationCanceledException)
+        {
+            return "[library_list] Cancelled.";
+        }
+        catch (Exception ex)
+        {
+            return $"[library_list error] {ex.Message}";
+        }
     }
 
     [McpServerTool(Name = "library_query")]
@@ -781,13 +779,11 @@ internal sealed class DevMindTools
                     "doc_filter: \"!SDK\" (everything except the SDK corpus). Omit or leave empty for the whole library.")] string doc_filter = null,
         CancellationToken cancellationToken = default)
     {
-        return await _svc.EnqueueAsync(async () =>
-        {
-            var config = TuiConfig.Load();
-            return await DocumentLibrarian.QueryAsTextAsync(
-                config.LibraryEmbeddingEndpoint, config.LibraryConnectionString,
-                question, top_k, doc_filter, cancellationToken);
-        }, cancellationToken);
+        // Off the dispatcher: embedding call + SQL over its own connection, no shared host state (see web_search).
+        var config = TuiConfig.Load();
+        return await DocumentLibrarian.QueryAsTextAsync(
+            config.LibraryEmbeddingEndpoint, config.LibraryConnectionString,
+            question, top_k, doc_filter, cancellationToken);
     }
 
     [McpServerTool(Name = "query_db")]
@@ -1707,9 +1703,12 @@ internal sealed class DevMindTools
         CancellationToken cancellationToken = default)
     {
         // Shared implementation in DevMind.Core — same code path as the TUI/CLI hosts.
-        return await _svc.EnqueueAsync(
-            async () => await WebTools.WebSearchAsync(query, max_results, cancellationToken),
-            cancellationToken);
+        // OFF the dispatcher: pure network I/O over stateless static helpers. Nothing here
+        // touches the shared ShellRunner / file cache / patch state the FIFO queue protects,
+        // and a slow remote fetch must not park read_file/patch_file behind it (nor be parked
+        // behind a long foreground run_shell — the 2026-09-01 wedge). Same rule applies to
+        // web_fetch, learn_*, library_list and library_query below.
+        return await WebTools.WebSearchAsync(query, max_results, cancellationToken);
     }
 
     [McpServerTool(Name = "web_fetch")]
@@ -1721,10 +1720,8 @@ internal sealed class DevMindTools
         [Description("URL to fetch.")] string url,
         CancellationToken cancellationToken = default)
     {
-        // Shared implementation in DevMind.Core — same code path as the TUI/CLI hosts.
-        return await _svc.EnqueueAsync(
-            async () => await WebTools.WebFetchAsync(url, cancellationToken),
-            cancellationToken);
+        // Shared implementation in DevMind.Core — same code path as the TUI/CLI hosts. Off the dispatcher (see web_search).
+        return await WebTools.WebFetchAsync(url, cancellationToken);
     }
 
     // ── Phase D: Microsoft Learn tools ────────────────────────────────────────
@@ -1739,10 +1736,8 @@ internal sealed class DevMindTools
         [Description("Maximum number of results to return (default 10, max 10).")] int? max_results = null,
         CancellationToken cancellationToken = default)
     {
-        // Shared implementation in DevMind.Core — same code path as the TUI/CLI hosts.
-        return await _svc.EnqueueAsync(
-            async () => await LearnTools.LearnSearchAsync(query, max_results, cancellationToken),
-            cancellationToken);
+        // Shared implementation in DevMind.Core — same code path as the TUI/CLI hosts. Off the dispatcher (see web_search).
+        return await LearnTools.LearnSearchAsync(query, max_results, cancellationToken);
     }
 
     [McpServerTool(Name = "learn_fetch")]
@@ -1754,10 +1749,8 @@ internal sealed class DevMindTools
         [Description("learn.microsoft.com URL to fetch.")] string url,
         CancellationToken cancellationToken = default)
     {
-        // Shared implementation in DevMind.Core — same code path as the TUI/CLI hosts.
-        return await _svc.EnqueueAsync(
-            async () => await LearnTools.LearnFetchAsync(url, cancellationToken),
-            cancellationToken);
+        // Shared implementation in DevMind.Core — same code path as the TUI/CLI hosts. Off the dispatcher (see web_search).
+        return await LearnTools.LearnFetchAsync(url, cancellationToken);
     }
 
     [McpServerTool(Name = "learn_code_search")]
@@ -1770,10 +1763,8 @@ internal sealed class DevMindTools
         [Description("Maximum number of results to return (default 10, max 10).")] int? max_results = null,
         CancellationToken cancellationToken = default)
     {
-        // Shared implementation in DevMind.Core — same code path as the TUI/CLI hosts.
-        return await _svc.EnqueueAsync(
-            async () => await LearnTools.LearnCodeSearchAsync(query, max_results, cancellationToken),
-            cancellationToken);
+        // Shared implementation in DevMind.Core — same code path as the TUI/CLI hosts. Off the dispatcher (see web_search).
+        return await LearnTools.LearnCodeSearchAsync(query, max_results, cancellationToken);
     }
 
     // ── Phase D: ssh_exec ────────────────────────────────────────────────────
