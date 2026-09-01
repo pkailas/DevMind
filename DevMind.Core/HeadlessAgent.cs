@@ -239,6 +239,12 @@ namespace DevMind
             bool forceToolChoiceRequired = false; // Layer 2 narration-retry flag (mirrors TUI Program.cs)
             string lastResponse = "";
             string lastTerminalReason = null;
+            // Last response that contained real prose (status lines like [CONTEXT]/[TOOL_USE]
+            // stripped). A tool-call-only final turn leaves lastResponse as pure status noise,
+            // which is what a thrash-stopped job used to return as its "answer" (job-1384).
+            string lastProse = "";
+            string lastRepeatedFailure = null;
+
 
             // DEVMIND_TASK_SHOW_THINKING=1 streams the model's think tokens into the
             // transcript (dm-watch shows it reasoning live). Off by default: think
@@ -335,6 +341,10 @@ namespace DevMind
                     }
 
                     lastResponse = responseBuffer.ToString();
+                    {
+                        string prose = HeadlessAgent.StripStatusLines(HeadlessAgent.SanitizeAnswer(lastResponse));
+                        if (!string.IsNullOrWhiteSpace(prose)) lastProse = prose;
+                    }
 
                     LoopIterationResult iter;
                     try
@@ -373,7 +383,10 @@ namespace DevMind
                         if (iter.TerminalReason == "needs_input")
                             result.NeedsInput = true;
                         else if (iter.TerminalReason is "thrashing" or "consecutive_errors")
+                        {
                             result.ThrashStopped = true;
+                            lastRepeatedFailure = iter.Result?.Errors?.LastOrDefault();
+                        }
                         break;
                     }
 
@@ -419,6 +432,23 @@ namespace DevMind
                     "state from the action journal and build_verification, or send devmind_task_continue to resume " +
                     "this conversation where it left off.]\n\n"
                     + result.Answer;
+            }
+            else if (result.ThrashStopped)
+            {
+                // The final turn of a thrash-stopped run is almost always a tool-call-only
+                // retry, so lastResponse is status noise. Return the last real prose plus the
+                // failure that kept repeating, and mark it so the caller doesn't read it as a
+                // completion summary.
+                string reason = lastTerminalReason == "consecutive_errors" ? "consecutive tool errors" : "the same failure repeated";
+                var sb = new StringBuilder();
+                sb.Append($"[INCOMPLETE — stopped by the harness: {reason}. The work is NOT trustworthy as-is. ")
+                  .Append("Below is the agent's last real message and the failure it kept hitting — not a completion summary. ")
+                  .Append("Re-brief around that failure (or devmind_task_continue with specific guidance).]");
+                if (!string.IsNullOrWhiteSpace(lastRepeatedFailure))
+                    sb.Append("\n\nRepeating failure:\n").Append(lastRepeatedFailure.Trim());
+                if (!string.IsNullOrWhiteSpace(lastProse))
+                    sb.Append("\n\nAgent's last message:\n").Append(lastProse);
+                result.Answer = sb.ToString();
             }
 
             if (!string.IsNullOrEmpty(transcriptPath))
@@ -646,6 +676,29 @@ namespace DevMind
         /// (raw &lt;/think&gt; tags and &lt;tool_call&gt;/&lt;function=...&gt; syntax that
         /// escaped the server-side parser) so they never reach the returned answer.
         /// </summary>
+        /// <summary>
+        /// Drops harness status lines that LlmClient streams through the token callback
+        /// ("[CONTEXT] …", "[TOOL_USE] …", "[LLM] …", "[AGENTIC] …") so only the model's
+        /// own prose remains. Returns "" when nothing else was there.
+        /// </summary>
+        internal static string StripStatusLines(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return "";
+            var keep = new List<string>();
+            foreach (string raw in text.Split('\n'))
+            {
+                string line = raw.TrimEnd('\r');
+                string t = line.TrimStart();
+                if (t.StartsWith("[CONTEXT]", StringComparison.Ordinal)
+                    || t.StartsWith("[TOOL_USE]", StringComparison.Ordinal)
+                    || t.StartsWith("[LLM]", StringComparison.Ordinal)
+                    || t.StartsWith("[AGENTIC]", StringComparison.Ordinal))
+                    continue;
+                keep.Add(line);
+            }
+            return string.Join("\n", keep).Trim();
+        }
+
         internal static string SanitizeAnswer(string text)
         {
             if (string.IsNullOrEmpty(text)) return "";

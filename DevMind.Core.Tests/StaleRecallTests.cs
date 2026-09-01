@@ -57,6 +57,19 @@ namespace DevMind.Core.Tests
         }
 
         [Fact]
+        public void StripStatusLines_RemovesHarnessNoise_KeepsProse()
+        {
+            // The final turn of a thrash-stopped job (job-1384) was exactly this shape.
+            string noise = "[CONTEXT] ~60,757 / 262,144 (~23%) [estimated]\n\n[TOOL_USE] Processing tool call(s)...";
+            Assert.Equal("", HeadlessAgent.StripStatusLines(noise));
+
+            string mixed = "[AGENTIC] Iteration 40/70\nMain.vb is clean. Now DesktopLink.vb:\n[LLM] reasoning… 30s\n  [CONTEXT] ~1 / 2\nSecond line.";
+            Assert.Equal("Main.vb is clean. Now DesktopLink.vb:\nSecond line.", HeadlessAgent.StripStatusLines(mixed));
+
+            Assert.Equal("", HeadlessAgent.StripStatusLines(null));
+        }
+
+        [Fact]
         public void NearlineCache_GetCachedAtUtc_KnownKeyReturnsStoreTime_UnknownReturnsNull()
         {
             var cache = new NearlineCache();

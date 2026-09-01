@@ -572,10 +572,18 @@ namespace DevMind
         /// exit code when the body's last statement was a native executable; when the
         /// body ends in a PowerShell statement ($LASTEXITCODE is $null) this is a no-op.
         /// </para>
+        /// <para>
+        /// <c>$ProgressPreference='SilentlyContinue'</c> stops PowerShell serialising
+        /// progress records ("Preparing modules for first use.") to stderr as a CLIXML
+        /// blob. With stderr redirected, every spawn otherwise emits ~600 bytes of
+        /// <c>#&lt; CLIXML &lt;Objs …&gt;</c> noise into the tool result (2 stderr lines on all
+        /// 28 spawns in the 2026-09-01 trace) — tokens for nothing, and it hides real stderr.
+        /// </para>
         /// </summary>
         private static string WrapForPowerShell(string command)
         {
             return "$ErrorActionPreference = 'Continue';\n" +
+                   "$ProgressPreference = 'SilentlyContinue';\n" +
                    "$Error.Clear();\n" +
                    command + "\n" +
                    "if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }\n";
