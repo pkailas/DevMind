@@ -160,6 +160,18 @@ namespace DevMind
         public bool Contains(string key) => _memory.ContainsKey(key) || _disk.ContainsKey(key);
 
         /// <summary>
+        /// UTC time the entry was stored (trimmed from context), or null if the key is unknown.
+        /// Note this is the TRIM time, not the time the underlying tool result was produced —
+        /// callers using it as a staleness bound should treat it as an upper bound only.
+        /// </summary>
+        public DateTime? GetCachedAtUtc(string key)
+        {
+            if (_memory.TryGetValue(key, out var mem)) return mem.CachedAt;
+            if (_disk.TryGetValue(key, out var disk)) return disk.CachedAt;
+            return null;
+        }
+
+        /// <summary>
         /// Clear both tiers, the counters, and delete this session's spill folder.
         /// Called on session reset (/new, /restart). NOT called on brainwash.
         /// </summary>

@@ -79,6 +79,15 @@ namespace DevMind
         private readonly Dictionary<string, string> _pendingPatchEcho =
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
+        // Files (bare names) whose [READ:] block was recalled from the nearline cache while a
+        // fresher version existed on disk (edited since the model's last read, or mtime newer than
+        // the cache entry). Cleared on the next real read. A patch that then fails to resolve on one
+        // of these files gets a specific "your FIND came from a stale recall" diagnostic instead of
+        // the generic one — field evidence (job-1387): the model recalled a pre-patch read, built
+        // FIND from it, and on failure fell back to a PowerShell line-index rewrite.
+        private readonly HashSet<string> _staleRecallsSinceRead = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+
         private readonly ShellRunner _shellRunner;
         private readonly FileContentCache _fileCache = new FileContentCache();
 
@@ -998,8 +1007,76 @@ namespace DevMind
                 content = content.Substring(0, MaxRecallChars) + $"\n[truncated — {originalLength} chars]";
             }
 
+            // Staleness banner for recalled file reads. Recall is still served (the model may only
+            // need orientation), but a read that predates edits must not be used as FIND source.
+            string staleNote = BuildStaleRecallNote(content, key);
+            if (staleNote != null)
+            {
+                AppendOutput($"[RECALL] {handle} → {key} ({content.Length} chars) [STALE]\n", OutputColor.Warning);
+                return Task.FromResult(staleNote + "\n\n" + content);
+            }
+
             AppendOutput($"[RECALL] {handle} → {key} ({content.Length} chars)\n", OutputColor.Dim);
             return Task.FromResult(content);
+        }
+
+        /// <summary>
+        /// If <paramref name="content"/> is a recalled [READ:file] block and that file has a fresher
+        /// version than the cached one, returns a banner naming the file; otherwise null. Two signals,
+        /// either suffices: (1) the file has been patched since the model's last read (then EVERY cached
+        /// read of it predates the latest write), or (2) the on-disk mtime is newer than the nearline
+        /// entry's store time (out-of-band write after the trim). Also records the file in
+        /// <see cref="_staleRecallsSinceRead"/> so a subsequent patch failure can point at the cause.
+        /// </summary>
+        private string BuildStaleRecallNote(string content, string key)
+        {
+            string fileNameOnly = ExtractReadBlockFileName(content);
+            if (fileNameOnly == null) return null;
+
+            bool editedSinceRead = _editedSpansSinceRead.TryGetValue(fileNameOnly, out var spans) && spans.Count > 0;
+
+            bool diskNewer = false;
+            try
+            {
+                DateTime? cachedAt = NearlineCache?.GetCachedAtUtc(key);
+                FileResolution res = FindFile(fileNameOnly, fileNameOnly);
+                if (cachedAt.HasValue && res?.Path != null && File.Exists(res.Path))
+                    diskNewer = File.GetLastWriteTimeUtc(res.Path) > cachedAt.Value;
+            }
+            catch { /* best-effort — a failed check must never break recall */ }
+
+            if (!editedSinceRead && !diskNewer) return null;
+
+            _staleRecallsSinceRead.Add(fileNameOnly);
+            string why = editedSinceRead
+                ? "it has been patched since you last read it"
+                : "the file on disk was modified after this content was cached";
+            return $"[STALE RECALL] This is an OLD read of {fileNameOnly} — {why}. " +
+                   "Do NOT copy FIND text from it; it will not match. Use read_file (full or the affected range) " +
+                   "and build patches from that fresh output.";
+        }
+
+        /// <summary>
+        /// Bare file name from a leading "[READ:name]" or "[READ:name:12-40]" tag, or null if the
+        /// content is not a read block.
+        /// </summary>
+        internal static string ExtractReadBlockFileName(string content)
+        {
+            if (string.IsNullOrEmpty(content)) return null;
+            int start = content.IndexOf("[READ:", StringComparison.Ordinal);
+            if (start < 0 || start > 64) return null; // must be at/near the top, not an incidental mention
+            int end = content.IndexOf(']', start);
+            if (end < 0) return null;
+            string tag = content.Substring(start + 6, end - start - 6).Trim();
+            // Range reads render as "name:12-40" — strip the trailing ":start-end".
+            int lastColon = tag.LastIndexOf(':');
+            if (lastColon > 0)
+            {
+                string tail = tag.Substring(lastColon + 1);
+                if (tail.Length > 0 && tail.All(ch => char.IsDigit(ch) || ch == '-'))
+                    tag = tag.Substring(0, lastColon);
+            }
+            return tag.Length > 0 ? SafeGetFileName(tag) : null;
         }
 
         Task<string> IAgenticHost.ListCacheAsync()
@@ -1451,9 +1528,26 @@ namespace DevMind
                 var (content, encoding) = PatchEngine.ReadFilePreservingEncoding(fullPath);
                 var patchResult = PatchEngine.ResolvePatch(patchContent, fullPath, blockFileName, content, encoding,
                     fromToolCall, AppendOutput);
-                return (patchResult, patchResult == null
-                    ? "FIND/REPLACE could not be resolved against the file (FIND text not matching, ambiguous, or no-op). The diagnostic above names the cause; act on it — do not retry the identical patch."
-                    : null);
+                if (patchResult != null) return (patchResult, null);
+
+                // Name the likely cause when the model's source text is known to be stale: it either
+                // recalled an old read of this file, or patched it since its last read. Either way the
+                // fix is a fresh read — say so explicitly, and rule out the shell-edit workaround.
+                bool staleRecall = _staleRecallsSinceRead.Contains(fileNameOnly);
+                bool editedSinceRead = _editedSpansSinceRead.TryGetValue(fileNameOnly, out var spans) && spans.Count > 0;
+                if (staleRecall || editedSinceRead)
+                {
+                    string source = staleRecall
+                        ? "you recalled an OLD read of this file from the cache"
+                        : $"{_patchesSinceRead.GetValueOrDefault(fileNameOnly)} patch(es) were applied to it since you last read it";
+                    return (null,
+                        $"FIND/REPLACE could not be resolved against the CURRENT {fileNameOnly} — {source}, so your FIND text " +
+                        "is probably copied from a stale copy. Fix: read_file the affected range now and copy FIND verbatim from that " +
+                        "output, then retry. Do not work around this with shell-based line edits.");
+                }
+
+                return (null,
+                    "FIND/REPLACE could not be resolved against the file (FIND text not matching, ambiguous, or no-op). The diagnostic above names the cause; act on it — do not retry the identical patch.");
             }
             catch (Exception ex)
             {
@@ -1835,7 +1929,8 @@ namespace DevMind
 
                     _taskReadFiles.MarkKnown(fullPath);
                     _patchesSinceRead.Remove(fileNameOnly);      // model refreshed its view
-                _editedSpansSinceRead.Remove(fileNameOnly);  // stale-overlap tracking reset with it
+                    _editedSpansSinceRead.Remove(fileNameOnly);  // stale-overlap tracking reset with it
+                    _staleRecallsSinceRead.Remove(fileNameOnly); // fresh view supersedes any stale recall
                     int totalLines = _fileCache.GetLineCount(cacheKey);
 
                     if (rangeStart > rangeEnd) { int t = rangeStart; rangeStart = rangeEnd; rangeEnd = t; }
@@ -1870,6 +1965,7 @@ namespace DevMind
                 _taskReadFiles.MarkKnown(fullPath);
                 _patchesSinceRead.Remove(fileNameOnly);      // model refreshed its view
                 _editedSpansSinceRead.Remove(fileNameOnly);  // stale-overlap tracking reset with it
+                _staleRecallsSinceRead.Remove(fileNameOnly); // fresh view supersedes any stale recall
                 int lineCount = content.Split('\n').Length;
 
                 bool alreadyRead = _filesRead.Contains(fileNameOnly);
