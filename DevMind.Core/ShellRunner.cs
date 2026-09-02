@@ -579,13 +579,29 @@ namespace DevMind
         /// <c>#&lt; CLIXML &lt;Objs …&gt;</c> noise into the tool result (2 stderr lines on all
         /// 28 spawns in the 2026-09-01 trace) — tokens for nothing, and it hides real stderr.
         /// </para>
+        /// <para>
+        /// The body runs inside <c>&amp; { … } 6&gt;&amp;1 3&gt;&amp;1 | … | Out-String -Stream</c> so the
+        /// Information stream (<c>Write-Host</c>) and the Warning stream land in stdout as plain
+        /// text. With stderr redirected and no console host, PowerShell otherwise serialises every
+        /// <c>Write-Host</c> line as a ~700-byte CLIXML <c>InformationRecord</c> on stderr
+        /// (job-1390, 2026-09-02: a dozen Write-Host lines became ~9 KB of XML per shell call).
+        /// Two non-obvious parts, both verified on PowerShell 5.1: (1) a merged WarningRecord
+        /// that reaches the host unconverted is re-routed to stderr as CLIXML anyway, so it is
+        /// stringified in a <c>ForEach-Object</c>; (2) the trailing <c>exit</c> runs before the
+        /// host's deferred formatter flushes object output, which silently drops tables — hence
+        /// <c>Out-String -Stream</c>, which formats inside the pipeline. <c>$LASTEXITCODE</c> is
+        /// global, so a native command's exit code inside the block still reaches the final
+        /// <c>exit</c>.
+        /// </para>
         /// </summary>
         private static string WrapForPowerShell(string command)
         {
             return "$ErrorActionPreference = 'Continue';\n" +
                    "$ProgressPreference = 'SilentlyContinue';\n" +
                    "$Error.Clear();\n" +
+                   "& {\n" +
                    command + "\n" +
+                   "} 6>&1 3>&1 | ForEach-Object { if ($_ -is [System.Management.Automation.WarningRecord]) { \"WARNING: $_\" } else { $_ } } | Out-String -Stream -Width 200\n" +
                    "if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }\n";
         }
 
