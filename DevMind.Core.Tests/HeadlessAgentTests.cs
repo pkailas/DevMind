@@ -26,6 +26,21 @@ namespace DevMind.Core.Tests
 
         public void Dispose() => Directory.Delete(_dir, recursive: true);
 
+        // The chat request carries the whole conversation, so a re-trigger message stays
+        // in the body of every LATER request too. "Contains" on raw bodies therefore
+        // measures message INSTANCES in the conversation, not the number of requests in
+        // which the text first appears (request i carries the messages of 1..i).
+        private static int CountOccurrences(string haystack, string needle)
+        {
+            int count = 0, i = 0;
+            while ((i = haystack.IndexOf(needle, i, StringComparison.Ordinal)) >= 0)
+            {
+                count++;
+                i += needle.Length;
+            }
+            return count;
+        }
+
         private static HeadlessOptions Options(int maxDepth = 5) => new HeadlessOptions
         {
             RequestTimeoutMinutes = 1,
@@ -167,6 +182,101 @@ namespace DevMind.Core.Tests
                 Assert.True(result.Iterations >= 2 && result.Iterations <= 3,
                     $"iterations {result.Iterations}");
                 Assert.Contains(result.Actions, a => a.Kind == "shell" && a.Detail.Contains("echo looping"));
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("DEVMIND_SERVER_TYPE", prior);
+            }
+        }
+
+        [Fact]
+        public async Task RunAsync_LastIterationBeforeCap_SendsFinishUpDirective()
+        {
+            // Finish-up reserve (LoopDriver "Finish-up reserve" block): when the re-trigger
+            // message starts the LAST iteration before AgenticLoopMaxDepth, it is replaced
+            // with a "write your final summary now" directive instead of the neutral
+            // continue nudge. With maxDepth=3 and an eternally tool-calling model, the
+            // directive must appear in EXACTLY ONE request body — the one that starts
+            // iteration 3/3 (sent right after AgenticDepth is incremented to 3) — and in
+            // none before it.
+            using var server = new FakeSseServer { RepeatLastWhenExhausted = true };
+            server.SseQueue.Add(FakeSseServer.BuildToolCallSse("run_shell",
+                "{\"command\":\"echo looping\"}"));
+
+            string? prior = Environment.GetEnvironmentVariable("DEVMIND_SERVER_TYPE");
+            Environment.SetEnvironmentVariable("DEVMIND_SERVER_TYPE", "llama");
+            try
+            {
+                using var console = new ConsoleGuard();
+                var result = await HeadlessAgent.RunAsync(
+                    "Loop forever.", Options(maxDepth: 3), server.BaseUrl, apiKey: null!,
+                    workingDirectory: _dir, buildCommand: "dotnet build",
+                    ct: CancellationToken.None);
+
+                Assert.Equal("", console.Captured);
+                Assert.Null(result.Error);
+                Assert.True(result.HitDepthCap);
+                Assert.Contains(result.Actions, a => a.Kind == "shell" && a.Detail.Contains("echo looping"));
+
+                const string directive = "LAST iteration before the 3-iteration cap";
+                // The user message is JSON-encoded inside the chat request body, so a
+                // raw substring check is safe. The directive must be sent exactly ONCE
+                // (the re-trigger that starts iteration 3), so it must occur exactly
+                // once in the whole conversation — i.e. only in the FINAL request body
+                // (each earlier body is a conversation prefix and must not carry it).
+                int total = server.RequestBodies.Sum(b => CountOccurrences(b, directive));
+                int lastBody = server.RequestBodies.Count - 1;
+                Assert.True(server.RequestBodies[lastBody].Contains(directive),
+                    $"expected the final request body to contain {directive}, but none did; " +
+                    "bodies' user-message contents: " +
+                    string.Join(" | ", server.RequestBodies.Select(b => b.Length)));
+                for (int i = 0; i < lastBody; i++)
+                    Assert.DoesNotContain(directive, server.RequestBodies[i]);
+                Assert.Equal(1, total);
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("DEVMIND_SERVER_TYPE", prior);
+            }
+        }
+
+        [Fact]
+        public async Task RunAsync_FinishUpDirective_BoundaryAtSmallestCap()
+        {
+            // Boundary condition for the finish-up reserve at the smallest cap:
+            // maxDepth=2, so AgenticDepth == maxDepth holds after the second increment —
+            // the directive must ride in the request that STARTS iteration 2/2, exactly once.
+            using var server = new FakeSseServer { RepeatLastWhenExhausted = true };
+            server.SseQueue.Add(FakeSseServer.BuildToolCallSse("run_shell",
+                "{\"command\":\"echo looping\"}"));
+
+            string? prior = Environment.GetEnvironmentVariable("DEVMIND_SERVER_TYPE");
+            Environment.SetEnvironmentVariable("DEVMIND_SERVER_TYPE", "llama");
+            try
+            {
+                using var console = new ConsoleGuard();
+                var result = await HeadlessAgent.RunAsync(
+                    "Loop forever.", Options(maxDepth: 2), server.BaseUrl, apiKey: null!,
+                    workingDirectory: _dir, buildCommand: "dotnet build",
+                    ct: CancellationToken.None);
+
+                Assert.Equal("", console.Captured);
+                Assert.Null(result.Error);
+                Assert.True(result.HitDepthCap);
+                Assert.Contains(result.Actions, a => a.Kind == "shell" && a.Detail.Contains("echo looping"));
+
+                const string directive = "LAST iteration before the 2-iteration cap";
+                // Same conversation-prefix semantics as the maxDepth=3 test: the
+                // directive must occur exactly once overall, only in the final body.
+                int total = server.RequestBodies.Sum(b => CountOccurrences(b, directive));
+                int lastBody = server.RequestBodies.Count - 1;
+                Assert.True(server.RequestBodies[lastBody].Contains(directive),
+                    $"expected the final request body to contain {directive}, but none did; " +
+                    "bodies' user-message contents: " +
+                    string.Join(" | ", server.RequestBodies.Select(b => b.Length)));
+                for (int i = 0; i < lastBody; i++)
+                    Assert.DoesNotContain(directive, server.RequestBodies[i]);
+                Assert.Equal(1, total);
             }
             finally
             {

@@ -418,6 +418,26 @@ namespace DevMind
                         "If research does not produce a new hypothesis, call ask_caller with specific questions " +
                         "instead of patching again.";
                 }
+                // Finish-up reserve — the message that starts the LAST iteration before the cap
+                // tells the model to stop working and write the answer. Field evidence
+                // (2026-09-02/03, jobs 1390/1395/1397/1399): four of six headless runs finished
+                // the work with 1-3 iterations to spare and then spent them on a final build,
+                // a re-read, or "let me update the scratchpad", so the cap fired with the real
+                // summary unwritten and the caller received a status line as the answer.
+                // AgenticDepth was incremented above, so == maxDepth means the request built
+                // here starts iteration N/N — the last one before the cap check fires.
+                else if (maxDepth > 0 && _state.AgenticDepth == maxDepth)
+                {
+                    _agenticHost.AppendOutput(
+                        $"[AGENTIC] Finish-up reserve: iteration {_state.AgenticDepth} of {maxDepth} is the last — asking for the final summary.\n",
+                        OutputColor.Dim);
+                    nextMessage =
+                        $"This is your LAST iteration before the {maxDepth}-iteration cap. Do not edit any file, " +
+                        "run any command, or read anything further. Write your final answer now: what was done " +
+                        "(files changed/created), what was verified (build/test results you actually observed), " +
+                        "what is NOT done or NOT verified, and anything the caller must know. If the tool is " +
+                        "available, deliver it via task_done; otherwise reply with the summary as plain text.";
+                }
 
                 _state.ShellLoopPending = true;
                 MaybeLogTurn(userMessage, assistantResponse, outcome, result, lastToolCalls);
