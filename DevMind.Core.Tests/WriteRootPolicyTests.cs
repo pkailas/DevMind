@@ -135,6 +135,21 @@ namespace DevMind.Core.Tests
             Assert.Equal(2, warnings.Count);
         }
 
+        [Fact]
+        public void Reload_AcceptsUncEntryWithoutExistenceCheck()
+        {
+            var warnings = new List<string>();
+            var policy = new WriteRootPolicy(_workDir);
+
+            string unc = @"\\nonexistent-host-devmind-test\share\repo";
+            var roots = policy.Reload(new[] { unc, _extraDir }, warnings.Add);
+
+            Assert.Contains(unc, roots, StringComparer.OrdinalIgnoreCase);
+            Assert.Contains(_extraDir, roots, StringComparer.OrdinalIgnoreCase);
+            Assert.Equal(3, roots.Count); // working dir + UNC (no probe) + extra
+            Assert.Empty(warnings); // no "does not exist" warning for the UNC entry
+        }
+
         // ── Containment ──────────────────────────────────────────────────────
 
         [Fact]

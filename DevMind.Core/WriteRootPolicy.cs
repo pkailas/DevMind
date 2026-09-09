@@ -8,7 +8,10 @@
 //              roots fixed at process start. A reload can NEVER remove these.
 //   Config   — the allowedWriteRoots array in the user's devmind.json, re-read on
 //              each Reload call. Only a human editing that file can grant new roots;
-//              no code path accepts a root as a parameter.
+//              no code path accepts a root as a parameter. UNC entries are accepted
+//              without an existence probe so an offline share cannot stall Reload/
+//              initialize; containment (EnsureContained) is unaffected because a
+//              nonexistent root matches no real path.
 //
 // Concurrency: the effective root list is published as an immutable snapshot behind
 // a volatile field. Containment checks read the snapshot once and iterate it; Reload
@@ -112,7 +115,13 @@ namespace DevMind
                         continue;
                     }
 
-                    if (!Directory.Exists(normalized) && !File.Exists(normalized))
+                    // UNC entries skip the existence probe: on an offline host the
+                    // SMB timeout would otherwise stall Reload (and MCP initialize)
+                    // for ~20s per dead share. A nonexistent root is harmless here —
+                    // EnsureContained matches no real path under it.
+                    bool isUnc = normalized.StartsWith(@"\\", StringComparison.Ordinal);
+
+                    if (!isUnc && !Directory.Exists(normalized) && !File.Exists(normalized))
                     {
                         warn?.Invoke($"allowedWriteRoots entry does not exist, skipping: '{normalized}'");
                         continue;
