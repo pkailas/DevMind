@@ -317,6 +317,23 @@ namespace DevMind
             return ext == ".cmd" || ext == ".bat" || ext == ".sh" || ext == ".ps1";
         }
 
+        /// <summary>
+        /// File extensions where fuzzy (Levenshtein) matching is forbidden. These are
+        /// structured formats — a near-match can silently re-emit a GUID, project item,
+        /// or element with subtly different whitespace and the file still loads, so the
+        /// damage is invisible. For these, only a whitespace-normalized exact match is
+        /// allowed; a miss is a hard failure.
+        /// </summary>
+        private static readonly HashSet<string> StructuredFormatExtensions = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ".slnx", ".sln", ".csproj", ".props", ".targets",
+            ".xaml", ".axaml",
+            ".json", ".yml", ".yaml", ".xml", ".resx", ".config",
+        };
+
+        private static bool IsStructuredFormat(string path)
+            => StructuredFormatExtensions.Contains(Path.GetExtension(path) ?? "");
+
         // ── Matching algorithms ───────────────────────────────────────────────
 
         /// <summary>
@@ -507,6 +524,22 @@ namespace DevMind
 
                 if (normIdx < 0)
                 {
+                    // Structured formats (solutions, projects, XML/JSON/AML) are not
+                    // eligible for fuzzy matching. A Levenshtein near-match on a .slnx or
+                    // .csproj can silently re-emit a GUID or item with subtly different
+                    // whitespace — the file still loads, so the damage is invisible. Only
+                    // the whitespace-normalized exact match (above) is allowed; a miss is
+                    // a hard failure telling the agent to copy the FIND verbatim.
+                    if (IsStructuredFormat(fileName))
+                    {
+                        reporter(
+                            $"[PATCH] Block {i + 1}: FIND text not found exactly in {fileName}.\n" +
+                            "  Fuzzy matching is disabled for this file type (.slnx/.sln/.csproj/.props/.targets/.xaml/.axaml/.json/.yml/.yaml/.xml/.resx/.config).\n" +
+                            "  → re-read the file and copy the FIND text verbatim.\n",
+                            OutputColor.Error);
+                        return null;
+                    }
+
                     var fuzzy = FindFuzzyMatch(fileContent, findText, normFind);
                     if (fuzzy == null || fuzzy.Value.reason != null)
                     {
@@ -578,6 +611,28 @@ namespace DevMind
                         fuzzyFinalReplace[0] != '\r' && fuzzyFinalReplace[0] != '\n')
                         fuzzyFinalReplace = fileContent.Substring(
                             fuzzy.Value.origStart, fuzzyIndentEnd - fuzzy.Value.origStart) + fuzzyFinalReplace;
+
+                    // The parser strips the trailing newline off the REPLACE text, but the
+                    // fuzzy span is line-aligned and includes the last matched line's
+                    // newline. So an N-line replacement for an N-line span that is NOT at
+                    // end-of-file would otherwise drop that final newline and glue the last
+                    // replaced line onto the one below it (the "two declarations merged onto
+                    // one line" damage). Restore the boundary: the replacement ends with a
+                    // newline exactly when the span's last line is not the file's last line.
+                    if (fuzzyFinalReplace.Length > 0)
+                    {
+                        bool spanEndsAtEof = fuzzy.Value.origEnd >= fileContent.Length;
+                        bool replEndsNewline = fileUsesCrlf
+                            ? fuzzyFinalReplace.EndsWith("\r\n", StringComparison.Ordinal)
+                            : fuzzyFinalReplace.EndsWith("\n", StringComparison.Ordinal);
+                        if (!spanEndsAtEof && !replEndsNewline)
+                            fuzzyFinalReplace += fileUsesCrlf ? "\r\n" : "\n";
+                        else if (spanEndsAtEof && replEndsNewline)
+                            fuzzyFinalReplace = fileUsesCrlf
+                                ? fuzzyFinalReplace.Substring(0, fuzzyFinalReplace.Length - 2)
+                                : fuzzyFinalReplace.Substring(0, fuzzyFinalReplace.Length - 1);
+                    }
+
                     resolvedBlocks.Add((fuzzy.Value.origStart, fuzzy.Value.origEnd, fuzzyFinalReplace));
                     int fuzzyLine = fileContent.Substring(0, fuzzy.Value.origStart).Count(c => c == '\n') + 1;
                     reporter(

@@ -1086,11 +1086,27 @@ internal sealed class DevMindTools
                 _svc.FileCache.Store(cacheKey, applyResult.UpdatedContent);
                 _svc.FilesRead.Add(cacheKey);
 
-                string badge = resolved.Confidence == PatchConfidence.Fuzzy
-                    ? " (fuzzy match — verify with diff_file)"
-                    : "";
                 string countNote = pairs.Count > 1 ? $" ({pairs.Count} edits)" : "";
-                return $"patch_file: applied to {fullPath}{countNote}{badge}";
+
+                // Fuzzy match — make the advisory load-bearing. Saying "verify with
+                // diff_file" is a hint the agent can ignore; instead emit the actual
+                // resulting diff in this tool result so a silent line-merge or re-indent is
+                // visible immediately, without a second call. An unattended job can then
+                // (and must) confirm the diff is exactly the intended edit before reporting
+                // success — the merge-that-still-compiles failure mode is now visible in-band.
+                if (resolved.Confidence != PatchConfidence.Fuzzy)
+                    return $"patch_file: applied to {fullPath}{countNote}";
+
+                string normOld = content.Replace("\r\n", "\n").Replace("\r", "\n");
+                string normNew = applyResult.UpdatedContent.Replace("\r\n", "\n").Replace("\r", "\n");
+                string fuzzyDiff = DiffHelper.GenerateUnifiedDiff(
+                    fileNameOnly, normOld.Split('\n'), normNew.Split('\n'));
+                return
+                    "patch_file: APPLIED VIA FUZZY MATCH to " + fullPath + countNote +
+                    "\nThis was NOT an exact match — inspect the diff below and confirm it is " +
+                    "exactly the intended edit. A merged line (two declarations on one line) or a " +
+                    "re-indented block means the FIND was wrong: fix the FIND and retry.\n" +
+                    fuzzyDiff;
             }
             catch (Exception ex)
             {
