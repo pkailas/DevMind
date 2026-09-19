@@ -22,8 +22,8 @@ namespace DevMind.Core.Tests
 {
     public class WebToolsFailureMessageTests : IDisposable
     {
-        private string _savedSearch = null;
-        private string _savedFetch = null;
+        private string? _savedSearch = null;
+        private string? _savedFetch = null;
         private bool _hadSearch, _hadFetch;
 
         private const string UnreachableUrl = "http://127.0.0.1:1"; // nothing listens here
@@ -42,7 +42,7 @@ namespace DevMind.Core.Tests
             Restore("DEVMIND_FETCH_URL", _savedFetch, _hadFetch);
         }
 
-        private static void Restore(string name, string saved, bool hadValue)
+        private static void Restore(string name, string? saved, bool hadValue)
         {
             if (hadValue) Environment.SetEnvironmentVariable(name, saved);
             else Environment.SetEnvironmentVariable(name, null);

@@ -15,7 +15,7 @@ namespace DevMind.Core.Tests
     public class ShellRunnerTimeoutTests : IDisposable
     {
         private readonly string _dir;
-        private string _savedEnv = null;
+        private string? _savedEnv;
         private bool _hadEnv;
 
         public ShellRunnerTimeoutTests()
@@ -32,7 +32,7 @@ namespace DevMind.Core.Tests
         public void Dispose()
         {
             try { Directory.Delete(_dir, recursive: true); } catch { }
-            if (_hadEnv) Environment.SetEnvironmentVariable("DEVMIND_SHELL_TIMEOUT", _savedEnv);
+            if (_hadEnv) Environment.SetEnvironmentVariable("DEVMIND_SHELL_TIMEOUT", _savedEnv!);
             else Environment.SetEnvironmentVariable("DEVMIND_SHELL_TIMEOUT", null);
         }
 

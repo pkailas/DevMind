@@ -87,6 +87,9 @@ namespace DevMind
         private readonly string _workingDirectory;
         private readonly string _resolvedBuildCommand;
         private readonly bool _allowCommit;
+        // Optional override for the global system-prompt file path. Null = use the
+        // production default (%APPDATA%\devmind\system-prompt.md via SystemPromptFile.Path).
+        private readonly string _promptFilePath;
         // Mutable: re-synced by SetNoExecute on a reused (continuation) session.
         private bool _noExecute;
 
@@ -106,12 +109,14 @@ namespace DevMind
             string buildCommand = null,
             bool allowCommit = false,
             bool noExecute = false,
-            string sessionId = null)
+            string sessionId = null,
+            string promptFilePath = null)
         {
             _options = options;
             _workingDirectory = workingDirectory;
             _allowCommit = allowCommit;
             _noExecute = noExecute;
+            _promptFilePath = promptFilePath;
 
             _llmClient = new LlmClient(options);
             _llmClient.Configure(endpointUrl, apiKey);
@@ -493,7 +498,17 @@ namespace DevMind
         private string BuildSystemPrompt()
         {
             string llmDirective = LoopHelpers.BuildToolUsePrompt(_resolvedBuildCommand, projectNamespace: null);
-            string combined = $"{_options.SystemPrompt}\n\n{llmDirective}";
+            // The global system-prompt file (%APPDATA%\devmind\system-prompt.md) replaces
+            // the hardcoded options.SystemPrompt when present. Absence is normal —
+            // fall back to options.SystemPrompt unchanged. An explicit --system-prompt
+            // CLI arg still wins (it sets _options.SystemPrompt before this method runs).
+            // _promptFilePath is an optional override (tests inject a temp path);
+            // null means use the production default. Read on EVERY rebuild (hot-reload).
+            string filePrompt = _promptFilePath != null
+                ? SystemPromptFile.LoadFrom(_promptFilePath)
+                : SystemPromptFile.Load();
+            string basePrompt = filePrompt ?? _options.SystemPrompt;
+            string combined = $"{basePrompt}\n\n{llmDirective}";
 
             string context = HeadlessAgent.LoadAgentsContext(_workingDirectory);
             if (!string.IsNullOrEmpty(context))
@@ -664,10 +679,11 @@ namespace DevMind
             bool allowCommit = false,
             string transcriptPath = null,
             Action<string> progress = null,
-            CancellationToken ct = default)
+            CancellationToken ct = default,
+            string promptFilePath = null)
         {
             using var session = new HeadlessSession(options, endpointUrl, apiKey,
-                workingDirectory, buildCommand, allowCommit);
+                workingDirectory, buildCommand, allowCommit, promptFilePath: promptFilePath);
             return await session.RunTurnAsync(prompt, transcriptPath, progress, ct).ConfigureAwait(false);
         }
 

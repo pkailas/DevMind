@@ -198,7 +198,9 @@ namespace DevMind.Core.Tests
             var tc = new ToolCallResult { Name = name, Id = "call_1" };
             if (argumentsJson != null)
             {
-                foreach (var kv in System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(argumentsJson))
+                var dict = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(argumentsJson);
+                Assert.NotNull(dict);
+                foreach (var kv in dict)
                     tc.Arguments[kv.Key] = kv.Value;
             }
             return tc;
@@ -243,7 +245,7 @@ namespace DevMind.Core.Tests
             /// </summary>
             public Task<LoopIterationResult> RunProseTurn(string prose)
             {
-                _llm.LastToolCalls = null;
+                _llm.LastToolCalls = null!;
                 State.ShellLoopPending = true;
                 return _driver.ProcessIterationAsync(
                     "task", prose, buildCommand: "dotnet build", CancellationToken.None);
@@ -283,9 +285,9 @@ namespace DevMind.Core.Tests
             public Task<string> RenameFileAsync(string oldFilename, string newFilename) => Task.FromResult("Renamed");
             public Task<string> GetFileDiffAsync(string filename) => Task.FromResult("");
             public Task<string> RunTestsAsync(string project, string filter, int? timeoutSeconds = null) => Task.FromResult("");
-            public Task<(PatchResolveResult, string)> ResolvePatchAsync(string patchContent, bool fromToolCall = false) =>
+            public Task<(PatchResolveResult? result, string? failureReason)> ResolvePatchAsync(string patchContent, bool fromToolCall = false) =>
                 throw new NotImplementedException("tests avoid patch blocks");
-            public Task<(string, string)> ApplyResolvedPatchAsync(PatchResolveResult resolved) =>
+            public Task<(string? fullPath, string? failureReason)> ApplyResolvedPatchAsync(PatchResolveResult resolved) =>
                 throw new NotImplementedException("tests avoid patch blocks");
             public Task<List<int>> ShowDiffPreviewAsync(List<PatchResolveResult> resolvedPatches, CancellationToken cancellationToken) =>
                 Task.FromResult(new List<int>());
@@ -294,7 +296,7 @@ namespace DevMind.Core.Tests
             public Task<string> ListMemoryTopicsAsync() => Task.FromResult("");
             public Task<string> SearchMemoryAsync(string pattern) => Task.FromResult("");
             public Task<string> QueryLibraryAsync(string question, int topK, CancellationToken cancellationToken = default) => Task.FromResult("");
-            public Task<string> QueryLibraryAsync(string question, int topK, string docFilter, CancellationToken cancellationToken = default) => Task.FromResult("");
+            public Task<string> QueryLibraryAsync(string question, int topK, string? docFilter, CancellationToken cancellationToken = default) => Task.FromResult("");
             public Task<string> ListFilesAsync(string glob, bool recursive, CancellationToken cancellationToken = default) => Task.FromResult("");
             public int GetPatchBackupCount() => 0;
             public Task<string> GetDiagnosticsAsync(string filename) => Task.FromResult("");
@@ -319,7 +321,7 @@ namespace DevMind.Core.Tests
         /// metrics are zero so the context-window guard never fires.</summary>
         private sealed class FakeLlmClient : ILlmClient
         {
-            public List<ToolCallResult> LastToolCalls { get; set; }
+            public List<ToolCallResult> LastToolCalls { get; set; } = null!;
             public int ServerContextSize => 0;
             public int MaxPromptTokens => 0;
             public int LastContextUsed => 0;
@@ -331,15 +333,15 @@ namespace DevMind.Core.Tests
             public int LastPromptTokens => 0;
             public int CurrentTurn => 1;
             public string SystemPromptContent => "";
-            public string LastCompactionSummary => null;
+            public string? LastCompactionSummary => null;
             public string LastAssistantText => "";
             public int EstimateHistoryTokens() => 0;
-            public void AddToolResultMessage(string toolCallId, string content, string toolName = null) { }
+            public void AddToolResultMessage(string toolCallId, string content, string? toolName = null) { }
             public void StagePendingImage(string imageDataUri) { }
             public Task SendMessageAsync(string userMessage, Action<string> onToken, Action onComplete,
-                Action<Exception> onError, bool deferCompression = false, string combinedSystemPrompt = null,
+                Action<Exception> onError, bool deferCompression = false, string? combinedSystemPrompt = null,
                 CancellationToken cancellationToken = default, bool forceToolChoiceRequired = false,
-                string imageBase64 = null, int maxTokens = 0)
+                string? imageBase64 = null, int maxTokens = 0)
                 => throw new NotImplementedException("tests drive ProcessIterationAsync directly");
             public void ClearHistory(bool preserveScratchpad = false) { }
             public void PrependMessages(string[] roles, string[] contents) { }

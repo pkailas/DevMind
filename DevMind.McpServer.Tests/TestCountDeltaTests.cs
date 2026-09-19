@@ -417,7 +417,7 @@ namespace DevMind.McpServer.Tests
 
             // "off" skips the before-run ENTIRELY: exactly ONE suite invocation
             // (the after-run), not merely a faster second one.
-            Assert.Equal(1, calls.Count);
+            Assert.Single(calls);
 
             Assert.Null(job.BaselineTests);
             Assert.NotNull(job.Tests);

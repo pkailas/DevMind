@@ -153,6 +153,12 @@ namespace DevMind
         /// sent as multimodal content (text + image). Null when no host wires it or the
         /// endpoint has no vision support.</summary>
         public Action<string> StagePendingImage { get; set; }
+
+        // -- Context window size (/prompt) --------------------------------------
+
+        /// <summary>Current context window size in tokens (server-reported or fallback
+        /// default). 0 when not yet determined (first turn before detection completes).</summary>
+        public int ContextWindowSize { get; set; }
     }
 
    /// <summary>
@@ -376,10 +382,15 @@ namespace DevMind
                 "/reasoning on|off",
                 ThinkHandler);
 
-           RegisterCommand("/rules",
+            RegisterCommand("/rules",
                 "Show, set, or clear behavioral rules",
                 "/rules [text|clear]",
                 RulesHandler);
+
+            RegisterCommand("/prompt",
+                "Show the global system-prompt file path, existence, and assembled prompt size",
+                "/prompt",
+                PromptHandler);
 
             RegisterCommand("/lsp",
                 "Show or enable/disable language server tools",
@@ -560,6 +571,55 @@ namespace DevMind
             ctx.SetBehavioralRules(text);
             ctx.RebuildSystemPrompt();
             return Task.FromResult(new CommandResult { Message = $"Behavioral rules set ({text.Length} chars)." });
+        }
+
+        // -- /prompt ---------------------------------------------------------------
+
+        static Task<CommandResult> PromptHandler(string[] args, CommandContext ctx)
+        {
+            string path = SystemPromptFile.Path;
+            bool exists = File.Exists(path);
+
+            string assembled = ctx.SystemPrompt ?? "";
+            int promptTokens = (assembled.Length / 4) + 4;
+            int window = ctx.ContextWindowSize;
+
+            string sizeLine;
+            if (window > 0)
+            {
+                double pct = promptTokens * 100.0 / window;
+                sizeLine = $"Assembled prompt: {promptTokens:N0} tokens ({pct:F1}% of {window:N0} window)";
+            }
+            else
+            {
+                sizeLine = $"Assembled prompt: {promptTokens:N0} tokens (window not yet determined)";
+            }
+
+            string fileStatus = exists ? "exists" : "absent (using default persona)";
+
+            string guidance =
+                "Standing rules only — repo-specific context goes in the repo's AGENTS.md,\n" +
+                "  task-specific guidance goes in the brief.\n" +
+                "One rule per line. Most important first.\n" +
+                "Say what to do, not what to avoid.\n" +
+                "Make rules checkable (\"0 warnings\" beats \"write quality code\").\n" +
+                "Keep paths, versions and ports out — they go stale, and the model will\n" +
+                "  trust them over what it finds on disk.\n" +
+                "Don't restate tool rules — the tool directive is injected separately.\n" +
+                "Add a rule after you see the model get it wrong, not before.\n" +
+                "Avoid blanket emphasis — if half the lines are CRITICAL, none are.\n" +
+                "Contradictions fail silently; the model picks one, unpredictably.\n" +
+                "Budget: 5% of the loaded context window.";
+
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine($"System prompt file: {path}");
+            sb.AppendLine($"  {fileStatus}");
+            sb.AppendLine(sizeLine);
+            sb.AppendLine();
+            sb.AppendLine("Guidance for authoring the file:");
+            sb.AppendLine(guidance);
+
+            return Task.FromResult(new CommandResult { Message = sb.ToString().TrimEnd() });
         }
 
         // -- /image <path> [page|first-last|all] --------------------------------

@@ -776,7 +776,7 @@ internal sealed class DevMindTools
                     "name contains the value (top_k is computed over the filtered set, not trimmed afterward). " +
                     "A leading '!' inverts: exclude documents whose name contains the remainder. " +
                     "Examples: doc_filter: \"InstallationGuide\" (only that doc family), " +
-                    "doc_filter: \"!SDK\" (everything except the SDK corpus). Omit or leave empty for the whole library.")] string doc_filter = null,
+                    "doc_filter: \"!SDK\" (everything except the SDK corpus). Omit or leave empty for the whole library.")] string? doc_filter = null,
         CancellationToken cancellationToken = default)
     {
         // Off the dispatcher: embedding call + SQL over its own connection, no shared host state (see web_search).

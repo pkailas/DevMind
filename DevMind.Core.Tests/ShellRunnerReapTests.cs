@@ -24,7 +24,7 @@ namespace DevMind.Core.Tests
     public class ShellRunnerReapTests : IDisposable
     {
         private readonly string _dir;
-        private string _savedEnv = null;
+        private string? _savedEnv;
         private bool _hadEnv;
 
         public ShellRunnerReapTests()
@@ -43,7 +43,7 @@ namespace DevMind.Core.Tests
         public void Dispose()
         {
             try { Directory.Delete(_dir, recursive: true); } catch { }
-            if (_hadEnv) Environment.SetEnvironmentVariable("MSBUILDDISABLENODEREUSE", _savedEnv);
+            if (_hadEnv) Environment.SetEnvironmentVariable("MSBUILDDISABLENODEREUSE", _savedEnv!);
             else Environment.SetEnvironmentVariable("MSBUILDDISABLENODEREUSE", null);
         }
 

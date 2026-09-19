@@ -209,28 +209,28 @@ namespace DevMind.Core.Tests
         /// </summary>
         private sealed class ScriptedPatchHost : IAgenticHost
         {
-            public (bool Ok, PatchResolveResult Result, string Failure) ResolveOutcome;
-            public (bool Ok, string Path, string Failure) ApplyOutcome;
-            public Exception ResolveThrows;
-            public Exception ApplyThrows;
+            public (bool Ok, PatchResolveResult? Result, string? Failure) ResolveOutcome;
+            public (bool Ok, string? Path, string? Failure) ApplyOutcome;
+            public Exception? ResolveThrows;
+            public Exception? ApplyThrows;
 
             public string Output { get; private set; } = "";
 
-            public Task<(PatchResolveResult, string)> ResolvePatchAsync(string patchContent, bool fromToolCall = false)
+            public Task<(PatchResolveResult? result, string? failureReason)> ResolvePatchAsync(string patchContent, bool fromToolCall = false)
             {
                 if (ResolveThrows != null) throw ResolveThrows;
-                return Task.FromResult<(PatchResolveResult, string)>(
+                return Task.FromResult<(PatchResolveResult?, string?)>(
                     ResolveOutcome.Ok
-                        ? (ResolveOutcome.Result, (string)null)
+                        ? (ResolveOutcome.Result, (string?)null)
                         : (null, ResolveOutcome.Failure));
             }
 
-            public Task<(string, string)> ApplyResolvedPatchAsync(PatchResolveResult resolved)
+            public Task<(string? fullPath, string? failureReason)> ApplyResolvedPatchAsync(PatchResolveResult resolved)
             {
                 if (ApplyThrows != null) throw ApplyThrows;
-                return Task.FromResult<(string, string)>(
+                return Task.FromResult<(string?, string?)>(
                     ApplyOutcome.Ok
-                        ? (ApplyOutcome.Path, (string)null)
+                        ? (ApplyOutcome.Path, (string?)null)
                         : (null, ApplyOutcome.Failure));
             }
 
@@ -265,7 +265,7 @@ namespace DevMind.Core.Tests
             public Task<string> SearchMemoryAsync(string pattern) => Task.FromResult("");
             public Task<string> QueryLibraryAsync(string question, int topK, CancellationToken cancellationToken = default)
                 => Task.FromResult("");
-            public Task<string> QueryLibraryAsync(string question, int topK, string docFilter, CancellationToken cancellationToken = default)
+            public Task<string> QueryLibraryAsync(string question, int topK, string? docFilter, CancellationToken cancellationToken = default)
                 => Task.FromResult("");
             public Task<string> ListFilesAsync(string glob, bool recursive, CancellationToken cancellationToken = default)
                 => Task.FromResult("");

@@ -178,8 +178,8 @@ namespace DevMind.McpServer.Tests
     public sealed class NoExecuteInheritanceTests : IDisposable
     {
         private readonly string _dir;
-        private readonly string _priorEndpoint;
-        private readonly string _priorServerType;
+        private readonly string? _priorEndpoint;
+        private readonly string? _priorServerType;
 
         public NoExecuteInheritanceTests()
         {

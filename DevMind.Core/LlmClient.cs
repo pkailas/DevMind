@@ -396,6 +396,14 @@ namespace DevMind
         private readonly List<int> _contextDeltas = new List<int>();
         private int _previousContextUsed;
 
+        // ── System-prompt size warning (one-shot per distinct text) ─────────────
+        // UpdateSystemPrompt runs every turn; an unguarded warning would spam the
+        // pane on every response. These fields track whether a warning has already
+        // been emitted for the current prompt text, and what that text was.
+        // Reset when the text changes so editing the file down clears the warning.
+        private bool _systemPromptWarned;
+        private string _systemPromptWarnedText;
+
         /// <summary>
         /// Conversation history count at the time LastContextUsed was last updated.
         /// Messages at indices &gt;= this value have not yet been counted by the server.
@@ -914,7 +922,9 @@ namespace DevMind
                 _pendingDebugLog.Clear();
             }
 
-            UpdateSystemPrompt(combinedSystemPrompt);
+            string promptWarning = UpdateSystemPrompt(combinedSystemPrompt);
+            if (promptWarning != null)
+                onToken(promptWarning);
 
             // ── Append-only context management ─────────────────────────────────────
             // What you store is what you send. What you send is what the cache sees.
@@ -1595,16 +1605,59 @@ namespace DevMind
             return string.IsNullOrWhiteSpace(prompt) ? DefaultSystemPrompt : prompt;
         }
 
-        private void UpdateSystemPrompt(string combinedSystemPrompt = null)
+        /// <summary>
+        /// Updates the system prompt in conversation history. Returns a warning
+        /// message string if the prompt exceeds 5% of the context window, or
+        /// null if no warning is needed. The warning fires once per distinct
+        /// prompt text (re-armed when the text changes). Skipped silently when
+        /// both ServerContextSize and _contextSize are 0 (first turn, server
+        /// not yet reported).
+        /// </summary>
+        private string UpdateSystemPrompt(string combinedSystemPrompt = null)
         {
             string prompt = !string.IsNullOrEmpty(combinedSystemPrompt)
                 ? combinedSystemPrompt
                 : GetSystemPrompt();
+
+            // Size warning: fire once per distinct prompt text, past 5% of the window.
+            // Denominator: ServerContextSize when known, else _contextSize (fallback
+            // default 13372). If both are 0 (first turn, server not yet reported),
+            // skip the check silently. See line 3799 for this exact fallback shape.
+            //
+            // The warning is accumulated into a local and returned at the END of this
+            // method. It must NOT short-circuit the history update below: returning
+            // early on a warning leaves _conversationHistory[0] holding the bare
+            // constructor default, so the assembled prompt (tool directive, AGENTS.md,
+            // standing rules, NoExecuteRule) silently never reaches the request body.
+            string warning = null;
+            int window = ServerContextSize > 0 ? ServerContextSize : _contextSize;
+            if (window > 0)
+            {
+                if (!string.Equals(prompt, _systemPromptWarnedText, StringComparison.Ordinal))
+                {
+                    // Text changed — re-arm the warning (editing the file down clears it).
+                    _systemPromptWarned = false;
+                    _systemPromptWarnedText = prompt;
+                }
+
+                if (!_systemPromptWarned)
+                {
+                    int promptTokens = EstimateTokens(prompt);
+                    int threshold = (int)(window * 0.05);
+                    if (promptTokens > threshold)
+                    {
+                        double pct = promptTokens * 100.0 / window;
+                        _systemPromptWarned = true;
+                        warning = $"\n[PROMPT] System prompt {promptTokens:N0} tokens ({pct:F1}% of {window:N0}) — over the 5% guideline.\n";
+                    }
+                }
+            }
+
             if (_conversationHistory.Count > 0 && _conversationHistory[0].Role == "system")
             {
                 // Skip replacement if the prompt text is identical — preserves the KV cache prefix.
                 if (string.Equals(_conversationHistory[0].Content, prompt, StringComparison.Ordinal))
-                    return;
+                    return warning;
 
                 _conversationHistory[0] = new ChatMessage("system", prompt);
                 _historyMutatedThisSend = true;
@@ -1616,6 +1669,7 @@ namespace DevMind
                 // not evidence about the backend's cache, so exclude it from sampling.
                 _historyMutatedThisSend = true;
             }
+            return warning;
         }
 
         private static readonly Regex _reWarnings = new Regex(@"(\d+)\s+Warning", RegexOptions.IgnoreCase | RegexOptions.Compiled);

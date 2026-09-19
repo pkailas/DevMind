@@ -93,7 +93,7 @@ namespace DevMind.Core.Tests
             string traceDir = Path.Combine(_dir, "trace");
             Directory.CreateDirectory(traceDir);
             string[] envKeys = { "DEVMIND_TRACE_ENABLED", "DEVMIND_TRACE_LEVEL", "DEVMIND_TRACE_DIR", "DEVMIND_TRACE_RUN_ID" };
-            string[] saved = {
+            string?[] saved = {
                 Environment.GetEnvironmentVariable(envKeys[0]),
                 Environment.GetEnvironmentVariable(envKeys[1]),
                 Environment.GetEnvironmentVariable(envKeys[2]),
@@ -245,7 +245,7 @@ namespace DevMind.Core.Tests
                     }
                 }
                 string pidsFound = jobPids.Count > 0 ? string.Join(",", jobPids) : "(none)";
-                string degradedReason = ExtractReason(trace);
+                string? degradedReason = ExtractReason(trace);
 
                 if (childHasJobRecord)
                 {
@@ -318,7 +318,7 @@ namespace DevMind.Core.Tests
             finally
             {
                 for (int i = 0; i < envKeys.Length; i++)
-                    Environment.SetEnvironmentVariable(envKeys[i], saved[i]);
+                    Environment.SetEnvironmentVariable(envKeys[i], saved[i]!);
                 ResetTraceInitialized();
             }
         }
@@ -561,7 +561,7 @@ namespace DevMind.Core.Tests
             }
         }
 
-        private static string ExtractReason(string trace)
+        private static string? ExtractReason(string trace)
         {
             // The degraded record looks like:
             //   {"ts":...,"event":"mcp.shell.job.degraded","data":{"reason":"..."}}

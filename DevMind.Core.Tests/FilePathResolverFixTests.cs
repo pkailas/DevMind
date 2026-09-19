@@ -146,10 +146,11 @@ namespace DevMind.Core.Tests
             // tolerate empty input (IsNullOrWhiteSpace guard / SafeGetFileName); the
             // re-resolving fallback must too, or the second call throws where the
             // first returned null gracefully.
-            string msg = null;
+            string? msg = null;
             Exception ex = Record.Exception(() =>
                 msg = FilePathResolver.BuildFileNotFoundMessage("read_file", "", _repo));
             Assert.Null(ex);
+            Assert.NotNull(msg);
 
             Assert.StartsWith("read_file: file not found", msg);
             Assert.Contains("Searched recursively", msg);
@@ -161,10 +162,11 @@ namespace DevMind.Core.Tests
             // Path.GetFileName("C:\\") throws ArgumentException (invalid character).
             // A hallucinated drive root is a realistic model output — it must reach
             // the clean not-found path, not an exception.
-            string msg = null;
+            string? msg = null;
             Exception ex = Record.Exception(() =>
                 msg = FilePathResolver.BuildFileNotFoundMessage("read_file", "C:\\\\", _repo));
             Assert.Null(ex);
+            Assert.NotNull(msg);
 
             Assert.StartsWith("read_file: file not found", msg);
             Assert.Contains("Searched recursively", msg);

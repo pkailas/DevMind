@@ -112,7 +112,7 @@ namespace DevMind.McpServer
         /// Internal so only DevMind.McpServer.Tests (via InternalsVisibleTo) can use it.
         /// </summary>
         internal McpServices(string workingDirectory, IEnumerable<string>? additionalWriteRoots,
-            MemoryManager memoryManager)
+            MemoryManager? memoryManager)
         {
             WorkingDirectory = string.IsNullOrWhiteSpace(workingDirectory)
                 ? Environment.CurrentDirectory

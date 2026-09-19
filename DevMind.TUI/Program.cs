@@ -1092,7 +1092,8 @@ namespace DevMind
                         DepthCap = options.AgenticLoopMaxDepth,
                         ContextLimitPercent = options.AgenticContextLimitPercent,
                         ThinkingEnabled = options.ShowLlmThinking,
-                       SystemPrompt = llmClient.SystemPromptContent ?? BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules, host.TaskScratchpad),
+                        SystemPrompt = llmClient.SystemPromptContent ?? BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules, host.TaskScratchpad),
+                        ContextWindowSize = llmClient.ServerContextSize > 0 ? llmClient.ServerContextSize : llmClient.MaxPromptTokens,
                        ResetConversation = () =>
                         {
                             state.ResetForUserTurn();
@@ -1681,8 +1682,15 @@ static string LoadContextFile(string workingDirectory)
             buildCommand: ResolveBuildCommand(options),
             projectNamespace: null);
 
+        // The global system-prompt file (%APPDATA%\devmind\system-prompt.md) replaces
+        // the hardcoded options.SystemPrompt when present. Absence is normal —
+        // fall back to options.SystemPrompt unchanged. An explicit --system-prompt
+        // CLI arg still wins (it sets options.SystemPrompt before this method runs).
+        string filePrompt = SystemPromptFile.Load();
+        string basePrompt = filePrompt ?? options.SystemPrompt;
+
         var sb = new StringBuilder();
-        sb.Append(options.SystemPrompt);
+        sb.Append(basePrompt);
         sb.Append("\n\n");
         sb.Append(llmDirective);
 

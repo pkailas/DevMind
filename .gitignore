@@ -57,3 +57,11 @@ dist/*
 .claude-memory.md
 
 deploy-log.txt
+
+# DevMind's own per-repo memory - written into the working tree at runtime
+MEMORY.md
+.devmind/memory/
+
+# Local scratch/debug leftovers - never part of a build
+_scratch_*
+reddit-draft.md

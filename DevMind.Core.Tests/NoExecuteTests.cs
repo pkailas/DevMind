@@ -258,12 +258,13 @@ namespace DevMind.Core.Tests
             try
             {
                 using var session = new HeadlessSession(Options(), server.BaseUrl, apiKey: null!,
-                    workingDirectory: _dir, buildCommand: "dotnet build", noExecute: false);
+                    workingDirectory: _dir, buildCommand: "dotnet build", noExecute: false,
+                    promptFilePath: Path.Combine(_dir, "nonexistent-prompt.md"));
                 var result = await session.RunTurnAsync("Say done.", ct: CancellationToken.None);
                 Assert.Null(result.Error);
 
                 // The single chat request must NOT carry the no-execution rule.
-                Assert.Equal(1, server.RequestBodies.Count);
+                Assert.Single(server.RequestBodies);
                 Assert.DoesNotContain("NO-EXECUTION RESTRICTION", server.RequestBodies[0]);
             }
             finally
@@ -292,7 +293,8 @@ namespace DevMind.Core.Tests
             try
             {
                 using var session = new HeadlessSession(Options(), server.BaseUrl, apiKey: null!,
-                    workingDirectory: _dir, buildCommand: "dotnet build", noExecute: true);
+                    workingDirectory: _dir, buildCommand: "dotnet build", noExecute: true,
+                    promptFilePath: Path.Combine(_dir, "nonexistent-prompt.md"));
 
                 var first = await session.RunTurnAsync("Try to run the app.", ct: CancellationToken.None);
                 Assert.Null(first.Error);
