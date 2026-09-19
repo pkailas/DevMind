@@ -193,6 +193,57 @@ namespace DevMind.McpServer.Tests
             Assert.Equal(1, p.GetProperty("delta").GetInt32());
         }
 
+        // ── 3. The warning-count honesty fix ─────────────────────────────────
+        // The post-run build is incremental, so up-to-date projects do not re-emit their
+        // warnings and the "0 Warning(s)" in the summary is meaningless (a hand -t:Rebuild on
+        // the same tree reports dozens). Rather than pay a full rebuild per job to make the
+        // count real, the build_verification payload now labels the count as not-verified so a
+        // reader cannot mistake the tail for a warning check that actually happened. This drives
+        // the REAL devmind_task_result serialization path and asserts the label is present and
+        // false while the error/exit-code result (succeeded) is still reported.
+        [Fact]
+        public async Task VerifyBuildTrue_ResultPayload_LabelsWarningCountUnverified()
+        {
+            using var server = new EditThenDoneLlmServer(Path.Combine(_dir, "newfile.txt"));
+            Environment.SetEnvironmentVariable("DEVMIND_ENDPOINT", server.BaseUrl);
+
+            using var mgr = new AgentJobManager();
+            // Simulate the misleading incremental output: passing exit code + "0 Warning(s)"
+            // summary, even though the tree genuinely has warnings.
+            mgr.BuildRunnerOverride = async (_, _) =>
+            {
+                await Task.Delay(50);
+                return new BuildVerification
+                {
+                    Command = "dotnet build \"DevMind.slnx\"",
+                    ExitCode = 0,
+                    OutputTail = "Build succeeded.\n    0 Warning(s)\n    0 Error(s)",
+                };
+            };
+
+            var job = mgr.Start("p", _dir, 5, 30,
+                allowCommit: false, verifyBuild: true, verifyTests: false);
+
+            await WaitForDone(job);
+            Assert.NotNull(job.Build);
+            Assert.True(job.Build.Succeeded);
+
+            // Exercise the real devmind_task_result serialization path.
+            var tools = new AgentTaskTools(mgr);
+            string json = await tools.TaskResult(job.Id, CancellationToken.None);
+            using var doc = JsonDocument.Parse(json);
+            var bv = doc.RootElement.GetProperty("build_verification");
+
+            // Error/exit-code result is still reported and is the reliable signal.
+            Assert.True(bv.GetProperty("succeeded").GetBoolean());
+            Assert.Equal(0, bv.GetProperty("exit_code").GetInt32());
+            // The raw tail is preserved (real warnings it did emit are not discarded)…
+            Assert.Contains("0 Warning(s)", bv.GetProperty("output_tail").GetString());
+            // …but the count is explicitly labeled NOT verified — nothing implies a warning
+            // check happened when it did not.
+            Assert.False(bv.GetProperty("warning_count_verified").GetBoolean());
+        }
+
         // Polls until the job leaves Queued/Running. With the fix, returning here means
         // verification is FINAL (not merely "the turn ended"), so the final-field
         // assertions below it are meaningful — they read a Done job that is already

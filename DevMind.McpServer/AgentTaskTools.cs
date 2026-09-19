@@ -316,6 +316,12 @@ namespace DevMind.McpServer
                     command = job.Build.Command,
                     succeeded = job.Build.Succeeded,
                     exit_code = job.Build.ExitCode,
+                    // The post-run build is incremental: up-to-date projects are not recompiled and
+                    // therefore do not re-emit their warnings, so any "N Warning(s)" in output_tail
+                    // is NOT a verified count. Only the error/exit-code result (succeeded) is
+                    // reliable. The field is present and false so the tail cannot read as a warning
+                    // check that actually happened.
+                    warning_count_verified = false,
                     output_tail = job.Build.OutputTail,
                 },
                 test_verification = TestVerificationPayload.Create(job),

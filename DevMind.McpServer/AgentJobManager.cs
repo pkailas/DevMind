@@ -141,7 +141,9 @@ namespace DevMind.McpServer
     {
         public required string Command { get; init; }
         public int ExitCode { get; init; }
-        /// <summary>Last ~2 KB of build output — enough for the error summary.</summary>
+        /// <summary>Last ~2 KB of build output — enough for the error summary. Carries the
+        /// warning-count disclaimer appended, because the verification build is incremental
+        /// and its warning count is therefore not a verified figure.</summary>
         public required string OutputTail { get; init; }
         public bool Succeeded => ExitCode == 0;
     }
@@ -778,6 +780,11 @@ namespace DevMind.McpServer
                         command = job.Build.Command,
                         succeeded = job.Build.Succeeded,
                         exit_code = job.Build.ExitCode,
+                        // Incremental build: up-to-date projects don't re-emit warnings, so any
+                        // "N Warning(s)" in output_tail is not a verified count; only the
+                        // error/exit-code result (succeeded) is reliable. warning_count_verified
+                        // is false so the tail cannot read as a warning check that happened.
+                        warning_count_verified = false,
                         output_tail = job.Build.OutputTail,
                     },
                     test_verification = TestVerificationPayload.Create(job),
@@ -793,6 +800,13 @@ namespace DevMind.McpServer
         {
             const int BuildTimeoutSeconds = 600;
             const int TailChars = 2_000;
+            // Appended to every verification tail. The flag alone is not enough: the
+            // misleading "N Warning(s)" is in the tail text, which is what a model reads
+            // as prose, so the disclaimer has to sit with it rather than beside it.
+            const string BuildWarningCountDisclaimer =
+                "\n[verification] Warning count above is NOT verified - this build is incremental\n" +
+                "and does not re-emit warnings for projects that were already up to date.\n" +
+                "Only the error result and exit code are reliable.\n";
 
             // Test seam: when set, build verification goes through this instead of a
             // real build (hermetic — a temp dir resolves to no build command). Null =
@@ -818,6 +832,11 @@ namespace DevMind.McpServer
                 var (output, exitCode) = await runner.ExecuteAsync(
                     command, CancellationToken.None, BuildTimeoutSeconds).ConfigureAwait(false);
                 string tail = output.Length <= TailChars ? output : output.Substring(output.Length - TailChars);
+                // The warning_count_verified flag is a sibling field; the misleading
+                // "0 Warning(s)" lives here in the tail, which is what a model actually
+                // reads as prose. Keep the disclaimer WITH the text it disclaims, or a
+                // reader takes the count at face value and never looks at the flag.
+                tail += BuildWarningCountDisclaimer;
                 return new BuildVerification { Command = command, ExitCode = exitCode, OutputTail = tail };
             }
             catch (Exception ex)
