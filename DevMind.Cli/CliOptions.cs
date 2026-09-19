@@ -46,6 +46,7 @@ namespace DevMind
         public LlmServerType ServerType        { get; set; } = LlmServerType.LlamaServer;
         public string CustomContextEndpoint    { get; set; } = "";
         public int    MicroCompactThreshold    { get; set; } = 85;
+        public int    NearlineIngestThresholdChars { get; set; } = 8_000;
         public bool   MicroCompactSummarize    { get; set; } = true;
 
         // Defaulting to false: brainwash performs a full-context replacement when
@@ -141,6 +142,7 @@ namespace DevMind
                 if (TryInt(root, "requestTimeout",         out n))        opts.RequestTimeoutMinutes   = n;
                 if (TryInt(root, "firstTokenTimeout",      out n))        opts.FirstTokenTimeoutMinutes = n;
                 if (TryInt(root, "microCompactThreshold",  out n))        opts.MicroCompactThreshold   = n;
+                if (TryInt(root, "nearlineIngestThresholdChars", out n))  opts.NearlineIngestThresholdChars = n;
 
                 if (TryBool(root, "alwaysConfirmPatch",    out bool b))   opts.AlwaysConfirmPatch      = b;
                 if (TryBool(root, "microCompactSummarize", out b))        opts.MicroCompactSummarize   = b;

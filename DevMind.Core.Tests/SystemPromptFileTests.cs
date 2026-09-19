@@ -150,6 +150,7 @@ namespace DevMind.Core.Tests
             public LlmServerType ServerType { get; set; } = LlmServerType.LlamaServer;
             public string CustomContextEndpoint { get; set; } = "";
             public int MicroCompactThreshold { get; set; } = 85;
+            public int NearlineIngestThresholdChars { get; set; } = 8_000;
             public bool MicroCompactSummarize { get; set; } = false;
             public bool MicroCompactBrainwash { get; set; } = false;
             public bool AlwaysConfirmPatch { get; set; } = false;

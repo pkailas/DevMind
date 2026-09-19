@@ -8,6 +8,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -4277,13 +4278,17 @@ namespace DevMind
         private const int MaxToolResultChars = 50_000;
 
         /// <summary>
-        /// Tool results longer than this are nearline-capped at ingest: the full content goes to
-        /// the NearlineCache and only a head+tail excerpt (with the recall handle) enters history.
-        /// Keeping the context small at the source makes compactions rare, which keeps the prompt
-        /// prefix stable — on hybrid/recurrent backends (Gated DeltaNet, Mamba) any prefix edit
-        /// forces a full re-prefill, so avoiding the edit beats recovering from it.
+        /// Default (and fallback) nearline ingest threshold in characters. The live value is read
+        /// from <c>ILlmOptions.NearlineIngestThresholdChars</c>; this constant is only used when the
+        /// configured value is non-positive, so the cap is never accidentally disabled.
+        /// Tool results longer than the threshold are nearline-capped at ingest: the full content goes
+        /// to the NearlineCache AND is spilled to the durable output dir, and only a head+tail excerpt
+        /// (with the recall handle, the spill file path and its sha256) enters history. Keeping the
+        /// context small at the source makes compactions rare, which keeps the prompt prefix stable —
+        /// on hybrid/recurrent backends (Gated DeltaNet, Mamba) any prefix edit forces a full
+        /// re-prefill, so avoiding the edit beats recovering from it.
         /// </summary>
-        private const int NearlineIngestThresholdChars = 8_000;
+        private const int DefaultNearlineIngestThresholdChars = 8_000;
         private const int IngestExcerptHeadChars = 4_000;
         private const int IngestExcerptTailChars = 2_000;
 
@@ -4310,26 +4315,44 @@ namespace DevMind
         /// <summary>
         /// Appends a tool result message to conversation history.
         /// Called by the onComplete handler after executing each tool call.
-        /// Oversized results are nearline-capped: full content is cached immediately and
-        /// only an excerpt + recall handle enters history (append-only context discipline).
-        /// recall_cache results are exempt — the model explicitly asked for the full
-        /// content, and re-capping them would hand back another excerpt forever.
+        /// Oversized results are nearline-capped: full content is cached immediately AND spilled to
+        /// the durable output dir, and only an excerpt + recall handle + spill path + sha256 enters
+        /// history (append-only context discipline). recall_cache and read_file results are exempt —
+        /// recall_cache because the model explicitly asked for the full content (re-capping it would
+        /// hand back another excerpt forever), read_file because it self-pages via outline/line-range.
         /// </summary>
         public void AddToolResultMessage(string toolCallId, string content, string toolName = null)
         {
             string stored = content ?? "";
-            bool exemptFromIngestCap = string.Equals(toolName, "recall_cache", StringComparison.OrdinalIgnoreCase);
+            bool exemptFromIngestCap =
+                string.Equals(toolName, "recall_cache", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(toolName, "read_file", StringComparison.OrdinalIgnoreCase);
 
-            if (!exemptFromIngestCap && stored.Length > NearlineIngestThresholdChars)
+            int ingestThreshold = _options.NearlineIngestThresholdChars > 0
+                ? _options.NearlineIngestThresholdChars
+                : DefaultNearlineIngestThresholdChars;
+
+            if (!exemptFromIngestCap && stored.Length > ingestThreshold)
             {
                 int originalLength = stored.Length;
                 string cacheKey = $"tool:{toolCallId ?? $"ingest-{_currentTurn}-{_conversationHistory.Count}"}";
                 string handle = NearlineCache.Store(cacheKey, stored,
                     BuildToolResultBreadcrumb(stored, originalLength, null));
 
+                // Durability: the nearline disk tier is wiped on /new, /restart, and (orphaned) at
+                // next startup, so the full text is ALSO spilled to the durable output dir with a
+                // sha256 the model can verify against. This gives recovery via read_file that does
+                // not depend on the in-memory handle index. A failed spill degrades gracefully —
+                // the excerpt + recall handle remain the recovery path.
+                string spillPath = SpillFullToolOutput(stored);
+                string spillHash = ComputeSha256Hex(stored);
+
                 int omitted = originalLength - IngestExcerptHeadChars - IngestExcerptTailChars;
+                string spillSuffix = string.IsNullOrEmpty(spillPath)
+                    ? ""
+                    : $". Full text also written to: {spillPath} (sha256 {spillHash}); read_file it to recover the omitted middle";
                 stored = stored.Substring(0, IngestExcerptHeadChars)
-                    + $"\n[... {omitted:N0} chars omitted — full output cached as {handle}; call recall_cache(\"{handle}\") to retrieve ...]\n"
+                    + $"\n[... {omitted:N0} chars omitted — full output cached as {handle}; call recall_cache(\"{handle}\") to retrieve{spillSuffix} ...]\n"
                     + stored.Substring(originalLength - IngestExcerptTailChars);
             }
             else if (stored.Length > MaxToolResultChars)
@@ -4343,6 +4366,55 @@ namespace DevMind
 
             _conversationHistory.Add(new ChatMessage("tool", stored,
                 _currentTurn, toolCallId: toolCallId));
+        }
+
+        /// <summary>
+        /// Writes the full text of an ingest-capped tool result to a durable file under
+        /// <see cref="BufferedAgenticHost.OutputDirectory"/> (outside the working tree) and returns
+        /// its absolute path, or null on failure. The file is named by the sha256 of the content so
+        /// the filename is always filesystem-safe and re-emitting identical output is idempotent.
+        /// The durable location is deliberate: the nearline disk tier is wiped on session reset and
+        /// (orphaned) at next startup, so it cannot be the sole place the full text lives.
+        /// </summary>
+        private static string SpillFullToolOutput(string content)
+        {
+            try
+            {
+                Directory.CreateDirectory(BufferedAgenticHost.OutputDirectory);
+                string fileName = "dm_toolout_" + ComputeSha256Hex(content) + ".txt";
+                string path = Path.Combine(BufferedAgenticHost.OutputDirectory, fileName);
+                File.WriteAllText(path, content, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+                return Path.GetFullPath(path);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[DevMind] tool-output spill write failed: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>Lowercase hex sha256 of <paramref name="text"/> — the value embedded in the
+        /// ingest marker so the model can verify the spilled file matches the original.</summary>
+        private static string ComputeSha256Hex(string text)
+        {
+            byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(text ?? ""));
+            var sb = new StringBuilder(hash.Length * 2);
+            foreach (byte b in hash)
+                sb.Append(b.ToString("x2"));
+            return sb.ToString();
+        }
+
+        /// <summary>Content of the most recent tool-result message in history, or null if the last
+        /// message is not a tool result. Test-only (InternalsVisibleTo) — lets tests assert exactly
+        /// what was stored rather than re-deriving it from the cache.</summary>
+        internal string LastToolResultContent
+        {
+            get
+            {
+                if (_conversationHistory.Count == 0) return null;
+                var last = _conversationHistory[^1];
+                return last.Role == "tool" ? last.Content : null;
+            }
         }
     }
 

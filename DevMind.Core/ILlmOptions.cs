@@ -23,6 +23,11 @@ namespace DevMind
         LlmServerType ServerType { get; }
         string CustomContextEndpoint { get; }
         int MicroCompactThreshold { get; }
+
+        /// <summary>Characters above which a tool result is nearline-capped at ingest (full text
+        /// cached + spilled to the durable output dir, head+tail excerpt enters history). Non-positive
+        /// falls back to the built-in default (8,000).</summary>
+        int NearlineIngestThresholdChars { get; }
         bool MicroCompactSummarize { get; }
         bool MicroCompactBrainwash { get; }
         bool AlwaysConfirmPatch { get; }
