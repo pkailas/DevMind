@@ -252,6 +252,8 @@ namespace DevMind
 
                 case "find_symbol":
                 case "web_search":
+                case "learn_search":
+                case "learn_code_search":
                     {
                         string key = tc.Arguments?.TryGetValue("query", out string q) == true ? q : null;
                         if (key != null && result.ToolResultContents != null &&
@@ -261,6 +263,7 @@ namespace DevMind
                     }
 
                 case "web_fetch":
+                case "learn_fetch":
                     {
                         string key = tc.Arguments?.TryGetValue("url", out string u) == true ? u : null;
                         if (key != null && result.ToolResultContents != null &&

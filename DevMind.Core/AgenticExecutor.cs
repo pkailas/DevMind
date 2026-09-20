@@ -616,6 +616,50 @@ namespace DevMind
                         }
                         break;
 
+                    case BlockType.LearnSearch:
+                        try
+                        {
+                            int? learnSearchCap = block.MaxResults > 0 ? (int?)block.MaxResults : null;
+                            string learnSearchContent = await _host.LearnSearchAsync(block.Pattern, learnSearchCap);
+                            if (learnSearchContent != null)
+                                result.ToolResultContents[block.Pattern ?? ""] = learnSearchContent;
+                        }
+                        catch (Exception ex)
+                        {
+                            result.Errors.Add(ex.Message);
+                            _host.AppendOutput($"[LEARN ERROR] search \"{block.Pattern}\": {ex.Message}\n", OutputColor.Error);
+                        }
+                        break;
+
+                    case BlockType.LearnFetch:
+                        try
+                        {
+                            string learnFetchContent = await _host.LearnFetchAsync(block.Url);
+                            if (learnFetchContent != null)
+                                result.ToolResultContents[block.Url ?? ""] = learnFetchContent;
+                        }
+                        catch (Exception ex)
+                        {
+                            result.Errors.Add(ex.Message);
+                            _host.AppendOutput($"[LEARN ERROR] fetch {block.Url}: {ex.Message}\n", OutputColor.Error);
+                        }
+                        break;
+
+                    case BlockType.LearnCodeSearch:
+                        try
+                        {
+                            int? learnCodeSearchCap = block.MaxResults > 0 ? (int?)block.MaxResults : null;
+                            string learnCodeSearchContent = await _host.LearnCodeSearchAsync(block.Pattern, learnCodeSearchCap);
+                            if (learnCodeSearchContent != null)
+                                result.ToolResultContents[block.Pattern ?? ""] = learnCodeSearchContent;
+                        }
+                        catch (Exception ex)
+                        {
+                            result.Errors.Add(ex.Message);
+                            _host.AppendOutput($"[LEARN ERROR] code_search \"{block.Pattern}\": {ex.Message}\n", OutputColor.Error);
+                        }
+                        break;
+
                     case BlockType.RunSql:
                         try
                         {

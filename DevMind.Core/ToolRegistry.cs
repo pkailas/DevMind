@@ -306,6 +306,27 @@ namespace DevMind
                 "Use for reading documentation pages, GitHub files, API references, or vendor support articles.",
                 Required("url", "string", "URL to fetch.")));
 
+            // ── Microsoft Learn tools (learn.microsoft.com via the hosted Learn MCP server) ──
+            tools.Add(MakeTool("learn_search",
+                "Search official Microsoft documentation (learn.microsoft.com). Returns up to 10 results " +
+                "with title, URL, and excerpt. Prefer this over web_search for .NET, C#, Azure, SQL Server, " +
+                "and other Microsoft/Azure API documentation questions — it returns authoritative, curated docs.",
+                Required("query", "string", "Search query string."),
+                Optional("max_results", "integer", "Maximum number of results to return (default 10, max 10).")));
+
+            tools.Add(MakeTool("learn_fetch",
+                "Fetch a specific learn.microsoft.com page and return its content as markdown. " +
+                "Use after learn_search to read a full article, or when you have a direct learn.microsoft.com URL. " +
+                "Prefer over web_fetch for Microsoft documentation pages — it returns clean markdown.",
+                Required("url", "string", "learn.microsoft.com URL to fetch.")));
+
+            tools.Add(MakeTool("learn_code_search",
+                "Search official Microsoft code samples. Returns up to 10 results with title, URL, " +
+                "and code excerpt. Prefer this over web_search when looking for .NET, C#, or Azure code " +
+                "examples — it returns curated, official samples.",
+                Required("query", "string", "Search query string."),
+                Optional("max_results", "integer", "Maximum number of results to return (default 10, max 10).")));
+
             // ── run_sql ────────────────────────────────────────────────────
             tools.Add(MakeTool("run_sql",
                 "Execute a read-only SQL query against a database. " +
@@ -406,7 +427,11 @@ namespace DevMind
                         "while stopped. Breakpoint hits and debuggee output stream to the transcript. " +
                         "Commands: launch {project}; attach {pid_or_name}; break {file, line}; clear_breaks; continue; step; " +
                         "stepin; stepout; inspect {variable}; stack; eval {expression}; detach; stop. " +
-                        "Set breakpoints before launch/attach; inspect/stack/eval require the debuggee to be stopped at a breakpoint or step.",
+                        "Set breakpoints before launch/attach; inspect/stack/eval require the debuggee to be stopped at a breakpoint or step. " +
+                        "AVAILABILITY: TUI only — the console/headless skin has no debugger and returns an error for every debug call, " +
+                        "so never plan a task around one in a non-TUI run. " +
+                        "LIFECYCLE (required): you MUST end any debug session you started with detach or stop before you call task_done, " +
+                        "so you never leave netcoredbg attached to a stranded process.",
                     ["parameters"] = parameters
                 }
             };

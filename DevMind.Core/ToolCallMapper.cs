@@ -313,6 +313,29 @@ namespace DevMind
                         Url = GetArg(tc, "url")
                     };
 
+                case "learn_search":
+                    return new ResponseBlock
+                    {
+                        Type = BlockType.LearnSearch,
+                        Pattern = GetArg(tc, "query"),
+                        MaxResults = GetIntArg(tc, "max_results")
+                    };
+
+                case "learn_fetch":
+                    return new ResponseBlock
+                    {
+                        Type = BlockType.LearnFetch,
+                        Url = GetArg(tc, "url")
+                    };
+
+                case "learn_code_search":
+                    return new ResponseBlock
+                    {
+                        Type = BlockType.LearnCodeSearch,
+                        Pattern = GetArg(tc, "query"),
+                        MaxResults = GetIntArg(tc, "max_results")
+                    };
+
                 case "run_sql":
                     {
                         int maxRowsVal = GetIntArg(tc, "max_rows");
