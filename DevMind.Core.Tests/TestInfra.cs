@@ -236,7 +236,9 @@ namespace DevMind.Core.Tests
         public LlmServerType ServerType => LlmServerType.LlamaServer;
         public string CustomContextEndpoint => null!; // Core is nullable-oblivious; null means "no custom endpoint"
         public int MicroCompactThreshold => 99;
-        public int NearlineIngestThresholdChars => 8_000;
+        // Settable (the rest are fixed) so ingest tests can drive the threshold to the
+        // out-of-range values a devmind.json can actually configure.
+        public int NearlineIngestThresholdChars { get; set; } = 8_000;
         public bool MicroCompactSummarize => false;
         public bool MicroCompactBrainwash => false;
         public bool AlwaysConfirmPatch => false;

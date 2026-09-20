@@ -1093,7 +1093,11 @@ namespace DevMind
                         ContextLimitPercent = options.AgenticContextLimitPercent,
                         ThinkingEnabled = options.ShowLlmThinking,
                         SystemPrompt = llmClient.SystemPromptContent ?? BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules, host.TaskScratchpad),
-                        ContextWindowSize = llmClient.ServerContextSize > 0 ? llmClient.ServerContextSize : llmClient.MaxPromptTokens,
+                        // The RAW window, same accessor the system-prompt size warning uses —
+                        // NOT MaxPromptTokens, which before context detection is the window
+                        // minus response headroom and made /prompt report a percentage the
+                        // warning disagreed with.
+                        ContextWindowSize = llmClient.EffectiveContextWindow,
                        ResetConversation = () =>
                         {
                             state.ResetForUserTurn();

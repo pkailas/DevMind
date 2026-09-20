@@ -26,6 +26,19 @@ namespace DevMind.Core.Tests
 
         public void Dispose() => Directory.Delete(_dir, recursive: true);
 
+        /// <summary>
+        /// Path handed to every HeadlessSession/HeadlessAgent call below as
+        /// <c>promptFilePath</c>. It points inside this test's fresh temp dir and is never
+        /// created, so <see cref="SystemPromptFile.LoadFrom"/> returns null and
+        /// BuildSystemPrompt falls back to <c>options.SystemPrompt</c> — the hermetic
+        /// default. Without it the seam defaults to <see cref="SystemPromptFile.Path"/> and
+        /// these tests would assemble their prompt from the DEVELOPER'S real
+        /// %APPDATA%\devmind\system-prompt.md, making the suite's result a property of the
+        /// machine it runs on. See HeadlessPromptIsolationTests for the proof that this
+        /// seam, not the real file, decides what reaches the request.
+        /// </summary>
+        private string NoPromptFile => Path.Combine(_dir, "no-system-prompt.md");
+
         // The chat request carries the whole conversation, so a re-trigger message stays
         // in the body of every LATER request too. "Contains" on raw bodies therefore
         // measures message INSTANCES in the conversation, not the number of requests in
@@ -84,7 +97,8 @@ namespace DevMind.Core.Tests
                     buildCommand: "dotnet build",   // explicit: keep BuildCommandResolver off the disk
                     transcriptPath: transcriptPath,
                     progress: chunk => progress.Append(chunk),
-                    ct: CancellationToken.None);
+                    ct: CancellationToken.None,
+                    promptFilePath: NoPromptFile);
 
                 Assert.Equal("", console.Captured);                    // NOTHING on stdout
                 Assert.Null(result.Error);
@@ -133,7 +147,8 @@ namespace DevMind.Core.Tests
             {
                 using var console = new ConsoleGuard();
                 using var session = new HeadlessSession(Options(), server.BaseUrl, apiKey: null!,
-                    workingDirectory: _dir, buildCommand: "dotnet build");
+                    workingDirectory: _dir, buildCommand: "dotnet build",
+                    promptFilePath: NoPromptFile);
 
                 var first = await session.RunTurnAsync("Create alpha.txt with some content.");
                 Assert.Null(first.Error);
@@ -174,7 +189,8 @@ namespace DevMind.Core.Tests
                 var result = await HeadlessAgent.RunAsync(
                     "Loop forever.", Options(maxDepth: 2), server.BaseUrl, apiKey: null!,
                     workingDirectory: _dir, buildCommand: "dotnet build",
-                    ct: CancellationToken.None);
+                    ct: CancellationToken.None,
+                    promptFilePath: NoPromptFile);
 
                 Assert.Equal("", console.Captured);
                 Assert.Null(result.Error);
@@ -211,7 +227,8 @@ namespace DevMind.Core.Tests
                 var result = await HeadlessAgent.RunAsync(
                     "Loop forever.", Options(maxDepth: 3), server.BaseUrl, apiKey: null!,
                     workingDirectory: _dir, buildCommand: "dotnet build",
-                    ct: CancellationToken.None);
+                    ct: CancellationToken.None,
+                    promptFilePath: NoPromptFile);
 
                 Assert.Equal("", console.Captured);
                 Assert.Null(result.Error);
@@ -258,7 +275,8 @@ namespace DevMind.Core.Tests
                 var result = await HeadlessAgent.RunAsync(
                     "Loop forever.", Options(maxDepth: 2), server.BaseUrl, apiKey: null!,
                     workingDirectory: _dir, buildCommand: "dotnet build",
-                    ct: CancellationToken.None);
+                    ct: CancellationToken.None,
+                    promptFilePath: NoPromptFile);
 
                 Assert.Equal("", console.Captured);
                 Assert.Null(result.Error);
@@ -315,7 +333,8 @@ namespace DevMind.Core.Tests
                     "Scaffold an endpoint and note any open questions.",
                     Options(maxDepth: 8), server.BaseUrl, apiKey: null!,
                     workingDirectory: _dir, buildCommand: "dotnet build",
-                    ct: CancellationToken.None);
+                    ct: CancellationToken.None,
+                    promptFilePath: NoPromptFile);
 
                 Assert.Equal("", console.Captured);
                 Assert.Null(result.Error);
@@ -368,7 +387,8 @@ namespace DevMind.Core.Tests
                     "Create notes.txt and check the build.",
                     Options(maxDepth: 8), server.BaseUrl, apiKey: null!,
                     workingDirectory: _dir, buildCommand: "dotnet build",
-                    ct: CancellationToken.None);
+                    ct: CancellationToken.None,
+                    promptFilePath: NoPromptFile);
 
                 Assert.Equal("", console.Captured);
                 Assert.Null(result.Error);
@@ -420,7 +440,8 @@ namespace DevMind.Core.Tests
                     "Create notes.txt and check the build.",
                     Options(maxDepth: 8), server.BaseUrl, apiKey: null!,
                     workingDirectory: _dir, buildCommand: "dotnet build",
-                    ct: CancellationToken.None);
+                    ct: CancellationToken.None,
+                    promptFilePath: NoPromptFile);
 
                 Assert.Equal("", console.Captured);
                 Assert.Null(result.Error);
@@ -479,7 +500,8 @@ namespace DevMind.Core.Tests
                 var result = await HeadlessAgent.RunAsync(
                     "Anything.", Options(), "http://127.0.0.1:1/v1", apiKey: null!,
                     workingDirectory: _dir, buildCommand: "dotnet build",
-                    ct: CancellationToken.None);
+                    ct: CancellationToken.None,
+                    promptFilePath: NoPromptFile);
 
                 Assert.Equal("", console.Captured);
                 Assert.NotNull(result.Error);

@@ -239,6 +239,20 @@ namespace DevMind
             ? ServerContextSize
             : (_budget?.HistoryHardLimit ?? (int)(_contextSize * 0.85));
 
+        /// <summary>
+        /// The RAW context window: the server-reported n_ctx once detection has run, else the
+        /// local fallback. This is the denominator for "what percentage of the window does X
+        /// occupy" — the system-prompt size warning and the TUI's /prompt command both use it,
+        /// so they cannot report different percentages for the same text.
+        ///
+        /// NOT interchangeable with <see cref="MaxPromptTokens"/>. Before detection completes
+        /// that property returns <c>HistoryHardLimit</c> (= window − response headroom, i.e.
+        /// 11,367 of the 13,372 fallback), which is the ceiling for HISTORY, not the window.
+        /// Using it as a percentage denominator silently overstates every figure by ~18%.
+        /// 0 only if a caller constructs with a non-positive manual size.
+        /// </summary>
+        public int EffectiveContextWindow => ServerContextSize > 0 ? ServerContextSize : _contextSize;
+
         // Tokens reserved for LLM response generation — never consumed by history.
         public int ResponseHeadroomTokens => _budget?.ResponseHeadroomLimit ?? (int)(_contextSize * 0.15);
 
@@ -1414,7 +1428,7 @@ namespace DevMind
                 {
                     double genSec = LastGeneratedMs / 1000.0;
                     double tokPerSec = genSec > 0 ? LastGeneratedTokens / genSec : 0;
-                    int ctxTotal = ServerContextSize > 0 ? ServerContextSize : _contextSize;
+                    int ctxTotal = EffectiveContextWindow;
                     int ctxPct = ctxTotal > 0 ? (int)(LastContextUsed * 100.0 / ctxTotal) : 0;
                     string deltaStr = LastContextDelta > 0 ? $" | delta +{LastContextDelta:N0}" : "";
                     string reuseStr = "";
@@ -1611,8 +1625,7 @@ namespace DevMind
         /// message string if the prompt exceeds 5% of the context window, or
         /// null if no warning is needed. The warning fires once per distinct
         /// prompt text (re-armed when the text changes). Skipped silently when
-        /// both ServerContextSize and _contextSize are 0 (first turn, server
-        /// not yet reported).
+        /// <see cref="EffectiveContextWindow"/> is 0.
         /// </summary>
         private string UpdateSystemPrompt(string combinedSystemPrompt = null)
         {
@@ -1621,9 +1634,11 @@ namespace DevMind
                 : GetSystemPrompt();
 
             // Size warning: fire once per distinct prompt text, past 5% of the window.
-            // Denominator: ServerContextSize when known, else _contextSize (fallback
-            // default 13372). If both are 0 (first turn, server not yet reported),
-            // skip the check silently. See line 3799 for this exact fallback shape.
+            // Denominator is EffectiveContextWindow — the RAW window, shared with the TUI's
+            // /prompt command so the two cannot report different percentages for the same
+            // text. Deliberately NOT MaxPromptTokens, which before detection is the window
+            // minus response headroom and would overstate every figure. When the window is
+            // 0 (a non-positive manual size) the check is skipped silently.
             //
             // The warning is accumulated into a local and returned at the END of this
             // method. It must NOT short-circuit the history update below: returning
@@ -1631,7 +1646,7 @@ namespace DevMind
             // constructor default, so the assembled prompt (tool directive, AGENTS.md,
             // standing rules, NoExecuteRule) silently never reaches the request body.
             string warning = null;
-            int window = ServerContextSize > 0 ? ServerContextSize : _contextSize;
+            int window = EffectiveContextWindow;
             if (window > 0)
             {
                 if (!string.Equals(prompt, _systemPromptWarnedText, StringComparison.Ordinal))
@@ -4292,6 +4307,18 @@ namespace DevMind
         private const int IngestExcerptHeadChars = 4_000;
         private const int IngestExcerptTailChars = 2_000;
 
+        /// <summary>
+        /// Lower bound for the effective ingest threshold. The excerpt splice keeps a
+        /// <see cref="IngestExcerptHeadChars"/> head and a <see cref="IngestExcerptTailChars"/> tail,
+        /// so capping anything shorter than their sum cannot produce a shorter excerpt: below 4,000
+        /// the head slice runs off the end of the string, and between 4,000 and 6,000 the two slices
+        /// overlap and the omitted-char count goes negative. Configuring a smaller threshold is a
+        /// request for MORE capping, so it is clamped up to the smallest value the splice can honour
+        /// rather than rejected — the caller still gets capping, just at the floor.
+        /// </summary>
+        private const int MinNearlineIngestThresholdChars =
+            IngestExcerptHeadChars + IngestExcerptTailChars;
+
         // Matches the exact marker AddToolResultMessage embeds in ingest-capped excerpts, so
         // the compaction passes can reuse the existing handle instead of re-storing the
         // excerpt over the full cached content under the same key. Anchored on the full
@@ -4328,9 +4355,13 @@ namespace DevMind
                 string.Equals(toolName, "recall_cache", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(toolName, "read_file", StringComparison.OrdinalIgnoreCase);
 
-            int ingestThreshold = _options.NearlineIngestThresholdChars > 0
+            // Non-positive means "unset" — fall back to the default so the cap is never
+            // accidentally disabled. Anything positive but below the splice floor is clamped
+            // UP: see MinNearlineIngestThresholdChars for why the splice cannot honour less.
+            int configuredThreshold = _options.NearlineIngestThresholdChars > 0
                 ? _options.NearlineIngestThresholdChars
                 : DefaultNearlineIngestThresholdChars;
+            int ingestThreshold = Math.Max(configuredThreshold, MinNearlineIngestThresholdChars);
 
             if (!exemptFromIngestCap && stored.Length > ingestThreshold)
             {

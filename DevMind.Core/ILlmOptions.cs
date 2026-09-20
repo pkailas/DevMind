@@ -26,7 +26,9 @@ namespace DevMind
 
         /// <summary>Characters above which a tool result is nearline-capped at ingest (full text
         /// cached + spilled to the durable output dir, head+tail excerpt enters history). Non-positive
-        /// falls back to the built-in default (8,000).</summary>
+        /// falls back to the built-in default (8,000). Positive values below 6,000 are clamped up to
+        /// 6,000 — the excerpt keeps a 4,000-char head and a 2,000-char tail, so a smaller threshold
+        /// cannot produce a shorter excerpt than the original.</summary>
         int NearlineIngestThresholdChars { get; }
         bool MicroCompactSummarize { get; }
         bool MicroCompactBrainwash { get; }

@@ -142,6 +142,125 @@ public sealed class FuzzyPatchSafetyTests
         finally { TempHelpers.Cleanup(tmpPath, backupPath); }
     }
 
+    // ── Requirement 1b: the boundary at the OTHER end of the file ─────────────
+    //
+    // The first fix tested "is the span at EOF?" as a proxy for "does the span end with a
+    // newline". Those diverge for the common case of a newline-terminated file: the fuzzy
+    // span is built as end = nl + 1, so a match on the file's LAST line has
+    // origEnd == fileContent.Length while still owning a trailing newline. Testing for EOF
+    // therefore dropped the file's terminal newline — the mirror image of the glue bug.
+    // The predicate is now what the span itself ends with, which is correct at both ends.
+
+    // A file that ends WITH a newline must still end with one after a fuzzy patch to its
+    // last line. This is the regression: the patched file previously lost its final "\n".
+    [Fact]
+    public void FuzzyReplace_OnLastLineOfNewlineTerminatedFile_KeepsTrailingNewline()
+    {
+        string src =
+            "namespace DevMind\n" +
+            "{\n" +
+            "    class A { }\n" +
+            "}\n" +
+            "// tail marker line with distinctive content here\n";
+
+        string tmpPath = TempHelpers.TmpFile();
+        string? backupPath = null;
+        try
+        {
+            var (resolved, _, _) = Run(new[]
+            {
+                ("// tail marker line with distinctiv content here",   // typo → fuzzy path
+                 "// tail marker line CHANGED content here"),          // parser-style: no trailing \n
+            }, "x.cs", src, fullPath: tmpPath);
+
+            Assert.NotNull(resolved);
+            Assert.Equal(PatchConfidence.Fuzzy, resolved!.Confidence);
+
+            var applied = PatchEngine.ApplyPatch(resolved, TempHelpers.TmpBackupDir());
+            backupPath = applied.BackupPath;
+            Assert.True(applied.Success, applied.Error);
+
+            Assert.Contains("// tail marker line CHANGED content here", applied.UpdatedContent);
+            Assert.True(applied.UpdatedContent.EndsWith("\n"),
+                "the file's terminal newline must survive a fuzzy patch to its last line");
+            // Exactly one — the span's newline must be restored, not doubled.
+            Assert.False(applied.UpdatedContent.EndsWith("\n\n"),
+                "the terminal newline must not be duplicated");
+        }
+        finally { TempHelpers.Cleanup(tmpPath, backupPath); }
+    }
+
+    // The converse: a file with NO trailing newline must not gain one. This is the case
+    // the EOF proxy got right by accident, and it must keep working under the new predicate.
+    [Fact]
+    public void FuzzyReplace_OnLastLineOfUnterminatedFile_DoesNotAddTrailingNewline()
+    {
+        string src =
+            "namespace DevMind\n" +
+            "{\n" +
+            "    class A { }\n" +
+            "}\n" +
+            "// tail marker line with distinctive content here"; // no trailing newline
+
+        string tmpPath = TempHelpers.TmpFile();
+        string? backupPath = null;
+        try
+        {
+            var (resolved, _, _) = Run(new[]
+            {
+                ("// tail marker line with distinctiv content here",
+                 "// tail marker line CHANGED content here"),
+            }, "x.cs", src, fullPath: tmpPath);
+
+            Assert.NotNull(resolved);
+            Assert.Equal(PatchConfidence.Fuzzy, resolved!.Confidence);
+
+            var applied = PatchEngine.ApplyPatch(resolved, TempHelpers.TmpBackupDir());
+            backupPath = applied.BackupPath;
+            Assert.True(applied.Success, applied.Error);
+
+            Assert.EndsWith("// tail marker line CHANGED content here", applied.UpdatedContent);
+            Assert.False(applied.UpdatedContent.EndsWith("\n"),
+                "a file without a terminal newline must not gain one");
+        }
+        finally { TempHelpers.Cleanup(tmpPath, backupPath); }
+    }
+
+    // Same boundary in a CRLF file: the span ends "\r\n" and the restored newline must be
+    // "\r\n" too, not a bare "\n" that would leave a mixed line ending at EOF.
+    [Fact]
+    public void FuzzyReplace_OnLastLineOfCrlfFile_KeepsCrlfTerminator()
+    {
+        string src =
+            "namespace DevMind\r\n" +
+            "{\r\n" +
+            "    class A { }\r\n" +
+            "}\r\n" +
+            "// tail marker line with distinctive content here\r\n";
+
+        string tmpPath = TempHelpers.TmpFile();
+        string? backupPath = null;
+        try
+        {
+            var (resolved, _, _) = Run(new[]
+            {
+                ("// tail marker line with distinctiv content here",
+                 "// tail marker line CHANGED content here"),
+            }, "x.cs", src, fullPath: tmpPath);
+
+            Assert.NotNull(resolved);
+            Assert.Equal(PatchConfidence.Fuzzy, resolved!.Confidence);
+
+            var applied = PatchEngine.ApplyPatch(resolved, TempHelpers.TmpBackupDir());
+            backupPath = applied.BackupPath;
+            Assert.True(applied.Success, applied.Error);
+
+            Assert.EndsWith("// tail marker line CHANGED content here\r\n", applied.UpdatedContent);
+            Assert.DoesNotContain("here\r\n\r\n", applied.UpdatedContent); // not doubled
+        }
+        finally { TempHelpers.Cleanup(tmpPath, backupPath); }
+    }
+
     // ── Requirement 2: structured formats never fuzzy-match ───────────────────
 
     // A .csproj with a near-but-inexact FIND (typo "FrameworK"). Without the guard this

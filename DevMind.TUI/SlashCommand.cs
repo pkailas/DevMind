@@ -156,8 +156,11 @@ namespace DevMind
 
         // -- Context window size (/prompt) --------------------------------------
 
-        /// <summary>Current context window size in tokens (server-reported or fallback
-        /// default). 0 when not yet determined (first turn before detection completes).</summary>
+        /// <summary>Current RAW context window in tokens — <c>LlmClient.EffectiveContextWindow</c>:
+        /// the server-reported n_ctx once detection has run, else the local fallback. The
+        /// system-prompt size warning uses the same accessor, so /prompt and the warning always
+        /// report the same percentage for the same prompt. 0 only if a non-positive manual
+        /// context size was configured; the handler falls back to "window not yet determined".</summary>
         public int ContextWindowSize { get; set; }
     }
 

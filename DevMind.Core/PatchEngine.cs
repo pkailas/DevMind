@@ -614,20 +614,27 @@ namespace DevMind
 
                     // The parser strips the trailing newline off the REPLACE text, but the
                     // fuzzy span is line-aligned and includes the last matched line's
-                    // newline. So an N-line replacement for an N-line span that is NOT at
-                    // end-of-file would otherwise drop that final newline and glue the last
-                    // replaced line onto the one below it (the "two declarations merged onto
-                    // one line" damage). Restore the boundary: the replacement ends with a
-                    // newline exactly when the span's last line is not the file's last line.
+                    // newline (FindFuzzyMatch builds spans as end = nl + 1). So an N-line
+                    // replacement for an N-line span would otherwise drop that final newline
+                    // and glue the last replaced line onto the one below it (the "two
+                    // declarations merged onto one line" damage).
+                    //
+                    // The predicate is what the SPAN ends with, NOT whether the span reaches
+                    // EOF. Those differ for the common case of a newline-terminated file: a
+                    // match on its last line has origEnd == fileContent.Length while the span
+                    // still owns a trailing newline, so testing for EOF drops the file's
+                    // terminal newline instead of preserving it. Replace exactly what the
+                    // span consumed and the boundary survives at both ends of the file.
                     if (fuzzyFinalReplace.Length > 0)
                     {
-                        bool spanEndsAtEof = fuzzy.Value.origEnd >= fileContent.Length;
+                        bool spanEndsNewline = fuzzy.Value.origEnd > 0
+                            && fileContent[fuzzy.Value.origEnd - 1] == '\n';
                         bool replEndsNewline = fileUsesCrlf
                             ? fuzzyFinalReplace.EndsWith("\r\n", StringComparison.Ordinal)
                             : fuzzyFinalReplace.EndsWith("\n", StringComparison.Ordinal);
-                        if (!spanEndsAtEof && !replEndsNewline)
+                        if (spanEndsNewline && !replEndsNewline)
                             fuzzyFinalReplace += fileUsesCrlf ? "\r\n" : "\n";
-                        else if (spanEndsAtEof && replEndsNewline)
+                        else if (!spanEndsNewline && replEndsNewline)
                             fuzzyFinalReplace = fileUsesCrlf
                                 ? fuzzyFinalReplace.Substring(0, fuzzyFinalReplace.Length - 2)
                                 : fuzzyFinalReplace.Substring(0, fuzzyFinalReplace.Length - 1);

@@ -205,6 +205,95 @@ namespace DevMind.Core.Tests
                 if (spillPath != null && File.Exists(spillPath)) File.Delete(spillPath);
             }
         }
+
+        // ── Threshold clamping ────────────────────────────────────────────────
+        //
+        // nearlineIngestThresholdChars is user-configurable from devmind.json, but the
+        // excerpt splice keeps a fixed 4,000-char head and 2,000-char tail. A threshold
+        // below that sum cannot produce a shorter excerpt, and before the clamp it did
+        // real damage: under 4,000 the head slice ran off the end of the string and threw
+        // ArgumentOutOfRangeException; between 4,000 and 6,000 the slices overlapped and
+        // the omitted-char count went negative. Lowering a cap is a request for MORE
+        // capping, so the value is clamped up to the floor rather than rejected.
+
+        [Fact]
+        public void ThresholdBelowExcerptHead_DoesNotThrow()
+        {
+            // 500 < the 4,000-char head: a 1,000-char result is over the configured
+            // threshold but shorter than the head slice. This threw before the clamp.
+            var client = new LlmClient(new FakeLlmOptions { NearlineIngestThresholdChars = 500 });
+            string mid = new string('a', 1_000);
+
+            client.AddToolResultMessage("call_clamp_1", mid);
+
+            // Clamped to 6,000, so 1,000 chars is now under the cap: stored verbatim.
+            Assert.Equal(mid, client.LastToolResultContent);
+            Assert.Equal(0, client.NearlineCache.Count);
+        }
+
+        [Fact]
+        public void ThresholdBetweenHeadAndHeadPlusTail_DoesNotProduceNegativeOmittedCount()
+        {
+            // 4,500 clears the head but not head+tail. A 5,000-char result previously
+            // spliced head[0..4000] + tail[3000..5000] — overlapping, longer than the
+            // original, and labelled "-1,000 chars omitted".
+            var client = new LlmClient(new FakeLlmOptions { NearlineIngestThresholdChars = 4_500 });
+            string mid = new string('b', 5_000);
+
+            client.AddToolResultMessage("call_clamp_2", mid);
+
+            string stored = client.LastToolResultContent;
+            Assert.Equal(mid, stored);                      // clamped to 6,000 — under the cap
+            Assert.DoesNotContain("chars omitted", stored); // no excerpt marker at all
+            Assert.True(stored.Length <= mid.Length,
+                $"excerpt ({stored.Length}) must never exceed the original ({mid.Length})");
+        }
+
+        [Fact]
+        public void ClampedThreshold_StillCapsAboveTheFloor()
+        {
+            // The clamp must not disable capping — a result over the 6,000 floor is still
+            // excerpted, with a positive omitted count.
+            var client = new LlmClient(new FakeLlmOptions { NearlineIngestThresholdChars = 100 });
+            string big = new string('c', 20_000);
+
+            client.AddToolResultMessage("call_clamp_3", big);
+
+            string stored = client.LastToolResultContent;
+            Assert.True(stored.Length < big.Length);                   // capped
+            Assert.StartsWith(big.Substring(0, 4_000), stored);        // head kept
+            Assert.EndsWith(big.Substring(big.Length - 2_000), stored); // tail kept
+            Assert.Contains("14,000 chars omitted", stored);           // 20,000 - 6,000, positive
+        }
+
+        [Fact]
+        public void ThresholdExactlyAtFloor_CapsWithZeroOmittedCount()
+        {
+            // The boundary the clamp lands on: 6,001 chars against a 6,000 threshold is
+            // over the cap by one, and head+tail account for all but that one char.
+            var client = new LlmClient(new FakeLlmOptions { NearlineIngestThresholdChars = 6_000 });
+            string big = new string('d', 6_001);
+
+            client.AddToolResultMessage("call_clamp_4", big);
+
+            string stored = client.LastToolResultContent;
+            Assert.Contains("1 chars omitted", stored); // positive, not negative or zero
+            Assert.StartsWith(big.Substring(0, 4_000), stored);
+            Assert.EndsWith(big.Substring(big.Length - 2_000), stored);
+        }
+
+        [Fact]
+        public void NonPositiveThreshold_FallsBackToDefaultNotTheFloor()
+        {
+            // Non-positive means "unset" — it must reach the 8,000 default, not the
+            // 6,000 clamp floor. A 7,000-char result distinguishes the two.
+            var client = new LlmClient(new FakeLlmOptions { NearlineIngestThresholdChars = 0 });
+            string mid = new string('e', 7_000);
+
+            client.AddToolResultMessage("call_clamp_5", mid);
+
+            Assert.Equal(mid, client.LastToolResultContent); // under 8,000 — not capped
+        }
     }
 
     public class ContextStrategyOverrideTests
