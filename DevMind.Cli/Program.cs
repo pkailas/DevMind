@@ -12,6 +12,10 @@ namespace DevMind
 {
     internal static class Program
     {
+        // Turn clock: advances once per user turn at the boundary (TurnClock.BeginTurn),
+        // never per agentic-loop iteration, and not again on an ask_caller answer (same turn).
+        static TurnClock _turnClock = new();
+
         static async Task<int> Main(string[] args)
         {
             if (HasFlag(args, "--help") || HasFlag(args, "-h"))
@@ -138,6 +142,14 @@ namespace DevMind
             state.ResetForUserTurn();
             host.ResetTaskContext();
 
+            // Turn clock: advance ONCE per user turn, at this boundary — NOT per iteration of
+            // the agentic loop below (see TurnClock). Every re-trigger shares the turn, and an
+            // answer to a pending ask_caller question resumes the SAME turn rather than
+            // advancing a second time. A per-iteration increment ran the context-aging clock
+            // ~an order of magnitude faster than dropAge was tuned for.
+            if (_turnClock.BeginTurn())
+                llmClient.IncrementTurn();
+
             var thinkFilter = new ThinkFilter();
             string currentPrompt = userInput;
             bool firstIteration = true;
@@ -146,9 +158,6 @@ namespace DevMind
             {
                 if (cts.Token.IsCancellationRequested) return;
 
-                // Mirror extension: IncrementTurn() on every SendMessageAsync call,
-                // including agentic re-triggers. (IncrementTurn is on LlmClient, not ILlmClient.)
-                llmClient.IncrementTurn();
                 host.CancellationToken = cts.Token;
 
                 if (!firstIteration) thinkFilter.Reset();
@@ -246,6 +255,10 @@ namespace DevMind
                 {
                     case LoopIterationKind.Terminal:
                     case LoopIterationKind.Cancelled:
+                        // Record whether this turn stopped needing input (ask_caller). If so,
+                        // the next user send is an ANSWER resuming this turn — it must not
+                        // advance the turn clock a second time (see TurnClock).
+                        _turnClock.EndTurn(iter.TerminalReason == "needs_input");
                         return;
 
                     case LoopIterationKind.ShouldReTrigger:

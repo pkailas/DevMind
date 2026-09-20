@@ -195,6 +195,14 @@ namespace DevMind
         /// <summary>Most recent eviction snippets shown in the rolling [DROPPED] marker (bounded).</summary>
         private readonly List<string> _recentDropSnippets = new List<string>();
 
+        /// <summary>
+        /// Test seam (visible via InternalsVisibleTo) — the cumulative EvictStaleContext drop
+        /// count, so a test can assert age-based eviction did (or did not) fire. Counts ONLY
+        /// age eviction, not token-budget trimming — the exact mechanism the per-user-turn
+        /// clock governs.
+        /// </summary>
+        internal int EvictedMessageCountForTest => _droppedMessageCount;
+
         /// <summary>Maximum eviction snippets kept in the rolling [DROPPED] marker.</summary>
         private const int MaxDropSnippets = 12;
 

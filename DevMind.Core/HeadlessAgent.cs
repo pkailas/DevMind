@@ -256,6 +256,16 @@ namespace DevMind
             _host.ResetTaskContext();
             _host.ClearActions(); // result.Actions is THIS turn's journal
 
+            // Turn clock: ONE increment per user turn, at the turn boundary — NOT inside the
+            // agentic loop below. The loop re-triggers many iterations for a single turn and
+            // they SHARE this turn (the contract at LlmClient.IncrementTurn: "once per
+            // user-initiated send, not per agentic resubmit"). A per-iteration increment ran
+            // the context-aging clock ~an order of magnitude faster than dropAge was tuned
+            // for, so a long job age-evicted its own middle while the window was nearly empty.
+            // Deliberately here with the resets, OUTSIDE the try below (BeginSteerTurn is the
+            // first statement INSIDE it) — a once-per-call advance, not a per-iteration one.
+            _llmClient.IncrementTurn();
+
             var thinkFilter = new ThinkFilter();
             string currentPrompt = prompt;
             bool firstIteration = true;
@@ -302,7 +312,6 @@ namespace DevMind
                         break;
                     }
 
-                    _llmClient.IncrementTurn();
                     _host.CancellationToken = runCts.Token;
 
                     if (!firstIteration) thinkFilter.Reset();
@@ -645,6 +654,20 @@ namespace DevMind
         /// a live model. Same source as result.Actions (GetActions at turn end).
         /// </summary>
         internal IReadOnlyList<HostAction> JournalForTest => _host.GetActions();
+
+        /// <summary>
+        /// Test seam (visible to DevMind.Core.Tests via InternalsVisibleTo) — the session's
+        /// turn-clock value, so a test can pin the increment to once-per-user-turn rather than
+        /// once-per-agentic-iteration.
+        /// </summary>
+        internal int CurrentTurnForTest => _llmClient.CurrentTurn;
+
+        /// <summary>
+        /// Test seam (visible to DevMind.Core.Tests via InternalsVisibleTo) — the cumulative
+        /// age-eviction drop count, so a test can assert a continuation did not age-evict a
+        /// prior job's still-recent messages (the 37-dropped-at-3%-context regression).
+        /// </summary>
+        internal int EvictedMessageCountForTest => _llmClient.EvictedMessageCountForTest;
 
         /// <summary>Adjusts the per-turn iteration cap for a continuation.</summary>
         public void SetMaxDepth(int maxDepth) => _options.AgenticLoopMaxDepth = maxDepth;
