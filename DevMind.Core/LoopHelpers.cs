@@ -179,12 +179,28 @@ namespace DevMind
                 case "create_file":
                     if (result.FilesCreated != null && result.FilesCreated.Count > 0)
                         return $"[File created: {string.Join(", ", result.FilesCreated)}]";
-                    return "[File created]";
+                    // Nothing was written — the host returned null (path outside the
+                    // allowed write roots, write guard, pending merge conflict) or threw.
+                    // MUST be reported as a failure: "[File created]" made an agent
+                    // believe the file existed and retry against a file that was never
+                    // written. (Hosts return null only on refusal — there is no
+                    // "succeeded but empty" case, so this branch is pure failure.)
+                    return BuildWriteFailure(
+                        "create_file",
+                        GetToolPathArg(tc, "filename"),
+                        result,
+                        "no file was created",
+                        "The file does NOT exist — do not assume it was written.");
 
                 case "append_file":
                     if (result.FilesAppended != null && result.FilesAppended.Count > 0)
                         return $"[Content appended to {string.Join(", ", result.FilesAppended)}]";
-                    return "[Content appended]";
+                    return BuildWriteFailure(
+                        "append_file",
+                        GetToolPathArg(tc, "filename"),
+                        result,
+                        "no content was appended",
+                        "The file was NOT modified — do not assume the content was added.");
 
                 case "run_shell":
                 case "run_build":
@@ -204,12 +220,22 @@ namespace DevMind
                 case "delete_file":
                     if (result.FilesDeleted != null && result.FilesDeleted.Count > 0)
                         return $"[Deleted: {string.Join(", ", result.FilesDeleted)}]";
-                    return "[File deleted]";
+                    return BuildWriteFailure(
+                        "delete_file",
+                        GetToolPathArg(tc, "filename"),
+                        result,
+                        "no file was deleted",
+                        "The file still exists (or was not found) — do not assume it was deleted.");
 
                 case "rename_file":
                     if (result.FilesRenamed != null && result.FilesRenamed.Count > 0)
                         return $"[Renamed: {string.Join(", ", result.FilesRenamed)}]";
-                    return "[File renamed]";
+                    return BuildWriteFailure(
+                        "rename_file",
+                        GetToolPathArg(tc, "new_filename"),
+                        result,
+                        "no file was renamed",
+                        "The file was NOT renamed — do not assume the rename happened.");
 
                 case "scratchpad":
                     return "[Scratchpad updated]";
@@ -334,6 +360,33 @@ namespace DevMind
                     return "[Executed]";
             }
         }
+
+        /// <summary>
+        /// Builds the tool_result for a write operation (create_file / append_file /
+        /// delete_file / rename_file) that the host did NOT perform: an empty
+        /// success list means the side effect never happened (path outside the
+        /// allowed write roots, a declined write guard, a pending merge conflict,
+        /// or an exception). The message is unmistakably a failure and names the
+        /// target; when <c>result.Errors</c> carries a cause it is relayed, and
+        /// when it is empty (the host's null-return refusals add nothing there)
+        /// the message states the likely refusal reasons instead.
+        /// </summary>
+        private static string BuildWriteFailure(string tool, string target, ExecutionResult result,
+            string whatHappened, string consequence)
+        {
+            string detail = result.Errors != null && result.Errors.Count > 0
+                ? string.Join("; ", result.Errors)
+                : "The write was refused — the path is likely outside the allowed write roots " +
+                  "(the working directory or the devmind output directory), or a write guard / " +
+                  "pending merge conflict blocked it. Check the [SANDBOX] / [WRITE GUARD] / " +
+                  "[MERGE CONFLICT] output.";
+            return $"[{tool.ToUpperInvariant()} FAILED: {whatHappened} for \"{target}\". {detail} {consequence}]";
+        }
+
+        private static string GetToolPathArg(ToolCallResult tc, string key)
+            => tc.Arguments?.TryGetValue(key, out string v) == true && !string.IsNullOrWhiteSpace(v)
+                ? v
+                : "(unknown path)";
 
         /// <summary>
         /// Builds the runtime tool-use section of the system prompt.
