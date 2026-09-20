@@ -326,7 +326,7 @@ namespace DevMind
         /// </summary>
         private static readonly HashSet<string> StructuredFormatExtensions = new(StringComparer.OrdinalIgnoreCase)
         {
-            ".slnx", ".sln", ".csproj", ".props", ".targets",
+            ".slnx", ".sln", ".csproj", ".vbproj", ".fsproj", ".vcxproj", ".props", ".targets",
             ".xaml", ".axaml",
             ".json", ".yml", ".yaml", ".xml", ".resx", ".config",
         };

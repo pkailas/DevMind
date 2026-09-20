@@ -1,4 +1,4 @@
-﻿// File: FuzzyPatchSafetyTests.cs  v1.0
+// File: FuzzyPatchSafetyTests.cs  v1.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Regression tests for making fuzzy patch application safe for unattended agent runs.
@@ -281,6 +281,29 @@ public sealed class FuzzyPatchSafetyTests
             ("    <TargetFrameworK>net10.0</TargetFrameworK>",
              "    <TargetFramework>net9.0</TargetFramework>"),
         }, "app.csproj", csproj);
+
+        Assert.Null(resolved);
+        Assert.Contains("Fuzzy matching is disabled", errors);
+    }
+
+    // .vbproj is the same class of structured file as .csproj: a near-but-inexact FIND
+    // (typo "FrameworK") must be refused rather than fuzzy-matched. .fsproj and .vcxproj
+    // are in the same set and share this code path; only .vbproj is exercised here.
+    [Fact]
+    public void StructuredFormat_Vbproj_NearButInexactFind_IsRefused()
+    {
+        string vbproj =
+            "<Project Sdk=\"Microsoft.NET.Sdk\">\n" +
+            "  <PropertyGroup>\n" +
+            "    <TargetFramework>net10.0</TargetFramework>\n" +
+            "  </PropertyGroup>\n" +
+            "</Project>\n";
+
+        var (resolved, errors, _) = Run(new[]
+        {
+            ("    <TargetFrameworK>net10.0</TargetFrameworK>",
+             "    <TargetFramework>net9.0</TargetFramework>"),
+        }, "app.vbproj", vbproj);
 
         Assert.Null(resolved);
         Assert.Contains("Fuzzy matching is disabled", errors);
