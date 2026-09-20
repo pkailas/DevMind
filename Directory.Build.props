@@ -20,6 +20,19 @@
     <GitShortHash></GitShortHash>
   </PropertyGroup>
 
+  <!-- Warnings are errors for every live project in the solution (this makes
+       "build to 0 errors and 0 warnings" a compiler-enforced rule, not an
+       honour system). Same _archive exclusion as SetGitVersion above: MSBuild
+       walks up the tree, so building an _archive project directly would
+       otherwise inherit the flag with no opt-out. NuGet-audit findings
+       (NU1901–NU1904) stay warnings: an advisory published against an already
+       shipped dependency would otherwise red-line the solution with no code
+       change of ours to fix, and cannot be reverted locally. -->
+  <PropertyGroup Condition="!$(MSBuildProjectDirectory.Contains('_archive'))">
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <WarningsNotAsErrors>NU1901;NU1902;NU1903;NU1904</WarningsNotAsErrors>
+  </PropertyGroup>
+
   <Target Name="SetGitVersion"
           BeforeTargets="GetAssemblyVersion;GenerateAssemblyInfo;CoreCompile"
           Condition="'$(_DevMindGitVersionSet)' != 'true' and !$(MSBuildProjectDirectory.Contains('_archive'))">

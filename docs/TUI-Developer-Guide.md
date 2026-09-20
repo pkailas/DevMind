@@ -120,7 +120,7 @@ host input loop instead; their registry entries exist so `/help` lists them.
 - New UI work goes in `DevMind.TUI`; `DevMind.Cli` is the reference/fallback.
 - Do not reintroduce VSIX/WPF/.NET Framework patterns.
 - Use `LoggerMessage` for logging where applicable.
-- `TreatWarningsAsErrors` is on for C# projects.
+- `TreatWarningsAsErrors` is on for all solution projects (set in `Directory.Build.props`, which excludes `_archive` builds); NuGet-audit codes `NU1901`–`NU1904` stay warnings via `WarningsNotAsErrors` so a new dependency advisory cannot red-line the build.
 - Global TUI config uses atomic write: write to `.tmp` then
   `File.Move(..., overwrite: true)`. The overwrite flag is required — plain
   `File.Move` throws once the file exists, silently no-op'ing every save
