@@ -187,6 +187,18 @@ namespace DevMind
         private readonly object _transcriptLock = new object();
         private Action<string> _turnProgress;
 
+        // Steer mailbox (devmind_task_steer): a single pending steer, last-write-wins.
+        // Enqueued on an MCP request thread, drained on the worker thread at the top of
+        // each iteration — guarded by one lock, matching the AgentJob._tail/_tailLock pattern.
+        private readonly object _steerLock = new object();
+        private SteerMessage _pendingSteer;
+
+        private sealed class SteerMessage
+        {
+            public required string Message { get; init; }
+            public SteerMode Mode { get; init; }
+        }
+
         private void EmitToTurn(string text)
         {
             if (string.IsNullOrEmpty(text)) return;
@@ -290,6 +302,12 @@ namespace DevMind
                     long thinkChars = 0;
                     DateTime generationStartUtc = DateTime.UtcNow;
                     DateTime lastTranscriptEmitUtc = DateTime.UtcNow;
+
+                    // Fold a pending steer (devmind_task_steer) into this iteration's prompt,
+                    // before it is sent — its own delimited block, never glued into the driver's
+                    // synthetic re-trigger. An override on the last iteration is refused (Steer).
+                    // No-op when no steer is pending.
+                    DrainSteerIntoPrompt(ref currentPrompt);
 
                     await _llmClient.SendMessageAsync(
                         currentPrompt,
@@ -417,6 +435,18 @@ namespace DevMind
                 LastActivityUtc = DateTime.UtcNow;
             }
 
+            // A steer enqueued after the last iteration boundary (e.g. during the final LLM
+            // call, or one that was rejected is already recorded) that is still pending when
+            // the turn ends was never folded in — record it so the caller learns it was
+            // accepted but the turn ended first. Never silently drop a caller's message.
+            var unconsumed = TakePendingSteer();
+            if (unconsumed != null)
+            {
+                _host.RecordSteer(unconsumed.Message, unconsumed.Mode, SteerDisposition.Unconsumed,
+                    "turn ended before the next iteration boundary");
+                EmitToTurn($"[STEER] unconsumed — the turn ended before the next iteration boundary. {unconsumed.Message}\n");
+            }
+
             result.Answer = HeadlessAgent.SanitizeAnswer(lastResponse);
             result.Actions = _host.GetActions();
             result.ElapsedSeconds = Math.Round(sw.Elapsed.TotalSeconds, 1);
@@ -483,6 +513,71 @@ namespace DevMind
 
             return result;
         }
+
+        /// <summary>
+        /// Queues a steer into this session's running turn — single slot, last-write-wins
+        /// (the devmind_task_steer mailbox). The loop folds it into the prompt at the next
+        /// iteration boundary, before the next LLM request. A new steer supersedes any
+        /// un-consumed one; the superseded steer is recorded in the journal (never silently
+        /// dropped) and its mode is returned so a downgrade onto a pending override is
+        /// visible to the caller. Safe to call from the MCP request thread while the turn
+        /// runs on the worker thread.
+        /// </summary>
+        public (bool superseded, SteerMode? supersededMode) EnqueueSteer(string message, SteerMode mode)
+        {
+            lock (_steerLock)
+            {
+                bool superseded = _pendingSteer != null;
+                SteerMode? supersededMode = superseded ? (SteerMode?)_pendingSteer!.Mode : null;
+                if (superseded)
+                {
+                    _host.RecordSteer(_pendingSteer!.Message, _pendingSteer.Mode, SteerDisposition.Unconsumed,
+                        "superseded by a newer steer before it was consumed");
+                    EmitToTurn($"[STEER] superseded (not consumed): {_pendingSteer.Message}\n");
+                }
+                _pendingSteer = new SteerMessage { Message = message, Mode = mode };
+                return (superseded, supersededMode);
+            }
+        }
+
+        // Atomic get-and-clear of the pending steer. Returns null when none is pending.
+        private SteerMessage TakePendingSteer()
+        {
+            lock (_steerLock)
+            {
+                SteerMessage s = _pendingSteer;
+                _pendingSteer = null;
+                return s;
+            }
+        }
+
+        // Fold the pending steer (if any) into the prompt about to be sent this iteration.
+        // The decision lives in Steer (pure/testable); this method only wires it to the
+        // state, the audit journal, and the transcript. An override on the last iteration
+        // is refused (no iterations left to act on it); everything else is folded.
+        private void DrainSteerIntoPrompt(ref string currentPrompt)
+        {
+            var pending = TakePendingSteer();
+            if (pending == null) return;
+
+            bool last = Steer.IsLastIteration(_options.AgenticLoopMaxDepth, _state.AgenticDepth);
+            (currentPrompt, SteerDisposition disp) = Steer.Apply(currentPrompt, pending.Message, pending.Mode, last);
+
+            _host.RecordSteer(pending.Message, pending.Mode, disp,
+                disp == SteerDisposition.Rejected ? "last_iteration" : null);
+
+            string modeTag = pending.Mode == SteerMode.Override ? "override" : "suggest";
+            EmitToTurn(disp == SteerDisposition.Rejected
+                ? $"[STEER] {modeTag} REJECTED — last iteration, no iterations left to change course. {pending.Message}\n"
+                : $"[STEER] {modeTag} folded into the prompt at this iteration boundary. {pending.Message}\n");
+        }
+
+        /// <summary>
+        /// Test seam (visible to DevMind.Core.Tests via InternalsVisibleTo) — exposes the
+        /// action journal so tests can assert what the loop/steer recorded without driving
+        /// a live model. Same source as result.Actions (GetActions at turn end).
+        /// </summary>
+        internal IReadOnlyList<HostAction> JournalForTest => _host.GetActions();
 
         /// <summary>Adjusts the per-turn iteration cap for a continuation.</summary>
         public void SetMaxDepth(int maxDepth) => _options.AgenticLoopMaxDepth = maxDepth;

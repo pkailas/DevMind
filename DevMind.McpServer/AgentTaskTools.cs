@@ -348,7 +348,83 @@ namespace DevMind.McpServer
             }, JsonOpts));
         }
 
+        [McpServerTool(Name = "devmind_task_steer")]
+        [Description(
+            "Send a message into a DevMind task that is CURRENTLY RUNNING. The agent folds it into " +
+            "its prompt at the next iteration boundary and acts on it without waiting for the job to " +
+            "finish — use it to redirect an in-flight task. mode: \"suggest\" (default) reads as an " +
+            "addition that does not interrupt the current approach; \"override\" reads as a " +
+            "stop-and-change-course instruction. An override is refused on the task's last iteration " +
+            "(no iterations left to act on it); the refusal is recorded in the action journal. For a " +
+            "FINISHED or needs_input job use devmind_task_continue (it resumes the conversation); " +
+            "steer only reaches a job that is still running. Returns whether this steer superseded an " +
+            "earlier, still-un-consumed steer and that steer's mode.")]
+        public Task<string> TaskSteer(
+            [Description("The job_id of the RUNNING task to steer.")] string job_id,
+            [Description("The instruction to fold into the running task at its next iteration boundary.")] string message,
+            [Description("How to treat it: \"suggest\" (default — an addition that does not interrupt the current approach) or \"override\" (stop and change course). Not inferred from the message text.")] string? mode = null,
+            CancellationToken cancellationToken = default)
+        {
+            if (string.IsNullOrWhiteSpace(message))
+                return Task.FromResult(Err("message is required."));
+
+            SteerMode? steerMode = ParseSteerMode(mode);
+            if (steerMode is null)
+                return Task.FromResult(Err($"mode must be \"suggest\" or \"override\" (got \"{mode ?? ""}\")."));
+
+            var job = _jobs.Get(job_id);
+            if (job == null)
+                return Task.FromResult(Err(
+                    $"Unknown job_id: {job_id} — not in this server process. For a finished job use " +
+                    "devmind_task_result, or resume it with devmind_task_continue."));
+
+            if (job.State != AgentJobState.Running)
+            {
+                string state = job.State.ToString().ToLowerInvariant();
+                string rightTool = job.State == AgentJobState.Queued
+                    ? "devmind_task_status (it has not started yet — steering works once it is running)"
+                    : "devmind_task_continue (it is finished/failed/cancelled — resume it; it keeps full context)";
+                return Task.FromResult(Err(
+                    $"Job {job_id} is {state}, not running — devmind_task_steer only reaches a running job. Use {rightTool}."));
+            }
+
+            // Running, but the session is created by the worker just before the turn starts — a
+            // Running job with no session yet is in the startup window, not yet steerable.
+            if (job.Session is null)
+                return Task.FromResult(Err(
+                    $"Job {job_id} is starting up and not yet ready to accept a steer. Poll " +
+                    "devmind_task_status and retry once it is fully running."));
+
+            var (superseded, supersededMode) = job.Session.EnqueueSteer(message, steerMode.Value);
+
+            return Task.FromResult(JsonSerializer.Serialize(new
+            {
+                job_id,
+                accepted = true,
+                mode = steerMode.Value.ToString().ToLowerInvariant(),
+                superseded,
+                superseded_mode = supersededMode?.ToString().ToLowerInvariant(),
+                note = superseded
+                    ? "Replaced an earlier, still-un-consumed steer (the earlier one was not yet folded in; its disposition is recorded in the action journal)."
+                    : "Queued; it will be folded into the task at the next iteration boundary. Its disposition (steer / steer_rejected / steer_unconsumed) is recorded in the action journal — check devmind_task_result if the job ends before the next boundary.",
+            }, JsonOpts));
+        }
+
         // ── Helpers ───────────────────────────────────────────────────────────────
+
+        /// <summary>Parses the explicit steer mode; null when the value is not suggest/override.
+        /// Blank/omitted defaults to suggest.</summary>
+        private static SteerMode? ParseSteerMode(string? mode)
+        {
+            if (string.IsNullOrWhiteSpace(mode))
+                return SteerMode.Suggest;
+            return mode.Trim().ToLowerInvariant() switch
+            {
+                "suggest"  => SteerMode.Suggest,
+                "override" => SteerMode.Override,
+                _ => null,
+            };
+        }
 
         /// <summary>Null when the model server answers; otherwise a user-presentable error.</summary>
         private async Task<string?> ProbeModelServerAsync(CancellationToken ct)

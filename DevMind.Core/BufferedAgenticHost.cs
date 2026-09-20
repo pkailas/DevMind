@@ -299,6 +299,31 @@ namespace DevMind
                 _actions.Add(new HostAction { Kind = kind, Detail = detail, Success = success });
         }
 
+        /// <summary>
+        /// Public audit seam for the steer feature (RecordAction is private and only
+        /// invoked from within the host's own mutating operations, so the loop cannot log
+        /// through it). Records a steer's disposition in the SAME action journal as the
+        /// host's mutating operations, using distinct kinds so a result that changed
+        /// because of an injection at iteration N is explainable from the journal alone:
+        /// "steer" (consumed), "steer_rejected", or "steer_unconsumed".
+        /// </summary>
+        public void RecordSteer(string message, SteerMode mode, SteerDisposition disposition, string reason = null)
+        {
+            string kind = disposition switch
+            {
+                SteerDisposition.Consumed   => "steer",
+                SteerDisposition.Rejected   => "steer_rejected",
+                SteerDisposition.Unconsumed => "steer_unconsumed",
+                _ => "steer",
+            };
+            string modeTag = mode == SteerMode.Override ? "override" : "suggest";
+            string detail = reason is null
+                ? $"[{modeTag}] {message}"
+                : $"[{modeTag}] {message} — {reason}";
+            bool success = disposition == SteerDisposition.Consumed;
+            RecordAction(kind, detail, success);
+        }
+
         // ── Context lifecycle helpers called by the REPL ──────────────────────────
 
         /// <summary>Called at the start of each user-initiated turn to reset the write guard set.</summary>
