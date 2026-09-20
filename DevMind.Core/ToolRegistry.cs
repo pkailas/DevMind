@@ -146,7 +146,7 @@ namespace DevMind
                 "Use run_tests after making changes to verify correctness. " +
                 "Default timeout is 120s (overridable via timeout_seconds or DEVMIND_SHELL_TIMEOUT env var). " +
                 "If tests fail, fix the code with patch_file and run_tests again.",
-                Optional("project", "string", "Project file name (e.g., 'MyProject.csproj'). Omit to run all tests."),
+                Optional("project", "string", "Project file name (e.g., 'MyProject.csproj') or its path (relative to the working directory or absolute). If omitted, the FIRST top-level .csproj file in the working directory is used — omitting does NOT run the whole suite, and the call fails if the working directory has no top-level .csproj files. To run a specific project, pass its name or path."),
                 Optional("filter", "string", "Test filter expression (e.g., 'FullyQualifiedName~SomeTest' or 'ClassName.MethodName')"),
                 Optional("timeout_seconds", "integer", "Override the default timeout in seconds. Use for large test suites. Omit or pass 0/negative to use the default (from DEVMIND_SHELL_TIMEOUT env var or 120s fallback).")));
 
