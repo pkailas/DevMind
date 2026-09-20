@@ -1842,7 +1842,7 @@ namespace DevMind
                 return diagLog.Length > 0 ? diagLog.ToString() : null;
             }
 
-            diagLog.AppendLine($"[CONTEXT] Eviction: {dropped} message(s) dropped");
+            diagLog.AppendLine($"[CONTEXT] Staleness compaction: {dropped} message(s) older than {dropAge} turn(s) dropped (tool messages: >{toolDropAge})");
 
             if (showDebug)
             {
