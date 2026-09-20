@@ -190,28 +190,40 @@ namespace DevMind.Core.Tests
         }
 
         // ── Single-slot mailbox: supersession is reported, the old steer is recorded ──
+        // EnqueueSteer now requires a turn in progress (the enqueue-after-turn-end fix), so
+        // this drives a real turn through the gated server and enqueues while it is held.
+        // What it proves is unchanged: last-write-wins, the superseded steer is recorded,
+        // and its mode is reported so a downgrade onto a pending override is visible.
 
         [Fact]
-        public void EnqueueSteer_SingleSlot_ReplacesAndRecordsTheSupersededSteer()
+        public async Task EnqueueSteer_SingleSlot_ReplacesAndRecordsTheSupersededSteer()
         {
-            using var server = new FakeSseServer();
+            using var server = new GatedSseServer();
+            server.SseQueue.Add(FakeSseServer.BuildToolCallSse("task_done", "{\"summary\":\"done\"}"));
+            var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            server.GateBeforeFirstResponse = gate.Task;
+
             string? prior = Environment.GetEnvironmentVariable("DEVMIND_SERVER_TYPE");
             Environment.SetEnvironmentVariable("DEVMIND_SERVER_TYPE", "llama");
             try
             {
                 using var session = NewSession(server.BaseUrl);
+                var turn = session.RunTurnAsync("Work.");
+                await WaitForAsync(() => server.RequestBodies.Count >= 1);   // turn in progress
 
-                // First steer: nothing pending to supersede.
-                var (sup1, mode1) = session.EnqueueSteer("first steer", SteerMode.Suggest);
-                Assert.False(sup1);
-                Assert.Null(mode1);
+                // First steer: nothing pending to supersede. (Turn in progress → accepted.)
+                SteerEnqueueResult r1 = session.EnqueueSteer("first steer", SteerMode.Suggest);
+                Assert.True(r1.Accepted);
+                Assert.False(r1.Superseded);
+                Assert.Null(r1.SupersededMode);
                 // Pending — not yet folded, so not yet in the journal either.
                 Assert.Empty(session.JournalForTest);
 
                 // Second steer (override): replaces the still-un-consumed suggest.
-                var (sup2, mode2) = session.EnqueueSteer("second steer", SteerMode.Override);
-                Assert.True(sup2);
-                Assert.Equal(SteerMode.Suggest, mode2);            // mode of the steer it replaced
+                SteerEnqueueResult r2 = session.EnqueueSteer("second steer", SteerMode.Override);
+                Assert.True(r2.Accepted);
+                Assert.True(r2.Superseded);
+                Assert.Equal(SteerMode.Suggest, r2.SupersededMode);        // mode of the steer it replaced
                 var afterSecond = session.JournalForTest;
                 HostAction superseded = Assert.Single(afterSecond, a => a.Kind == "steer_unconsumed");
                 Assert.Contains("first steer", superseded.Detail); // the OLD steer, …
@@ -219,9 +231,83 @@ namespace DevMind.Core.Tests
                 Assert.DoesNotContain(afterSecond, a => a.Detail.Contains("second steer")); // … not the new one
 
                 // Third steer (suggest) onto a pending OVERRIDE — the downgrade is visible.
-                var (sup3, mode3) = session.EnqueueSteer("third steer", SteerMode.Suggest);
-                Assert.True(sup3);
-                Assert.Equal(SteerMode.Override, mode3);           // it replaced a pending override
+                SteerEnqueueResult r3 = session.EnqueueSteer("third steer", SteerMode.Suggest);
+                Assert.True(r3.Accepted);
+                Assert.True(r3.Superseded);
+                Assert.Equal(SteerMode.Override, r3.SupersededMode);      // it replaced a pending override
+
+                gate.SetResult();                                          // let the turn end
+                var result = await turn;
+                Assert.Null(result.Error);
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("DEVMIND_SERVER_TYPE", prior);
+            }
+        }
+
+        // ── The refusal: no turn in progress → refused, nothing queued or recorded ──
+
+        [Fact]
+        public void EnqueueSteer_WithNoTurnInProgress_IsRefused_NotAccepted()
+        {
+            using var server = new FakeSseServer();
+            string? prior = Environment.GetEnvironmentVariable("DEVMIND_SERVER_TYPE");
+            Environment.SetEnvironmentVariable("DEVMIND_SERVER_TYPE", "llama");
+            try
+            {
+                using var session = NewSession(server.BaseUrl);
+                // No turn has been started — the mailbox must not accept a steer into a
+                // session nothing will ever drain.
+                SteerEnqueueResult r = session.EnqueueSteer("too late", SteerMode.Suggest);
+                Assert.False(r.Accepted);
+                Assert.Empty(session.JournalForTest);      // nothing was queued or recorded
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("DEVMIND_SERVER_TYPE", prior);
+            }
+        }
+
+        // ── Atomicity: a steer cannot slip between the final drain and the flag clear ──
+        // A steer enqueued BEFORE the turn ends (flag still true) is captured by the atomic
+        // close and recorded as unconsumed; one enqueued AFTER (flag already cleared) is
+        // refused. Taking and clearing in one lock acquisition is what makes "neither"
+        // impossible — there is no moment where a steer is accepted but unaccounted for.
+
+        [Fact]
+        public async Task EnqueueSteer_AtomicClose_CapturesBeforeEnd_AndRefusesAfter()
+        {
+            using var server = new GatedSseServer();
+            server.SseQueue.Add(FakeSseServer.BuildToolCallSse("task_done", "{\"summary\":\"done\"}"));
+            var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            server.GateBeforeFirstResponse = gate.Task;
+
+            string? prior = Environment.GetEnvironmentVariable("DEVMIND_SERVER_TYPE");
+            Environment.SetEnvironmentVariable("DEVMIND_SERVER_TYPE", "llama");
+            try
+            {
+                using var session = NewSession(server.BaseUrl);
+                var turn = session.RunTurnAsync("Work.");
+                await WaitForAsync(() => server.RequestBodies.Count >= 1);   // turn in progress
+
+                // Enqueue BEFORE the turn ends (flag true) → accepted into the mailbox.
+                SteerEnqueueResult before = session.EnqueueSteer("before the close", SteerMode.Suggest);
+                Assert.True(before.Accepted);
+
+                // End the turn — the atomic close takes-and-clears in one lock acquisition.
+                gate.SetResult();
+                var result = await turn;
+                Assert.Null(result.Error);
+
+                // The "before" steer was accepted but never folded (turn ended first) → unconsumed.
+                HostAction captured = Assert.Single(result.Actions, a => a.Detail.Contains("before the close"));
+                Assert.Equal("steer_unconsumed", captured.Kind);
+
+                // Enqueue AFTER the turn ends (flag cleared) → REFUSED, and it is not recorded.
+                SteerEnqueueResult after = session.EnqueueSteer("after the close", SteerMode.Suggest);
+                Assert.False(after.Accepted);
+                Assert.DoesNotContain(session.JournalForTest, a => a.Detail.Contains("after the close"));
             }
             finally
             {
@@ -234,25 +320,38 @@ namespace DevMind.Core.Tests
         [Fact]
         public async Task SteerFoldsIntoPrompt_AtNextBoundary_AndIsRecordedInTheJournal()
         {
-            using var server = new FakeSseServer();
+            using var server = new GatedSseServer();
+            // Two iterations: create_file (re-triggers) then task_done (terminal). The steer
+            // is enqueued while iteration 1 is held, so a turn IS in progress, and it is
+            // drained at the NEXT boundary — iteration 2's prompt, not the driver's re-trigger.
+            server.SseQueue.Add(FakeSseServer.BuildToolCallSse("create_file",
+                "{\"filename\":\"a.txt\",\"content\":\"x\"}"));
             server.SseQueue.Add(FakeSseServer.BuildToolCallSse("task_done", "{\"summary\":\"done\"}"));
+            var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            server.GateBeforeFirstResponse = gate.Task;
 
             string? prior = Environment.GetEnvironmentVariable("DEVMIND_SERVER_TYPE");
             Environment.SetEnvironmentVariable("DEVMIND_SERVER_TYPE", "llama");
             try
             {
                 using var session = NewSession(server.BaseUrl);
-                // Enqueued before the turn: drained at the FIRST iteration boundary.
-                session.EnqueueSteer("also mention the rollback plan", SteerMode.Suggest);
-
-                var result = await session.RunTurnAsync("Fix the login bug.");
+                var turn = session.RunTurnAsync("Fix the login bug.");
+                await WaitForAsync(() => server.RequestBodies.Count >= 1);   // iteration 1 held
+                // A steer can only be accepted while a turn is running — enqueue it now.
+                SteerEnqueueResult r = session.EnqueueSteer("also mention the rollback plan", SteerMode.Suggest);
+                Assert.True(r.Accepted);
+                gate.SetResult();                                            // iter 1 → re-trigger → iter 2
+                var result = await turn;
                 Assert.Null(result.Error);
-                Assert.Equal(1, result.Iterations);
+                Assert.Equal(2, result.Iterations);
 
-                // The steer reached the model as its own request block…
-                string sent = Assert.Single(server.RequestBodies);
+                // The steer reached the model at the NEXT iteration boundary (iteration 2's
+                // request) — not glued into the driver's re-trigger, and not in iteration 1.
+                Assert.Equal(2, server.RequestBodies.Count);
+                string sent = server.RequestBodies[1];
                 Assert.Contains("also mention the rollback plan", sent);
                 Assert.Contains("[CALLER STEER — suggestion]", sent);
+                Assert.DoesNotContain("also mention the rollback plan", server.RequestBodies[0]);
 
                 // …and it is in the action journal the result serves (devmind_task_result).
                 HostAction steer = Assert.Single(result.Actions, a => a.Kind == "steer");

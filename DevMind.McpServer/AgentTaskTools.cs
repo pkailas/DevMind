@@ -391,20 +391,41 @@ namespace DevMind.McpServer
             // Running, but the session is created by the worker just before the turn starts — a
             // Running job with no session yet is in the startup window, not yet steerable.
             if (job.Session is null)
-                return Task.FromResult(Err(
-                    $"Job {job_id} is starting up and not yet ready to accept a steer. Poll " +
-                    "devmind_task_status and retry once it is fully running."));
+                return Task.FromResult(JsonSerializer.Serialize(new
+                {
+                    job_id,
+                    accepted = false,
+                    mode = steerMode.Value.ToString().ToLowerInvariant(),
+                    reason = "The job is starting up and has no turn yet. Poll devmind_task_status " +
+                             "and retry once it is fully running.",
+                }, JsonOpts));
 
-            var (superseded, supersededMode) = job.Session.EnqueueSteer(message, steerMode.Value);
+            SteerEnqueueResult steerResult = job.Session.EnqueueSteer(message, steerMode.Value);
+
+            // Refused — a session exists but no turn is in progress (its turn ended between the
+            // State check above and this call, or it has not started one yet). Nothing was queued
+            // and no journal entry was written. This is the enqueue-after-turn-end window closed:
+            // accepted means a live turn will drain it, so a refusal is a real "no turn running
+            // right now," read from the actual state, not a guess from a null check.
+            if (!steerResult.Accepted)
+                return Task.FromResult(JsonSerializer.Serialize(new
+                {
+                    job_id,
+                    accepted = false,
+                    mode = steerMode.Value.ToString().ToLowerInvariant(),
+                    reason = "The job is running but not in a turn right now — its turn just ended, or it has " +
+                             "not started one. Nothing was queued and no journal entry was written. Poll " +
+                             "devmind_task_status; if it has finished, resume it with devmind_task_continue.",
+                }, JsonOpts));
 
             return Task.FromResult(JsonSerializer.Serialize(new
             {
                 job_id,
                 accepted = true,
                 mode = steerMode.Value.ToString().ToLowerInvariant(),
-                superseded,
-                superseded_mode = supersededMode?.ToString().ToLowerInvariant(),
-                note = superseded
+                superseded = steerResult.Superseded,
+                superseded_mode = steerResult.SupersededMode?.ToString().ToLowerInvariant(),
+                note = steerResult.Superseded
                     ? "Replaced an earlier, still-un-consumed steer (the earlier one was not yet folded in; its disposition is recorded in the action journal)."
                     : "Queued; it will be folded into the task at the next iteration boundary. Its disposition (steer / steer_rejected / steer_unconsumed) is recorded in the action journal — check devmind_task_result if the job ends before the next boundary.",
             }, JsonOpts));

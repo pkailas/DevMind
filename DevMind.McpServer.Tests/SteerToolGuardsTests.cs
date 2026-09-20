@@ -36,8 +36,16 @@ namespace DevMind.McpServer.Tests
         private readonly CancellationTokenSource _cts = new();
         private readonly TaskCompletionSource _gate =
             new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _firstPost =
+            new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public string BaseUrl { get; }
+
+        /// <summary>Completes when the first chat POST arrives. By then the worker has already
+        /// set the session's turn-in-progress flag (it is set at turn start, before the first
+        /// request is sent), so awaiting this is a deterministic "a turn IS running" signal —
+        /// a steer enqueued after it is guaranteed to hit the accepted path, not a startup window.</summary>
+        public Task FirstPostReceived => _firstPost.Task;
 
         public GatedHangingLlmServer()
         {
@@ -77,7 +85,10 @@ namespace DevMind.McpServer.Tests
                     string contentType;
                     if (method == "POST" && !string.IsNullOrEmpty(body))
                     {
-                        // Hold the chat POST until released, then finish the job.
+                        // A chat POST arrived — the turn is in progress. Signal that, then
+                        // hold the POST until released (so the job parks in Running with a live
+                        // turn), and finish the job once released.
+                        _firstPost.TrySetResult();
                         try { await _gate.Task; } catch { return; }
                         payload = Encoding.UTF8.GetBytes(TaskDoneSse);
                         contentType = "text/event-stream";
@@ -261,21 +272,130 @@ namespace DevMind.McpServer.Tests
 
             var job = mgr.Start("a", _dir, 5, 30, allowCommit: false, verifyBuild: false);
             await WaitForStateAsync(job, DevMind.McpServer.AgentJobState.Running);
-            // A Running job is only steerable once the worker has created its session —
-            // wait for that, otherwise the guard (correctly) reports "starting up".
-            var sw = System.Diagnostics.Stopwatch.StartNew();
-            while (job.Session == null && sw.ElapsedMilliseconds < 10000)
-                await Task.Delay(25);
-            Assert.NotNull(job.Session);
+            // A steer is only accepted while a turn is actually RUNNING (the enqueue-after-
+            // turn-end fix). The first POST arriving means the turn is in progress, so this is
+            // a deterministic accepted case — not a startup window that would now be refused.
+            await server.FirstPostReceived;
 
             var (accepted, error) = Parse(await new DevMind.McpServer.AgentTaskTools(mgr)
                 .TaskSteer(job.Id, "fold this in", "suggest"));
 
-            Assert.False(error != null);
+            Assert.Null(error);
             Assert.Equal(true, accepted);
 
             server.Release();
             await WaitForStateAsync(job, DevMind.McpServer.AgentJobState.Done);
+        }
+
+        // ── The fix: the turn has ended but the job is still Running (build verification) ──
+        // Pre-fix this window stranded a steer (accepted=true, then lost or leaked to a
+        // continuation). Now the worker holds the job in Running through build verification
+        // AFTER the turn's flag has been cleared, giving a stable "Running, no turn" state:
+        // EnqueueSteer refuses it, so TaskSteer returns accepted=false with a reason.
+
+        [Fact]
+        public async Task Steer_TurnEndedButJobStillRunning_IsRefused_WithReason()
+        {
+            using var server = new EditThenDoneLlmServer(Path.Combine(_dir, "newfile.txt"));
+            Environment.SetEnvironmentVariable("DEVMIND_ENDPOINT", server.BaseUrl);
+            using var mgr = new DevMind.McpServer.AgentJobManager();
+            // Hold the build-verification window open: the job stays Running (turn already
+            // ended, flag cleared) for as long as this delay runs.
+            mgr.BuildRunnerOverride = async (_, ct) =>
+            {
+                await Task.Delay(2500, ct);
+                return new DevMind.McpServer.BuildVerification
+                {
+                    Command = "dotnet build", ExitCode = 0, OutputTail = "Build succeeded.",
+                };
+            };
+
+            var job = mgr.Start("p", _dir, 5, 30,
+                allowCommit: false, verifyBuild: true, verifyTests: false);
+            var tools = new DevMind.McpServer.AgentTaskTools(mgr);
+
+            // Wait for the exact window: the turn has ended (Result set) but the job is still
+            // Running because build verification is holding it.
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < 15000
+                   && !(job.Result != null && job.State == DevMind.McpServer.AgentJobState.Running))
+                await Task.Delay(10);
+            Assert.True(job.Result != null && job.State == DevMind.McpServer.AgentJobState.Running,
+                "never reached the Running-but-no-turn (build verification) window");
+
+            var (accepted, error) = Parse(await tools.TaskSteer(job.Id, "change course", "suggest"));
+            Assert.Equal(false, accepted);        // REFUSED — not accepted=true (the old bug)
+            Assert.Null(error);                   // a structured refusal, not an "error"
+
+            using var doc = System.Text.Json.JsonDocument.Parse(
+                await tools.TaskSteer(job.Id, "change course", "suggest"));
+            Assert.True(doc.RootElement.TryGetProperty("reason", out var reason));
+            Assert.Contains("not in a turn", reason.GetString());
+
+            await WaitForDoneAsync(job);
+        }
+
+        // ── Outcome 2: a steer sent while job N is Running-but-finished never reaches N+1 ──
+        // The continuation reuses job N's session. Pre-fix, a steer enqueued in this window
+        // stranded in _pendingSteer and drained into the CONTINUATION's first iteration,
+        // recorded in N+1's journal. Now it is refused outright, so it is in NEITHER job's
+        // journal. This is the "attributed to a job nobody steered" regression.
+
+        [Fact]
+        public async Task Steer_SentToFinishedJob_NeverAppearsInContinuationJournal()
+        {
+            using var server = new EditThenDoneLlmServer(Path.Combine(_dir, "newfile.txt"));
+            Environment.SetEnvironmentVariable("DEVMIND_ENDPOINT", server.BaseUrl);
+            using var mgr = new DevMind.McpServer.AgentJobManager();
+            mgr.BuildRunnerOverride = async (_, ct) =>
+            {
+                await Task.Delay(2500, ct);
+                return new DevMind.McpServer.BuildVerification
+                {
+                    Command = "dotnet build", ExitCode = 0, OutputTail = "Build succeeded.",
+                };
+            };
+
+            var n = mgr.Start("n", _dir, 5, 30,
+                allowCommit: false, verifyBuild: true, verifyTests: false);
+            var tools = new DevMind.McpServer.AgentTaskTools(mgr);
+
+            // Enter the Running-but-no-turn window (turn ended, build verification holding it).
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < 15000
+                   && !(n.Result != null && n.State == DevMind.McpServer.AgentJobState.Running))
+                await Task.Delay(10);
+            Assert.True(n.Result != null && n.State == DevMind.McpServer.AgentJobState.Running,
+                "never reached the Running-but-no-turn window");
+
+            // The steer that pre-fix would have leaked. Now it is refused — nothing queued.
+            var (accepted, _) = Parse(await tools.TaskSteer(n.Id, "leaky steer", "suggest"));
+            Assert.Equal(false, accepted);
+            await WaitForDoneAsync(n);
+
+            // Continue as a NEW job (reuses n's session, conversation intact).
+            var n1 = mgr.Continue(n.Id, "continue", 5, 30, verifyBuild: false, out string contErr);
+            Assert.Null(contErr);
+            Assert.NotNull(n1);
+            await WaitForDoneAsync(n1);
+
+            // THE invariant: the steer is in NEITHER job's journal — it was refused, so it
+            // was never queued and never drained. Job N+1 (which n did not steer) is clean.
+            Assert.NotNull(n.Result);
+            Assert.NotNull(n1.Result);
+            Assert.DoesNotContain(n.Result!.Actions, a => a.Detail.Contains("leaky steer"));
+            Assert.DoesNotContain(n1.Result!.Actions, a => a.Detail.Contains("leaky steer"));
+        }
+
+        // Polls until the job leaves Queued/Running.
+        private static async Task WaitForDoneAsync(DevMind.McpServer.AgentJob job, int timeoutMs = 30000)
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < timeoutMs
+                   && job.State is DevMind.McpServer.AgentJobState.Queued
+                      or DevMind.McpServer.AgentJobState.Running)
+                await Task.Delay(20);
+            Assert.Equal(DevMind.McpServer.AgentJobState.Done, job.State);
         }
 
         // ── An unknown job_id is refused with the honest answer ──

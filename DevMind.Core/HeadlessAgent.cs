@@ -192,6 +192,11 @@ namespace DevMind
         // each iteration — guarded by one lock, matching the AgentJob._tail/_tailLock pattern.
         private readonly object _steerLock = new object();
         private SteerMessage _pendingSteer;
+        // True for the duration of a turn (set at turn start, cleared atomically with the
+        // final drain at turn end). EnqueueSteer refuses when false — this is what closes
+        // the enqueue-after-turn-end window: there is no state where a turn is over but a
+        // steer would still be accepted into a mailbox nothing will ever drain.
+        private bool _turnInProgress;
 
         private sealed class SteerMessage
         {
@@ -276,6 +281,19 @@ namespace DevMind
 
             try
             {
+                // Open the steer window (devmind_task_steer), first thing in the try so the
+                // finally's atomic close always balances it on every exit path. If a steer is
+                // somehow already pending, the previous turn's close should have taken it —
+                // record it as unconsumed (self-healing, honest: never silently drop a
+                // caller's message) and start this turn clean.
+                var staleSteer = BeginSteerTurn();
+                if (staleSteer != null)
+                {
+                    _host.RecordSteer(staleSteer.Message, staleSteer.Mode, SteerDisposition.Unconsumed,
+                        "stale pending steer at turn start — carried over from a prior turn");
+                    EmitToTurn($"[STEER] unconsumed — stale steer at turn start. {staleSteer.Message}\n");
+                }
+
                 while (true)
                 {
                     if (runCts.Token.IsCancellationRequested)
@@ -433,18 +451,24 @@ namespace DevMind
                 _currentTurnCts = null;
                 _turnProgress = null;
                 LastActivityUtc = DateTime.UtcNow;
-            }
 
-            // A steer enqueued after the last iteration boundary (e.g. during the final LLM
-            // call, or one that was rejected is already recorded) that is still pending when
-            // the turn ends was never folded in — record it so the caller learns it was
-            // accepted but the turn ended first. Never silently drop a caller's message.
-            var unconsumed = TakePendingSteer();
-            if (unconsumed != null)
-            {
-                _host.RecordSteer(unconsumed.Message, unconsumed.Mode, SteerDisposition.Unconsumed,
-                    "turn ended before the next iteration boundary");
-                EmitToTurn($"[STEER] unconsumed — the turn ended before the next iteration boundary. {unconsumed.Message}\n");
+                // Close the steer window: atomically take the final pending steer AND clear
+                // the in-progress flag (one lock acquisition — see TakePendingSteerAndEndTurn).
+                // Done in the FINALLY so the flag is cleared on EVERY exit path — a clean
+                // break, a cancellation, or an exception escaping the loop (ProcessIteration
+                // only catches OperationCanceledException). Leaving the flag set on an error
+                // path would keep EnqueueSteer accepting into a mailbox nothing will drain —
+                // the exact bug this closes. A steer still pending here was accepted but never
+                // folded (the turn ended first) — record it as unconsumed. A steer enqueued
+                // AFTER the flag clears is refused by EnqueueSteer, so no message is silently
+                // lost and none leaks into a later turn (a continuation).
+                var unconsumed = TakePendingSteerAndEndTurn();
+                if (unconsumed != null)
+                {
+                    _host.RecordSteer(unconsumed.Message, unconsumed.Mode, SteerDisposition.Unconsumed,
+                        "turn ended before the next iteration boundary");
+                    EmitToTurn($"[STEER] unconsumed — the turn ended before the next iteration boundary. {unconsumed.Message}\n");
+                }
             }
 
             result.Answer = HeadlessAgent.SanitizeAnswer(lastResponse);
@@ -520,13 +544,22 @@ namespace DevMind
         /// iteration boundary, before the next LLM request. A new steer supersedes any
         /// un-consumed one; the superseded steer is recorded in the journal (never silently
         /// dropped) and its mode is returned so a downgrade onto a pending override is
-        /// visible to the caller. Safe to call from the MCP request thread while the turn
-        /// runs on the worker thread.
+        /// visible to the caller. REFUSED when no turn is in progress (the enqueue-after-
+        /// turn-end window): accepted means a live turn will drain it. Safe to call from
+        /// the MCP request thread while the turn runs on the worker thread.
         /// </summary>
-        public (bool superseded, SteerMode? supersededMode) EnqueueSteer(string message, SteerMode mode)
+        public SteerEnqueueResult EnqueueSteer(string message, SteerMode mode)
         {
             lock (_steerLock)
             {
+                // The fix for the enqueue-after-turn-end race. A steer enqueued once the
+                // turn is over would otherwise sit in _pendingSteer, un-recorded and
+                // un-drained — silently lost (no continuation) or drained into the NEXT
+                // turn (a continuation reuses this session), attributed to a job nobody
+                // steered. There is no "maybe": accepted means a live turn will drain it.
+                if (!_turnInProgress)
+                    return new SteerEnqueueResult { Accepted = false };
+
                 bool superseded = _pendingSteer != null;
                 SteerMode? supersededMode = superseded ? (SteerMode?)_pendingSteer!.Mode : null;
                 if (superseded)
@@ -536,11 +569,12 @@ namespace DevMind
                     EmitToTurn($"[STEER] superseded (not consumed): {_pendingSteer.Message}\n");
                 }
                 _pendingSteer = new SteerMessage { Message = message, Mode = mode };
-                return (superseded, supersededMode);
+                return new SteerEnqueueResult { Accepted = true, Superseded = superseded, SupersededMode = supersededMode };
             }
         }
 
         // Atomic get-and-clear of the pending steer. Returns null when none is pending.
+        // Used by the per-iteration DRAIN (the turn stays in progress, so the flag is untouched).
         private SteerMessage TakePendingSteer()
         {
             lock (_steerLock)
@@ -548,6 +582,39 @@ namespace DevMind
                 SteerMessage s = _pendingSteer;
                 _pendingSteer = null;
                 return s;
+            }
+        }
+
+        // Turn end: atomically close the steer window — take the final pending steer AND
+        // clear the in-progress flag in ONE lock acquisition. A steer enqueued before this
+        // point (flag still true) is captured here and recorded as unconsumed; one enqueued
+        // after (flag already false) is refused by EnqueueSteer. Splitting the take and the
+        // clear into two lock acquisitions would reopen the exact gap this closes: an
+        // EnqueueSteer landing between them would set _pendingSteer that nothing drains.
+        // The caller records the taken steer (RecordSteer/EmitToTurn) AFTER the lock.
+        private SteerMessage TakePendingSteerAndEndTurn()
+        {
+            lock (_steerLock)
+            {
+                SteerMessage s = _pendingSteer;
+                _pendingSteer = null;
+                _turnInProgress = false;
+                return s;
+            }
+        }
+
+        // Turn start: open the steer window. Setting the flag and clearing any stale pending
+        // steer is ONE lock acquisition. A pending steer here is an invariant violation — the
+        // previous turn's atomic close must have taken it — so it is returned for the caller
+        // to record as unconsumed (self-healing, honest) rather than silently dropped.
+        private SteerMessage BeginSteerTurn()
+        {
+            lock (_steerLock)
+            {
+                SteerMessage stale = _pendingSteer;
+                _pendingSteer = null;
+                _turnInProgress = true;
+                return stale;
             }
         }
 

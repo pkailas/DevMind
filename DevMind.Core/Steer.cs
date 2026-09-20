@@ -90,4 +90,32 @@ namespace DevMind
             return (folded, SteerDisposition.Consumed);
         }
     }
+
+    /// <summary>
+    /// The outcome of handing a steer to a session (devmind_task_steer). A steer is
+    /// accepted only while a turn is actually running on that session; otherwise it is
+    /// REFUSED rather than silently accepted into a mailbox nothing will drain. The
+    /// refused case closes the enqueue-after-turn-end window: between the job's State
+    /// check and the enqueue, the turn can end — and a steer enqueued then would
+    /// otherwise be stranded (silently lost, or drained into a later turn on a
+    /// continuation and attributed to a job nobody steered).
+    /// </summary>
+    public sealed class SteerEnqueueResult
+    {
+        /// <summary>
+        /// False when the session had no turn in progress and the steer was refused —
+        /// nothing was queued and nothing was recorded. True means a live turn will drain it.
+        /// </summary>
+        public bool Accepted { get; init; }
+
+        /// <summary>True when this steer replaced an earlier, still-un-consumed steer.</summary>
+        public bool Superseded { get; init; }
+
+        /// <summary>
+        /// The mode of the steer this one replaced, when <see cref="Superseded"/> — so a
+        /// downgrade onto a pending override is visible to the caller ("replaced a pending
+        /// override" ≠ "replaced a pending steer"). Null when nothing was superseded.
+        /// </summary>
+        public SteerMode? SupersededMode { get; init; }
+    }
 }
