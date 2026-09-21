@@ -788,6 +788,7 @@ namespace DevMind
                 try { _turnTranscriptWriter?.Dispose(); } catch { }
                 _turnTranscriptWriter = null;
             }
+            try { _host.DrainPatchBackups(); } catch { /* the drain never throws; belt and suspenders on a disposal path */ }
             _llmClient.Dispose();
         }
 

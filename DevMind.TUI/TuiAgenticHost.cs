@@ -222,7 +222,7 @@ namespace DevMind
 
         public void ResetTaskContext() => _taskReadFiles.Clear();
 
-       public void ResetSession()
+        public void ResetSession()
         {
             _filesRead.Clear();
             _fileSnapshots.Clear();
@@ -234,6 +234,21 @@ namespace DevMind
             _pendingConflict = null;
             CleanupDap();
             _pendingBreaks.Reset();
+            DrainPatchBackups();
+        }
+
+        /// <summary>
+        /// Removes every PATCH backup from the undo stack, deleting each backup
+        /// file as it goes. Session-scoped: backups are undo state, and a new
+        /// session has no business undoing the last one's patches.
+        /// </summary>
+        public void DrainPatchBackups()
+        {
+            while (_patchBackupStack.Count > 0)
+            {
+                var (_, backupPath) = _patchBackupStack.Pop();
+                try { File.Delete(backupPath); } catch { /* a locked or already-deleted backup must not abort the drain */ }
+            }
         }
 
         // ── IAgenticHost.AppendOutput ─────────────────────────────────────────────
@@ -1111,6 +1126,10 @@ namespace DevMind
         // ── IAgenticHost.GetPatchBackupCount ──────────────────────────────────────
 
         int IAgenticHost.GetPatchBackupCount() => _patchBackupStack.Count;
+
+        /// <summary>Count of pending PATCH backups on the undo stack (public mirror
+        /// of the interface member, for skin-side bookkeeping and tests).</summary>
+        public int PatchBackupCount => _patchBackupStack.Count;
 
         // ── IAgenticHost.RecallMemoryAsync ────────────────────────────────────────
 

@@ -1340,6 +1340,10 @@ namespace DevMind
             // Run the application.
             app.Run(window);
 
+            // The UI exited — drop the session's PATCH backups with it. Without this
+            // the undo stack's files outlive the process, orphaned in %TEMP%\DevMind.
+            host.DrainPatchBackups();
+
             return 0;
         }
 
