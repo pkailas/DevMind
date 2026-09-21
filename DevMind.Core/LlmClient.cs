@@ -539,7 +539,53 @@ namespace DevMind
             if (_options.ShowDebugOutput)
                 _pendingDebugLog.Add($"\n[DEBUG] Configure() — API key: {apiKeyState}, endpoint: {_baseUrl}\n");
             RecreateHttpClient();
+
+            // Apply a manual context-size override SYNCHRONOUSLY, before the detection task
+            // is started. Applying it costs no I/O, so making callers wait for a scheduled
+            // task to run was pure latency: until it ran, ServerContextSize was 0 and
+            // EffectiveContextWindow reported the 13,372 fallback, so the status bar and any
+            // context read before the first message showed the wrong window.
+            //
+            // The detection task still runs, and is NOT redundant when an override is set:
+            // it resolves ServerType (DEVMIND_SERVER_TYPE override, else a /v1/models probe)
+            // BEFORE the manual branch, and streaming/detection branch on that backend
+            // regardless of where the context size came from. It re-enters the same helper,
+            // which is then a no-op.
+            TryApplyManualContextSize();
             _contextDetectionTask = DetectContextSizeAsync();
+        }
+
+        /// <summary>
+        /// Applies the manual context-size override (<see cref="ILlmOptions.ManualContextSize"/>)
+        /// when one is configured. The single home for that assignment, so the synchronous call
+        /// in <see cref="Configure"/> and the branch inside <see cref="DetectContextSizeAsync"/>
+        /// cannot drift apart. Pure in-memory — it performs no I/O, which is why it is safe to
+        /// run on the configuring thread.
+        /// <para>
+        /// Re-entering once the values are already in place is a no-op and does not log again,
+        /// so the debug line still appears exactly once per <see cref="Configure"/>.
+        /// </para>
+        /// </summary>
+        /// <returns>
+        /// <c>true</c> when a manual override is configured (and now in effect); <c>false</c>
+        /// when there is none and auto-detection must run.
+        /// </returns>
+        private bool TryApplyManualContextSize()
+        {
+            int manual = _options.ManualContextSize;
+            if (manual <= 0)
+                return false;
+
+            if (_contextSize == manual && ServerContextSize == manual && _budget != null)
+                return true;   // already applied for this configuration — do not log twice
+
+            _contextSize = manual;
+            _budget = new ContextBudget(_contextSize);
+            ServerContextSize = _contextSize;          // surface to the status bar
+            Debug.WriteLine($"[DevMind] Using manual context size: {_contextSize}");
+            if (_options.ShowDebugOutput)
+                _pendingDebugLog.Add($"\n[DEBUG] Manual context override: {_contextSize:N0} tokens\n");
+            return true;
         }
 
         /// <summary>
@@ -694,17 +740,13 @@ namespace DevMind
                 await DetectServerTypeAsync(serverRoot).ConfigureAwait(false);
             }
 
-            int manual = _options.ManualContextSize;
-            if (manual > 0)
-            {
-                _contextSize = manual;
-                _budget = new ContextBudget(_contextSize);
-                ServerContextSize = _contextSize;          // surface to the status bar
-                Debug.WriteLine($"[DevMind] Using manual context size: {_contextSize}");
-                if (_options.ShowDebugOutput)
-                    _pendingDebugLog.Add($"\n[DEBUG] DetectContextSizeAsync() — manual context override: {_contextSize:N0} tokens\n");
+            // A manual override short-circuits detection. Configure() has normally already
+            // applied it synchronously, in which case this is a no-op; calling
+            // DetectContextSizeAsync() directly (tests, a re-probe) still applies it here.
+            // ServerType resolution above has already happened either way — that part is
+            // needed whether or not the context size was overridden.
+            if (TryApplyManualContextSize())
                 return;
-            }
 
             if (_options.ShowDebugOutput)
                 _pendingDebugLog.Add($"\n[DEBUG] DetectContextSizeAsync() — auto-detecting context size (no manual override)\n");
