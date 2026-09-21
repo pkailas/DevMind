@@ -865,6 +865,16 @@ namespace DevMind
             "answer instead. When the task is complete, call task_done with a concise\n" +
             "summary of what you changed and why.\n" +
             "\n" +
+            "File content never goes through the shell: use create_file or write_file for new\n" +
+            "content and patch_file for edits. NEVER build a file with run_shell — no\n" +
+            "here-strings, no echo/Out-File redirects, no cat > file. This is not a style\n" +
+            "preference. One wrong quote, backtick or $ inside a here-string does not fail\n" +
+            "where you made it: it writes a file that LOOKS written, so the next build fails\n" +
+            "somewhere that looks unrelated, and you then patch against content that is not\n" +
+            "what you think it is — several iterations burned on damage done by the first\n" +
+            "character. The file tools write exactly the bytes you pass and report failure at\n" +
+            "the point of failure.\n" +
+            "\n" +
             "C# discipline: NEVER guess an API shape. Before calling, overriding, or mocking\n" +
             "any method or type you have not read in this session, use hover or go_to_definition\n" +
             "on it — signatures, return types (Task vs Task<T>), and overloads must come from\n" +
