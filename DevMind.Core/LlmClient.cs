@@ -970,12 +970,22 @@ namespace DevMind
              CancellationToken cancellationToken = default,
              bool forceToolChoiceRequired = false,
              string imageBase64 = null,
-             int maxTokens = 0)
+             int maxTokens = 0,
+             string taskScratchpad = null)
         {
             System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] SendMessageAsync ENTER — userMessage length={userMessage?.Length ?? 0}, deferCompression={deferCompression}");
 
             _historyMutatedThisSend = _historyMutatedBetweenSends;
             _historyMutatedBetweenSends = false;
+
+            // The scratchpad travels as its own message, not inside the system prompt. Drop
+            // last send's copy before anything reads history, and rebuild it just before the
+            // request is built: exactly one exists at send time, and it is never the stale one.
+            // null means "no scratchpad plumbed on this path" (a private side-conversation
+            // client) and leaves the stored value alone; "" clears it.
+            RemoveScratchpadMessage();
+            if (taskScratchpad != null)
+                _taskScratchpad = taskScratchpad.Trim();
 
             // Ensure context-size detection has completed before computing budget math.
             // If detection is still in-flight (common on the first message after launch),
@@ -1255,6 +1265,11 @@ namespace DevMind
             // full chat payload. If the probe times out or fails, RecreateHttpClient()
             // swaps in a fresh connection pool so the chat request goes over a live TCP connection.
             await EnsureConnectionHealthAsync(cancellationToken).ConfigureAwait(false);
+
+            // After every compaction/eviction pass, and immediately before the request is
+            // serialized — see RemoveScratchpadMessage for why this ordering is the safety
+            // argument rather than a convenience.
+            InsertScratchpadMessage();
 
            string modelName = _options.ModelName;
             string requestJson = BuildRequestJson(modelName, forceToolChoiceRequired, maxTokens);
@@ -1668,6 +1683,48 @@ namespace DevMind
             bool alreadyRead = _filesReadThisSession.Contains(fileNameOnly);
             _filesReadThisSession.Add(fileNameOnly);
             return alreadyRead;
+        }
+
+        /// <summary>
+        /// Removes the scratchpad message from history. Called at the top of every send, so
+        /// that no compaction or eviction pass ever sees one.
+        /// <para>
+        /// That ordering is the whole safety argument. MicroCompact clears history outright
+        /// and rebuilds it from the system message plus one synthetic user turn;
+        /// TrimOldestTurns forms removal groups over everything except the final message;
+        /// EvictStaleContext drops by turn age. Any of them could otherwise delete the live
+        /// scratchpad or carry a stale one forward. Rebuilding it after they run makes all
+        /// three impossible by construction, rather than by three separate exemptions that
+        /// would each have to stay correct as those passes change.
+        /// </para>
+        /// </summary>
+        private void RemoveScratchpadMessage()
+        {
+            for (int i = _conversationHistory.Count - 1; i >= 0; i--)
+            {
+                if (_conversationHistory[i].IsScratchpad)
+                    _conversationHistory.RemoveAt(i);
+            }
+        }
+
+        /// <summary>
+        /// Inserts the current scratchpad, if any, immediately before the last message.
+        /// Called just before the request is built — after every compaction pass.
+        /// <para>
+        /// Second-to-last is deliberate: late enough that changing it invalidates only the
+        /// tail of the KV cache (the point of moving it out of the system prompt), while
+        /// leaving the real user message in final position, where the generation prompt
+        /// follows it and the model's attention is strongest. Empty content inserts nothing,
+        /// so clearing the scratchpad removes the message rather than leaving a hollow one.
+        /// </para>
+        /// </summary>
+        private void InsertScratchpadMessage()
+        {
+            if (string.IsNullOrWhiteSpace(_taskScratchpad)) return;
+            if (_conversationHistory.Count == 0) return;
+
+            int index = Math.Max(1, _conversationHistory.Count - 1);
+            _conversationHistory.Insert(index, ChatMessage.Scratchpad(_taskScratchpad, _currentTurn));
         }
 
         /// <summary>
@@ -4597,6 +4654,35 @@ namespace DevMind
         /// objects instead of a flat string. Null for text-only messages (existing behavior).
         /// </summary>
         public JArray ContentParts { get; }
+
+        /// <summary>
+        /// True for the single harness-maintained scratchpad message. A structural marker
+        /// rather than a text match: this message is removed and rebuilt on every send, and
+        /// identifying it by scanning its content would fail the moment the model's own
+        /// scratchpad text happened to contain the header.
+        /// </summary>
+        public bool IsScratchpad { get; }
+
+        /// <summary>
+        /// Builds the scratchpad message.
+        /// <para>
+        /// The role is <c>user</c>, and it cannot be <c>system</c>: BuildRequestJson collects
+        /// EVERY system-role message and emits them merged as the single leading message, so a
+        /// system-role scratchpad would be folded straight back into the prefix it was moved
+        /// out of. <c>assistant</c> would alternate more neatly but would attribute to the
+        /// model a turn it did not produce. <c>user</c> is what the harness already uses for
+        /// content it authors itself (see SyntheticPrompts), and it is the one role every
+        /// backend renders in place.
+        /// </para>
+        /// </summary>
+        internal static ChatMessage Scratchpad(string content, int turn)
+            => new ChatMessage("user", $"--- CURRENT SCRATCHPAD ---\n{content}\n---", turn, isScratchpad: true);
+
+        private ChatMessage(string role, string content, int turn, bool isScratchpad)
+            : this(role, content, turn)
+        {
+            IsScratchpad = isScratchpad;
+        }
 
         /// <summary>
         /// Initializes a new instance of the <see cref="ChatMessage"/> class.

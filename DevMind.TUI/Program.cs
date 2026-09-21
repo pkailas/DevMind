@@ -1493,7 +1493,8 @@ namespace DevMind
                     onError: ex => tcs.TrySetException(ex),
                    deferCompression: state.ShellLoopPending,
                     combinedSystemPrompt: buildSystemPrompt(),
-                    cancellationToken: cts.Token);
+                    cancellationToken: cts.Token,
+                    taskScratchpad: host.TaskScratchpad);
 
                 try
                 {
@@ -1744,15 +1745,6 @@ static string LoadContextFile(string workingDirectory)
             }
         }
         catch { }
-
-        // Scratchpad — model's cross-turn state tracking.
-        // Injected into the system prompt so it survives context compaction.
-        if (!string.IsNullOrEmpty(scratchpad))
-        {
-            sb.Append("\n\n--- CURRENT SCRATCHPAD ---\n");
-            sb.Append(scratchpad);
-            sb.Append("\n---");
-        }
 
         return sb.ToString();
     }

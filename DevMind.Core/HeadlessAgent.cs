@@ -402,7 +402,8 @@ namespace DevMind
                         onError: ex => tcs.TrySetException(ex),
                         deferCompression: _state.ShellLoopPending,
                         combinedSystemPrompt: BuildSystemPrompt(),
-                        cancellationToken: runCts.Token).ConfigureAwait(false);
+                        cancellationToken: runCts.Token,
+                        taskScratchpad: _host.TaskScratchpad).ConfigureAwait(false);
 
                     try
                     {
@@ -766,9 +767,6 @@ namespace DevMind
                     combined += $"\n\n--- STANDING REPO CONVENTIONS (follow these in every change) ---\n{standing}\n---";
             }
             catch { /* memory is best-effort */ }
-
-            if (!string.IsNullOrEmpty(_host.TaskScratchpad))
-                combined += $"\n\n--- CURRENT SCRATCHPAD ---\n{_host.TaskScratchpad}\n---";
 
             combined += HeadlessAgent.BuildHeadlessAddendum(_options.HarnessVerifiesTests);
             if (!_allowCommit)

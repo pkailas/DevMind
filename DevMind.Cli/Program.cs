@@ -120,7 +120,7 @@ namespace DevMind
                 }
 
                await RunTurnAsync(input, options, llmClient, host, driver, state,
-                    callbacks, () => BuildCombinedSystemPrompt(options, devMindContext, host.TaskScratchpad), cts);
+                    callbacks, () => BuildCombinedSystemPrompt(options, devMindContext), cts);
             }
 
             return 0;
@@ -216,7 +216,8 @@ namespace DevMind
                     onError: ex => tcs.TrySetException(ex),
                    deferCompression: state.ShellLoopPending,
                     combinedSystemPrompt: buildSystemPrompt(),
-                    cancellationToken: cts.Token);
+                    cancellationToken: cts.Token,
+                    taskScratchpad: host.TaskScratchpad);
 
                 try
                 {
@@ -314,7 +315,7 @@ namespace DevMind
                 : BuildCommandResolver.Resolve(options.WorkingDirectory,
                     warn => Console.Error.WriteLine($"[BUILD] Warning: {warn}"));
 
-       internal static string BuildCombinedSystemPrompt(CliOptions options, string devMindContext, string scratchpad = "")
+       internal static string BuildCombinedSystemPrompt(CliOptions options, string devMindContext)
         {
             // projectNamespace is null in CLI context — no VS project loaded.
             string llmDirective = LoopHelpers.BuildToolUsePrompt(
@@ -345,11 +346,6 @@ namespace DevMind
                     combined += $"\n\n--- Session Memory (MEMORY.md) ---\n{memoryIndex}\n---";
             }
             catch { }
-
-            // Scratchpad — model's cross-turn state tracking.
-            // Injected into the system prompt so it survives context compaction.
-            if (!string.IsNullOrEmpty(scratchpad))
-                combined += $"\n\n--- CURRENT SCRATCHPAD ---\n{scratchpad}\n---";
 
             return combined;
         }

@@ -171,7 +171,7 @@ namespace DevMind.Core.Tests
         public Task SendMessageAsync(string userMessage, Action<string> onToken, Action onComplete,
             Action<Exception> onError, bool deferCompression = false, string? combinedSystemPrompt = null,
             CancellationToken cancellationToken = default, bool forceToolChoiceRequired = false,
-            string? imageBase64 = null, int maxTokens = 0)
+            string? imageBase64 = null, int maxTokens = 0, string? taskScratchpad = null)
             => throw new NotImplementedException("tests drive ProcessIterationAsync directly");
         public void ClearHistory(bool preserveScratchpad = false) { }
         public void PrependMessages(string[] roles, string[] contents) { }

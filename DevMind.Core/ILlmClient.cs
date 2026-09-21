@@ -99,7 +99,8 @@ namespace DevMind
             CancellationToken cancellationToken = default,
             bool forceToolChoiceRequired = false,
             string imageBase64 = null,
-            int maxTokens = 0);
+            int maxTokens = 0,
+            string taskScratchpad = null);
 
        /// <summary>Resets conversation history to the system prompt only.</summary>
         void ClearHistory(bool preserveScratchpad = false);
