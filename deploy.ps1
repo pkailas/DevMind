@@ -111,7 +111,46 @@ try {
     }
     Write-Host "  clean, HEAD $head, will publish as 1.0.$count" -ForegroundColor DarkGray
 
-    # ---- 2. stop what is running ---------------------------------------------
+    # ---- 2. refuse to kill a live job ----------------------------------------
+    # AgentJobManager writes %TEMP%\devmind\tasks\_active.json for exactly as long as a
+    # delegated job is executing, and its own comment (AgentJobManager.cs:714) records
+    # why it exists: a deploy once killed a live job by guessing from transcript silence
+    # and CPU load, both of which lie - think blocks are transcript-silent and generation
+    # is GPU-bound. The marker is the positive signal, so check it before stopping anything.
+    Step "Checking for a running delegated job..."
+    $tasksDir = if ($env:DEVMIND_TASKS_DIR) { $env:DEVMIND_TASKS_DIR } else { Join-Path $env:TEMP 'devmind\tasks' }
+    $marker   = Join-Path $tasksDir '_active.json'
+
+    if (-not (Test-Path $marker)) {
+        Write-Host "  none running" -ForegroundColor DarkGray
+    } else {
+        $active = $null
+        try { $active = Get-Content $marker -Raw | ConvertFrom-Json } catch { }
+
+        if (-not $active -or -not $active.pid) {
+            # Unreadable marker: treat as stale rather than blocking forever on a corrupt file.
+            Write-Host "  marker present but unreadable - treating as stale: $marker" -ForegroundColor Yellow
+        }
+        else {
+            # A marker outlives a crashed server, so the pid decides, not the file's existence.
+            $owner = Get-Process -Id $active.pid -ErrorAction SilentlyContinue
+            if (-not $owner) {
+                Write-Host ("  stale marker from dead PID {0} (job {1}) - ignoring" -f $active.pid, $active.job_id) -ForegroundColor DarkGray
+            }
+            elseif (-not $Force) {
+                Write-Host ("  job      : {0}" -f $active.job_id)       -ForegroundColor Yellow
+                Write-Host ("  pid      : {0} ({1})" -f $active.pid, $owner.ProcessName) -ForegroundColor Yellow
+                Write-Host ("  started  : {0} UTC" -f $active.started_at_utc) -ForegroundColor Yellow
+                Write-Host ("  work dir : {0}" -f $active.working_dir)  -ForegroundColor Yellow
+                Fail "a delegated job is running. Stopping the server now would kill it mid-task. Wait for it to finish, or re-run with -Force to kill it deliberately."
+            }
+            else {
+                Write-Host ("  -Force: killing live job {0} (PID {1})" -f $active.job_id, $active.pid) -ForegroundColor Red
+            }
+        }
+    }
+
+    # ---- 3. stop what is running ---------------------------------------------
     Step "Stopping running DevMind processes..."
 
     # Match on image path under dist\ rather than name alone, so a DevMind build
@@ -161,7 +200,7 @@ try {
         Write-Host ("  {0} writable" -f (Split-Path $f -Leaf)) -ForegroundColor DarkGray
     }
 
-    # ---- 3. snapshot the version being replaced ------------------------------
+    # ---- 4. snapshot the version being replaced ------------------------------
     if (-not $SkipBackup -and (Test-Path $exe)) {
         $old = (Get-Item $exe).VersionInfo.FileVersion
         $bak = Join-Path $dist "mcp.bak-$($old -replace '\.0$','')"
@@ -174,12 +213,12 @@ try {
         }
     }
 
-    # ---- 4. publish -----------------------------------------------------------
+    # ---- 5. publish -----------------------------------------------------------
     Step "Publishing..."
     & (Join-Path $repo 'run-deploy.ps1')
     if ($LASTEXITCODE -ne 0) { Fail "run-deploy.ps1 failed (exit $LASTEXITCODE)" }
 
-    # ---- 5. report ------------------------------------------------------------
+    # ---- 6. report ------------------------------------------------------------
     $newMcp = (Get-Item $exe).VersionInfo.FileVersion
     $newTui = if (Test-Path $tui) { (Get-Item $tui).VersionInfo.FileVersion } else { '(not published)' }
 
