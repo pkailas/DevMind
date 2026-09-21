@@ -1380,17 +1380,21 @@ internal sealed class DevMindTools
 
     [McpServerTool(Name = "run_shell")]
     [Description(
-        "Execute a shell command and return its output. Commands run via PowerShell " +
-        "(multi-line commands and here-strings are passed to PowerShell verbatim). Default " +
-        "timeout 120s — override with timeout_seconds. For anything expected to run longer than " +
-        "~45s (installs, deploys, long test runs), pass background=true: the call returns a " +
-        "shell_job_id immediately and the command runs detached — poll shell_job_status. This " +
-        "avoids the MCP client-timeout trap where the call dies but the command keeps running " +
-        "and blocks every subsequent tool call. Do not use run_shell to list or search files — " +
-        "use list_files or find_in_files instead; do not route file content through the shell — " +
-        "use write_file.")]
+        "Execute a shell command and return its output. Commands run via PowerShell. " +
+        "This tool is for RUNNING things, never for producing files. Do not list or search " +
+        "files with it — use list_files or find_in_files. Do not route file content through " +
+        "it: use create_file or write_file for new content and patch_file for edits. The " +
+        "command text, newlines included, reaches PowerShell verbatim — that is what lets a " +
+        "genuinely multi-line command (a loop, a multi-step script) run as written, and it is " +
+        "NOT a file-writing mechanism: a here-string or redirect that emits file content is " +
+        "the wrong tool, not a clever one. Default timeout 120s — override with " +
+        "timeout_seconds. For anything expected to run longer than ~45s (installs, deploys, " +
+        "long test runs), pass background=true: the call returns a shell_job_id immediately " +
+        "and the command runs detached — poll shell_job_status. This avoids the MCP " +
+        "client-timeout trap where the call dies but the command keeps running and blocks " +
+        "every subsequent tool call.")]
     public async Task<string> RunShell(
-        [Description("The shell command to execute. Newlines are preserved.")] string command,
+        [Description("The shell command to execute. Newlines are preserved, so a command that genuinely spans lines runs as written. Do NOT assemble file content here — no here-strings, no echo/Out-File redirects: use create_file or write_file for new content and patch_file for edits.")] string command,
         [Description("Timeout in seconds (default 120, max 3600). Ignored when background=true (background default 1800).")] int? timeout_seconds = null,
         [Description("Run detached and return a shell_job_id to poll with shell_job_status (default false).")] bool? background = null,
         IProgress<ProgressNotificationValue>? progress = null,
