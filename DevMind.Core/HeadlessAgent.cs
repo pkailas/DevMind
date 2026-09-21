@@ -41,6 +41,17 @@ namespace DevMind
         /// value wins over the environment variable.
         /// </summary>
         public bool?  StreamThinkingToTranscript { get; set; }
+        /// <summary>
+        /// Whether the JOB HARNESS runs the test suite over the solution after the agent
+        /// stops (MCP verify_tests). Decides which test-verification regime is written
+        /// into the headless addendum: harness-on tells the agent NOT to run the full
+        /// suite itself (the harness numbers are the ones reported); harness-off tells it
+        /// to run the full suite and report what it actually observed. Prompt-only — no
+        /// host guard to mirror. Default false: every non-harness path (TUI/CLI/one-shot
+        /// RunAsync) has no harness, and a forgotten flag fails loud (one wasted suite
+        /// run) rather than silent (an unverified change shipped as "done").
+        /// </summary>
+        public bool   HarnessVerifiesTests { get; set; } = false;
         public ContextEvictionMode ContextEviction { get; set; } = ContextEvictionMode.Balanced;
         public int    ManualContextSize        { get; set; } = 0;
         public LlmServerType ServerType        { get; set; } = LlmServerType.LlamaServer;
@@ -710,6 +721,16 @@ namespace DevMind
             _options.StreamThinkingToTranscript = streamThinkingToTranscript;
         }
 
+        /// <summary>Re-syncs the test-verification REGIME on a REUSED (continuation)
+        /// session — a continuation's verify_tests can differ from what the parent's
+        /// session was built with, and the addendum is rebuilt on every turn, so a stale
+        /// regime would misinstruct the agent on turn N+1. Prompt-only — no host guard.
+        /// Idempotent — re-syncing with the current value is a no-op.</summary>
+        public void SetHarnessVerifiesTests(bool harnessVerifiesTests)
+        {
+            _options.HarnessVerifiesTests = harnessVerifiesTests;
+        }
+
         private string BuildSystemPrompt()
         {
             string llmDirective = LoopHelpers.BuildToolUsePrompt(_resolvedBuildCommand, projectNamespace: null);
@@ -749,7 +770,7 @@ namespace DevMind
             if (!string.IsNullOrEmpty(_host.TaskScratchpad))
                 combined += $"\n\n--- CURRENT SCRATCHPAD ---\n{_host.TaskScratchpad}\n---";
 
-            combined += HeadlessAgent.HeadlessAddendum;
+            combined += HeadlessAgent.BuildHeadlessAddendum(_options.HarnessVerifiesTests);
             if (!_allowCommit)
                 combined += HeadlessAgent.NoCommitRule;
             if (_noExecute)
@@ -810,9 +831,11 @@ namespace DevMind
     public static class HeadlessAgent
     {
         /// <summary>
-        /// Behavioral rails appended to every headless system prompt. The commit rule is
-        /// conditional (see <c>allowCommit</c>); the rest keeps a delegated agent inside
-        /// its sandbox and prevents it stalling on questions nobody will answer.
+        /// Shared behavioral rails appended to every headless system prompt, regardless
+        /// of test-verification regime. The commit rule is conditional (see
+        /// <c>allowCommit</c>); this body plus the regime picked by
+        /// <see cref="BuildHeadlessAddendum"/> keeps a delegated agent inside its sandbox
+        /// and prevents it stalling on questions nobody will answer.
         /// </summary>
         internal const string HeadlessAddendum =
             "\n\n--- HEADLESS DELEGATION RULES ---\n" +
@@ -859,6 +882,51 @@ namespace DevMind
             "repo or its frameworks (conventions, patterns, gotchas), or search_memory when\n" +
             "the right topic isn't obvious. For framework reference questions (React hooks\n" +
             "rules, TypeScript patterns), use query_library before guessing from memory.\n";
+
+        /// <summary>Regime: the harness runs the full suite over the solution after the
+        /// agent stops and those numbers are the ones reported. Measured before this
+        /// existed: an agent re-ran the full suite as its final act and the harness ran
+        /// it again moments later with no file changes in between — 23% of a 256-second
+        /// job spent proving the same thing twice. Targeted/filtered runs during the work stay
+        /// encouraged: the waste is only the final full-suite sweep.</summary>
+        internal const string HarnessVerifiesTestsRule =
+            "\n" +
+            "--- TEST VERIFICATION: HARNESS REGIME (the job runner runs the suite for you) ---\n" +
+            "This job has harness test verification ENABLED. The harness runs `dotnet test`\n" +
+            "over the solution immediately after you stop, and its numbers are the ones\n" +
+            "reported.\n" +
+            "- While working, use targeted/filtered test runs (run_tests with a filter, or\n" +
+            "  `dotnet test --filter`) to check your own edits as you go — that is how you\n" +
+            "  verify incrementally, and it is cheap; keep doing it.\n" +
+            "- Do NOT run the full test suite as a final step. It will be run for you\n" +
+            "  moments later with no file changes in between — the extra minutes are pure\n" +
+            "  waste.\n" +
+            "- In your final report, say the full suite was not run and that the harness\n" +
+            "  verifies it. Do NOT claim a suite result you did not observe. If the harness\n" +
+            "  run fails, the job comes back stopped_incomplete and is continued — that is\n" +
+            "  the intended path and it is cheap.\n";
+
+        /// <summary>Regime: no harness will run the suite — the agent is the only
+        /// verifier. TUI/CLI jobs and MCP jobs with verify_tests off all land here,
+        /// which is also the default when the flag is forgotten: failing loud (one
+        /// wasted suite run) is cheap; failing silent (an unverified change shipped as
+        /// \"done\") is not.</summary>
+        internal const string NoHarnessSafetyNetRule =
+            "\n" +
+            "--- TEST VERIFICATION: NO HARNESS SAFETY NET (you are the only verifier) ---\n" +
+            "This job has NO harness test verification. There is no harness safety net —\n" +
+            "nobody runs the suite for you after you stop. Run the FULL test suite yourself\n" +
+            "before finishing, and report the per-assembly counts you actually observed.\n";
+
+        /// <summary>Assembles the headless addendum: the shared body plus the
+        /// test-verification regime matching this job. The two regimes must read as
+        /// genuinely different instructions — a single hedged paragraph that works for
+        /// both is the failure mode: the agent needs to know which world it is in.</summary>
+        internal static string BuildHeadlessAddendum(bool harnessVerifiesTests)
+        {
+            return HeadlessAddendum +
+                   (harnessVerifiesTests ? HarnessVerifiesTestsRule : NoHarnessSafetyNetRule);
+        }
 
         internal const string NoCommitRule =
             "Do NOT run git commit, git push, or any other git command that rewrites history\n" +

@@ -464,5 +464,55 @@ namespace DevMind.Core.Tests
             Assert.Contains("recall_memory", HeadlessAgent.HeadlessAddendum);
             Assert.Contains("query_library", HeadlessAgent.HeadlessAddendum);
         }
+
+        // ── Headless addendum: test-verification regimes ─────────────────────
+
+        [Fact]
+        public void Addendum_HarnessVerifiesTests_TellsAgentNotToRerunFullSuite()
+        {
+            string text = HeadlessAgent.BuildHeadlessAddendum(harnessVerifiesTests: true);
+
+            // The harness regime: the agent must NOT run the full suite as a final step —
+            // the harness runs it and its numbers are the ones reported.
+            Assert.Contains("Do NOT run the full test suite", text);
+            Assert.Contains("harness", text);
+            Assert.Contains("stopped_incomplete", text);
+
+            // Targeted runs stay encouraged; the waste is only the final sweep.
+            Assert.Contains("targeted/filtered", text);
+
+            // Cross-regime negative: the no-safety-net instruction must NOT leak in.
+            Assert.DoesNotContain("NO HARNESS SAFETY NET", text);
+        }
+
+        [Fact]
+        public void Addendum_NoHarnessVerification_TellsAgentToRunFullSuiteItself()
+        {
+            string text = HeadlessAgent.BuildHeadlessAddendum(harnessVerifiesTests: false);
+
+            // No-harness regime: the agent IS the only verifier — it must run the full
+            // suite itself and report what it actually observed.
+            Assert.Contains("NO HARNESS SAFETY NET", text);
+            Assert.Contains("Run the FULL test suite yourself", text);
+            Assert.Contains("per-assembly counts you actually observed", text);
+
+            // Cross-regime negative: the do-not-rerun instruction must NOT leak in.
+            Assert.DoesNotContain("Do NOT run the full test suite", text);
+            Assert.DoesNotContain("harness runs `dotnet test`", text);
+        }
+
+        [Fact]
+        public void Addendum_BothRegimes_CarrySharedRails()
+        {
+            // The regime text is additive — the shared body (sandboxing, diagnostics,
+            // memory rules) must be present in BOTH worlds.
+            foreach (bool flag in new[] { true, false })
+            {
+                string text = HeadlessAgent.BuildHeadlessAddendum(flag);
+                Assert.Contains("get_diagnostics", text);
+                Assert.Contains("ask_caller", text);
+                Assert.StartsWith("\n\n--- HEADLESS DELEGATION RULES ---", text);
+            }
+        }
     }
 }

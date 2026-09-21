@@ -600,6 +600,12 @@ namespace DevMind.McpServer
                             // non-null value wins over the DEVMIND_TASK_SHOW_THINKING env
                             // var; null keeps the legacy env-var fallback.
                             StreamThinkingToTranscript = job.ShowThinking,
+                            // Decides which test-verification regime the headless addendum
+                            // writes: verify_tests on -> the agent must NOT re-run the full
+                            // suite (this runner does it right after, with no file changes in
+                            // between — measured at 23% of one short job); off
+                            // -> no harness safety net, the agent runs the suite itself.
+                            HarnessVerifiesTests = job.VerifyTests,
                         };
                         session = new HeadlessSession(options, EndpointUrl, ApiKey,
                             job.WorkingDirectory, buildCommand: null, allowCommit: job.AllowCommit,
@@ -616,6 +622,12 @@ namespace DevMind.McpServer
                         // the continuation can differ from what the parent's session was
                         // built with (e.g. parent omitted it -> env fallback; now explicit).
                         session.SetStreamThinking(job.ShowThinking);
+                        // Same rule for the test-verification regime: a continuation's
+                        // verify_tests can differ from the parent's (e.g. parent ran with
+                        // verification off, the continue job opts in), and BuildSystemPrompt
+                        // rebuilds the addendum from _options every turn — a stale regime
+                        // would misinstruct the agent on turn N+1.
+                        session.SetHarnessVerifiesTests(job.VerifyTests);
                     }
 
                     var result = await session.RunTurnAsync(
