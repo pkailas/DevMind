@@ -148,20 +148,29 @@ namespace DevMind.McpServer
                 // or the agent run never started it (job cancelled while queued).
                 baselineWhy = "baseline run skipped (test_baseline off or job did not reach the before-run)";
             }
-            else if (!baseRun.Succeeded)
-            {
-                // A failing baseline is not a trustworthy "before" number — the
-                // suite may not even have built. Report null and say why.
-                baselineWhy = $"baseline test run failed (exit code {baseRun.ExitCode}) — no before-count reported";
-            }
             else if (baseRun.Total == null)
             {
-                baselineWhy = $"baseline test run had no parseable total ({baseRun.ParseFailure ?? "unknown parse failure"})";
+                // A parseable total is the criterion for a usable baseline — a
+                // red run that still produced its summary line did measure the
+                // suite. Only when no total is present is there no number to
+                // stand behind, and the reason must say whether the suite never
+                // ran to a summary at all (build failure, empty output) or ran
+                // and the summary did not parse (ambiguous or inconsistent line).
+                baselineWhy = baseRun.Succeeded
+                    ? $"baseline test run had no parseable total ({baseRun.ParseFailure ?? "unknown parse failure"})"
+                    : $"baseline test run failed (exit code {baseRun.ExitCode}) and produced no parseable total ({baseRun.ParseFailure ?? "no test summary line found in output"})";
             }
             else
             {
+                // The count is structural (tests added or removed), so it holds
+                // even when the baseline run exited non-zero. A red baseline is
+                // disclosed in baseline_unavailable_reason and in the note, never
+                // silently presented as a clean measurement. Report, do not
+                // block: a red baseline must not become an incomplete reason.
                 baseline = baseRun.Total;
-                baselineWhy = null;
+                baselineWhy = baseRun.Succeeded
+                    ? null
+                    : $"baseline test run had failing tests (exit code {baseRun.ExitCode}) — structural before-count, suite already red before this task";
             }
 
             int? delta = after.Total.HasValue && baseline.HasValue
@@ -176,6 +185,8 @@ namespace DevMind.McpServer
             if (delta.HasValue)
             {
                 note = $"harness-measured test counts: {baseline} before this task, {after.Total} after (delta {FormatSigned(delta.Value)})";
+                if (baselineWhy != null)
+                    note += $"; baseline was a failing run — delta is structural, suite was already red before this task";
             }
             else if (after.Total.HasValue)
             {

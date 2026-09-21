@@ -260,26 +260,62 @@ namespace DevMind.McpServer.Tests
         }
 
         [Fact]
-        public void BaselineRunFailed_BeforeCountIsNullNotGuess()
+        public void BaselineRunFailed_NoSummaryTotal_BeforeCountIsNullNotGuess()
         {
-            var job = NewJob(Run(37), Run(37, exitCode: 1)); // total present but exit 1
+            // A baseline run that failed BEFORE producing its summary line
+            // (build error, empty output) has no total to stand behind — the
+            // count is genuinely unknowable, and that is the only failure that
+            // justifies a null before-count.
+            var job = NewJob(Run(37), Run(null, exitCode: 1));
             var p = Payload(job);
             Assert.Equal(37, p.GetProperty("total").GetInt32());
             Assert.True(p.GetProperty("baseline_total").ValueKind == JsonValueKind.Null);
             Assert.True(p.GetProperty("delta").ValueKind == JsonValueKind.Null);
-            Assert.Contains("baseline test run failed (exit code 1)",
-                p.GetProperty("baseline_unavailable_reason").GetString());
+            string? reason = p.GetProperty("baseline_unavailable_reason").GetString();
+            Assert.Contains("baseline test run failed (exit code 1)", reason);
+            Assert.Contains("no parseable total", reason);
+        }
+
+        [Fact]
+        public void BaselineRedWithParseableTotal_BeforeCountUsedAndRednessDisclosed()
+        {
+            // A RED baseline that still produced its summary line DID measure
+            // the suite: the delta is structural (tests added/removed) and is
+            // knowable whether or not the tests pass. The before-count is used,
+            // the note discloses the suite was already red, and a red baseline
+            // never becomes an incomplete reason — report, do not block.
+            var job = NewJob(Run(38), Run(37, exitCode: 1)); // 37 tests, 1 failing, total parsed
+            Assert.False(job.IsIncomplete);
+            Assert.DoesNotContain("tests_removed", job.IncompleteReasons());
+
+            var p = Payload(job);
+            Assert.Equal(38, p.GetProperty("total").GetInt32());
+            Assert.Equal(37, p.GetProperty("baseline_total").GetInt32());
+            Assert.Equal(1, p.GetProperty("delta").GetInt32());
+            Assert.Equal(0, p.GetProperty("tests_removed").GetInt32());
+            string? reason = p.GetProperty("baseline_unavailable_reason").GetString();
+            Assert.Contains("baseline test run had failing tests (exit code 1)", reason);
+            Assert.Equal(
+                "harness-measured test counts: 37 before this task, 38 after (delta +1); " +
+                "baseline was a failing run — delta is structural, suite was already red before this task",
+                p.GetProperty("note").GetString());
         }
 
         [Fact]
         public void BaselineUnparseable_BeforeCountIsNullWithReason()
         {
+            // Green run, but the summary line did not parse — the total is
+            // genuinely unknowable. The reason must distinguish this (ran, but
+            // the summary did not parse) from a run that never reached a summary
+            // at all (see BaselineRunFailed_NoSummaryTotal_BeforeCountIsNullNotGuess).
             var job = NewJob(Run(37),
-                Run(null, exitCode: 0, parseFailure: "no test summary line found in output"));
+                Run(null, exitCode: 0, parseFailure: "ambiguous output: a summary line for DevMind.McpServer.Tests.dll appears more than once — cannot tell which run is authoritative"));
             var p = Payload(job);
             Assert.True(p.GetProperty("baseline_total").ValueKind == JsonValueKind.Null);
             Assert.True(p.GetProperty("delta").ValueKind == JsonValueKind.Null);
-            Assert.Contains("no parseable total", p.GetProperty("baseline_unavailable_reason").GetString());
+            string? reason = p.GetProperty("baseline_unavailable_reason").GetString();
+            Assert.Contains("no parseable total", reason);
+            Assert.DoesNotContain("baseline test run failed", reason);
         }
 
         [Fact]
