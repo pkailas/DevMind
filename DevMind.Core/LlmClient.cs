@@ -1459,18 +1459,19 @@ namespace DevMind
 
                 LastToolCalls = null;
                 JArray rawToolCalls = null;
+                var argumentRepairNotes = new List<string>();
 
                 // Priority 1: Use accumulated tool calls from streamed deltas
                 if (accumulatedToolCalls != null && accumulatedToolCalls.Count > 0)
                 {
-                    LastToolCalls = ParseToolCallsFromArray(accumulatedToolCalls);
+                    LastToolCalls = ParseToolCallsFromArray(accumulatedToolCalls, argumentRepairNotes);
                     rawToolCalls = accumulatedToolCalls;
                 }
 
                 // Priority 2: Fallback — check lastDataLine for non-streamed message.tool_calls
                 if (LastToolCalls == null && lastDataLine != null)
                 {
-                    var parseResult = ParseToolCalls(lastDataLine);
+                    var parseResult = ParseToolCalls(lastDataLine, argumentRepairNotes);
                     if (parseResult != null && parseResult.Count > 0)
                     {
                         LastToolCalls = parseResult;
@@ -1486,6 +1487,16 @@ namespace DevMind
                                 _reasoningBuilder.Append(thinking);
                         }
                     }
+                }
+
+                // Surface any argument repair to the operator AND to the durable log. A
+                // truncated payload that the ladder quietly rescued is still evidence — a
+                // token limit set too low, or a template wrapping arguments in a fence —
+                // and repeated repairs are only readable as a pattern if each one is visible.
+                foreach (string note in argumentRepairNotes)
+                {
+                    onToken("\n" + note + "\n");
+                    DevMindLog.Write(note);
                 }
 
                 // Guarantee history holds only valid-JSON tool-call arguments so a malformed
@@ -4069,12 +4080,44 @@ namespace DevMind
         }
 
         /// <summary>
+        /// Runs the repair ladder over one raw <c>function.arguments</c> payload and writes the
+        /// resulting members into <paramref name="args"/>. When a rung above the fallback had to
+        /// act, a one-line description is added to <paramref name="repairNotes"/> for the caller
+        /// to surface — a repaired call must not be indistinguishable from a clean one.
+        /// </summary>
+        private static void ApplyRepairedArguments(
+            string rawArguments, string toolName, Dictionary<string, string> args, ICollection<string> repairNotes)
+        {
+            var repair = ToolArgumentRepair.Repair(rawArguments);
+
+            if ((repair.Repaired || repair.Failed) && repairNotes != null)
+            {
+                string note = repair.Describe(toolName);
+                if (note != null) repairNotes.Add(note);
+            }
+
+            try
+            {
+                if (JToken.Parse(repair.Json) is JObject obj)
+                {
+                    foreach (var prop in obj.Properties())
+                        args[prop.Name] = prop.Value?.ToString() ?? "";
+                }
+            }
+            catch (JsonException)
+            {
+                // Repair guarantees valid JSON, so this is unreachable in practice — but a
+                // parse here must never take down a response that already has tool calls.
+            }
+        }
+
+        /// <summary>
         /// Parses tool_calls from the last SSE data line. Checks both
         /// <c>choices[0].message.tool_calls</c> (non-streamed) and
         /// <c>choices[0].delta.tool_calls</c> (streamed delta).
         /// Returns null if no tool_calls found.
         /// </summary>
-        private static List<ToolCallResult> ParseToolCalls(string json)
+        private static List<ToolCallResult> ParseToolCalls(string json, ICollection<string> repairNotes = null)
         {
             try
             {
@@ -4114,29 +4157,18 @@ namespace DevMind
                     var argsToken = fn["arguments"];
                     if (argsToken != null)
                     {
-                        JObject argsObj = null;
                         if (argsToken.Type == JTokenType.String)
                         {
-                            // OpenAI format: arguments is a JSON string
-                            string argsStr = argsToken.ToString();
-                            if (!string.IsNullOrEmpty(argsStr))
-                            {
-                                try { argsObj = JObject.Parse(argsStr); }
-                                catch { /* malformed args — skip */ }
-                            }
+                            // OpenAI format: arguments is a JSON string — the only shape a
+                            // model can malform, so the only one the repair ladder sees.
+                            ApplyRepairedArguments(argsToken.ToString(), name, args, repairNotes);
                         }
                         else if (argsToken.Type == JTokenType.Object)
                         {
-                            // Ollama native format: arguments is already an object
-                            argsObj = (JObject)argsToken;
-                        }
-
-                        if (argsObj != null)
-                        {
-                            foreach (var prop in argsObj.Properties())
-                            {
+                            // Ollama native format: arguments is already an object — the
+                            // server parsed it, so there is nothing to repair.
+                            foreach (var prop in ((JObject)argsToken).Properties())
                                 args[prop.Name] = prop.Value?.ToString() ?? "";
-                            }
                         }
                     }
 
@@ -4293,12 +4325,11 @@ namespace DevMind
                     }
                     else
                     {
-                        string raw = argsToken.ToString();
-                        if (!string.IsNullOrWhiteSpace(raw))
-                        {
-                            try { normalized = JToken.Parse(raw).ToString(Formatting.None); }
-                            catch { normalized = "{}"; } // truncated/duplicated/invalid → safe empty object
-                        }
+                        // Same ladder the execution-path parsers use, so what history
+                        // replays and what the tool actually ran can never disagree.
+                        // Silent here by design: this runs again on every history rebuild,
+                        // and the parsers below announce the repair exactly once.
+                        normalized = ToolArgumentRepair.Repair(argsToken.ToString()).Json;
                     }
                 }
 
@@ -4338,7 +4369,7 @@ namespace DevMind
         /// Parses a pre-built tool_calls JArray into <see cref="ToolCallResult"/> list.
         /// Used for accumulated streamed tool calls (already assembled).
         /// </summary>
-        private static List<ToolCallResult> ParseToolCallsFromArray(JArray toolCallsArray)
+        private static List<ToolCallResult> ParseToolCallsFromArray(JArray toolCallsArray, ICollection<string> repairNotes = null)
         {
             if (toolCallsArray == null || toolCallsArray.Count == 0)
                 return null;
@@ -4355,19 +4386,7 @@ namespace DevMind
                 var args = new Dictionary<string, string>();
                 var argsToken = fn["arguments"];
                 if (argsToken != null)
-                {
-                    string argsStr = argsToken.ToString();
-                    if (!string.IsNullOrEmpty(argsStr))
-                    {
-                        try
-                        {
-                            var argsObj = JObject.Parse(argsStr);
-                            foreach (var prop in argsObj.Properties())
-                                args[prop.Name] = prop.Value?.ToString() ?? "";
-                        }
-                        catch { /* malformed args — skip */ }
-                    }
-                }
+                    ApplyRepairedArguments(argsToken.ToString(), name, args, repairNotes);
 
                 string tcIdArr = tc["id"]?.ToString();
                 results.Add(new ToolCallResult

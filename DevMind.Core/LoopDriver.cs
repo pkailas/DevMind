@@ -87,6 +87,25 @@ namespace DevMind
             new Regex(
                 @"^\s*#{1,6}\s+(?:fix|root cause|changes|summary)\b",
                 RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.Multiline),
+
+            // prose_tool_call: the model wrote the call out as TEXT instead of emitting it
+            // on the tool-call channel, so the turn arrived with no tool calls at all. That
+            // is the strongest narration claim there is — the model did not merely describe
+            // an action, it wrote the exact call it meant to make.
+            //
+            // Matching it here routes the turn to the tool_choice=required retry, which asks
+            // the SERVER for a structured call. Nothing reads, parses or executes the text.
+            // Extracting the call from prose and running it was the alternative, and it is
+            // the wrong trade: a missed recovery costs one iteration, while a misread one
+            // executes something the model never asked for — and the shapes that would be
+            // misread (a model quoting a call while explaining it, or a half-written call it
+            // then talked itself out of) are exactly the shapes a text heuristic cannot tell
+            // apart from the real thing. Without this pattern the turn instead fell to the
+            // prose-finish re-prompt, which asks for task_done or ask_caller — the wrong
+            // instruction for a model that was trying to call read_file, and one that ends
+            // the run early.
+            new Regex(@"<tool_call>|<function\s*=",
+                RegexOptions.IgnoreCase | RegexOptions.Compiled),
         };
 
        public LoopDriver(
