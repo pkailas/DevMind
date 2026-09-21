@@ -314,13 +314,24 @@ namespace DevMind
                 : BuildCommandResolver.Resolve(options.WorkingDirectory,
                     warn => Console.Error.WriteLine($"[BUILD] Warning: {warn}"));
 
-       static string BuildCombinedSystemPrompt(CliOptions options, string devMindContext, string scratchpad = "")
+       internal static string BuildCombinedSystemPrompt(CliOptions options, string devMindContext, string scratchpad = "")
         {
             // projectNamespace is null in CLI context — no VS project loaded.
             string llmDirective = LoopHelpers.BuildToolUsePrompt(
                 buildCommand: ResolveBuildCommand(options), projectNamespace: null);
 
-            string combined = $"{options.SystemPrompt}\n\n{llmDirective}";
+            // The global system-prompt file (%APPDATA%\devmind\system-prompt.md) replaces
+            // the hardcoded options.SystemPrompt when present. Absence is normal —
+            // fall back to options.SystemPrompt unchanged. An explicit --system-prompt
+            // CLI arg still wins (it sets options.SystemPrompt before this method runs).
+            // Loaded HERE, inside the builder, so both callers — the session-lifetime
+            // build and the per-turn closure — follow the same rule, and so editing the
+            // file in another editor takes effect on the next turn (hot-reload), exactly
+            // as in the TUI and the headless agent.
+            string filePrompt = SystemPromptFile.Load();
+            string basePrompt = filePrompt ?? options.SystemPrompt;
+
+            string combined = $"{basePrompt}\n\n{llmDirective}";
 
             if (!string.IsNullOrEmpty(devMindContext))
                combined += $"\n\n--- Project Context (AGENTS.md) ---\n{devMindContext}\n---";

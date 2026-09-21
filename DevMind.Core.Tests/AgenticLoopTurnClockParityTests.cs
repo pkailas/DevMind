@@ -234,7 +234,7 @@ namespace DevMind.Core.Tests
                 string rel = p.Substring(root.Length).Replace('\\', '/');
                 foreach (string bad in new[] { "/_archive/", "/bin/", "/obj/", "/dist/", "/publish/", "/tools/", "/.vs/", "/.devmind/", "/CodeReviewBenchmarkWithBugs/" })
                     if (rel.Contains(bad, StringComparison.OrdinalIgnoreCase)) return false;
-                foreach (string testDir in new[] { ".Core.Tests/", ".McpServer.Tests/", ".TUI.Tests/" })
+                foreach (string testDir in new[] { ".Core.Tests/", ".Cli.Tests/", ".McpServer.Tests/", ".TUI.Tests/" })
                     if (rel.Contains(testDir, StringComparison.OrdinalIgnoreCase)) return false;
                 return true;
             });

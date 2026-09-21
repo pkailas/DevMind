@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>DevMind.Cli.Tests</RootNamespace>
+    <AssemblyName>DevMind.Cli.Tests</AssemblyName>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.9.0" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- ProjectReference to the CLI skin itself: the behaviour under test lives in
+         DevMind.Cli's own prompt-assembly method, not in the engine. Referencing the
+         Exe project is the same pattern DevMind.TUI.Tests uses for the TUI skin. -->
+    <ProjectReference Include="..\DevMind.Cli\DevMind.Cli.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Serial test execution: these tests mutate the DEVMIND_GLOBAL_DIR process
+         environment variable, which is assembly-global. Same config as
+         DevMind.Core.Tests. -->
+    <None Include="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
