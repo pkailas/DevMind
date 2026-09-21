@@ -63,6 +63,7 @@ namespace DevMind.McpServer
             [Description("After a successful build verification, also run `dotnet test` in working_dir and attach test_verification (default false — tests can be slow). test_verification carries harness-measured test counts (baseline_total, total, delta) parsed from the runs the harness itself captured.")] bool? verify_tests = null,
             [Description("How the harness obtains the baseline test count for the structural delta (default \"before-run\": it runs the suite ONCE before the agent starts, so the result reports a real before->after delta the agent cannot misreport. \"off\": skip the before-run — for slow suites — and report only the after total. Only takes effect when verify_tests is on.")] string? test_baseline = null,
             [Description("Enable model reasoning (think blocks) for this task (default false). Leave off for briefed mechanical tasks — thinking runs UNBOUNDED on the local server and can add minutes per iteration. Turn on only for genuinely hard design/debugging tasks. Continuations inherit this setting.")] bool? think = null,
+            [Description("Stream the model's think blocks into the job's transcript as it reasons. Omitted = the DEVMIND_TASK_SHOW_THINKING environment variable applies (legacy fallback: off unless it is set); explicit true or false takes precedence over the environment variable. DISPLAY only — think blocks are only streamed when `think` is also on, and showing them adds per-iteration overhead. When true it implies `think: true` — asking to see reasoning that is never generated would be a silent no-op, so this turns generation on instead. Continuations inherit this setting, including an inherited omission.")] bool? show_thinking = null,
             [Description("Restrict the agent to no execution (default false): it may still build (dotnet build / run_build) for compile verification, but running executables, `dotnet run`/`dotnet exec`, the test suite (run_tests / dotnet test), and debug launch/attach are blocked at the harness. This is NOT a sandbox — it blocks a named set of execution invocations, not every conceivable way to start a process; use it to stop an agent from launching (or re-launching) something that hangs or spawns runaway children, not as a security boundary. Continuations inherit this setting.")] bool? no_execute = null,
             CancellationToken cancellationToken = default)
         {
@@ -88,10 +89,11 @@ namespace DevMind.McpServer
                 timeoutMinutes: Math.Clamp(timeout_minutes ?? 30, 1, 240),
                 allowCommit: allow_commit ?? false,
                 verifyBuild: verify_build ?? true,
-                think: think ?? false,
+                think: (think ?? false) || show_thinking == true,
                 verifyTests: verify_tests ?? false,
                 noExecute: no_execute ?? false,
-                runTestBaseline: baseline != "off");
+                runTestBaseline: baseline != "off",
+                showThinking: show_thinking);
 
             return JsonSerializer.Serialize(new
             {
@@ -121,6 +123,7 @@ namespace DevMind.McpServer
             bool? verify_tests = null,
             [Description("Baseline mode for the structural test delta (default \"before-run\": the harness runs the suite ONCE before this continuation's agent starts. \"off\": skip the before-run and report only the after total. Only takes effect when verify_tests is on.")] string? test_baseline = null,
             [Description("Restrict this continuation to no execution (default: inherit the parent task's setting). When inherited or set, running executables, the test suite, and debug launch/attach are blocked at the harness; builds stay allowed. Cannot be used to relax a parent's restriction — start a fresh task for that.")] bool? no_execute = null,
+            [Description("Stream the model's think blocks into the job's transcript as it reasons. Omitted = inherit the parent task's setting, including an inherited omission (the DEVMIND_TASK_SHOW_THINKING environment variable then applies, as for the parent). Explicit true or false takes precedence over the environment variable for this continuation. DISPLAY only — requires the parent's `think` (which the continuation also inherits) to have any effect. To turn reasoning on for the continuation, start a fresh task with `think` and `show_thinking` set.")] bool? show_thinking = null,
             CancellationToken cancellationToken = default)
         {
             string baseline = string.IsNullOrWhiteSpace(test_baseline) ? "before-run" : test_baseline;
@@ -140,7 +143,8 @@ namespace DevMind.McpServer
                 out string error,
                 verifyTests: verify_tests ?? false,
                 noExecute: no_execute,
-                runTestBaseline: baseline != "off");
+                runTestBaseline: baseline != "off",
+                showThinking: show_thinking);
 
             if (job == null)
                 return Err(error);

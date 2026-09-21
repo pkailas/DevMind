@@ -39,6 +39,14 @@ namespace DevMind.McpServer
         /// <summary>Enable model reasoning (think blocks) for this task. Default false:
         /// briefed mechanical tasks iterate faster without unbounded thinking.</summary>
         public bool Think { get; init; }
+        /// Stream the model's think blocks into the job's transcript (DISPLAY only —
+        /// generation is <see cref="Think"/> / HeadlessOptions.ShowLlmThinking).
+        /// Tri-state: null = no explicit per-job setting — the DEVMIND_TASK_SHOW_THINKING
+        /// environment variable applies (legacy behaviour, preserved as a fallback). true
+        /// = stream thinking into the transcript (wins over the env var); false = filtered,
+        /// heartbeat lines mark visible silence (also wins over the env var). A continuation
+        /// inherits the parent's setting, including an inherited null (same rule as Think).
+        public bool? ShowThinking { get; init; }
         /// <summary>Caller-imposed no-execution restriction for this task (default false):
         /// the agent may build but not run executables, tests, or a debugger. Continuations
         /// inherit this from their parent — a constraint set on turn 1 must not evaporate
@@ -285,7 +293,7 @@ namespace DevMind.McpServer
 
         public AgentJob Start(string prompt, string workingDirectory, int maxDepth, int timeoutMinutes,
             bool allowCommit, bool verifyBuild, bool think = false, bool verifyTests = false,
-            bool noExecute = false, bool runTestBaseline = true)
+            bool noExecute = false, bool runTestBaseline = true, bool? showThinking = null)
         {
             var job = new AgentJob
             {
@@ -297,6 +305,7 @@ namespace DevMind.McpServer
                 AllowCommit = allowCommit,
                 VerifyBuild = verifyBuild,
                 Think = think,
+                ShowThinking = showThinking,
                 VerifyTests = verifyTests,
                 NoExecute = noExecute,
                 RunTestBaseline = runTestBaseline,
@@ -330,7 +339,7 @@ namespace DevMind.McpServer
         /// </summary>
         public AgentJob? Continue(string parentJobId, string prompt, int maxDepth, int timeoutMinutes,
             bool verifyBuild, out string error, bool verifyTests = false, bool? noExecute = null,
-            bool runTestBaseline = true)
+            bool runTestBaseline = true, bool? showThinking = null)
         {
             error = null!;
             AgentJob parent;
@@ -375,6 +384,11 @@ namespace DevMind.McpServer
                 VerifyBuild = verifyBuild,
                 VerifyTests = verifyTests,
                 Think = parent.Think, // continuation inherits the parent's reasoning mode
+                // Inherited by default (same rule as Think — including an inherited
+                // null, i.e. "env fallback"); an explicit value overrides it for this
+                // continuation (a display preference flips either way, unlike
+                // noExecute's ratchet).
+                ShowThinking = showThinking ?? parent.ShowThinking,
                 NoExecute = ResolveContinuationNoExecute(parent.NoExecute, noExecute),
                 RunTestBaseline = runTestBaseline,
                 State = AgentJobState.Queued,
@@ -581,6 +595,11 @@ namespace DevMind.McpServer
                             // (see LlmClient.BuildRequestJson) — false = the model does not
                             // generate think blocks at all for this session.
                             ShowLlmThinking = job.Think,
+                            // DISPLAY switch (per-job, from show_thinking): streams the
+                            // generated think blocks into the transcript. Tri-state — a
+                            // non-null value wins over the DEVMIND_TASK_SHOW_THINKING env
+                            // var; null keeps the legacy env-var fallback.
+                            StreamThinkingToTranscript = job.ShowThinking,
                         };
                         session = new HeadlessSession(options, EndpointUrl, ApiKey,
                             job.WorkingDirectory, buildCommand: null, allowCommit: job.AllowCommit,
@@ -593,6 +612,10 @@ namespace DevMind.McpServer
                         // A continuation's job may differ from the session it reuses
                         // (e.g. noExecute newly opted in), so re-sync the host guard.
                         session.SetNoExecute(job.NoExecute);
+                        // Same rule for the display switch: an explicit show_thinking on
+                        // the continuation can differ from what the parent's session was
+                        // built with (e.g. parent omitted it -> env fallback; now explicit).
+                        session.SetStreamThinking(job.ShowThinking);
                     }
 
                     var result = await session.RunTurnAsync(

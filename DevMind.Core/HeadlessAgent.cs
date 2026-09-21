@@ -33,6 +33,14 @@ namespace DevMind
         public bool   ShowDebugOutput          { get; set; } = false;
         public bool   ShowContextBudget        { get; set; } = false;
         public bool   ShowLlmThinking          { get; set; } = false;
+        /// <summary>
+        /// DISPLAY switch: whether the model's think blocks stream into the transcript.
+        /// This does NOT control generation — that is <see cref="ShowLlmThinking"/>
+        /// (the enable_thinking template switch). null = no explicit per-session setting:
+        /// fall back to the DEVMIND_TASK_SHOW_THINKING environment variable. A non-null
+        /// value wins over the environment variable.
+        /// </summary>
+        public bool?  StreamThinkingToTranscript { get; set; }
         public ContextEvictionMode ContextEviction { get; set; } = ContextEvictionMode.Balanced;
         public int    ManualContextSize        { get; set; } = 0;
         public LlmServerType ServerType        { get; set; } = LlmServerType.LlamaServer;
@@ -284,9 +292,16 @@ namespace DevMind
             // blocks are filtered, so instead a heartbeat line lands every
             // HeartbeatSeconds of visible silence — long unbounded reasoning otherwise
             // looks identical to a wedged request from the outside.
-            string showThinkingRaw = Environment.GetEnvironmentVariable("DEVMIND_TASK_SHOW_THINKING");
-            bool showThinking = showThinkingRaw == "1"
-                || string.Equals(showThinkingRaw, "true", StringComparison.OrdinalIgnoreCase);
+            //
+            // The per-session StreamThinkingToTranscript (set by the job runner from
+            // the job's show_thinking parameter) travels with the request and wins
+            // when supplied — it replaces the invisible process-environment chain.
+            // null (no explicit setting) keeps the legacy behaviour: the env var is
+            // read here per turn, exactly as before, so env-based setups keep working.
+            bool showThinking = _options.StreamThinkingToTranscript
+                ?? Environment.GetEnvironmentVariable("DEVMIND_TASK_SHOW_THINKING") is string showThinkingRaw
+                    && (showThinkingRaw == "1"
+                        || string.Equals(showThinkingRaw, "true", StringComparison.OrdinalIgnoreCase));
             const int HeartbeatSeconds = 30;
 
             try
@@ -679,6 +694,17 @@ namespace DevMind
         {
             _noExecute = noExecute;
             _host.NoExecute = noExecute;
+        }
+
+        /// <summary>Re-syncs the thinking-to-transcript DISPLAY switch on a REUSED
+        /// (continuation) session — a continuation's explicit show_thinking can differ from
+        /// what the parent's session was built with. null reverts to the
+        /// DEVMIND_TASK_SHOW_THINKING environment-variable fallback. Display only — never
+        /// touches generation (that is the ShowLlmThinking option, read per request by the
+        /// LlmClient). Idempotent — re-syncing with the constructor's value is a no-op.</summary>
+        public void SetStreamThinking(bool? streamThinkingToTranscript)
+        {
+            _options.StreamThinkingToTranscript = streamThinkingToTranscript;
         }
 
         private string BuildSystemPrompt()
