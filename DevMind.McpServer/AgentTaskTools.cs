@@ -41,6 +41,34 @@ namespace DevMind.McpServer
 
         public AgentTaskTools(AgentJobManager jobs) => _jobs = jobs;
 
+        // Agentic depth cap accepted by the devmind_task_* tools. The ceiling is kept equal
+        // to the TUI's /depth-cap ceiling (DevMind.TUI/SlashCommand.cs) because both paths set
+        // the SAME engine option: a lower ceiling here silently gave a delegated job a smaller
+        // budget than the operator could set interactively.
+        internal const int MaxDepthFloor   = 1;
+        internal const int MaxDepthCeiling = 200;
+        internal const int MaxDepthDefault = 40;
+
+        /// <summary>
+        /// Resolves a caller-supplied <c>max_depth</c> into the supported range. Out-of-range
+        /// values are CLAMPED, never rejected — a caller that has always passed 500 must keep
+        /// working — but the clamp is reported back through <paramref name="notice"/> so the
+        /// caller is told it got a different iteration budget than it asked for instead of
+        /// discovering it only when the job stops early.
+        /// </summary>
+        /// <param name="requested">The caller's value, or null for the default.</param>
+        /// <param name="notice">A human-readable description of the clamp, or null when the
+        /// requested value was already in range.</param>
+        internal static int ClampMaxDepth(int? requested, out string? notice)
+        {
+            int asked   = requested ?? MaxDepthDefault;
+            int clamped = Math.Clamp(asked, MaxDepthFloor, MaxDepthCeiling);
+            notice = clamped == asked
+                ? null
+                : $"max_depth {asked} is outside the supported range {MaxDepthFloor}-{MaxDepthCeiling} — using {clamped}.";
+            return clamped;
+        }
+
         [McpServerTool(Name = "devmind_task_start")]
         [Description(
             "Delegate a whole coding task to DevMind's local agent (runs on a local GPU model at zero " +
@@ -56,7 +84,7 @@ namespace DevMind.McpServer
         public async Task<string> TaskStart(
             [Description("The task brief: goal, relevant files, constraints, and how to verify success.")] string prompt,
             [Description("Absolute path of the directory the agent operates in (its sandbox).")] string working_dir,
-            [Description("Max agentic iterations before the agent must stop (default 40).")] int? max_depth = null,
+            [Description("Max agentic iterations before the agent must stop (default 40, range 1-200). Out-of-range values are clamped into the range and the clamp is reported back as max_depth_notice.")] int? max_depth = null,
             [Description("Wall-clock kill timeout in minutes (default 30).")] int? timeout_minutes = null,
             [Description("Allow the agent to run git commit (default false — the caller owns version control).")] bool? allow_commit = null,
             [Description("After the agent finishes, the job runner builds the working_dir itself and attaches build_verification to the result (default true).")] bool? verify_build = null,
@@ -83,9 +111,11 @@ namespace DevMind.McpServer
             if (health != null)
                 return Err(health);
 
+            int maxDepth = ClampMaxDepth(max_depth, out string? depthNotice);
+
             var job = _jobs.Start(
                 prompt, working_dir,
-                maxDepth: Math.Clamp(max_depth ?? 40, 1, 100),
+                maxDepth: maxDepth,
                 timeoutMinutes: Math.Clamp(timeout_minutes ?? 30, 1, 240),
                 allowCommit: allow_commit ?? false,
                 verifyBuild: verify_build ?? true,
@@ -95,14 +125,29 @@ namespace DevMind.McpServer
                 runTestBaseline: baseline != "off",
                 showThinking: show_thinking);
 
-            return JsonSerializer.Serialize(new
-            {
-                job_id = job.Id,
-                state = "queued",
-                queue_position = _jobs.QueuePosition(job),
-                endpoint = _jobs.EndpointUrl,
-                hint = "Poll devmind_task_status with this job_id; fetch devmind_task_result when done.",
-            }, JsonOpts);
+            const string startHint =
+                "Poll devmind_task_status with this job_id; fetch devmind_task_result when done.";
+
+            return JsonSerializer.Serialize(depthNotice == null
+                ? (object)new
+                {
+                    job_id = job.Id,
+                    state = "queued",
+                    queue_position = _jobs.QueuePosition(job),
+                    endpoint = _jobs.EndpointUrl,
+                    max_depth = maxDepth,
+                    hint = startHint,
+                }
+                : new
+                {
+                    job_id = job.Id,
+                    state = "queued",
+                    queue_position = _jobs.QueuePosition(job),
+                    endpoint = _jobs.EndpointUrl,
+                    max_depth = maxDepth,
+                    max_depth_notice = depthNotice,
+                    hint = startHint,
+                }, JsonOpts);
         }
 
         [McpServerTool(Name = "devmind_task_continue")]
@@ -116,7 +161,7 @@ namespace DevMind.McpServer
         public async Task<string> TaskContinue(
             [Description("The job_id of the finished task to resume (the newest in its chain).")] string job_id,
             [Description("Instruction for the resumed agent. Default: 'Continue the task from where you left off.'")] string? prompt = null,
-            [Description("Max agentic iterations for this continuation (default 40).")] int? max_depth = null,
+            [Description("Max agentic iterations for this continuation (default 40, range 1-200). Out-of-range values are clamped into the range and the clamp is reported back as max_depth_notice.")] int? max_depth = null,
             [Description("Wall-clock kill timeout in minutes (default 30).")] int? timeout_minutes = null,
             [Description("Run build verification after this turn (default true). Note: post-turn build verification by the job runner is independent of no_execute and unaffected by it.")] bool? verify_build = null,
             [Description("After a successful build verification, also run `dotnet test` and attach test_verification (default false). test_verification carries harness-measured test counts (baseline_total, total, delta).")]
@@ -134,10 +179,12 @@ namespace DevMind.McpServer
             if (health != null)
                 return Err(health);
 
+            int maxDepth = ClampMaxDepth(max_depth, out string? depthNotice);
+
             var job = _jobs.Continue(
                 job_id,
                 string.IsNullOrWhiteSpace(prompt) ? "Continue the task from where you left off." : prompt,
-                maxDepth: Math.Clamp(max_depth ?? 40, 1, 100),
+                maxDepth: maxDepth,
                 timeoutMinutes: Math.Clamp(timeout_minutes ?? 30, 1, 240),
                 verifyBuild: verify_build ?? true,
                 out string error,
@@ -149,14 +196,29 @@ namespace DevMind.McpServer
             if (job == null)
                 return Err(error);
 
-            return JsonSerializer.Serialize(new
-            {
-                job_id = job.Id,
-                parent_job_id = job_id,
-                state = "queued",
-                queue_position = _jobs.QueuePosition(job),
-                hint = "Poll devmind_task_status with the NEW job_id; the conversation context carried over.",
-            }, JsonOpts);
+            const string continueHint =
+                "Poll devmind_task_status with the NEW job_id; the conversation context carried over.";
+
+            return JsonSerializer.Serialize(depthNotice == null
+                ? (object)new
+                {
+                    job_id = job.Id,
+                    parent_job_id = job_id,
+                    state = "queued",
+                    queue_position = _jobs.QueuePosition(job),
+                    max_depth = maxDepth,
+                    hint = continueHint,
+                }
+                : new
+                {
+                    job_id = job.Id,
+                    parent_job_id = job_id,
+                    state = "queued",
+                    queue_position = _jobs.QueuePosition(job),
+                    max_depth = maxDepth,
+                    max_depth_notice = depthNotice,
+                    hint = continueHint,
+                }, JsonOpts);
         }
 
         [McpServerTool(Name = "devmind_task_status")]
