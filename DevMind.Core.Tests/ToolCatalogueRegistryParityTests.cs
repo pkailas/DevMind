@@ -21,16 +21,6 @@ namespace DevMind.Core.Tests;
 
 public sealed class ToolCatalogueRegistryParityTests
 {
-    // Advertised tools whose names contain no underscore. A regex cannot separate
-    // these from ordinary prose words, so they are asserted explicitly. Keep in sync
-    // if the catalogue gains or loses a single-word tool name.
-    private static readonly string[] AdvertisedSingleWordTools = { "debug", "scratchpad", "hover" };
-
-    // Snake_case tokens that appear in the catalogue but are NOT tools: parameter names
-    // (start_line/end_line on the read_file line) and a debug sub-command value
-    // (clear_breaks). Keep in sync if that vocabulary changes.
-    private static readonly string[] NotATool = { "start_line", "end_line", "clear_breaks" };
-
     private static string[] RegistryToolNames() =>
         ToolRegistry.BuildToolsArray()
             .Select(t => (string?)t["function"]?["name"])
@@ -49,33 +39,29 @@ public sealed class ToolCatalogueRegistryParityTests
         return prompt.Substring(startAt, endAt - startAt);
     }
 
-    // Derives the set of tool names the prompt advertises, straight from the
-    // generated prompt — so it tracks the prose rather than a second hand-kept list.
-    private static HashSet<string> AdvertisedTools()
+    // Every backticked identifier inside a "- " catalogue bullet is an advertised
+    // tool name. The prompt wraps tool names in backticks (BuildToolUsePrompt), so
+    // the advertised set is derived straight from the generated prompt and tracks
+    // it rather than a second hand-kept list. Parameter names and debug sub-command
+    // values are not backticked in the prompt, so they never surface here.
+    private static readonly Regex BacktickedToolName = new(@"`([a-z][a-z0-9_]*)`");
+
+    private static HashSet<string> AdvertisedToolsFromSection(string section)
     {
-        string prompt = LoopHelpers.BuildToolUsePrompt(buildCommand: "", projectNamespace: "");
-        string section = ToolCatalogSection(prompt);
-
         var advertised = new HashSet<string>(StringComparer.Ordinal);
-
-        // Snake_case tools: every "- " catalogue bullet is scanned. Prose words have no
-        // underscores; the NotATool list strips the few snake_case param/command tokens.
-        var snake = new Regex(@"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b");
         foreach (string line in section.Split('\n'))
         {
             if (!line.TrimStart().StartsWith("- ", StringComparison.Ordinal))
                 continue;
-            foreach (Match m in snake.Matches(line))
-                if (!NotATool.Contains(m.Value, StringComparer.Ordinal))
-                    advertised.Add(m.Value);
+            foreach (Match m in BacktickedToolName.Matches(line))
+                advertised.Add(m.Groups[1].Value);
         }
-
-        // Single-word tools a regex cannot isolate from prose.
-        foreach (string t in AdvertisedSingleWordTools)
-            advertised.Add(t);
-
         return advertised;
     }
+
+    private static HashSet<string> AdvertisedTools()
+        => AdvertisedToolsFromSection(ToolCatalogSection(
+            LoopHelpers.BuildToolUsePrompt(buildCommand: "", projectNamespace: "")));
 
     [Fact]
     public void EveryToolNamedInPromptCatalogue_HasASchemaEntry()
@@ -89,6 +75,40 @@ public sealed class ToolCatalogueRegistryParityTests
         Assert.True(missing.Count == 0,
             "Tools named in the prompt catalogue but missing from BuildToolsArray(): " +
             string.Join(", ", missing));
+    }
+
+    // A single-word tool advertised in the catalogue but absent from the registry
+    // must be reported as missing. Before catalogue names were backticked, a
+    // single-word name could not be isolated from prose and such a tool slipped
+    // through the guard silently. This drives the same derivation path the main
+    // guard uses against a catalogue fragment containing an unregistered
+    // single-word name and asserts it surfaces in the missing set.
+    [Fact]
+    public void AdvertisedSingleWordToolWithoutSchemaEntry_IsReportedMissing()
+    {
+        const string Fragment = "- Tracking state: `scratchpad`\n- New capability: `frob`\n";
+        HashSet<string> advertised = AdvertisedToolsFromSection(Fragment);
+        Assert.Contains("scratchpad", advertised);
+        Assert.Contains("frob", advertised);
+
+        var registered = RegistryToolNames().ToHashSet(StringComparer.Ordinal);
+        var missing = advertised.Where(t => !registered.Contains(t)).OrderBy(t => t).ToList();
+        Assert.Contains("frob", missing);
+        Assert.DoesNotContain("scratchpad", missing);
+    }
+
+    // The derivation path above is proven end-to-end against the real generated
+    // prompt: the single-word names a regex can no longer isolate from prose must
+    // surface in the advertised set via their backticks. If a name loses its
+    // backticks in the catalogue, it drops out of the derived set and this fails
+    // by name — the guard would silently stop checking it otherwise.
+    [Fact]
+    public void AdvertisedTools_FromTheRealCatalogue_IncludeBacktickedSingleWordNames()
+    {
+        HashSet<string> advertised = AdvertisedTools();
+        foreach (string t in new[] { "debug", "scratchpad", "hover" })
+            Assert.True(advertised.Contains(t),
+                $"'{t}' not found in the derived advertised set — is it backticked in the '## Tool Catalog' section?");
     }
 
     [Fact]
