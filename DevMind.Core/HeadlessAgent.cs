@@ -778,6 +778,14 @@ namespace DevMind
             return combined;
         }
 
+        /// <summary>
+        /// Deletes the PATCH backup files this session's host is still holding, without
+        /// ending the session. The backup stack is write-only — nothing ever reads a
+        /// backup back — so its files are dead weight the moment a turn ends, while the
+        /// conversation itself stays alive and continuable.
+        /// </summary>
+        public void DrainPatchBackups() => _host.DrainPatchBackups();
+
         public void Dispose()
         {
             if (_disposed) return;

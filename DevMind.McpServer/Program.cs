@@ -167,6 +167,22 @@ builder.Services.AddSingleton(mcpServices);
 builder.Services.AddSingleton(new AgentJobManager(
     onJobFinished: () => mcpServices.FileCache.InvalidateAll()));
 
+// Reclaim PATCH backups orphaned by a previous run. A host deletes its own backups
+// when its turn ends, but a force-killed process never reaches that, and nothing else
+// owns the files afterwards — they accumulate in %TEMP%\DevMind without bound. Skipped
+// entirely while another agent is mid-job, since it may own live backups in that same
+// flat folder. Fire-and-forget and never throws: startup must not wait on it or fail
+// because of it.
+_ = System.Threading.Tasks.Task.Run(() =>
+{
+    try
+    {
+        if (AgentJobManager.IsJobActiveElsewhere()) return;
+        DevMind.PatchBackupSweeper.CleanupStale(DevMind.PatchBackupSweeper.DefaultMaxAge);
+    }
+    catch { /* best-effort cleanup — must never affect startup */ }
+});
+
 // MCP server: stdio transport + attribute-based tool discovery.
 builder.Services
     .AddMcpServer()

@@ -706,6 +706,17 @@ namespace DevMind.McpServer
                     job.EndedAtUtc = DateTime.UtcNow;
                     ClearActiveMarker();
                     WriteResultSidecar(job);
+
+                    // Drop the turn's PATCH backups now the job is over, WITHOUT ending
+                    // the session — a finished job keeps its conversation so it can be
+                    // continued, and disposal is what used to be relied on here. It runs
+                    // only on session expiry, eviction past the retention cap, or a clean
+                    // shutdown, so backups from a job nobody follows up on sat in
+                    // %TEMP%\DevMind indefinitely, and a force-killed server orphaned them
+                    // permanently. The backups play no part in a continuation: the stack is
+                    // write-only, with no path that restores a file from one.
+                    try { job.Session?.DrainPatchBackups(); } catch { /* never kill the worker */ }
+
                     try { _onJobFinished(); } catch { /* never kill the worker */ }
                 }
             }
@@ -742,6 +753,37 @@ namespace DevMind.McpServer
         private static void ClearActiveMarker()
         {
             try { File.Delete(ActiveMarkerPath); } catch { }
+        }
+
+        /// <summary>
+        /// True when the active-job marker names a LIVE process other than this one — a
+        /// second server, or a job still running under a previous one. Callers that clean
+        /// up shared temp state (patch backups, transcripts) use this to stay off files
+        /// another agent may still own. A marker whose pid is dead is a leftover from a
+        /// crash and reports false, which is the whole reason the pid is written.
+        /// </summary>
+        public static bool IsJobActiveElsewhere()
+        {
+            try
+            {
+                if (!File.Exists(ActiveMarkerPath)) return false;
+
+                using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(ActiveMarkerPath));
+                if (!doc.RootElement.TryGetProperty("pid", out var pidElement)
+                    || !pidElement.TryGetInt32(out int pid))
+                    return false;
+
+                if (pid == Environment.ProcessId) return false;
+
+                using var owner = System.Diagnostics.Process.GetProcessById(pid);
+                return !owner.HasExited;
+            }
+            catch
+            {
+                // Unreadable, malformed, or a pid no process holds — treat the marker as
+                // stale rather than blocking cleanup on it forever.
+                return false;
+            }
         }
 
         private static bool HasFileChanges(HeadlessAgentResult result)
