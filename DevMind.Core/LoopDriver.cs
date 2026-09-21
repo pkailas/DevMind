@@ -306,7 +306,13 @@ namespace DevMind
                         $"[AGENTIC] Aborted: '{_state.ConsecutiveErrorToolName}' failed {_state.ConsecutiveErrorCount} " +
                         $"consecutive times with no resolution.\n" +
                         $"Last error: {firstError}{cmdLine}{outputSnip}\n" +
-                        "Review the failure above and re-send with a corrected approach.\n",
+                        // Name the pattern, not just "something failed". Five failures sharing
+                        // ONE tool is the finding: it separates "this tool is being called
+                        // wrongly" from "five unrelated things went wrong", and that is what
+                        // decides whether the fix is the brief or the code.
+                        $"Pattern: every one of those {_state.ConsecutiveErrorCount} failures was " +
+                        $"'{_state.ConsecutiveErrorToolName}' — the tool is being called wrongly, " +
+                        "not failing at random. Fix how it is called, or use a different tool.\n",
                         OutputColor.Error);
                     _state.ConsecutiveErrorToolName = null;
                     _state.ConsecutiveErrorCount    = 0;
@@ -332,10 +338,19 @@ namespace DevMind
                 {
                     if (result.ShellExitCode.HasValue && result.ShellExitCode != 0)
                     {
-                        int undoDepth = _agenticHost.GetPatchBackupCount();
+                        // The branch stays distinct from the clean stop below: "the build is
+                        // broken" is the single most actionable thing the operator can be told
+                        // here, and collapsing the two would lose it.
+                        //
+                        // What it must NOT do is offer to put the edits back. Nothing in the
+                        // tree restores a file from a patch backup — no handler, no operator
+                        // command — and this is the worst possible moment to imply otherwise:
+                        // the loop has just walked away from a half-edited tree.
+                        // The replacement states what is actually true, without assuming the
+                        // working directory is a git repository (it often is not).
                         _agenticHost.AppendOutput($"[AGENTIC] Depth cap reached ({_state.AgenticDepth}) — build still failing.\n", OutputColor.Error);
-                        _agenticHost.AppendOutput("Type UNDO to revert all changes, or continue editing manually.\n", OutputColor.Dim);
-                        _agenticHost.AppendOutput($"({undoDepth} change(s) can be undone)\n", OutputColor.Dim);
+                        _agenticHost.AppendOutput("The edits made this run are on disk and have not been reverted — the working tree is mid-change.\n", OutputColor.Dim);
+                        _agenticHost.AppendOutput("Continue the task, or revert the changes yourself before re-running.\n", OutputColor.Dim);
                     }
                     else
                     {
