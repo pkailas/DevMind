@@ -1684,8 +1684,11 @@ namespace DevMind
 
                 _fileCache.Store(FileCacheKey(resolved.FullPath), result.UpdatedContent);
 
-                int undosAvailable = _patchBackupStack.Count;
-                AppendOutput($"[PATCH] Applied to {resolved.FullPath} (undo depth: {undosAvailable}){(merge.UsedFallback ? " [two-way fallback]" : "")}\n",
+                // This line deliberately reports no backup-stack depth. The stack is an internal
+                // safety net that is only ever pushed to, evicted from, and drained — nothing
+                // restores from it, and there is no operator command or tool that can. Naming a
+                // depth here told the model it held N reversals it had no way to spend.
+                AppendOutput($"[PATCH] Applied to {resolved.FullPath}{(merge.UsedFallback ? " [two-way fallback]" : "")}\n",
                     OutputColor.Success);
                 RecordAction("patch", resolved.FullPath);
 
