@@ -198,7 +198,7 @@ namespace DevMind
             catch (Exception ex)
             {
                 // Logging must never break the agentic loop.
-                System.Diagnostics.Debug.WriteLine($"[JsonlTrainingLogger] Write failed: {ex.Message}");
+                DevMindLog.Write($"[JsonlTrainingLogger] Write failed: {ex.Message}");
             }
         }
 

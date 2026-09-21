@@ -58,13 +58,13 @@ namespace DevMind
                     }
                     catch (Exception ex)
                     {
-                        System.Diagnostics.Debug.WriteLine($"[PatchBackupSweeper] delete of '{path}' failed: {ex.Message}");
+                        DevMindLog.Write($"[PatchBackupSweeper] delete of '{path}' failed: {ex.Message}");
                     }
                 }
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[PatchBackupSweeper] sweep failed: {ex.Message}");
+                DevMindLog.Write($"[PatchBackupSweeper] sweep failed: {ex.Message}");
             }
         }
     }

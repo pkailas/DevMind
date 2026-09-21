@@ -382,7 +382,7 @@ namespace DevMind
                 if (lower.Contains(hint))
                 {
                     _modelNameHintsHybrid = true;
-                    Debug.WriteLine($"[DevMind] Context strategy hint: '{modelName}' matches '{hint}' — starting on hybrid policy (auto mode).");
+                    DevMindLog.Write($"[DevMind] Context strategy hint: '{modelName}' matches '{hint}' — starting on hybrid policy (auto mode).");
                     return;
                 }
             }
@@ -582,7 +582,7 @@ namespace DevMind
             _contextSize = manual;
             _budget = new ContextBudget(_contextSize);
             ServerContextSize = _contextSize;          // surface to the status bar
-            Debug.WriteLine($"[DevMind] Using manual context size: {_contextSize}");
+            DevMindLog.Write($"[DevMind] Using manual context size: {_contextSize}");
             if (_options.ShowDebugOutput)
                 _pendingDebugLog.Add($"\n[DEBUG] Manual context override: {_contextSize:N0} tokens\n");
             return true;
@@ -733,7 +733,7 @@ namespace DevMind
             if (TryGetServerTypeOverride(out LlmServerType forcedType))
             {
                 ServerType = forcedType;
-                Debug.WriteLine($"[DevMind] Server type forced via DEVMIND_SERVER_TYPE: {forcedType}");
+                DevMindLog.Write($"[DevMind] Server type forced via DEVMIND_SERVER_TYPE: {forcedType}");
             }
             else
             {
@@ -762,19 +762,19 @@ namespace DevMind
                 {
                     case LlmServerType.LlamaServer:
                         url = serverRoot + "/props";
-                        Debug.WriteLine($"[DevMind] Context detection: server=llama-server, endpoint={url}");
+                        DevMindLog.Write($"[DevMind] Context detection: server=llama-server, endpoint={url}");
                         detected = await DetectFromLlamaPropsAsync(url).ConfigureAwait(false);
                         break;
 
                     case LlmServerType.LmStudio:
                         url = serverRoot + "/api/v0/models";
-                        Debug.WriteLine($"[DevMind] Context detection: server=LM Studio, endpoint={url}");
+                        DevMindLog.Write($"[DevMind] Context detection: server=LM Studio, endpoint={url}");
                         detected = await DetectFromLmStudioModelsAsync(url).ConfigureAwait(false);
                         break;
 
                     case LlmServerType.Vllm:
                         url = serverRoot + "/v1/models";
-                        Debug.WriteLine($"[DevMind] Context detection: server=vLLM, endpoint={url}");
+                        DevMindLog.Write($"[DevMind] Context detection: server=vLLM, endpoint={url}");
                         detected = await DetectFromVllmModelsAsync(url).ConfigureAwait(false);
                         break;
 
@@ -785,12 +785,12 @@ namespace DevMind
                             : (customPath.StartsWith("http", StringComparison.OrdinalIgnoreCase)
                                 ? customPath
                                 : serverRoot + (customPath.StartsWith("/", StringComparison.Ordinal) ? customPath : "/" + customPath));
-                        Debug.WriteLine($"[DevMind] Context detection: server=Custom, endpoint={url}");
+                        DevMindLog.Write($"[DevMind] Context detection: server=Custom, endpoint={url}");
                         detected = await DetectFromCustomEndpointAsync(url).ConfigureAwait(false);
                         break;
 
                     default:
-                        Debug.WriteLine($"[DevMind] Context detection: unknown server type, using default {_contextSize}");
+                        DevMindLog.Write($"[DevMind] Context detection: unknown server type, using default {_contextSize}");
                         return;
                 }
 
@@ -799,16 +799,16 @@ namespace DevMind
                     _contextSize = detected;
                     _budget = new ContextBudget(_contextSize);
                     ServerContextSize = detected;          // surface to the status bar
-                    Debug.WriteLine($"[DevMind] Context detection: n_ctx={_contextSize}");
+                    DevMindLog.Write($"[DevMind] Context detection: n_ctx={_contextSize}");
                 }
                 else
                 {
-                    Debug.WriteLine($"[DevMind] Context detection WARNING: could not read n_ctx from endpoint, using fallback {_contextSize}");
+                    DevMindLog.Write($"[DevMind] Context detection WARNING: could not read n_ctx from endpoint, using fallback {_contextSize}");
                 }
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"[DevMind] Context detection WARNING: exception during detection ({ex.GetType().Name}: {ex.Message}), using fallback {_contextSize}");
+                DevMindLog.Write($"[DevMind] Context detection WARNING: exception during detection ({ex.GetType().Name}: {ex.Message}), using fallback {_contextSize}");
             }
         }
 
@@ -891,7 +891,7 @@ namespace DevMind
                 case "lmstudio": serverType = LlmServerType.LmStudio;    return true;
                 case "custom":   serverType = LlmServerType.Custom;      return true;
                 default:
-                    Debug.WriteLine($"[DevMind] DEVMIND_SERVER_TYPE='{raw}' not recognized " +
+                    DevMindLog.Write($"[DevMind] DEVMIND_SERVER_TYPE='{raw}' not recognized " +
                         "(use vllm|llama|lmstudio|custom) — falling back to auto-detection.");
                     return false;
             }
@@ -919,7 +919,7 @@ namespace DevMind
                         if ((model as JObject)?["owned_by"]?.ToString() == "vllm")
                         {
                             ServerType = LlmServerType.Vllm;
-                            Debug.WriteLine("[DevMind] Server type auto-detected: vLLM (owned_by=vllm)");
+                            DevMindLog.Write("[DevMind] Server type auto-detected: vLLM (owned_by=vllm)");
                             return;
                         }
                     }
@@ -927,7 +927,7 @@ namespace DevMind
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"[DevMind] Server type auto-detect skipped ({ex.GetType().Name}: {ex.Message})");
+                DevMindLog.Write($"[DevMind] Server type auto-detect skipped ({ex.GetType().Name}: {ex.Message})");
             }
         }
 
@@ -2771,7 +2771,7 @@ namespace DevMind
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"[DevMind TRACE] GenerateSummaryAsync failed: {ex.Message}");
+                DevMindLog.Write($"[DevMind] GenerateSummaryAsync failed: {ex.Message}");
                 _lastSummaryError = ex.Message;
                 return null;
             }
@@ -4515,7 +4515,7 @@ namespace DevMind
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[DevMind] tool-output spill write failed: {ex.Message}");
+                DevMindLog.Write($"[DevMind] tool-output spill write failed: {ex.Message}");
                 return null;
             }
         }

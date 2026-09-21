@@ -182,7 +182,15 @@ same thing. Grouping follows `HelpGroups`.
 - Keep the engine UI-agnostic — UI concerns belong in the skins (`DevMind.Cli`, `DevMind.TUI`), never in `DevMind.Core`.
 - New UI work goes in `DevMind.TUI`; `DevMind.Cli` is the reference/fallback skin.
 - Do not reintroduce VSIX/WPF/.NET Framework patterns.
-- Use `LoggerMessage` for logging where applicable.
+- Diagnostics: `DevMindLog.Write` for anything worth reading after the fact — any failure a
+  `catch` would otherwise swallow, and the once-per-`Configure()` resolved state that makes such
+  a failure readable. It appends to `%APPDATA%\devmind\logs\devmind-<date>-pid<n>.log`, never
+  throws, and is bounded by size, age and file count (`DEVMIND_LOG=off` disables it).
+  `Debug.WriteLine` is for per-turn / per-request tracing ONLY, marked `[DevMind TRACE]`: it
+  carries `[Conditional("DEBUG")]`, so the compiler deletes the call and its string literals
+  from the `-c Release` build `run-deploy.ps1` actually publishes. `Console.Error` where a skin
+  already uses it. There is no `ILogger` pipeline and no `LoggerMessage` — the MCP stdio
+  transport owns stdout (`builder.Logging.ClearProviders()`), so nothing may write there.
 - `TreatWarningsAsErrors` is on for all solution projects (set in `Directory.Build.props`, which excludes `_archive` builds); NuGet-audit codes `NU1901`–`NU1904` stay warnings via `WarningsNotAsErrors` so a new dependency advisory cannot red-line the build.
 - Global TUI config uses atomic write (write to `.tmp` then `File.Move(..., overwrite: true)` — the overwrite flag is required; plain `File.Move` throws once the file exists, silently no-op'ing every save after the first).
 - TUI: render the agentic turn **off the UI thread** (`Task.Run`); synchronous tool I/O on the UI thread freezes the spinner/redraws. All UI writes marshal via `app.Invoke`.

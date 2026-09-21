@@ -143,7 +143,7 @@ namespace DevMind
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[NearlineCache] disk read failed for '{key}': {ex.Message}");
+                    DevMindLog.Write($"[NearlineCache] disk read failed for '{key}': {ex.Message}");
                     // Drop the broken index entry so we don't keep trying a dead file.
                     _diskBytes -= disk.SizeBytes;
                     if (_diskBytes < 0) _diskBytes = 0;
@@ -200,7 +200,7 @@ namespace DevMind
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[NearlineCache] session dir delete failed: {ex.Message}");
+                    DevMindLog.Write($"[NearlineCache] session dir delete failed: {ex.Message}");
                 }
                 _sessionDir = null;
             }
@@ -365,7 +365,7 @@ namespace DevMind
             catch (Exception ex)
             {
                 _diskWriteFailures++;
-                System.Diagnostics.Debug.WriteLine($"[NearlineCache] spill write failed for '{entry.Key}': {ex.Message}");
+                DevMindLog.Write($"[NearlineCache] spill write failed for '{entry.Key}': {ex.Message}");
                 return false;
             }
         }
@@ -403,7 +403,7 @@ namespace DevMind
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[NearlineCache] file delete failed for '{entry.Key}': {ex.Message}");
+                DevMindLog.Write($"[NearlineCache] file delete failed for '{entry.Key}': {ex.Message}");
             }
             _diskBytes -= entry.SizeBytes;
             if (_diskBytes < 0) _diskBytes = 0;
@@ -462,13 +462,13 @@ namespace DevMind
                     }
                     catch (Exception ex)
                     {
-                        System.Diagnostics.Debug.WriteLine($"[NearlineCache] cleanup of '{sessionDir}' failed: {ex.Message}");
+                        DevMindLog.Write($"[NearlineCache] cleanup of '{sessionDir}' failed: {ex.Message}");
                     }
                 }
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[NearlineCache] cleanup scan failed: {ex.Message}");
+                DevMindLog.Write($"[NearlineCache] cleanup scan failed: {ex.Message}");
             }
         }
 

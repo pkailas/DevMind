@@ -27,6 +27,12 @@ namespace DevMind
         public const string MemoryDirName = "memory";
 
         /// <summary>
+        /// Name of the directory holding the diagnostic log files written by
+        /// <see cref="DevMindLog"/>.
+        /// </summary>
+        public const string LogsDirName = "logs";
+
+        /// <summary>
         /// Absolute path to the per-user DevMind state directory
         /// (%APPDATA%\devmind). This is the same directory that holds
         /// devmind.json; it is intentionally NOT created here — callers decide
@@ -59,5 +65,15 @@ namespace DevMind
         /// </summary>
         public static string GlobalMemoryDir =>
             Path.Combine(GlobalDir, MemoryDirName);
+
+        /// <summary>
+        /// Absolute path to the diagnostic log directory
+        /// (%APPDATA%\devmind\logs). Like <see cref="GlobalMemoryDir"/> it is derived,
+        /// not cached, so it follows <c>DEVMIND_GLOBAL_DIR</c> — which is what keeps a
+        /// test run's log writes out of the operator's real %APPDATA%. Created on demand
+        /// by <see cref="DevMindLog"/>, never here.
+        /// </summary>
+        public static string GlobalLogsDir =>
+            Path.Combine(GlobalDir, LogsDirName);
     }
 }
