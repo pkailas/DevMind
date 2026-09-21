@@ -335,6 +335,7 @@ namespace DevMind.Core.Tests
             public string SystemPromptContent => "";
             public string? LastCompactionSummary => null;
             public string LastAssistantText => "";
+            public string LastReasoning => "";
             public int EstimateHistoryTokens() => 0;
             public void AddToolResultMessage(string toolCallId, string content, string? toolName = null) { }
             public void StagePendingImage(string imageDataUri) { }

@@ -66,6 +66,12 @@ namespace DevMind
         /// Set during <see cref="SendMessageAsync"/>. Null until the first response completes.</summary>
         string LastAssistantText { get; }
 
+        /// <summary>The model's reasoning text from the last response, captured upstream of any
+        /// display filtering (ThinkFilter / show_thinking are DISPLAY switches and never gate
+        /// this). Empty string when the turn generated no reasoning — that absence is itself
+        /// information for the training corpus. Set during <see cref="SendMessageAsync"/>.</summary>
+        string LastReasoning { get; }
+
         /// <summary>Estimates total history token usage from conversation message lengths.</summary>
         int EstimateHistoryTokens();
 

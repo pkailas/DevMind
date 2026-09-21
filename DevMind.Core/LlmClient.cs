@@ -124,6 +124,11 @@ namespace DevMind
         private const int ScratchpadMaxTokens = 200;
         private int _currentTurn;
 
+        // Per-send reasoning accumulator (delta.reasoning_content deltas, llama-server's
+        // native reasoning channel). Fed to LastReasoning at send end — the training
+        // corpus reads it upstream of ThinkFilter, so capture is display-switch-agnostic.
+        private readonly System.Text.StringBuilder _reasoningBuilder = new System.Text.StringBuilder();
+
         /// <summary>
         /// After the first compaction, stores the working-budget percentage target.
         /// Subsequent compactions trim until at or below this watermark.
@@ -273,6 +278,13 @@ namespace DevMind
         /// <summary>The raw assistant text from the last LLM response (content only, no TUI decorations).
         /// Set during <see cref="SendMessageAsync"/>. Null until the first response completes.</summary>
         public string LastAssistantText { get; private set; }
+
+        /// <summary>The model's reasoning text from the last response, captured upstream of ThinkFilter.
+        /// Empty string when no reasoning was generated (the model produced no
+        /// <c>reasoning_content</c> deltas). Set during <see cref="SendMessageAsync"/>.
+        /// Unlike <see cref="LastAssistantText"/> this is never null — an empty string is
+        /// the positive signal that the turn generated no reasoning.</summary>
+        public string LastReasoning { get; private set; } = "";
 
         // ── Server-reported timings from last SSE response ──────────────────
         public int LastPromptTokens { get; private set; }
@@ -1261,6 +1273,10 @@ namespace DevMind
                 LivePromptTokens = 0;
                 LiveTokensPerSecond = 0;
 
+                // Reset per-response reasoning accumulator — upstream of ThinkFilter so the
+                // corpus captures what the model reasoned regardless of the display switch.
+                _reasoningBuilder.Clear();
+
                 // vLLM wall-clock timing — stamped on the first SSE chunk below (0 = unstamped).
                 _streamStartMs = 0;
 
@@ -1353,8 +1369,9 @@ namespace DevMind
                     string reasoning = ParseReasoningDelta(data);
                     if (reasoning != null)
                     {
-                        if (!inReasoning) { inReasoning = true; onToken("<think>"); }
+                        if (!inReasoning) { inReasoning = true; onToken("\u003Cthink\u003E"); }
                         firstTokenReceived = true;
+                        _reasoningBuilder.Append(reasoning);
                         onToken(reasoning);
                     }
 
@@ -1416,6 +1433,16 @@ namespace DevMind
                     {
                         LastToolCalls = parseResult;
                         rawToolCalls = ExtractRawToolCalls(lastDataLine);
+
+                        // Non-streamed servers deliver reasoning_content on the single
+                        // tool_calls chunk instead of streamed deltas: if the streaming
+                        // accumulator is empty, this is the only reasoning this send had.
+                        if (_reasoningBuilder.Length == 0)
+                        {
+                            string thinking = parseResult[0]?.ThinkingText;
+                            if (!string.IsNullOrEmpty(thinking))
+                                _reasoningBuilder.Append(thinking);
+                        }
                     }
                 }
 
@@ -1429,6 +1456,10 @@ namespace DevMind
 
                 // Expose raw assistant text for history persistence (no TUI decorations).
                 LastAssistantText = fullResponse.ToString();
+
+                // Publish the reasoning captured this send. Empty when the model produced
+                // no reasoning_content deltas — that is information, not an error.
+                LastReasoning = _reasoningBuilder.ToString();
 
                 // ── Emit server timings status line ─────────────────────────
                 if (LastGeneratedTokens > 0
@@ -1539,6 +1570,7 @@ namespace DevMind
             _recentCompactionCount = 0;
             _lastCompactionTurn = 0;
             _compactionSummaries.Clear();
+            _reasoningBuilder.Clear();
             _completedFiles.Clear();
             _droppedMessageCount = 0;
             _recentDropSnippets.Clear();

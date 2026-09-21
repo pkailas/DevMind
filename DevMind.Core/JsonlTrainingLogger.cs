@@ -172,6 +172,7 @@ namespace DevMind
                     SystemPrompt = _systemPromptLogged ? null : data.SystemPrompt,
                     UserMessage = data.UserMessage,
                     AssistantResponse = data.AssistantResponse,
+                    ReasoningContent = data.Reasoning,
                     ToolCalls = data.ToolCalls,
                     ToolResults = data.ToolResults,
                     SummaryContext = data.SummaryContext,
@@ -362,6 +363,9 @@ namespace DevMind
             [JsonProperty("assistant_response")]
             public string AssistantResponse { get; set; }
 
+            [JsonProperty("reasoning_content")]
+            public string ReasoningContent { get; set; }
+
             [JsonProperty("tool_calls")]
             public List<ToolCallEntry> ToolCalls { get; set; }
 
@@ -393,6 +397,9 @@ namespace DevMind
         public string SystemPrompt { get; set; }
         public string UserMessage { get; set; }
         public string AssistantResponse { get; set; }
+        /// <summary>The model's reasoning text for this turn, captured upstream of any
+        /// display filter. Empty string when the turn generated no reasoning.</summary>
+        public string Reasoning { get; set; }
         public List<ToolCallEntry> ToolCalls { get; set; }
         public List<ToolResultEntry> ToolResults { get; set; }
         public string SummaryContext { get; set; }

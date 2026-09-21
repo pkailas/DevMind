@@ -157,7 +157,10 @@ namespace DevMind
             // over logging is disproportionate, so this degrades to a warning on stderr
             // and runs unlogged — visible, not silent.
             ITrainingLogger trainingLogger = null;
-            if (!string.IsNullOrWhiteSpace(sessionId))
+            // TrainingCapture.Disabled is the test-run opt-out: test assemblies set it once
+            // via [ModuleInitializer], and no test can then write into the operator's real
+            // configured corpus folder by picking up the ambient devmind.json here.
+            if (!TrainingCapture.Disabled && !string.IsNullOrWhiteSpace(sessionId))
             {
                 try
                 {

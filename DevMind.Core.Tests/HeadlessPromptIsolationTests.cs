@@ -142,10 +142,18 @@ namespace DevMind.Core.Tests
                         continue;
 
                     // The call spans several lines; promptFilePath is the last argument.
-                    // Scan forward to the closing ");" of the invocation.
-                    string call = string.Join("\n", lines.Skip(i).Take(12));
+                    // Scan forward to the closing ");" of the invocation. The 60-line bound
+                    // exists only so a malformed/unclosed call cannot run away.
+                    string call = string.Join("\n", lines.Skip(i).Take(60));
                     int close = call.IndexOf(");", StringComparison.Ordinal);
-                    if (close >= 0) call = call.Substring(0, close);
+                    if (close < 0)
+                    {
+                        // No closing ");" in the bound: fail closed. Silently passing an
+                        // unscannable invocation would make the guard fail open.
+                        offenders.Add($"{Path.GetFileName(file)}:{i + 1} (no closing ');' within 60 lines — inspect manually)");
+                        continue;
+                    }
+                    call = call.Substring(0, close);
 
                     if (!call.Contains("promptFilePath"))
                         offenders.Add($"{Path.GetFileName(file)}:{i + 1}");

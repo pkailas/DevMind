@@ -32,8 +32,24 @@ namespace DevMind
         /// devmind.json; it is intentionally NOT created here — callers decide
         /// when (and if) their own subtree needs to exist.
         /// </summary>
-        public static string GlobalDir =>
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), ConfigDirName);
+        /// <remarks>
+        /// Overridable via the <c>DEVMIND_GLOBAL_DIR</c> environment variable. This is a
+        /// test seam (mirroring <c>DEVMIND_TASKS_DIR</c>): a test run can point the global
+        /// config at a hermetic temp directory instead of the operator's real
+        /// %APPDATA%\devmind, so its assertions never depend on the machine it runs on.
+        /// Whitespace-only counts as unset (a blank path would be meaningless). Re-read on
+        /// every access — no caching — so a change takes effect without a restart.
+        /// </remarks>
+        public static string GlobalDir
+        {
+            get
+            {
+                string override_ = Environment.GetEnvironmentVariable("DEVMIND_GLOBAL_DIR");
+                if (!string.IsNullOrWhiteSpace(override_))
+                    return override_;
+                return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), ConfigDirName);
+            }
+        }
 
         /// <summary>
         /// Absolute path to the machine-level memory directory

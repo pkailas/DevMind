@@ -609,12 +609,22 @@ namespace DevMind
                 ? _llmClient.LastGeneratedTokens * 1000.0 / _llmClient.LastGeneratedMs
                 : 0;
 
+            // The model's visible text is captured from LlmClient.LastAssistantText, NOT from the
+            // responseBuffer the host passes in. That buffer is fed by the SAME onToken callback the
+            // client uses to emit its own [CONTEXT]/[LLM]/[TOOL_USE] status lines, so chrome and model
+            // prose are interleaved BY DESIGN and cannot be separated without a lossy strip. LastAssistantText
+            // is built purely from content deltas — zero chrome — and is the same shape of per-turn state
+            // every other field in this method already reads. Fall back to the raw param when null (pre-first
+            // -response error paths). The user transcript is untouched — this is the logged field only.
+            string loggedResponse = _llmClient.LastAssistantText ?? assistantResponse;
+
             return new TrainingTurnData
             {
                 TurnNumber = _llmClient.CurrentTurn,
                 SystemPrompt = _llmClient.SystemPromptContent,
                 UserMessage = userMessage,
-                AssistantResponse = assistantResponse,
+                AssistantResponse = loggedResponse,
+                Reasoning = _llmClient.LastReasoning,
                 ToolCalls = JsonlTrainingLogger.ExtractToolCalls(outcome?.Blocks),
                 ToolResults = JsonlTrainingLogger.ExtractToolResults(result),
                 SummaryContext = _llmClient.LastCompactionSummary,
