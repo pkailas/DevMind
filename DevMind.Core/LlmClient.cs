@@ -3672,8 +3672,22 @@ namespace DevMind
                 // (both ignore it — llama-server field evidence: headless tasks ran unbounded
                 // multi-minute think blocks with ShowLlmThinking=false because the old
                 // else-branch sent the ignored Anthropic form). enable_thinking rides in
-                // chat_template_kwargs; when thinking is on, vLLM additionally caps the budget
-                // (llama-server has no working numeric budget — on/off only).
+                // chat_template_kwargs; when thinking is on, vLLM additionally caps the budget.
+                // llama-server's budget (verified on llama.cpp b10499 — NOT on/off only):
+                //   * --reasoning-budget N is a real SERVER flag: -1 unrestricted, 0 immediate
+                //     end, N>0 a token budget. This deployment launches with 1500.
+                //   * reasoning_budget as a REQUEST BODY field is NOT honoured (tested: a request
+                //     with budget 40 still produced ~1424 characters of reasoning). It is
+                //     CLI/server-global only, so it CANNOT be a per-job parameter here.
+                //   * --chat-template-kwargs at server launch MERGES with per-request
+                //     chat_template_kwargs (not replaced): verified via /apply-template — a
+                //     request carrying only enable_thinking still resolved reasoning_effort
+                //     from the launch flag.
+                //   * The server launches with reasoning_effort=medium, and in this model's chat
+                //     template medium injects NO instruction text (only 'xhigh' and 'low' have
+                //     branches; medium falls through empty) — an abstention, not a middle.
+                //   * reasoning_effort CAN be set per request via chat_template_kwargs, unlike
+                //     the budget — so the per-job display switch below is all this layer can do.
                 request["chat_template_kwargs"] = new JObject
                 {
                     ["enable_thinking"] = _options.ShowLlmThinking
