@@ -159,22 +159,59 @@ namespace DevMind
                     }
 
                 case "patch_file":
-                    if (result.PatchedPaths != null && result.PatchedPaths.Count > 0)
                     {
-                        string header = $"[PATCH applied to {string.Join(", ", result.PatchedPaths)}]";
-                        // Append any post-patch context echoes (fresh view around each edit) so the
-                        // model can patch again without a separate READ. Keyed by full path.
-                        var echoes = new StringBuilder();
-                        foreach (var p in result.PatchedPaths.Distinct())
-                            if (result.ToolResultContents != null &&
-                                result.ToolResultContents.TryGetValue(p, out string ctx) &&
-                                !string.IsNullOrEmpty(ctx))
-                                echoes.Append('\n').Append(ctx);
-                        return echoes.Length > 0 ? header + "\n" + echoes.ToString().TrimStart('\n') : header;
+                        // ExecutionResult.Errors can hold errors from OTHER tools executed in the
+                        // same iteration, so only attribute entries this tool owns: every
+                        // producer site in AgenticExecutor records patch failures under one of
+                        // the two prefixes below (resolve/apply failure-or-throw, and user
+                        // cancel/reject), so the filter is exhaustive.
+                        var patchErrors = result.Errors != null
+                            ? result.Errors.Where(e =>
+                                e.StartsWith("[PATCH-FAILED:", StringComparison.Ordinal) ||
+                                e.StartsWith("[PATCH-SKIPPED:", StringComparison.Ordinal))
+                              .ToList()
+                            : null;
+
+                        string patchBody = null;
+                        if (result.PatchedPaths != null && result.PatchedPaths.Count > 0)
+                        {
+                            // Success header plus any post-patch context echoes (fresh view around
+                            // each edit) so the model can patch again without a separate READ.
+                            // Keyed by full path. Byte-identical to the historical output when
+                            // nothing failed.
+                            string header = $"[PATCH applied to {string.Join(", ", result.PatchedPaths)}]";
+                            var echoes = new StringBuilder();
+                            foreach (var p in result.PatchedPaths.Distinct())
+                                if (result.ToolResultContents != null &&
+                                    result.ToolResultContents.TryGetValue(p, out string ctx) &&
+                                    !string.IsNullOrEmpty(ctx))
+                                    echoes.Append('\n').Append(ctx);
+                            patchBody = echoes.Length > 0 ? header + "\n" + echoes.ToString().TrimStart('\n') : header;
+                        }
+
+                        if (patchErrors != null && patchErrors.Count > 0)
+                        {
+                            // Always report the failures, whether or not anything also succeeded:
+                            // a previous version returned the success header alone on a partial
+                            // success, telling the model the call worked and never naming the
+                            // file that did not change. Cite PatchesFailed as a cross-check on
+                            // the listed errors for a model that cannot see the transcript.
+                            string failureLine = patchErrors.Count == result.PatchesFailed
+                                ? $"[PATCH-FAILED: {string.Join("; ", patchErrors)}]"
+                                : $"[PATCH-FAILED: {string.Join("; ", patchErrors)} ({patchErrors.Count} of {result.PatchesFailed} recorded patch failures shown)]";
+                            return patchBody != null ? patchBody + "\n" + failureLine : failureLine;
+                        }
+
+                        if (patchBody != null)
+                            return patchBody;
+
+                        // Nothing was patched and no patch failure was recorded. Do NOT report
+                        // this as "[PATCH processed]" — that reads as success for a call that
+                        // did nothing. The realistic cause is that the patch's find-text matched
+                        // nothing, so no patch block resolved and the executor returned early
+                        // without touching any file.
+                        return $"[PATCH_FILE FAILED: no file was patched. The patch's find-text matched nothing in the target file, so no patch block resolved and the file was NOT modified. Re-READ the file and retry with the exact current text.]";
                     }
-                    if (result.Errors != null && result.Errors.Count > 0)
-                        return $"[PATCH-FAILED: {string.Join("; ", result.Errors)}]";
-                    return "[PATCH processed]";
 
                 case "create_file":
                     if (result.FilesCreated != null && result.FilesCreated.Count > 0)
