@@ -1,4 +1,4 @@
-// File: ScratchpadCompactionSafetyTests.cs  v1.0
+// File: ScratchpadCompactionSafetyTests.cs  v2.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Three history passes can reach a message between sends, and each is a way for the
@@ -12,10 +12,22 @@
 //     eventually age out, or worse, linger as a stale copy.
 //
 // Rather than exempt the message from all three (three exemptions that must each stay
-// correct as those passes change), the scratchpad is removed at the top of every send and
+// correct as those passes change), the scratchpad is removed before any pass runs and
 // rebuilt immediately before the request is serialized. None of the passes ever sees one.
 // That makes the safety property an ORDERING, so the ordering is what is pinned here —
 // behaviourally where a test can drive it, and structurally where it cannot.
+//
+// The structural half was rewritten when the send stopped being linear. Context-overflow
+// recovery compacts and re-serializes a SECOND time inside one send, so "exactly one call
+// site each, in ascending line order" — the old encoding — now describes a file layout
+// rather than the property. Worse, it would have forbidden the very call that keeps the
+// property true on the new path: the recovery must remove the scratchpad again before it
+// force-compacts, because by then one has already been inserted for the first attempt.
+//
+// So the guard now walks the call sites in file order as a state machine: a removal clears
+// the flag, an insertion sets it, every compaction pass must run with it clear, and every
+// request serialization must run with it set. That is the property itself, it holds for any
+// number of attempts, and it still fails if a pass is ever moved to the wrong side.
 
 using Xunit;
 
@@ -38,63 +50,87 @@ namespace DevMind.Core.Tests
             return dir;
         }
 
+        private enum Site { Remove, Insert, Pass, Serialize }
+
+        /// <summary>
+        /// Classifies a line of LlmClient.cs as one of the four events this ordering is made
+        /// of, or null. Comments and method declarations are not call sites: the declarations
+        /// are excluded by requiring the call's own punctuation rather than by matching
+        /// signatures, and the expression-bodied overload forward is excluded explicitly —
+        /// it is a signature adapter, not a compaction.
+        /// </summary>
+        private static Site? Classify(string line)
+        {
+            string t = line.TrimStart();
+            if (t.StartsWith("//", StringComparison.Ordinal)) return null;
+
+            if (line.Contains("=> MicroCompactToolResultsAsync(", StringComparison.Ordinal)) return null;
+
+            if (line.Contains("RemoveScratchpadMessage();", StringComparison.Ordinal)) return Site.Remove;
+            if (line.Contains("InsertScratchpadMessage();", StringComparison.Ordinal)) return Site.Insert;
+
+            if (line.Contains("EvictStaleContext();", StringComparison.Ordinal)) return Site.Pass;
+            if (line.Contains("TrimOldestTurns(", StringComparison.Ordinal)) return Site.Pass;
+            if (line.Contains("await MicroCompactToolResultsAsync()", StringComparison.Ordinal)) return Site.Pass;
+            if (line.Contains("MicroCompactToolResultsAsync(force:", StringComparison.Ordinal)) return Site.Pass;
+
+            if (line.Contains("BuildRequestJson(modelName,", StringComparison.Ordinal)) return Site.Serialize;
+
+            return null;
+        }
+
         [Fact]
-        public void TheScratchpadIsRemovedBeforeEveryCompactionPass_AndRebuiltAfterThemAll()
+        public void NoCompactionPassEverRunsWithAScratchpadInHistory_AndEverySendSerializesWithOne()
         {
             string path = Path.Combine(RepoRoot(), "DevMind.Core", "LlmClient.cs");
             Assert.True(File.Exists(path), $"source not found: {path} — RepoRoot() resolved wrong, the guard is vacuous.");
 
             string[] lines = File.ReadAllLines(path);
 
-            int Only(string needle)
+            var sites = new List<(int Line, Site Kind)>();
+            for (int i = 0; i < lines.Length; i++)
             {
-                var hits = new List<int>();
-                for (int i = 0; i < lines.Length; i++)
-                    if (lines[i].Contains(needle, StringComparison.Ordinal)
-                        && !lines[i].TrimStart().StartsWith("//", StringComparison.Ordinal)
-                        && !lines[i].TrimStart().StartsWith("///", StringComparison.Ordinal))
-                        hits.Add(i);
-                Assert.True(hits.Count == 1, $"expected exactly one call site for \"{needle}\", found {hits.Count}");
-                return hits[0];
+                Site? kind = Classify(lines[i]);
+                if (kind.HasValue) sites.Add((i + 1, kind.Value));
             }
 
-            int remove = Only("RemoveScratchpadMessage();");
-            int insert = Only("InsertScratchpadMessage();");
-            int request = Only("BuildRequestJson(modelName,");
+            // If the needles stop matching, every assertion below passes vacuously.
+            int passes = sites.Count(s => s.Kind == Site.Pass);
+            Assert.True(passes >= 4, $"found only {passes} compaction call sites — the guard has lost track of them");
+            Assert.Contains(sites, s => s.Kind == Site.Remove);
+            Assert.Contains(sites, s => s.Kind == Site.Insert);
+            Assert.Contains(sites, s => s.Kind == Site.Serialize);
 
-            // Call sites inside the send, between the removal and the request. A method
-            // DECLARATION elsewhere in the file is not a call site, so declarations are
-            // excluded by the window rather than by pattern-matching their signatures.
-            List<int> CallsInSend(string needle)
+            // The send begins with no scratchpad in history: it is removed at the top, before
+            // anything reads or rewrites the conversation.
+            Assert.Equal(Site.Remove, sites[0].Kind);
+
+            bool scratchpadPresent = false;
+            foreach (var (line, kind) in sites)
             {
-                var hits = new List<int>();
-                for (int i = remove; i <= request; i++)
+                switch (kind)
                 {
-                    string t = lines[i].TrimStart();
-                    if (t.StartsWith("//", StringComparison.Ordinal)) continue;
-                    if (lines[i].Contains(needle, StringComparison.Ordinal)) hits.Add(i);
+                    case Site.Remove:
+                        scratchpadPresent = false;
+                        break;
+
+                    case Site.Insert:
+                        scratchpadPresent = true;
+                        break;
+
+                    case Site.Pass:
+                        Assert.False(scratchpadPresent,
+                            $"the compaction pass at line {line} runs while a scratchpad is in history — " +
+                            "it can delete the live one or carry a stale one forward. Remove it first.");
+                        break;
+
+                    case Site.Serialize:
+                        Assert.True(scratchpadPresent,
+                            $"the request serialized at line {line} was built with no scratchpad inserted — " +
+                            "the model loses its cross-turn state for this turn.");
+                        break;
                 }
-                return hits;
             }
-
-            var passes = new List<int>();
-            passes.AddRange(CallsInSend("EvictStaleContext();"));
-            passes.AddRange(CallsInSend("TrimOldestTurns("));
-            passes.AddRange(CallsInSend("await MicroCompactToolResultsAsync()"));
-
-            Assert.True(passes.Count >= 4,
-                $"found only {passes.Count} compaction call sites — the guard has lost track of them");
-
-            foreach (int pass in passes)
-            {
-                Assert.True(remove < pass,
-                    $"a compaction pass at line {pass + 1} runs BEFORE the scratchpad is removed — it can delete or preserve one");
-                Assert.True(insert > pass,
-                    $"the scratchpad is inserted at line {insert + 1}, before the compaction pass at line {pass + 1} — that pass can reach it");
-            }
-
-            Assert.True(insert < request,
-                "the scratchpad is inserted after the request is built, so it never reaches the wire");
         }
 
         // ── Behavioural: it survives turns of aggressive eviction, and stays current ──

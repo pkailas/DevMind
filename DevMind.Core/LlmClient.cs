@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v7.29
+// File: LlmClient.cs  v7.30
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -125,6 +125,9 @@ namespace DevMind
 
         private string _taskScratchpad = "";
         private const int ScratchpadMaxTokens = 200;
+
+        /// <summary>Floor for the watermark a forced compaction may drive itself to.</summary>
+        private const int MinForcedWatermarkPct = 5;
         private int _currentTurn;
 
         // Per-send reasoning accumulator (delta.reasoning_content deltas, llama-server's
@@ -210,6 +213,18 @@ namespace DevMind
         /// clock governs.
         /// </summary>
         internal int EvictedMessageCountForTest => _droppedMessageCount;
+
+        /// <summary>
+        /// Test seam (visible via InternalsVisibleTo) — the compaction counters the thrash
+        /// detector reads, so a test can assert a FORCED compaction is accounted for exactly
+        /// as a normal one is. A recovery pass that skipped this bookkeeping would be
+        /// invisible to IsThrashing, which is how a compaction loop stops being detected as
+        /// one.
+        /// </summary>
+        internal int RecentCompactionCountForTest => _recentCompactionCount;
+
+        /// <summary>Test seam (visible via InternalsVisibleTo) — see <see cref="RecentCompactionCountForTest"/>.</summary>
+        internal int LastCompactionTurnForTest => _lastCompactionTurn;
 
         /// <summary>Maximum eviction snippets kept in the rolling [DROPPED] marker.</summary>
         private const int MaxDropSnippets = 12;
@@ -1269,28 +1284,17 @@ namespace DevMind
             // swaps in a fresh connection pool so the chat request goes over a live TCP connection.
             await EnsureConnectionHealthAsync(cancellationToken).ConfigureAwait(false);
 
-            // After every compaction/eviction pass, and immediately before the request is
-            // serialized — see RemoveScratchpadMessage for why this ordering is the safety
-            // argument rather than a convenience.
-            InsertScratchpadMessage();
-
            string modelName = _options.ModelName;
-            string requestJson = BuildRequestJson(modelName, forceToolChoiceRequired, maxTokens);
 
             string url = _baseUrl + "/chat/completions";
 
-            var request = new HttpRequestMessage(HttpMethod.Post, url)
-            {
-                Content = new StringContent(requestJson, Encoding.UTF8, "application/json")
-            };
-
-            System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] About to POST to {url} — requestJson length={requestJson.Length}");
-
             try
             {
-                using var response = await _httpClient.SendAsync(
-                    request,
-                    HttpCompletionOption.ResponseHeadersRead,
+                // Serialises and POSTs, and on a context-overflow rejection compacts once and
+                // re-sends this same turn. Any other failure comes back as the response it
+                // was, so the error handling directly below is reached unchanged.
+                using var response = await PostWithOverflowRecoveryAsync(
+                    modelName, forceToolChoiceRequired, maxTokens, url, onToken,
                     cancellationToken).ConfigureAwait(false);
 
                 // Surface the request URL and the server's error body instead of a bare status
@@ -1686,6 +1690,145 @@ namespace DevMind
             bool alreadyRead = _filesReadThisSession.Contains(fileNameOnly);
             _filesReadThisSession.Add(fileNameOnly);
             return alreadyRead;
+        }
+
+
+        /// <summary>
+        /// Serialises and sends one chat request, recovering from a context-window rejection
+        /// by compacting once and re-sending the same turn. Returns the response the caller
+        /// should handle: a successful one, or a failed one that is NOT an overflow, so the
+        /// caller's existing error path builds exactly the exception it always built.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Why this exists: a rejection for size is the only failure DevMind can act on
+        /// mechanically, and the only moment it is handed a MEASURED prompt size instead of
+        /// its own chars/4 estimate. Before this, that rejection reached onError and ended the
+        /// turn — the job died holding the exact number that would have told it what to drop.
+        /// </para>
+        /// <para>
+        /// Exactly one recovery attempt, and only when the compaction actually shrank the
+        /// prompt. Re-sending a request the compaction did not change is not a retry, it is a
+        /// loop against a server that has already answered; and a second rejection means the
+        /// mechanical fix was not enough, which the operator needs told rather than retried.
+        /// </para>
+        /// <para>
+        /// The user message is NOT re-appended between attempts. It was added to history
+        /// before the send and nothing removes it on failure, so re-adding it would put two
+        /// consecutive user turns on the wire.
+        /// </para>
+        /// <para>
+        /// No second connection-health probe before the retry. The rejection arrives with
+        /// <c>Connection: close</c>, and SocketsHttpHandler retires that pooled connection on
+        /// seeing it, so the retry opens a fresh one by itself; a probe would add a round trip
+        /// to a path already in trouble to re-establish something the pool has handled. The
+        /// integration tests run a real HttpClient against a server that closes the connection
+        /// on the rejection, so this is measured rather than assumed.
+        /// </para>
+        /// </remarks>
+        private async Task<HttpResponseMessage> PostWithOverflowRecoveryAsync(
+            string modelName,
+            bool forceToolChoiceRequired,
+            int maxTokens,
+            string url,
+            Action<string> onToken,
+            CancellationToken cancellationToken)
+        {
+            int reclaimedOnRetry = 0;
+
+            // Bounded by the attempt check below rather than by the loop condition, so there
+            // is no path that leaves the loop without either a response or an exception.
+            for (int attempt = 0; ; attempt++)
+            {
+                // After every compaction/eviction pass, and immediately before the request is
+                // serialized — see RemoveScratchpadMessage for why this ordering is the safety
+                // argument rather than a convenience.
+                InsertScratchpadMessage();
+
+                string requestJson = BuildRequestJson(modelName, forceToolChoiceRequired, maxTokens);
+
+                var request = new HttpRequestMessage(HttpMethod.Post, url)
+                {
+                    Content = new StringContent(requestJson, Encoding.UTF8, "application/json")
+                };
+
+                System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] About to POST to {url} — requestJson length={requestJson.Length}");
+
+                HttpResponseMessage response = await _httpClient.SendAsync(
+                    request,
+                    HttpCompletionOption.ResponseHeadersRead,
+                    cancellationToken).ConfigureAwait(false);
+
+                if (response.IsSuccessStatusCode)
+                    return response;
+
+                // Read (and so buffer) the error body here. The caller reads it again to build
+                // its exception; HttpContent buffers on the first read, so both see the same
+                // bytes and the caller's message is byte-for-byte what it has always been.
+                string errorBody = string.Empty;
+                try { errorBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false); }
+                catch { /* body may be empty or unreadable — TryParse handles that as "not ours" */ }
+
+                if (!ContextOverflow.TryParse((int)response.StatusCode, errorBody, out var info))
+                    return response;
+
+                if (attempt >= 1)
+                {
+                    response.Dispose();
+                    throw OverflowRecoveryFailed(info, reclaimedOnRetry, nothingToCompact: false);
+                }
+
+                response.Dispose();
+
+                onToken($"\n[CONTEXT] Server rejected the request: {info.PromptTokens:N0} tokens " +
+                        $"against {info.ContextSize:N0}. Forcing compaction and retrying once.\n");
+
+                // Compaction must not see a scratchpad message: MicroCompact clears history
+                // and rebuilds it, so a live scratchpad could be dropped, and
+                // InsertScratchpadMessage is not idempotent, so the next insert would leave a
+                // second copy behind. Removing it here restores exactly the invariant the top
+                // of the send establishes, which is what makes compacting mid-send safe.
+                RemoveScratchpadMessage();
+
+                // How far over the ceiling the server measured this prompt, plus room for the
+                // reply. Both numbers absent (an overflow reported without counts) leaves this
+                // at 0 and the watermark alone decides.
+                int responseHeadroom = maxTokens > 0 ? maxTokens : ResponseHeadroomTokens;
+                int needed = info.PromptTokens > 0 && info.ContextSize > 0
+                    ? Math.Max(0, info.PromptTokens - info.ContextSize + responseHeadroom)
+                    : 0;
+
+                int beforeTokens = EstimateHistoryTokens();
+                string compactLog = await MicroCompactToolResultsAsync(force: true, neededTokens: needed)
+                    .ConfigureAwait(false);
+                if (!string.IsNullOrEmpty(compactLog))
+                    onToken(compactLog);
+                reclaimedOnRetry = beforeTokens - EstimateHistoryTokens();
+
+                if (reclaimedOnRetry <= 0)
+                    throw OverflowRecoveryFailed(info, 0, nothingToCompact: true);
+
+                onToken($"\n[CONTEXT] Reclaimed ~{reclaimedOnRetry:N0} tokens; retrying.\n");
+            }
+        }
+
+        /// <summary>
+        /// The failure an operator reads when recovery ran and did not work. It names the
+        /// server's own numbers and what was attempted, because the alternative — a bare HTTP
+        /// error — reads as a network fault and sends the reader to the wrong problem.
+        /// </summary>
+        private static InvalidOperationException OverflowRecoveryFailed(
+            ContextOverflowInfo info, int reclaimed, bool nothingToCompact)
+        {
+            string attempted = nothingToCompact
+                ? "A forced compaction could reclaim nothing, so the request was not re-sent."
+                : $"A forced compaction reclaimed ~{reclaimed:N0} tokens and the retried request was rejected again.";
+
+            return new InvalidOperationException(
+                "The server rejected the request as exceeding its context window: " +
+                $"{info.PromptTokens:N0} tokens against a context size of {info.ContextSize:N0}. " +
+                attempted + " " +
+                "Start a new session (/restart), narrow the task, or raise the server's n_ctx.");
         }
 
         /// <summary>
@@ -2367,7 +2510,30 @@ namespace DevMind
         /// After passes 2-3, a Pass 4 trims oldest non-pinned messages until the watermark target is met.
         /// Called before <see cref="EvictStaleContext"/> on every send.
         /// </summary>
-        public async Task<string> MicroCompactToolResultsAsync()
+        public Task<string> MicroCompactToolResultsAsync()
+            => MicroCompactToolResultsAsync(force: false, neededTokens: 0);
+
+        /// <summary>
+        /// As <see cref="MicroCompactToolResultsAsync()"/>, but able to run against a
+        /// MEASURED overflow instead of a predicted one.
+        /// <para>
+        /// <paramref name="force"/> skips the pressure gate only. That gate answers "is this
+        /// urgent yet?" from estimates; a server that has just refused the request has
+        /// answered it with a tokenizer, so the gate is not merely early, it is wrong. It does
+        /// NOT skip the disabled check: <c>MicroCompactThreshold == 0</c> is an operator
+        /// saying never compact this history, which is a different statement and not one a
+        /// failed send overrides. With compaction off the recovery reclaims nothing and the
+        /// caller fails honestly, which is the correct outcome rather than a silent override.
+        /// </para>
+        /// <para>
+        /// <paramref name="neededTokens"/> is how far over the ceiling the server measured the
+        /// prompt to be. The watermark alone is a percentage target chosen for steady-state
+        /// pressure and can easily sit above what this rejection requires, so it is lowered by
+        /// the share of the window those tokens represent. A retry that does not shrink the
+        /// prompt past the ceiling is a second rejection.
+        /// </para>
+        /// </summary>
+        internal async Task<string> MicroCompactToolResultsAsync(bool force, int neededTokens)
         {
             bool showDebug = _options.ShowDebugOutput;
 
@@ -2376,49 +2542,27 @@ namespace DevMind
             if (threshold == 0)
                 return null; // disabled
 
-            // Predictive threshold: use observed growth rate to determine safe ceiling
-            if (LastContextUsed > 0 && ServerContextSize > 0 && _contextDeltas.Count > 0)
-            {
-                int avgDelta = 0;
-                foreach (var d in _contextDeltas) avgDelta += d;
-                avgDelta /= _contextDeltas.Count;
-                int headroom = avgDelta * 3;
-                int maxSafe = ServerContextSize - headroom;
-                if (LastContextUsed < maxSafe)
-                {
-                    if (showDebug)
-                        System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] MicroCompact: skipped — n_past={LastContextUsed}, maxSafe={maxSafe} (avgDelta={avgDelta})");
-                    return null;
-                }
-            }
-            else if (LastContextUsed > 0 && ServerContextSize > 0)
-            {
-                // Server data available but no deltas yet — use fixed 75% threshold
-                int pct = (int)(LastContextUsed * 100.0 / ServerContextSize);
-                if (pct < 75)
-                {
-                    if (showDebug)
-                        System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] MicroCompact: skipped — n_past/n_ctx={pct}% < 75%");
-                    return null;
-                }
-            }
-            else
-            {
-                // No server data — fall back to estimated working percentage
-                int workingPct = ComputeWorkingPct();
-                if (workingPct < 75)
-                {
-                    if (showDebug)
-                        System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] MicroCompact: skipped — working {workingPct}% < 75%");
-                    return null;
-                }
-            }
+            if (!force && !ContextPressureWarrantsCompaction(showDebug))
+                return null; // not under enough pressure to be worth the cache rebuild
 
             // ── Determine watermark target ────────────────────────────────────
             // Hybrid strategy compacts deeper: every compaction costs a full re-prefill
             // there, so buying more headroom per rebuild means fewer rebuilds per session.
             int defaultWatermark = EffectiveContextStrategy == ContextStrategy.Hybrid ? 25 : 40;
             int watermarkTarget = _microCompactWatermark > 0 ? _microCompactWatermark : defaultWatermark;
+
+            // Sizing against the server's measurement rather than the steady-state target:
+            // the watermark was chosen for "keep pressure comfortable", not for "this exact
+            // request was N tokens too big". Only ever lowered, and floored so an enormous
+            // overflow cannot drive the target to zero — the pinned task prompt and the last
+            // two messages are protected by Pass 4 regardless.
+            if (force && neededTokens > 0)
+            {
+                int neededPct = (int)Math.Ceiling(neededTokens * 100.0 / EffectiveContextWindow);
+                watermarkTarget = Math.Max(MinForcedWatermarkPct, watermarkTarget - neededPct);
+                if (showDebug)
+                    System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] MicroCompact: forced, needed={neededTokens} (~{neededPct}%), watermarkTarget={watermarkTarget}%");
+            }
 
             // ── Pin the original task prompt ──────────────────────────────────
             int firstUserIndex = -1;
@@ -2664,6 +2808,56 @@ namespace DevMind
             _lastCompactionTurn = _currentTurn;
 
             return logMsg;
+        }
+
+
+        /// <summary>
+        /// The pressure gate MicroCompact used to open with, now its own method so a forced
+        /// pass can skip exactly this and nothing else. True when context pressure is high
+        /// enough to justify a compaction, using the best signal available: observed growth
+        /// rate, else the server's n_past against n_ctx, else DevMind's own estimate.
+        /// </summary>
+        private bool ContextPressureWarrantsCompaction(bool showDebug)
+        {
+            // Predictive threshold: use observed growth rate to determine safe ceiling
+            if (LastContextUsed > 0 && ServerContextSize > 0 && _contextDeltas.Count > 0)
+            {
+                int avgDelta = 0;
+                foreach (var d in _contextDeltas) avgDelta += d;
+                avgDelta /= _contextDeltas.Count;
+                int headroom = avgDelta * 3;
+                int maxSafe = ServerContextSize - headroom;
+                if (LastContextUsed < maxSafe)
+                {
+                    if (showDebug)
+                        System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] MicroCompact: skipped — n_past={LastContextUsed}, maxSafe={maxSafe} (avgDelta={avgDelta})");
+                    return false;
+                }
+            }
+            else if (LastContextUsed > 0 && ServerContextSize > 0)
+            {
+                // Server data available but no deltas yet — use fixed 75% threshold
+                int pct = (int)(LastContextUsed * 100.0 / ServerContextSize);
+                if (pct < 75)
+                {
+                    if (showDebug)
+                        System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] MicroCompact: skipped — n_past/n_ctx={pct}% < 75%");
+                    return false;
+                }
+            }
+            else
+            {
+                // No server data — fall back to estimated working percentage
+                int workingPct = ComputeWorkingPct();
+                if (workingPct < 75)
+                {
+                    if (showDebug)
+                        System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] MicroCompact: skipped — working {workingPct}% < 75%");
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         /// <summary>

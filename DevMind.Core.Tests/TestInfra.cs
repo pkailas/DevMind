@@ -1,4 +1,4 @@
-// File: TestInfra.cs  v1.0
+// File: TestInfra.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Shared test infrastructure for LlmClient-facing tests:
@@ -47,6 +47,70 @@ namespace DevMind.Core.Tests
         public List<string> SseQueue { get; } = new();
         public bool RepeatLastWhenExhausted { get; set; }
         private int _sseIndex;
+
+        /// <summary>
+        /// Scripted HTTP failures for chat POSTs, consumed in order and independently of
+        /// <see cref="SseQueue"/>: an entry with a non-200 status is answered with that status
+        /// and body and does NOT consume an SSE entry, so a test scripts "400 then 200" as one
+        /// StatusQueue entry plus the normal SSE reply. An entry of 200 (or an exhausted
+        /// queue) falls through to the existing behaviour untouched.
+        /// </summary>
+        public List<(int Status, string Body)> StatusQueue { get; } = new();
+        private int _statusIndex;
+
+        /// <summary>
+        /// Maximum chat POSTs to answer normally; 0 means unlimited. Past the cap every chat
+        /// POST is answered with a 500 carrying <see cref="CapExceededBody"/>. A retry loop
+        /// that has lost its bound then dies on the next request instead of hanging the test
+        /// run, and the assertion that fails is the one about POST counts.
+        /// </summary>
+        public int MaxChatPosts { get; set; }
+
+        /// <summary>Body returned once <see cref="MaxChatPosts"/> is exceeded.</summary>
+        public const string CapExceededBody =
+            "{\"error\":{\"type\":\"fake_server_cap\",\"message\":\"FakeSseServer: chat POST cap exceeded\"}}";
+
+        /// <summary>Number of chat POSTs received, including ones answered with a failure.</summary>
+        public int ChatPostCount { get { lock (RequestBodies) return RequestBodies.Count; } }
+
+        /// <summary>
+        /// The overflow rejection llama.cpp b10499 returns, with the counts a test chooses.
+        /// Field order and wording copied from a live capture.
+        /// </summary>
+        public static string BuildOverflowBody(int promptTokens, int contextSize) =>
+            "{\"error\":{\"code\":400," +
+            "\"message\":\"request (" + promptTokens + " tokens) exceeds the available context size (" +
+            contextSize + " tokens), try increasing it\"," +
+            "\"type\":\"exceed_context_size_error\"," +
+            "\"n_prompt_tokens\":" + promptTokens + "," +
+            "\"n_ctx\":" + contextSize + "}}";
+
+        /// <summary>Reason phrase for the statuses these tests script.</summary>
+        private static string ReasonPhrase(int status) => status switch
+        {
+            200 => "OK",
+            400 => "Bad Request",
+            404 => "Not Found",
+            413 => "Payload Too Large",
+            500 => "Internal Server Error",
+            _   => "Error",
+        };
+
+        /// <summary>
+        /// The scripted failure for this chat POST, or null to answer normally.
+        /// </summary>
+        private (int Status, string Body)? NextChatFailure()
+        {
+            lock (StatusQueue)
+            {
+                if (_statusIndex < StatusQueue.Count)
+                {
+                    var entry = StatusQueue[_statusIndex++];
+                    if (entry.Status != 200) return entry;
+                }
+            }
+            return null;
+        }
 
         /// <summary>SSE payload for a plain streamed text response.</summary>
         public static string BuildTextSse(string text)
@@ -120,6 +184,8 @@ namespace DevMind.Core.Tests
 
                     byte[] payload;
                     string contentType;
+                    int status = 200;
+                    string reason = "OK";
                     if (isEmbedding)
                     {
                         payload = Encoding.UTF8.GetBytes(BuildEmbeddingResponse(body));
@@ -127,8 +193,18 @@ namespace DevMind.Core.Tests
                     }
                     else if (isChatPost)
                     {
-                        payload = Encoding.UTF8.GetBytes(NextChatSse());
-                        contentType = "text/event-stream";
+                        // Cap first: once a test's bound is blown, nothing scripted is
+                        // meaningful any more and the point is to stop, not to keep playing.
+                        // A scripted failure does NOT consume an SseQueue entry, so a test
+                        // scripts "400 then 200" as one StatusQueue entry plus the normal reply.
+                        var failure = (MaxChatPosts > 0 && ChatPostCount > MaxChatPosts)
+                            ? (Status: 500, Body: CapExceededBody)
+                            : NextChatFailure();
+
+                        status = failure?.Status ?? 200;
+                        reason = ReasonPhrase(status);
+                        payload = Encoding.UTF8.GetBytes(failure != null ? failure.Value.Body ?? string.Empty : NextChatSse());
+                        contentType = failure != null ? "application/json" : "text/event-stream";
                     }
                     else
                     {
@@ -136,7 +212,7 @@ namespace DevMind.Core.Tests
                         contentType = "application/json";
                     }
                     string headers =
-                        "HTTP/1.1 200 OK\r\n" +
+                        $"HTTP/1.1 {status} {reason}\r\n" +
                         $"Content-Type: {contentType}\r\n" +
                         $"Content-Length: {payload.Length}\r\n" +
                         "Connection: close\r\n\r\n";
