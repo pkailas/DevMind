@@ -1,4 +1,4 @@
-﻿// File: TuiAgenticHost.cs  v2.4
+﻿// File: TuiAgenticHost.cs  v2.5
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 implementation of IAgenticHost.
@@ -394,6 +394,34 @@ namespace DevMind
         // Drain the whole pending backlog into the document in ONE UI-thread pass: a single
         // Document.Insert followed by exactly one auto-scroll. MUST run on the UI thread (invoked by
         // the render pump). Cheap when idle (lock + count check).
+        /// <summary>
+        /// Drain the append backlog now, on the UI thread, and complete when it has landed.
+        /// <para>
+        /// The pump runs on a 100 ms timeout, so text appended a moment ago is still in the
+        /// queue. Anything that puts a modal in front of the transcript has to wait for that
+        /// queue first, or it asks about a diff the reader cannot see yet. IApplication.Invoke
+        /// is FIFO, so a flush invoked before the dialog is invoked has already run when the
+        /// dialog opens.
+        /// </para>
+        /// <para>
+        /// While the user is pinned to scrollback the document is frozen by design and this
+        /// changes nothing — the backlog stays buffered, as it would have anyway.
+        /// </para>
+        /// </summary>
+        internal Task FlushNowAsync()
+        {
+            IApplication app = _outputView.App;
+            if (app == null) { FlushPending(); return Task.CompletedTask; }
+
+            var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            app.Invoke(() =>
+            {
+                try { FlushPending(); }
+                finally { tcs.TrySetResult(true); }
+            });
+            return tcs.Task;
+        }
+
         private void FlushPending()
         {
             // Scroll lock: while the user is pinned reading scrollback, the document is
@@ -816,6 +844,23 @@ namespace DevMind
         // Mid-turn yes/no prompt for the token-budget guard. Marshals to the UI thread,
         // runs a modal Continue/Stop dialog, and resolves the awaiting loop with the choice.
         Task<bool> IAgenticHost.ConfirmContinueAsync(string message)
+            => ConfirmAsync("Token budget", message, "_Continue", "_Stop");
+
+        /// <summary>
+        /// A modal yes/no on the UI thread, resolving the awaiting worker with the answer.
+        /// <para>
+        /// The title and the button words are parameters because the one caller this used to
+        /// have was the token-budget guard, and its title was baked in. A patch prompt posed
+        /// under the heading "Token budget" with buttons reading Continue and Stop asks a
+        /// different question from the one it means — and the operator has to answer it in
+        /// the second it appears.
+        /// </para>
+        /// <para>
+        /// The negative button is the default, here and for the budget guard: Enter on a
+        /// dialog you did not expect should decline, not act.
+        /// </para>
+        /// </summary>
+        private Task<bool> ConfirmAsync(string title, string message, string yesText, string noText)
         {
             IApplication app = _outputView.App;
             if (app == null) return Task.FromResult(true); // pre-init / non-interactive — don't block
@@ -826,7 +871,7 @@ namespace DevMind
                 bool answer = false;
                 var dlg = new Dialog
                 {
-                    Title  = "Token budget",
+                    Title  = title,
                     Width  = Dim.Percent(70),
                     Height = 9,
                 };
@@ -837,13 +882,13 @@ namespace DevMind
                     Width  = Dim.Fill(2),
                     Height = Dim.Fill(2),
                 };
-                var contBtn = new Button { Text = "_Continue" };
-                var stopBtn = new Button { Text = "_Stop", IsDefault = true };
-                contBtn.Accepting += (s, e) => { answer = true;  e.Handled = true; app.RequestStop(); };
-                stopBtn.Accepting += (s, e) => { answer = false; e.Handled = true; app.RequestStop(); };
+                var yesBtn = new Button { Text = yesText };
+                var noBtn  = new Button { Text = noText, IsDefault = true };
+                yesBtn.Accepting += (s, e) => { answer = true;  e.Handled = true; app.RequestStop(); };
+                noBtn.Accepting  += (s, e) => { answer = false; e.Handled = true; app.RequestStop(); };
                 dlg.Add(label);
-                dlg.AddButton(contBtn);
-                dlg.AddButton(stopBtn);
+                dlg.AddButton(yesBtn);
+                dlg.AddButton(noBtn);
 
                 try { app.Run(dlg); }
                 finally { dlg.Dispose(); tcs.TrySetResult(answer); }
@@ -2218,13 +2263,32 @@ namespace DevMind
             catch { /* diff display is best-effort — never break a successful patch */ }
         }
 
-        // ── IAgenticHost.ShowDiffPreviewAsync ─────────────────────────────────────
-        // Auto-approve all patches. No interactive y/n/a/q prompt in TUI.
+        // ── Approval mode ─────────────────────────────────────────────────────────
 
-        Task<List<int>> IAgenticHost.ShowDiffPreviewAsync(
+        /// <summary>
+        /// Reads the approval mode currently in force. A delegate, not a stored value: the
+        /// executor reads <c>options.ApprovalMode</c> fresh at every dispatch, and /mode and
+        /// Shift+Tab both write it through <see cref="ApprovalModeControl.Apply"/> while a turn
+        /// may be running. A copy taken when the host was built would be the mode at launch,
+        /// which is a different and silently wrong answer. Unset reads as
+        /// <see cref="ApprovalMode.Auto"/>, the long-standing behaviour.
+        /// </summary>
+        public Func<ApprovalMode> ApprovalModeProvider { get; set; }
+
+        private ApprovalMode CurrentApprovalMode
+            => ApprovalModeProvider != null ? ApprovalModeProvider() : ApprovalMode.Auto;
+
+        // ── IAgenticHost.ShowDiffPreviewAsync ─────────────────────────────────────
+        // The patch card. In Auto it shows a fuzzy match and approves it; in Manual it shows
+        // every patch and ASKS — which is the whole of what Manual mode means for a patch,
+        // because the executor gates patches by forcing this card rather than by asking a
+        // question of its own.
+
+        async Task<List<int>> IAgenticHost.ShowDiffPreviewAsync(
             List<PatchResolveResult> resolvedPatches, CancellationToken cancellationToken)
         {
             var approved = new List<int>();
+            ApprovalMode mode = CurrentApprovalMode;
 
             for (int i = 0; i < resolvedPatches.Count; i++)
             {
@@ -2239,12 +2303,35 @@ namespace DevMind
                 // twice, once for the change and once for the rendering.
                 AppendDiff(r.OriginalContent, ComputePatchedContent(r), r.FileName);
 
-                // Auto-approve — no interactive prompt in TUI.
-                approved.Add(i);
-                AppendOutputLocal($"[PATCH] Auto-approved ({i + 1}/{resolvedPatches.Count})\n", OutputColor.Dim);
+                bool ok = await PatchCardDecision.ApproveAsync(mode, r.Confidence, async () =>
+                {
+                    // The diff has to be ON SCREEN before the question covers it. Appends are
+                    // queued for the render pump, so without this the dialog can open over a
+                    // transcript that has not caught up.
+                    await FlushNowAsync();
+                    return await ConfirmAsync(
+                        "Apply patch",
+                        PatchCardDecision.Question(r.FileName, r.Confidence),
+                        "_Apply", "_Skip");
+                });
+
+                if (ok)
+                {
+                    approved.Add(i);
+                    // Only Auto says "auto-approved". In Manual the operator approved it, and
+                    // the [PATCH] Applied line the executor prints next is the record.
+                    if (mode != ApprovalMode.Manual)
+                        AppendOutputLocal($"[PATCH] Auto-approved ({i + 1}/{resolvedPatches.Count})\n", OutputColor.Dim);
+                }
+                else
+                {
+                    // The model is told by the executor, which injects a SKIPPED tool result
+                    // for every index this list leaves out.
+                    AppendOutputLocal(PatchCardDecision.DeclinedLine(r.FileName), OutputColor.Warning);
+                }
             }
 
-            return Task.FromResult(approved);
+            return approved;
         }
 
         // ── Private helpers ───────────────────────────────────────────────────────

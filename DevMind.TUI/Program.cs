@@ -301,6 +301,12 @@ namespace DevMind
             var host = new TuiAgenticHost(options.WorkingDirectory, outputView, () => cts.Cancel());
             host.NearlineCache = llmClient.NearlineCache; // for the recall_cache tool
 
+            // The patch card asks in Manual mode, so it needs the mode — read live from the
+            // same options object ApprovalModeControl.Apply writes and the executor consults
+            // at each dispatch. A value captured here would be the mode at launch, and /mode
+            // or Shift+Tab mid-session would leave the card answering for the old one.
+            host.ApprovalModeProvider = () => options.ApprovalMode;
+
             // Persisted tool-output line cap. -1 means "not set", so the host's own default
             // stands; 0 is a deliberate "uncapped" and must survive a restart like any other
             // setting.
