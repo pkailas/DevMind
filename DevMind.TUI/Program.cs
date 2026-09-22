@@ -1,4 +1,4 @@
-﻿// File: Program.cs  v3.0
+﻿// File: Program.cs  v3.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 TUI for DevMind.
@@ -1420,11 +1420,14 @@ namespace DevMind
                 bool suppressDisplay = false;
                 string lineAccum = string.Empty;
 
-                // Render prose live, but buffer ```lang fenced blocks and emit them syntax-
-                // highlighted (markers hidden). One instance per LLM iteration. Prose and code
-                // both marshal to the UI thread inside the host (FIFO), so order is preserved.
+                // Render prose live (per completed line, so inline markdown — headings,
+                // **bold**, `code` — can be styled with markers consumed), but buffer
+                // ```lang fenced blocks and emit them syntax-highlighted (markers hidden).
+                // One instance per LLM iteration. Prose and code both marshal to the UI
+                // thread inside the host (FIFO), so order is preserved. Thinking text does
+                // NOT pass through this streamer — it is appended directly below.
                 var codeStreamer = new CodeBlockStreamer(
-                    prose: text => ((TuiAgenticHost)host).AppendOutputLocal(text, OutputColor.Normal),
+                    prose: text => ((TuiAgenticHost)host).AppendProse(text),
                     code:  (code, lang) => ((TuiAgenticHost)host).AppendCode(code, lang));
 
                 callbacks.StartThinkingTimer(state.AgenticDepth, options.AgenticLoopMaxDepth);

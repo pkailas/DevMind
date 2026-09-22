@@ -1,17 +1,22 @@
-// File: CodeBlockStreamer.cs  v1.0
+// File: CodeBlockStreamer.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Splits a streamed assistant response into prose and fenced code blocks, rendering
-// both LIVE so the transcript never stalls. Prose forwards as it arrives; inside a
-// ```lang … ``` block each code line is emitted syntax-highlighted the moment it
-// completes (one line of latency, never the whole block), with the ``` marker lines
-// hidden. Per-line highlighting means a multi-line construct (block comment, verbatim
-// string) is colored per line — a minor cosmetic trade for continuous feedback.
+// both LIVE so the transcript never stalls. Prose is emitted per COMPLETED line (the
+// same one-line-of-latency trade as code); inside a ```lang … ``` block each code
+// line is emitted syntax-highlighted the moment it completes, with the ``` marker
+// lines hidden. Per-line emission means a multi-line construct (block comment,
+// verbatim string) is colored per line — a minor cosmetic trade for continuous
+// feedback.
 //
-// Only the first character of each line is ever held back (to test for a fence
-// marker), so prose streaming is effectively unbuffered. Feed visible tokens via
-// Feed(); call Flush() once the stream ends to release any tail. Not thread-safe —
-// drive it from a single streaming callback (one LLM iteration per instance).
+// Line buffering is what makes inline-span styling possible downstream: a
+// **bold** or `code` pair can arrive split across two Feed calls, so a run is only
+// complete once the line is. The prose callback receives the line INCLUDING its
+// terminating newline (a trailing partial line at Flush() carries none). Only the
+// first characters of a line are ever held back while it is still ambiguous with a
+// fence marker. Feed visible tokens via Feed(); call Flush() once the stream ends
+// to release any tail. Not thread-safe — drive it from a single streaming callback
+// (one LLM iteration per instance).
 
 using System;
 using System.Text;
@@ -34,9 +39,9 @@ namespace DevMind
         private readonly StringBuilder _codeLine = new StringBuilder(); // current (incomplete) code line
 
         // Prose state.
-        private bool _lineClassified;                              // current prose line type known → stream live
+        private bool _lineClassified;                              // current prose line type known → buffer whole line
         private readonly StringBuilder _prefix = new StringBuilder(); // held line-start while still ambiguous
-        private readonly StringBuilder _proseOut = new StringBuilder(); // batched prose for the current Feed
+        private readonly StringBuilder _proseLine = new StringBuilder(); // the current prose line, incl. its newline
 
         public CodeBlockStreamer(Action<string> prose, Action<string, string> code)
         {
@@ -48,14 +53,7 @@ namespace DevMind
         {
             if (string.IsNullOrEmpty(text)) return;
             foreach (char c in text) FeedChar(c);
-            FlushProse(); // one prose emit per Feed (≈ one span per SSE token, as before)
-        }
-
-        private void FlushProse()
-        {
-            if (_proseOut.Length == 0) return;
-            _prose(_proseOut.ToString());
-            _proseOut.Clear();
+            // Prose emits happen inside FeedChar, at the newline that completes a line.
         }
 
         private void FeedChar(char c)
@@ -93,9 +91,9 @@ namespace DevMind
 
             if (_lineClassified)
             {
-                // Prose line already classified — accumulate; FlushProse emits per Feed.
-                _proseOut.Append(c);
-                if (c == '\n') { _lineClassified = false; _prefix.Clear(); }
+                // Prose line already classified — buffer until the newline completes it.
+                _proseLine.Append(c);
+                if (c == '\n') EmitProseLine();
                 return;
             }
 
@@ -107,7 +105,7 @@ namespace DevMind
             if (c == '\n')
             {
                 if (ts.StartsWith("```", StringComparison.Ordinal)) OpenFence(ts);
-                else _proseOut.Append(t);
+                else EmitProseLine(t);
                 _prefix.Clear();
                 _lineClassified = false;
                 return;
@@ -117,8 +115,8 @@ namespace DevMind
 
             if (ts[0] != '`')
             {
-                // Ordinary prose line — emit the held prefix; rest streams via _proseOut.
-                _proseOut.Append(t);
+                // Ordinary prose line — buffer the held prefix; rest follows until the newline.
+                _proseLine.Append(t);
                 _prefix.Clear();
                 _lineClassified = true;
                 return;
@@ -134,17 +132,35 @@ namespace DevMind
             // 1-2 backticks; if a third char arrived that isn't a backtick it's inline code → prose.
             if (ts.Length >= 3)
             {
-                _proseOut.Append(t);
+                _proseLine.Append(t);
                 _prefix.Clear();
                 _lineClassified = true;
             }
             // else keep holding — it may still become ```
         }
 
+        // Emit one completed prose line. `text` is the full line INCLUDING its terminating
+        // newline (the renderer and host expect that; a trailing partial line at Flush()
+        // carries no newline).
+        private void EmitProseLine(string text)
+        {
+            if (text.Length == 0) return;
+            _prose(text);
+        }
+
+        // The classified path: the newline just completed the line buffered in _proseLine.
+        private void EmitProseLine()
+        {
+            EmitProseLine(_proseLine.ToString());
+            _proseLine.Clear();
+            _lineClassified = false;
+            _prefix.Clear();
+        }
+
         // ts begins with ``` ; the remainder of the line (if present) is the language tag.
         private void OpenFence(string ts)
         {
-            FlushProse(); // emit any prose before the code block, in order
+            // Any prose is already complete-line at this point; nothing is buffered un-emitted.
             _inCode = true;
             _codeLine.Clear();
 
@@ -175,11 +191,14 @@ namespace DevMind
                 _collectingLang = false;
                 _lang = string.Empty;
             }
-            else if (_prefix.Length > 0)
+            else
             {
-                _proseOut.Append(_prefix.ToString());
+                // Trailing partial prose line (no terminating newline) — release it so
+                // nothing is lost.
+                EmitProseLine(_prefix.Length > 0 ? _prefix + _proseLine.ToString() : _proseLine.ToString());
                 _prefix.Clear();
-                FlushProse();
+                _proseLine.Clear();
+                _lineClassified = false;
             }
         }
     }

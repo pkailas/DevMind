@@ -31,4 +31,10 @@
     <PackageReference Include="Terminal.Gui" Version="2.4.17" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Expose internals (CodeBlockStreamer, MarkdownInlineRenderer) to the test
+         project — the same convention as Cli/Core/McpServer. -->
+    <InternalsVisibleTo Include="DevMind.TUI.Tests" />
+  </ItemGroup>
+
 </Project>

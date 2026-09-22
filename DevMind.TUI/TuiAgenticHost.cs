@@ -1,4 +1,4 @@
-﻿// File: TuiAgenticHost.cs  v2.0
+﻿// File: TuiAgenticHost.cs  v2.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 implementation of IAgenticHost.
@@ -718,7 +718,52 @@ namespace DevMind
             return tcs.Task;
         }
 
-        // ── Syntax-highlighted code append ────────────────────────────────────────
+        // ── Styled prose append (inline markdown) ─────────────────────────────────────
+        // CodeBlockStreamer now emits prose per COMPLETED line, which lets each line's
+        // inline markdown be rendered with its markers consumed: one '#'–'######' heading,
+        // **bold** spans, `inline code` spans. Each rendered run enqueues onto the same
+        // coalesced buffer as AppendCode, so prose keeps strict arrival order with code.
+        // Thinking text never flows here — Program.cs appends it directly in the
+        // muted Thinking color — so its output is unaffected by this path.
+        internal void AppendProse(string line)
+        {
+            if (string.IsNullOrEmpty(line)) return;
+
+            string content = line.TrimEnd('\r');
+            bool hasNewline = content.Length > 0 && content[content.Length - 1] == '\n';
+            int textEnd = hasNewline ? content.Length - 1 : content.Length;
+
+            Terminal.Gui.Drawing.Color bg = _outputView.GetScheme().Normal.Background;
+            foreach (var run in MarkdownInlineRenderer.Render(content.Substring(0, textEnd)))
+                EnqueueSpan(run.Text, ProseAttribute(run.Style, bg));
+
+            if (hasNewline) EnqueueSpan("\n", ResolveAttribute(OutputColor.Normal));
+        }
+
+        // Inline-markdown palette — VS Code Dark+ values already used by the code path
+        // (Syn* constants below) so the styled spans read as part of the same scheme:
+        //   Normal     → the host's Normal output color (ResolveAttribute)
+        //   Heading    → #569CD6 blue + TextStyle.Bold (headings stand out; bold is
+        //                Terminal.Gui's real SGR 1 attribute, not a faked bright color)
+        //   Bold       → #D4D4D4 light (SynPlain) + TextStyle.Bold
+        //   InlineCode → #4EC9B0 teal (SynType), no bold — matches code-ish text in code
+        private Terminal.Gui.Drawing.Attribute ProseAttribute(InlineTextStyle style, Terminal.Gui.Drawing.Color bg)
+        {
+            switch (style)
+            {
+                case InlineTextStyle.Heading:
+                    return new Terminal.Gui.Drawing.Attribute(SynKeyword, bg, Terminal.Gui.Drawing.TextStyle.Bold);
+                case InlineTextStyle.Bold:
+                    return new Terminal.Gui.Drawing.Attribute(SynPlain, bg, Terminal.Gui.Drawing.TextStyle.Bold);
+                case InlineTextStyle.InlineCode:
+                    return new Terminal.Gui.Drawing.Attribute(SynType, bg, Terminal.Gui.Drawing.TextStyle.None);
+                case InlineTextStyle.Normal:
+                default:
+                    return ResolveAttribute(OutputColor.Normal);
+            }
+        }
+
+        // ── Syntax-highlighted code append ────────────────────────────────────────────────
         // Tokenizes `code` for `language` and paints each token its VS Code Dark+ color. Tokens
         // enqueue onto the shared coalesced buffer — the same queue prose uses — so code and prose
         // keep strict arrival order and the whole block drains in the next flush rather than one
