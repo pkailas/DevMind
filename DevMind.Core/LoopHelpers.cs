@@ -481,10 +481,10 @@ namespace DevMind
 
             sb.Append("## Editing Workflow\n");
             sb.Append("Call read_file before patch_file if you have not seen the file. The find argument to patch_file must be copied verbatim from read_file output — never reconstructed from memory.\n");
-            sb.Append("Do not call read_file on the same file multiple times. If you have an outline and a line range, that is sufficient context to write a patch_file. Act immediately.\n\n");
+            sb.Append("Do not re-read content you already have: once read_file has returned a file, or the range of it you need, do not call read_file for that same content again — act on it. The one expected second read is the outline-then-range sequence in Large File Strategy below, where the first call returns only an outline. If you have an outline and a line range, that is sufficient context to write a patch_file. Act immediately.\n\n");
 
             sb.Append("## Large File Strategy\n");
-            sb.Append("For files over 400 lines, read_file returns an outline (types, methods, signatures with line numbers) instead of full content.\n");
+            sb.Append("For files over 400 lines, read_file returns an outline (types, methods, signatures with line numbers) instead of full content. This is the case Editing Workflow allows a second read_file on the same file for: the outline is not the content.\n");
             sb.Append("1. First read_file gets the outline.\n");
             sb.Append("2. Use the outline to identify the exact line range you need.\n");
             sb.Append("3. Call read_file with start_line and end_line for just that section.\n");
