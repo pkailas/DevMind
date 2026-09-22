@@ -16,6 +16,7 @@ using Newtonsoft.Json.Converters;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Text;
 
 namespace DevMind
 {
@@ -178,7 +179,6 @@ namespace DevMind
                     SummaryContext = data.SummaryContext,
                     Metrics = data.Metrics,
                     Outcome = data.Outcome,
-                    QualityFlag = null
                 };
 
                 if (!_systemPromptLogged && data.SystemPrompt != null)
@@ -268,9 +268,51 @@ namespace DevMind
                     case BlockType.Done:
                         calls.Add(new ToolCallEntry { Type = "done", Summary = block.Content });
                         break;
+
+                    case BlockType.Text:
+                        // Prose is not a tool call. Excluding it explicitly keeps the default
+                        // arm below from recording every narration turn as one.
+                        break;
+
+                    default:
+                        // Every other block type IS a tool call the model made — scratchpad,
+                        // ask_caller, append_file, list_files, the LSP/memory/web/learn/library/
+                        // cache tools, run_sql, debug. Until this arm existed they vanished from
+                        // the corpus, so an adoption question ("is the scratchpad ever used?")
+                        // answered from tool_calls returned a confident zero for tools the model
+                        // was calling every day.
+                        //
+                        // Type only, deliberately. ToolCallEntry's typed fields (Filename,
+                        // Command, Pattern) have per-tool meanings that the listed cases assign
+                        // from the specific ResponseBlock field each tool populates; nothing here
+                        // can know which field, if any, a given unlisted type uses, and a
+                        // plausible-looking wrong value is worse for analysis than an absent one.
+                        // Add a listed case above when a type's fields are worth recording.
+                        calls.Add(new ToolCallEntry { Type = ToolCallTypeName(block.Type) });
+                        break;
                 }
             }
             return calls.Count > 0 ? calls : null;
+        }
+
+        /// <summary>
+        /// The <c>tool_calls[].type</c> string for a block type that has no listed case: the
+        /// enum name in lower snake_case, so <c>NeedsInput</c> records as <c>needs_input</c>
+        /// and <c>GetDiagnostics</c> as <c>get_diagnostics</c>. Derived mechanically rather
+        /// than hand-mapped so a new BlockType can never be dropped again by omission.
+        /// </summary>
+        internal static string ToolCallTypeName(BlockType type)
+        {
+            string name = type.ToString();
+            var sb = new StringBuilder(name.Length + 4);
+            for (int i = 0; i < name.Length; i++)
+            {
+                char c = name[i];
+                if (char.IsUpper(c) && i > 0)
+                    sb.Append('_');
+                sb.Append(char.ToLowerInvariant(c));
+            }
+            return sb.ToString();
         }
 
         /// <summary>
@@ -381,8 +423,10 @@ namespace DevMind
             [JsonProperty("outcome")]
             public TurnOutcome Outcome { get; set; }
 
-            [JsonProperty("quality_flag")]
-            public string QualityFlag { get; set; }
+            // No quality_flag. It was hardcoded null at write time, had no producer and no
+            // reader anywhere in the tree, and was null in every one of 15,135 corpus records —
+            // a column of noise. Outcome already carries the only real per-turn classification.
+            // Populating it would have meant inventing a quality signal; removing it is honest.
         }
 
         #endregion

@@ -148,6 +148,14 @@ namespace DevMind
                         try
                         {
                             _host.UpdateScratchpad(block.Content);
+                            // A successful update used to leave no trace at all — the only
+                            // output was the catch below — so the job transcript could not show
+                            // whether the scratchpad was ever used. Length, not content: the
+                            // content is state the model re-reads, not something to replay.
+                            int len = block.Content?.Trim().Length ?? 0;
+                            _host.AppendOutput(len == 0
+                                ? "[SCRATCHPAD] cleared\n"
+                                : $"[SCRATCHPAD] updated ({len} chars)\n", OutputColor.Dim);
                         }
                         catch (Exception ex)
                         {
