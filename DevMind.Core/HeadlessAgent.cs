@@ -1,4 +1,4 @@
-// File: HeadlessAgent.cs  v2.1
+// File: HeadlessAgent.cs  v2.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Headless agentic runner — the engine behind DevMind.McpServer's devmind_task_*
@@ -26,7 +26,7 @@ namespace DevMind
     /// the CLI's, except AgenticLoopMaxDepth (25 — a delegated task gets room to work).</summary>
     public sealed class HeadlessOptions : ILlmOptions
     {
-        public string SystemPrompt             { get; set; } = "You are a helpful coding assistant. Be concise and precise.";
+        public string SystemPrompt             { get; set; } = DefaultPrompts.System;
         public string ModelName                { get; set; } = "";
         public int    RequestTimeoutMinutes    { get; set; } = 10;
         public int    FirstTokenTimeoutMinutes { get; set; } = 5;

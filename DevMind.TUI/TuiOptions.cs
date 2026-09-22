@@ -1,4 +1,4 @@
-﻿// File: TuiOptions.cs  v1.0
+﻿// File: TuiOptions.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Minimal ILlmOptions implementation for the TUI.
@@ -28,7 +28,7 @@ namespace DevMind
         public string BuildCommand { get; set; } = "";
 
         // ILlmOptions.
-        public string SystemPrompt             { get; set; } = "You are a helpful coding assistant. Be concise and precise.";
+        public string SystemPrompt             { get; set; } = DefaultPrompts.System;
         public string ModelName                { get; set; } = "";
         public int    RequestTimeoutMinutes    { get; set; } = 10;
         public int    FirstTokenTimeoutMinutes { get; set; } = 5;

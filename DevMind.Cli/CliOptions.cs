@@ -1,4 +1,4 @@
-// File: CliOptions.cs  v1.0
+// File: CliOptions.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -34,7 +34,7 @@ namespace DevMind
 
         // ── ILlmOptions ───────────────────────────────────────────────────────────
 
-        public string SystemPrompt             { get; set; } = "You are a helpful coding assistant. Be concise and precise.";
+        public string SystemPrompt             { get; set; } = DefaultPrompts.System;
         public string ModelName                { get; set; } = "";
         public int    RequestTimeoutMinutes    { get; set; } = 10;
         public int    FirstTokenTimeoutMinutes { get; set; } = 5;

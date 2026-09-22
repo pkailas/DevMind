@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v7.28
+// File: LlmClient.cs  v7.29
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -111,7 +111,10 @@ namespace DevMind
         private HttpClient _httpClient;
         private readonly List<ChatMessage> _conversationHistory;
         private readonly List<string> _pendingDebugLog = new List<string>();
-        private const string DefaultSystemPrompt = "You are a helpful coding assistant. Be concise and precise.";
+        // Last resort: an ILlmOptions implementation that supplies a blank prompt. The
+        // three shipped Options classes all default to the same constant, so in practice
+        // this is reached only by a custom implementation - it must not hold its own copy.
+        private const string DefaultSystemPrompt = DefaultPrompts.System;
         private readonly FileContentCache _fileCache = new FileContentCache();
 
         /// <summary>
