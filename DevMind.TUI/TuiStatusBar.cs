@@ -1,4 +1,4 @@
-﻿// File: TuiStatusBar.cs  v1.0
+﻿// File: TuiStatusBar.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Composed-Labels status row for the DevMind TUI (Phase 2 of the presentation
@@ -64,6 +64,7 @@ namespace DevMind
         private readonly Label _lspText;
         private readonly Label _meterLabel;
         private readonly Label _iterLabel;
+        private readonly Label _steerLabel;
         private readonly Label _rateLabel;
 
         public TuiStatusBar(int toolCount, bool lspEnabled, string lspLanguages)
@@ -113,11 +114,15 @@ namespace DevMind
             _iterLabel.X = Pos.Right(_meterLabel);
             _iterLabel.Y = 0;
 
+            _steerLabel = MakeLabel("", FgDim);
+            _steerLabel.X = Pos.Right(_iterLabel);
+            _steerLabel.Y = 0;
+
             _rateLabel = MakeLabel("", FgDim);
-            _rateLabel.X = Pos.Right(_iterLabel);
+            _rateLabel.X = Pos.Right(_steerLabel);
             _rateLabel.Y = 0;
 
-            _rightGroup.Add(_lspDot, _lspText, _meterLabel, _iterLabel, _rateLabel);
+            _rightGroup.Add(_lspDot, _lspText, _meterLabel, _iterLabel, _steerLabel, _rateLabel);
             _root.Add(_stateLabel, _hintLabel, _rightGroup);
         }
 
@@ -213,6 +218,28 @@ namespace DevMind
         public void ClearIteration()
         {
             OnUi(() => _iterLabel.Text = "");
+        }
+
+        /// <summary>
+        /// Show that a steer is queued and waiting for the next iteration boundary, in
+        /// amber so it reads as pending rather than done. Null blanks the chip.
+        /// <para>
+        /// The MODE is shown, not the text: an override and a suggestion do very different
+        /// things to a running turn, and a user who queued one while meaning the other has
+        /// only this to tell them before it lands. The message itself is already echoed into
+        /// the transcript, where there is room for it.
+        /// </para>
+        /// </summary>
+        public void SetSteerQueued(SteerMode? mode)
+        {
+            string text = mode == null
+                ? ""
+                : $" · steer {(mode == SteerMode.Override ? "override" : "suggest")}";
+            OnUi(() =>
+            {
+                _steerLabel.Text = text;
+                Pin(_steerLabel, mode == null ? FgDim : FgAmber);
+            });
         }
 
         // ── Helpers ──────────────────────────────────────────────────────────────

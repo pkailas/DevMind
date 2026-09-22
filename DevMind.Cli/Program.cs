@@ -1,4 +1,4 @@
-// File: Program.cs  v1.2
+// File: Program.cs  v1.3
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -264,8 +264,12 @@ namespace DevMind
 
                     case LoopIterationKind.ShouldReTrigger:
                         if (cts.Token.IsCancellationRequested) return;
-                        currentPrompt = iter.NextContextualMessage ?? callbacks.GetInputText();
-                        callbacks.SetInputText(string.Empty);
+                        // Never the input box. The fallback was unreachable (all three
+                        // MakeShouldReTrigger sites in LoopDriver pass a synthetic prompt,
+                        // SyntheticPrompts.Continue being the default) and would have been a
+                        // bug if it ever fired: the CLI reads stdin for the NEXT turn, so
+                        // taking it here would consume a prompt the user has not finished.
+                        currentPrompt = iter.NextContextualMessage ?? SyntheticPrompts.Continue;
                         break;
                 }
             }

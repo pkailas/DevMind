@@ -156,6 +156,8 @@ same thing. Grouping follows `HelpGroups`.
 | `/history` | List past sessions from history |
 | `/resume <n>` | Resume a past session by number (from /history listing) |
 | `/title <text>` | Set the current session's title |
+| `/steer <text>` | Fold a suggestion into the RUNNING turn at its next iteration boundary (plain text does the same) |
+| `/override <text>` | Redirect the RUNNING turn at its next iteration boundary - stop the current approach and change course |
 | **Model** | |
 | `/think on\|off` | Toggle session thinking mode (reasoning display) on/off |
 | `/t <message>` | One-shot: send a message with thinking ON (does not change the /think default) |

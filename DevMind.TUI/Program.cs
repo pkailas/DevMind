@@ -1,4 +1,4 @@
-﻿// File: Program.cs  v3.2
+﻿// File: Program.cs  v3.3
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 TUI for DevMind.
@@ -46,6 +46,19 @@ namespace DevMind
         // ── Ctrl+C / Esc state machine ──────────────────────────────────────────
         // Tracks whether a turn is currently running (set around RunTurnAsync calls).
         static bool _isTurnRunning;
+
+
+        // Steering: the same mailbox the headless agent uses for devmind_task_steer, so the
+        // TUI and a delegated job behave identically at an iteration boundary rather than
+        // growing two implementations of "is a turn running".
+        //
+        // Opened and closed inside RunTurnAsync, NOT beside every _isTurnRunning site. That
+        // flag is also set for /digest and the two /library operations, which are busy but
+        // have no iteration boundaries to fold a steer into — they are not steerable, and
+        // their input box stays disabled. RunTurnAsync is the one agentic loop both
+        // steerable paths (a plain send and /t) funnel through, so opening the window there
+        // cannot drift from the loop's actual lifetime.
+        static readonly SteerMailbox _steerMailbox = new SteerMailbox();
 
         // Turn clock: advances once per user turn at the boundary (TurnClock.BeginTurn),
         // never per agentic-loop iteration, and not again on an ask_caller answer (same turn).
@@ -566,7 +579,8 @@ namespace DevMind
                 // ── Reliable exit ───────────────────────────────────────────────
                 // Ctrl+Q is XON flow-control on many terminals and never reaches the app, so a
                 // typed command is the dependable way out. Submitted as normal input → no special-
-                // key interception possible.
+                // key interception possible. Checked BEFORE the steer routing: quitting must
+                // work while a turn runs, and it is not a thing to fold into a prompt.
                 if (input.Equals("/quit", StringComparison.OrdinalIgnoreCase) ||
                     input.Equals("/exit", StringComparison.OrdinalIgnoreCase))
                 {
@@ -581,6 +595,59 @@ namespace DevMind
                     var old = cts;
                     cts = new CancellationTokenSource();
                     old.Dispose();
+                }
+
+                // ── Steering a running turn ─────────────────────────────────────
+                // The input box now stays live during an agentic turn, so Enter means one of
+                // two things and SteerInputRouter decides which. Keyed on the MAILBOX, not on
+                // _isTurnRunning: that flag is also set for /digest and the two /library
+                // operations, which are busy but have no iteration boundaries to fold a steer
+                // into. Esc and Ctrl+C keep their meaning — steering never cancels.
+                var route = SteerInputRouter.Route(input, _steerMailbox.IsTurnOpen);
+                switch (route.Action)
+                {
+                    case SteerInputAction.Steer:
+                    {
+                        var steerResult = _steerMailbox.Enqueue(route.Message, route.Mode, out var superseded);
+                        if (!steerResult.Accepted)
+                        {
+                            // The turn ended between the routing and the enqueue. Refused
+                            // rather than queued for a turn that will never drain it.
+                            host.AppendOutputLocal(
+                                "[STEER] not queued — the turn ended before it could be accepted.\n",
+                                OutputColor.Warning);
+                            return;
+                        }
+
+                        // A displaced steer is reported, never silently dropped.
+                        if (superseded != null)
+                            host.AppendOutputLocal(
+                                $"[STEER] superseded (not consumed): {superseded.Message}\n",
+                                OutputColor.Warning);
+
+                        string queuedTag = route.Mode == SteerMode.Override ? "override" : "suggest";
+                        host.AppendOutputLocal(
+                            $"[STEER] {queuedTag} queued — folds in at the next iteration boundary.\n",
+                            OutputColor.Dim);
+                        callbacks.ShowSteerQueued(route.Mode);
+                        return;
+                    }
+
+                    case SteerInputAction.RefuseCommandDuringTurn:
+                        host.AppendOutputLocal(
+                            $"[STEER] {route.Message} is not available while a turn is running. " +
+                            "Type a message to fold in a suggestion, /override <text> to change course, or Esc to cancel.\n",
+                            OutputColor.Warning);
+                        return;
+
+                    case SteerInputAction.Ignore:
+                        return;
+
+                    case SteerInputAction.RefuseNoTurn:
+                        // Falls through to the registered /steer and /override commands, so
+                        // the refusal has ONE owner and those commands are real rather than
+                        // documentation for a path that never runs.
+                        break;
                 }
 
                 // ── /digest — host-driven, long-running ─────────────────────────
@@ -1235,8 +1302,8 @@ namespace DevMind
                             bool previousThinking = options.ShowLlmThinking;
                             options.ShowLlmThinking = true;
 
-                            inputBox.View.CanFocus = false;
-                            inputBox.SetActive(false);
+                            // The box stays live: typing during an agentic turn is a steer
+                            // (SteerInputRouter), not a new prompt. Esc/Ctrl+C still cancel.
                             statusBar.SetBusy("Processing...");
                             _isTurnRunning = true;
                             callbacks.BeginTurn();
@@ -1281,9 +1348,8 @@ namespace DevMind
 
                 AutoAttachTypedImages(input);
 
-                // Disable input during agentic processing.
-                inputBox.View.CanFocus = false;
-                inputBox.SetActive(false);
+                // The box stays live during agentic processing: typing is a steer
+                // (SteerInputRouter), not a new prompt. Esc/Ctrl+C still cancel.
                 statusBar.SetBusy("Processing...");
                 _isTurnRunning = true;
                 callbacks.BeginTurn();
@@ -1375,6 +1441,19 @@ namespace DevMind
             if (_turnClock.BeginTurn())
                 llmClient.IncrementTurn();
 
+            // Open the steer window for this turn. A steer pending here is an invariant
+            // violation — the previous turn's atomic close must have taken it — so it is
+            // reported rather than silently dropped, and this turn starts clean.
+            var staleSteer = _steerMailbox.BeginTurn();
+            if (staleSteer != null)
+                host.AppendOutputLocal(
+                    $"[STEER] unconsumed — stale steer at turn start. {staleSteer.Message}\n",
+                    OutputColor.Warning);
+            callbacks.ShowSteerQueued(null);
+
+            try
+            {
+
            var thinkFilter = new ThinkFilter();
             string currentPrompt = userInput;
             bool firstIteration = true;
@@ -1429,6 +1508,25 @@ namespace DevMind
                 var codeStreamer = new CodeBlockStreamer(
                     prose: text => ((TuiAgenticHost)host).AppendProse(text),
                     code:  (code, lang) => ((TuiAgenticHost)host).AppendCode(code, lang));
+
+                // Fold any queued steer into the prompt for THIS iteration, before the
+                // request goes out. Same decision logic as the headless drain (Steer.Apply
+                // with the same last-iteration predicate), so a TUI steer and a delegated
+                // one behave identically; only the reporting differs, because the TUI has
+                // no action journal and a transcript line is its record.
+                var pendingSteer = _steerMailbox.Take();
+                if (pendingSteer != null)
+                {
+                    // The decision and its wording live in SteerFold so they can be tested
+                    // without standing up Terminal.Gui; what stays here is the UI act.
+                    var fold = SteerFold.Fold(
+                        currentPrompt, pendingSteer.Message, pendingSteer.Mode,
+                        options.AgenticLoopMaxDepth, state.AgenticDepth);
+
+                    currentPrompt = fold.Prompt;
+                    host.AppendOutputLocal(fold.TranscriptLine, fold.Color);
+                    callbacks.ShowSteerQueued(null);
+                }
 
                 callbacks.StartThinkingTimer(state.AgenticDepth, options.AgenticLoopMaxDepth);
 
@@ -1595,14 +1693,36 @@ namespace DevMind
 
                    case LoopIterationKind.ShouldReTrigger:
                         if (cts.Token.IsCancellationRequested) return;
-                        currentPrompt = iter.NextContextualMessage ?? callbacks.GetInputText();
-                        // Only treat as synthetic when the prompt actually came from NextContextualMessage;
-                        // if it fell back to GetInputText (user typed input), never mark it synthetic.
-                        isSyntheticPrompt = iter.NextContextualMessage != null && iter.IsSyntheticPrompt;
+                        // The input box is NOT a prompt source. It used to be the fallback
+                        // here, which is now actively wrong: the box stays live during a turn
+                        // and holds the user's half-typed steer, so reading it would send that
+                        // as the next prompt and blank it.
+                        //
+                        // The fallback was also unreachable. All three MakeShouldReTrigger call
+                        // sites in LoopDriver pass a synthetic prompt (SyntheticPrompts.Continue
+                        // is the default), so NextContextualMessage is never null on a
+                        // re-trigger. Continue is what an absent one would mean anyway: the
+                        // driver wants another iteration and has nothing particular to say.
+                        currentPrompt = iter.NextContextualMessage ?? SyntheticPrompts.Continue;
+                        isSyntheticPrompt = iter.IsSyntheticPrompt;
                         forceToolChoiceRequired = iter.ForceToolChoiceRequired;
-                        callbacks.SetInputText(string.Empty);
                         break;
                 }
+            }
+            }
+            finally
+            {
+                // Close the steer window: take the final pending steer AND clear the
+                // in-progress flag in one lock acquisition (see SteerMailbox.TakeAndEndTurn).
+                // In the FINALLY so it happens on every exit path — a clean break, a return
+                // from a cancellation check, or an exception. Leaving the window open would
+                // keep accepting steers into a mailbox nothing will drain.
+                var unconsumed = _steerMailbox.TakeAndEndTurn();
+                if (unconsumed != null)
+                    host.AppendOutputLocal(
+                        $"[STEER] unconsumed — the turn ended before the next iteration boundary. {unconsumed.Message}\n",
+                        OutputColor.Warning);
+                callbacks.ShowSteerQueued(null);
             }
         }
 

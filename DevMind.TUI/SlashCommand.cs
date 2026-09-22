@@ -1,4 +1,4 @@
-﻿// File: SlashCommand.cs  v1.0
+﻿// File: SlashCommand.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Slash-command registry and dispatcher for DevMind.TUI.
@@ -390,6 +390,16 @@ namespace DevMind
                 "/rules [text|clear]",
                 RulesHandler);
 
+            RegisterCommand("/steer",
+                "Fold a suggestion into the RUNNING turn at its next iteration boundary (plain text does the same)",
+                "/steer <text>",
+                SteerHandler);
+
+            RegisterCommand("/override",
+                "Redirect the RUNNING turn at its next iteration boundary - stop the current approach and change course",
+                "/override <text>",
+                SteerHandler);
+
             RegisterCommand("/prompt",
                 "Show the global system-prompt file path, existence, and assembled prompt size",
                 "/prompt",
@@ -574,6 +584,28 @@ namespace DevMind
             ctx.SetBehavioralRules(text);
             ctx.RebuildSystemPrompt();
             return Task.FromResult(new CommandResult { Message = $"Behavioral rules set ({text.Length} chars)." });
+        }
+
+        // -- /steer, /override -----------------------------------------------------
+
+        /// <summary>
+        /// Reached ONLY when no turn is running. While a turn IS running the input handler
+        /// routes these (and plain text) straight to the steer mailbox via SteerInputRouter,
+        /// because a steer has to reach the running loop, not the command dispatcher.
+        /// <para>
+        /// So this handler has exactly one job: say why nothing happened. Same refusal
+        /// devmind_task_steer gives a caller who steers a job that is not running - a steer
+        /// with no turn is a mistake worth naming, not a message to queue for later.
+        /// </para>
+        /// </summary>
+        static Task<CommandResult> SteerHandler(string[] args, CommandContext ctx)
+        {
+            return Task.FromResult(new CommandResult
+            {
+                Message = "No turn is running - nothing to steer. Send it as a message to start one. " +
+                          "While a turn IS running, type a message to fold in a suggestion, " +
+                          "or /override <text> to change course.",
+            });
         }
 
         // -- /prompt ---------------------------------------------------------------
@@ -1097,7 +1129,7 @@ namespace DevMind
         /// </summary>
         static readonly (string Title, string[] Commands)[] HelpGroups =
         {
-            ("Session",    new[] { "/new", "/restart", "/clear", "/cls", "/compact", "/history", "/resume", "/title" }),
+            ("Session",    new[] { "/new", "/restart", "/clear", "/cls", "/compact", "/history", "/resume", "/title", "/steer", "/override" }),
             ("Model",      new[] { "/think", "/t", "/reasoning", "/rules", "/system_prompt" }),
             ("Context",    new[] { "/depth-cap", "/context-limit", "/cache", "/output-lines" }),
             ("Workspace",  new[] { "/dir", "/lsp", "/resolve", "/debug" }),

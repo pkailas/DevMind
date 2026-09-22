@@ -1,4 +1,4 @@
-﻿// File: TuiLoopCallbacks.cs  v3.0
+﻿// File: TuiLoopCallbacks.cs  v3.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 implementation of ILoopCallbacks.
@@ -200,6 +200,13 @@ namespace DevMind
         }
 
         /// <summary>Push current context metrics to the status bar's meter.</summary>
+        /// <summary>
+        /// Show or clear the status-bar chip for a steer queued against the running turn.
+        /// Null clears it. Marshalled to the UI thread by the status bar itself, like every
+        /// other chip here, because the enqueue happens on whichever thread typed it.
+        /// </summary>
+        public void ShowSteerQueued(SteerMode? mode) => _statusBar.SetSteerQueued(mode);
+
         public void RefreshContextMeter()
         {
             var (used, total) = GetContextMetrics();
