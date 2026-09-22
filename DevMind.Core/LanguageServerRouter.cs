@@ -1,4 +1,4 @@
-// File: LanguageServerRouter.cs  v1.1
+﻿// File: LanguageServerRouter.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Routes LSP tool calls to the correct language server (C# vs TypeScript) per file extension.
@@ -88,21 +88,69 @@ namespace DevMind
         /// from, so it routes by <paramref name="language"/> ("csharp" default, "typescript").
         /// The host is resolved per (kind|solution-root) exactly like the position-based tools,
         /// so it reuses the already-warm server rather than spawning a second one.
+        /// <paramref name="pathHint"/> is the stand-in for the file the position-based tools
+        /// get: any file or directory inside the solution to search. Omitted, the search falls
+        /// back to the session working directory — which on the MCP surface is fixed at
+        /// startup and may well be a different repository.
         /// </summary>
         public async Task<string> FindSymbolAsync(
             string query,
             int maxResults,
             string language,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default,
+            string pathHint = null)
         {
             var kind = ResolveLanguageKind(language);
-            string root = kind == LanguageServerKind.CSharp
-                ? (WorkspaceRootResolver.FindSolutionDirectory(_workingDirectory) ?? _workingDirectory)
-                : (WorkspaceRootResolver.FindTypeScriptProjectDirectory(_workingDirectory) ?? _workingDirectory);
+            string root = ResolveSymbolSearchRoot(kind, pathHint, _workingDirectory);
 
             return await GetOrCreateHost(kind, root)
                 .FindSymbolAsync(query, maxResults, cancellationToken)
                 .ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Workspace root for a symbol search. With no hint this is the session working
+        /// directory's enclosing solution (the historical behaviour). With a hint it is the
+        /// solution enclosing that file or directory, so a caller can search a repository the
+        /// server was not started in. A hint that does not exist throws rather than silently
+        /// falling back: searching the wrong solution and reporting "not found" is exactly the
+        /// failure this parameter exists to remove.
+        /// </summary>
+        public static string ResolveSymbolSearchRoot(
+            LanguageServerKind kind, string pathHint, string workingDirectory)
+        {
+            string session = string.IsNullOrWhiteSpace(workingDirectory)
+                ? Environment.CurrentDirectory
+                : Path.GetFullPath(workingDirectory);
+
+            string startDir = session;
+            if (!string.IsNullOrWhiteSpace(pathHint))
+            {
+                string full;
+                try
+                {
+                    full = Path.GetFullPath(pathHint, session);
+                }
+                catch (Exception ex)
+                {
+                    throw new InvalidOperationException(
+                        "path '" + pathHint + "' is not a usable path (" + ex.Message +
+                        "). Pass a file or a directory inside the solution to search.");
+                }
+
+                if (File.Exists(full))
+                    startDir = Path.GetDirectoryName(full) ?? session;
+                else if (Directory.Exists(full))
+                    startDir = full;
+                else
+                    throw new InvalidOperationException(
+                        "path '" + pathHint + "' does not exist (resolved to '" + full +
+                        "'). Pass an existing file or directory inside the solution to search.");
+            }
+
+            return kind == LanguageServerKind.CSharp
+                ? (WorkspaceRootResolver.FindSolutionDirectory(startDir) ?? startDir)
+                : (WorkspaceRootResolver.FindTypeScriptProjectDirectory(startDir) ?? startDir);
         }
 
         public void Dispose()

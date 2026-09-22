@@ -1,4 +1,4 @@
-// File: IAgenticHost.cs  v7.3
+﻿// File: IAgenticHost.cs  v7.3
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System.Collections.Generic;
@@ -230,8 +230,13 @@ namespace DevMind
         /// <summary>
         /// Solution-wide semantic symbol search by name. Returns kind, name,
         /// file:line:col, and containing type for each match.
+        /// <paramref name="path"/> is an optional file or directory inside the solution to
+        /// search; omitted, the session working directory decides the scope. The parameter
+        /// is on the interface rather than only on the MCP tool because the catalogue
+        /// advertises it to every skin — a host that silently dropped it would answer
+        /// from the wrong solution while the model believed it had said where to look.
         /// </summary>
-        Task<string> FindSymbolAsync(string query, int maxResults, string language);
+        Task<string> FindSymbolAsync(string query, int maxResults, string language, string path);
 
         /// <summary>
         /// Searches the web via the configured search service (DEVMIND_SEARCH_URL).

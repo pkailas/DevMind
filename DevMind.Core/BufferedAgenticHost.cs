@@ -1,4 +1,4 @@
-// File: BufferedAgenticHost.cs  v1.0 (promoted from DevMind.Cli/ConsoleAgenticHost.cs v1.1)
+﻿// File: BufferedAgenticHost.cs  v1.0 (promoted from DevMind.Cli/ConsoleAgenticHost.cs v1.1)
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // UI-agnostic IAgenticHost: all the file/shell/patch/memory/LSP logic the console skin
@@ -929,10 +929,10 @@ namespace DevMind
             return await _lspTools.HoverAsync(fullPath, line, character, CancellationToken);
         }
 
-        async Task<string> IAgenticHost.FindSymbolAsync(string query, int maxResults, string language)
+        async Task<string> IAgenticHost.FindSymbolAsync(string query, int maxResults, string language, string path)
         {
             AppendOutput($"[LSP] find_symbol \"{query}\"\n", OutputColor.Dim);
-            return await _lspTools.FindSymbolAsync(query, maxResults, language, CancellationToken);
+            return await _lspTools.FindSymbolAsync(query, maxResults, language, CancellationToken, path);
         }
 
         // ── IAgenticHost web tools (delegate to shared Core WebTools) ─────────────

@@ -1,4 +1,4 @@
-// File: LspToolService.cs  v1.0
+﻿// File: LspToolService.cs  v1.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Shared host-side facade over LanguageServerRouter for the five LSP tools
@@ -68,14 +68,14 @@ namespace DevMind
                 r => r.HoverAsync(fullPath, line, character, cancellationToken));
 
         public Task<string> FindSymbolAsync(string query, int maxResults, string language,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default, string pathHint = null)
         {
             if (string.IsNullOrWhiteSpace(query))
                 return Task.FromResult("[find_symbol] Provide a non-empty symbol name to search for.");
 
             int cap = Math.Min(maxResults > 0 ? maxResults : 50, 100);
             return InvokeAsync("find_symbol", null,
-                r => r.FindSymbolAsync(query, cap, language ?? "csharp", cancellationToken));
+                r => r.FindSymbolAsync(query, cap, language ?? "csharp", cancellationToken, pathHint));
         }
 
         /// <summary>

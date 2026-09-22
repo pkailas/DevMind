@@ -1300,10 +1300,10 @@ namespace DevMind
             return await _lspTools.HoverAsync(fullPath, line, character, CancellationToken);
         }
 
-        async Task<string> IAgenticHost.FindSymbolAsync(string query, int maxResults, string language)
+        async Task<string> IAgenticHost.FindSymbolAsync(string query, int maxResults, string language, string path)
         {
             AppendOutputLocal($"[LSP] find_symbol \"{query}\"\n", OutputColor.Dim);
-            return await _lspTools.FindSymbolAsync(query, maxResults, language, CancellationToken);
+            return await _lspTools.FindSymbolAsync(query, maxResults, language, CancellationToken, path);
         }
 
         // ── IAgenticHost web tools (delegate to shared Core WebTools) ─────────────

@@ -1,4 +1,4 @@
-// File: ToolCallMapper.cs  v7.4
+﻿// File: ToolCallMapper.cs  v7.4
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System.Collections.Generic;
@@ -295,7 +295,10 @@ namespace DevMind
                         Type = BlockType.FindSymbol,
                         Pattern = GetArg(tc, "query"),
                         MaxResults = GetIntArg(tc, "max_results"),
-                        Language = GetArg(tc, "language")
+                        Language = GetArg(tc, "language"),
+                        // Reuses FileName: for find_symbol it is the optional scope hint
+                        // (a file OR a directory inside the solution to search).
+                        FileName = GetArg(tc, "path")
                     };
 
                 case "web_search":

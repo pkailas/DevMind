@@ -1,4 +1,4 @@
-// File: ToolRegistry.cs  v8.0
+﻿// File: ToolRegistry.cs  v8.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json.Linq;
@@ -291,7 +291,10 @@ namespace DevMind
                 "Returns kind, name, file:line:col, and containing type, capped at 50.",
                 Required("query", "string", "Symbol name or substring to search for (e.g. \"LanguageServerHost\", \"GetDiagnostics\")."),
                 Optional("max_results", "integer", "Max results (default 50, capped at 100)."),
-                Optional("language", "string", "Language to search: \"csharp\" (default) or \"typescript\".")));
+                Optional("language", "string", "Language to search: \"csharp\" (default) or \"typescript\"."),
+                Optional("path", "string", "Optional file OR directory inside the solution to search. " +
+                    "Omitted, the search is scoped to the session working directory's solution, which " +
+                    "may be a different repository than the one you are asking about.")));
 
             // ── Web tools ────────────────────────────────────────────────────
             tools.Add(MakeTool("web_search",

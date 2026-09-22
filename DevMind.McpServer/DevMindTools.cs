@@ -1,4 +1,4 @@
-// File: DevMindTools.cs  v5.4
+﻿// File: DevMindTools.cs  v5.4
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Diagnostic policy: never write to Console.Out / Console.WriteLine in this file.
@@ -2357,16 +2357,24 @@ internal sealed class DevMindTools
         }, cancellationToken);
     }
 
+    // Unlike the position-based LSP tools, find_symbol has no file to derive a solution
+    // from, so it used to search whatever solution encloses the server's startup working
+    // directory — a different repository, silently, for any caller asking about another
+    // one. `path` restores parity: give it anything inside the target solution.
     [McpServerTool(Name = "find_symbol")]
     [Description(
         "Find a type or member across the whole solution by name (semantic, solution-wide). " +
         "Use this to answer \"where is X defined?\" when you do NOT already have a file+position — " +
         "prefer it over find_in_files text search for locating a type or member. " +
+        "Searches the solution enclosing 'path' when given, otherwise the one enclosing the " +
+        "server's working directory — pass 'path' whenever the symbol may live in another repo. " +
         "Returns kind, name, file:line:col, and containing type, capped at 50.")]
     public async Task<string> FindSymbol(
         [Description("Symbol name or substring to search for (e.g. \"LanguageServerHost\", \"GetDiagnostics\").")] string query,
         [Description("Max results (default 50, capped at 100).")] int? max_results = null,
         [Description("Language to search: \"csharp\" (default) or \"typescript\".")] string language = "csharp",
+        [Description("Optional file OR directory inside the solution to search. Omitted, the search is " +
+                     "scoped to the server working directory's solution, which may be a different repository.")] string? path = null,
         CancellationToken cancellationToken = default)
     {
         return await _svc.EnqueueAsync(async () =>
@@ -2379,7 +2387,7 @@ internal sealed class DevMindTools
             try
             {
                 int cap = Math.Min(max_results ?? 50, 100);
-                return await _svc.Lsp.FindSymbolAsync(query, cap, language ?? "csharp", cancellationToken);
+                return await _svc.Lsp.FindSymbolAsync(query, cap, language ?? "csharp", cancellationToken, path);
             }
             catch (Exception ex)
             {

@@ -1,4 +1,4 @@
-// File: AgenticExecutor.cs  v7.6
+﻿// File: AgenticExecutor.cs  v7.6
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -584,7 +584,7 @@ namespace DevMind
                         try
                         {
                             string symbolContent = await _host.FindSymbolAsync(
-                                block.Pattern, block.MaxResults, block.Language);
+                                block.Pattern, block.MaxResults, block.Language, block.FileName);
                             if (symbolContent != null)
                                 result.ToolResultContents[block.Pattern ?? ""] = symbolContent;
                         }

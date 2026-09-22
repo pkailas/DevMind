@@ -1,4 +1,4 @@
-// File: LanguageServerHost.cs  v2.3
+﻿// File: LanguageServerHost.cs  v2.3
 // v2.2: advertise workspace/symbol + FindSymbolAsync (solution-wide semantic symbol
 //   search); empty results route through the same A11 readiness path (no false-empty).
 // v2.3: annotate go_to_definition results that land in Roslyn's decompiled metadata-as-source
@@ -289,10 +289,23 @@ namespace DevMind
                 new JObject { ["query"] = query ?? "" },
                 cancellationToken).ConfigureAwait(false);
 
-            string readyEmpty =
-                "find_symbol: ran the search but found no symbols matching \"" + query +
-                "\" in the loaded " + _profile.DisplayName + " solution.";
+            string readyEmpty = BuildFindSymbolEmptyMessage(query, _profile.DisplayName, _workingDirectory);
             return FinishLocationResult("find_symbol", FormatSymbols(result, maxResults), readyEmpty);
+        }
+
+        /// <summary>
+        /// The "found nothing" line for find_symbol. It names the workspace root that was
+        /// actually searched: without that, a miss caused by searching a different solution
+        /// is indistinguishable from the symbol not existing, and reads as a true negative.
+        /// </summary>
+        internal static string BuildFindSymbolEmptyMessage(
+            string query, string languageDisplayName, string searchedRoot)
+        {
+            return "find_symbol: ran the search but found no symbols matching \"" + query +
+                   "\" in the " + languageDisplayName + " solution at " + searchedRoot +
+                   ". That solution is the entire scope of this search — a symbol defined in a " +
+                   "different solution cannot appear here. To search another one, pass path=<a file " +
+                   "or directory inside it>.";
         }
 
         public void Dispose()

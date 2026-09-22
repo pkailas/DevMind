@@ -1,4 +1,4 @@
-// File: ResponseBlock.cs  v1.0
+﻿// File: ResponseBlock.cs  v1.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System.Collections.Generic;
@@ -32,6 +32,8 @@ namespace DevMind
         public int  LspCharacter { get; set; }        // for GoToDefinition/FindReferences/Hover — 1-based column
         public int  MaxResults   { get; set; }        // for FindSymbol/WebSearch — result cap (0 = default)
         public string Language   { get; set; }        // for FindSymbol — "csharp" (default) or "typescript"
+                                                      // FileName doubles as FindSymbol's optional scope hint —
+                                                      // a file or directory inside the solution to search.
        public string Url        { get; set; }        // for WebFetch — URL to fetch
         public string SqlQuery   { get; set; }        // for RunSql — SQL statement
         public string SqlConnString { get; set; }     // for RunSql — explicit inline connection string (used verbatim; never logged/persisted raw)
