@@ -1,4 +1,4 @@
-﻿// File: IAgenticHost.cs  v7.3
+﻿// File: IAgenticHost.cs  v7.4
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System.Collections.Generic;
@@ -52,6 +52,12 @@ namespace DevMind
         /// dispatcher marshalling).
         /// </summary>
         void AppendOutput(string text, OutputColor color = OutputColor.Normal);
+
+        /// <summary>
+        /// Append a model-authored ANSWER (task_done summary, ask_caller questions) -
+        /// content a skin may render as markdown. Default: plain AppendOutput.
+        /// </summary>
+        void AppendAnswer(string text) => AppendOutput(text, OutputColor.Normal);
 
        /// <summary>
         /// Update the scratchpad content.

@@ -1,4 +1,4 @@
-﻿// File: AgenticExecutor.cs  v7.6
+﻿// File: AgenticExecutor.cs  v7.7
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -135,13 +135,13 @@ namespace DevMind
                         // Render task_done.summary so the user sees the answer when the model
                         // packs its response into the summary parameter instead of prose tokens.
                         if (!string.IsNullOrWhiteSpace(block.Content))
-                            _host.AppendOutput(block.Content.TrimEnd('\r', '\n') + "\n", OutputColor.Normal);
+                            _host.AppendAnswer(block.Content.TrimEnd('\r', '\n') + "\n");
                         break;
 
                     case BlockType.NeedsInput:
                         // Render ask_caller's questions so they land in the transcript/UI.
                         if (!string.IsNullOrWhiteSpace(block.Content))
-                            _host.AppendOutput(block.Content.TrimEnd('\r', '\n') + "\n", OutputColor.Normal);
+                            _host.AppendAnswer(block.Content.TrimEnd('\r', '\n') + "\n");
                         break;
 
                     case BlockType.Scratchpad:

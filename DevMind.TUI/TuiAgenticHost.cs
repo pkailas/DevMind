@@ -1,4 +1,4 @@
-﻿// File: TuiAgenticHost.cs  v2.1
+﻿// File: TuiAgenticHost.cs  v2.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 implementation of IAgenticHost.
@@ -716,6 +716,20 @@ namespace DevMind
                 finally { dlg.Dispose(); tcs.TrySetResult(answer); }
             });
             return tcs.Task;
+        }
+
+        // ── Model-authored answer (task_done summary, ask_caller questions) ─────
+        // Routes the whole block through a one-shot CodeBlockStreamer so fenced code
+        // stays fenced (not line-split and inlined) and prose gets the same per-line
+        // inline-markdown rendering as streamed prose.
+        public void AppendAnswer(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return;
+            var streamer = new CodeBlockStreamer(
+                prose: AppendProse,
+                code:  AppendCode);
+            streamer.Feed(text);
+            streamer.Flush();
         }
 
         // ── Styled prose append (inline markdown) ─────────────────────────────────────
