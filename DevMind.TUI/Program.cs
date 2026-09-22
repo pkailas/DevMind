@@ -1,4 +1,4 @@
-﻿// File: Program.cs  v3.3
+﻿// File: Program.cs  v3.4
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 TUI for DevMind.
@@ -47,6 +47,11 @@ namespace DevMind
         // Tracks whether a turn is currently running (set around RunTurnAsync calls).
         static bool _isTurnRunning;
 
+        /// <summary>How long a transient status-bar message stays up before Ready returns.</summary>
+        const int StatusFlashMilliseconds = 2500;
+
+        /// <summary>Supersession token: only the newest flash restores the status bar.</summary>
+        static int _statusFlashToken;
 
         // Steering: the same mailbox the headless agent uses for devmind_task_steer, so the
         // TUI and a delegated job behave identically at an iteration boundary rather than
@@ -71,6 +76,60 @@ namespace DevMind
 
         // Clear the armed state and any warning message. Called on any user activity
         // (typing, submitting, state change) so the warning doesn't persist.
+        /// <summary>
+        /// The one route by which the approval mode changes: /mode and the Shift+Tab binding
+        /// both come through here. Applies it to the live options the executor reads at its
+        /// next dispatch, persists it, and reports it twice — a timed status-bar flash, and a
+        /// transcript line.
+        /// <para>
+        /// Both reports are deliberate. The flash is gone in seconds, so an accidental
+        /// Shift+Tab would otherwise be silent, leaving someone wondering why the agent
+        /// started stopping at every write. The transcript line is the record that survives,
+        /// positioned in the conversation at the moment it changed.
+        /// </para>
+        /// </summary>
+        static void ApplyApprovalMode(
+            ApprovalMode mode, TuiOptions options, TuiAgenticHost host,
+            TuiStatusBar statusBar, IApplication app)
+        {
+            ApprovalModeControl.Apply(mode, options, _config);
+
+            host.AppendOutputLocal(
+                ApprovalModeControl.TranscriptLine(mode),
+                mode == ApprovalMode.Manual ? OutputColor.Warning : OutputColor.Dim);
+
+            statusBar.SetApprovalMode(mode);
+            FlashStatus(app, statusBar, ApprovalModeControl.StatusFlash(mode));
+        }
+
+        /// <summary>
+        /// Shows a message in the status bar and restores the previous state after a moment.
+        /// Same shape as the Ctrl+C "press again to exit" transient, but time-based rather
+        /// than keypress-based: nothing follows a mode toggle to clear it.
+        /// <para>
+        /// The restore is skipped while a turn is running, because the turn owns the status
+        /// text ("Processing…", the iteration chip) and stamping Ready over it mid-stream
+        /// would report the session as idle while it is not.
+        /// </para>
+        /// </summary>
+        static void FlashStatus(IApplication app, TuiStatusBar statusBar, string message)
+        {
+            statusBar.SetBusy(message);
+
+            int token = System.Threading.Interlocked.Increment(ref _statusFlashToken);
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(StatusFlashMilliseconds).ConfigureAwait(false);
+
+                // A newer flash (or a turn starting) supersedes this one's restore, so two
+                // quick toggles do not leave the bar cleared a beat after the second.
+                if (System.Threading.Volatile.Read(ref _statusFlashToken) != token) return;
+                if (_isTurnRunning) return;
+
+                app.Invoke(() => statusBar.SetReady());
+            });
+        }
+
         static void ClearCtrlCArmed(IApplication app, TuiStatusBar statusBar)
         {
             if (_ctrlCArmed)
@@ -169,7 +228,7 @@ namespace DevMind
                     TuiAgenticHost.Diag($"[PASTE] Driver.Paste len={text?.Length ?? -1}");
 
             // Main window.
-            using Window window = new() { Title = "DevMind TUI — Enter send · Ctrl+Enter newline · Ctrl+C copies · F10 quits · Esc interrupts" };
+            using Window window = new() { Title = "DevMind TUI — Enter send · Ctrl+Enter newline · Ctrl+C copies · Shift+Tab approval mode · F10 quits · Esc interrupts" };
 
            // Output pane — programmatically-written, non-interactive log (gui-cs/Editor).
             //
@@ -517,6 +576,30 @@ namespace DevMind
                     _ctrlCArmed = true;
                     _ctrlCArmedTime = DateTime.UtcNow;
                     statusBar.SetBusy("Press Ctrl+C again to exit");
+                }
+
+                // ── Shift+Tab / F2 — toggle the approval mode ───────────────────
+                // Bound HERE, on the instance keyboard, for the same reason Ctrl+C and Esc
+                // are: this layer fires whatever has focus, so it wins over the live input
+                // box (brief 05 left it focusable during a turn). Handled = true stops the
+                // key reaching that box, so no tab character is inserted.
+                //
+                // Shift+Tab is Tab|ShiftMask in Terminal.Gui 2.4.17 (measured: 268435465 vs
+                // 9 for bare Tab), a distinct code — so this cannot fire on bare Tab, which
+                // stays the input box's own key. Never Ctrl+Tab: Windows Terminal consumes
+                // it for its own tab switching and the app never sees it.
+                //
+                // F2 is bound alongside as a fallback, because some terminals deliver
+                // Shift+Tab as CSI Z and some swallow it entirely, and an operator whose
+                // terminal does that would otherwise have no key at all. F10 already
+                // establishes function keys as the dependable tier here.
+                if (key.KeyCode == Key.Tab.WithShift.KeyCode || key.KeyCode == Key.F2.KeyCode)
+                {
+                    key.Handled = true;
+                    ApplyApprovalMode(
+                        ApprovalModeControl.Next(options.ApprovalMode),
+                        options, host, statusBar, app);
+                    return;
                 }
 
                 // ── Esc ─────────────────────────────────────────────────────────
@@ -1192,6 +1275,8 @@ namespace DevMind
                             _config.Save();
                         },
                         SetThinking = (on) => { options.ShowLlmThinking = on; },
+                        ApprovalMode = options.ApprovalMode,
+                        SetApprovalMode = (m) => ApplyApprovalMode(m, options, host, statusBar, app),
                         // History fields.
                         HistoryStore = historyStore,
                         SessionId = SessionId.Get(),

@@ -1,4 +1,4 @@
-// File: ILlmOptions.cs  v1.1
+// File: ILlmOptions.cs  v1.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 namespace DevMind
@@ -33,6 +33,13 @@ namespace DevMind
         bool MicroCompactSummarize { get; }
         bool MicroCompactBrainwash { get; }
         bool AlwaysConfirmPatch { get; }
+
+        /// <summary>
+        /// Whether the agent asks before mutating anything. Read ONCE per tool dispatch by
+        /// AgenticExecutor, so a runtime flip lands at the next dispatch and never mid-batch.
+        /// <c>Manual</c> implies <see cref="AlwaysConfirmPatch"/>.
+        /// </summary>
+        ApprovalMode ApprovalMode { get; }
         int AgenticLoopMaxDepth { get; }
 
         /// <summary>Context-window utilization limit (percent). When a round's context usage

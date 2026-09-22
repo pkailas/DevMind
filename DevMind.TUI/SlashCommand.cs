@@ -1,4 +1,4 @@
-﻿// File: SlashCommand.cs  v1.1
+﻿// File: SlashCommand.cs  v1.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Slash-command registry and dispatcher for DevMind.TUI.
@@ -54,6 +54,15 @@ namespace DevMind
 
         /// <summary>Called to set the depth cap.</summary>
         public Action<int> SetDepthCap { get; set; }
+
+        /// <summary>The approval mode currently in force.</summary>
+        public ApprovalMode ApprovalMode { get; set; }
+
+        /// <summary>
+        /// Called to change the approval mode. Wired to the same helper the Shift+Tab
+        /// binding uses, so the command and the key cannot diverge.
+        /// </summary>
+        public Action<ApprovalMode> SetApprovalMode { get; set; }
 
         /// <summary>Current context-window utilization limit, percent (0 = off).</summary>
         public int ContextLimitPercent { get; set; }
@@ -390,6 +399,11 @@ namespace DevMind
                 "/rules [text|clear]",
                 RulesHandler);
 
+            RegisterCommand("/mode",
+                "Show or set the approval mode: auto applies mutations, manual asks first (Shift+Tab toggles)",
+                "/mode [auto|manual]",
+                ModeHandler);
+
             RegisterCommand("/steer",
                 "Fold a suggestion into the RUNNING turn at its next iteration boundary (plain text does the same)",
                 "/steer <text>",
@@ -584,6 +598,43 @@ namespace DevMind
             ctx.SetBehavioralRules(text);
             ctx.RebuildSystemPrompt();
             return Task.FromResult(new CommandResult { Message = $"Behavioral rules set ({text.Length} chars)." });
+        }
+
+        // -- /mode -----------------------------------------------------------------
+
+        /// <summary>
+        /// Shows the approval mode, or sets it. Changing it goes through ctx.SetApprovalMode,
+        /// which is the same helper Shift+Tab calls — the command owns no part of the change
+        /// itself, so the two routes cannot end up doing different things.
+        /// </summary>
+        static Task<CommandResult> ModeHandler(string[] args, CommandContext ctx)
+        {
+            string requested = args != null && args.Length > 0 ? args[0] : null;
+
+            if (string.IsNullOrWhiteSpace(requested))
+            {
+                return Task.FromResult(new CommandResult
+                {
+                    Message = $"Approval mode: {ApprovalModeText.Format(ctx.ApprovalMode)}. " +
+                              "auto applies mutations without asking; manual asks before every " +
+                              "file write, delete, rename and shell command, and routes every patch " +
+                              "through the diff card. Use /mode auto|manual, or press Shift+Tab to toggle.",
+                });
+            }
+
+            if (!ApprovalModeText.TryParse(requested, out ApprovalMode mode))
+            {
+                return Task.FromResult(new CommandResult
+                {
+                    Message = $"Unknown mode \"{requested}\". Use /mode auto or /mode manual.",
+                });
+            }
+
+            ctx.SetApprovalMode?.Invoke(mode);
+
+            // The caller reports the change (transcript line + status flash) through the
+            // shared helper, so this says only that the command was understood.
+            return Task.FromResult(new CommandResult { Message = null });
         }
 
         // -- /steer, /override -----------------------------------------------------
@@ -1129,7 +1180,7 @@ namespace DevMind
         /// </summary>
         static readonly (string Title, string[] Commands)[] HelpGroups =
         {
-            ("Session",    new[] { "/new", "/restart", "/clear", "/cls", "/compact", "/history", "/resume", "/title", "/steer", "/override" }),
+            ("Session",    new[] { "/new", "/restart", "/clear", "/cls", "/compact", "/history", "/resume", "/title", "/steer", "/override", "/mode" }),
             ("Model",      new[] { "/think", "/t", "/reasoning", "/rules", "/system_prompt" }),
             ("Context",    new[] { "/depth-cap", "/context-limit", "/cache", "/output-lines" }),
             ("Workspace",  new[] { "/dir", "/lsp", "/resolve", "/debug" }),

@@ -1,4 +1,4 @@
-﻿// File: TuiConfig.cs  v1.1
+﻿// File: TuiConfig.cs  v1.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Global TUI config persisted to %APPDATA%\devmind\devmind.json.
@@ -23,6 +23,26 @@ namespace DevMind
 
         [JsonPropertyName("behavioralRules")]
         public string BehavioralRules { get; set; } = "";
+
+        /// <summary>
+        /// Persisted approval mode ("auto" or "manual"), the value /mode writes. Text, not
+        /// the enum's ordinal: a hand-edited devmind.json should read as "manual", and
+        /// renumbering the enum later must not silently reinterpret an existing file.
+        /// Anything unrecognised reads back as Auto — see <see cref="ApprovalMode"/>.
+        /// </summary>
+        [JsonPropertyName("approvalMode")]
+        public string ApprovalModeText { get; set; } = "auto";
+
+        /// <summary>
+        /// The parsed form of <see cref="ApprovalModeText"/>. Setting it writes the
+        /// canonical spelling back, so the two cannot drift apart.
+        /// </summary>
+        [JsonIgnore]
+        public ApprovalMode ApprovalMode
+        {
+            get => DevMind.ApprovalModeText.TryParse(ApprovalModeText, out var m) ? m : ApprovalMode.Auto;
+            set => ApprovalModeText = DevMind.ApprovalModeText.Format(value);
+        }
 
         [JsonPropertyName("workingDirectory")]
         public string WorkingDirectory { get; set; } = null;
@@ -128,6 +148,12 @@ namespace DevMind
 
                 if (root.TryGetProperty("workingDirectory", out var dir) && dir.ValueKind == JsonValueKind.String)
                     config.WorkingDirectory = dir.GetString();
+
+                // Unrecognised text is left at the default rather than stored verbatim, so a
+                // hand-edited typo reads back as Auto instead of round-tripping as nonsense.
+                if (root.TryGetProperty("approvalMode", out var am) && am.ValueKind == JsonValueKind.String
+                    && DevMind.ApprovalModeText.TryParse(am.GetString(), out ApprovalMode amVal))
+                    config.ApprovalMode = amVal;
 
                 if (root.TryGetProperty("depthCap", out var depth) && depth.ValueKind == JsonValueKind.Number
                     && depth.TryGetInt32(out int depthVal))

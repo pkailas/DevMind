@@ -1,4 +1,4 @@
-// File: CliOptions.cs  v1.2
+// File: CliOptions.cs  v1.3
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -64,6 +64,12 @@ namespace DevMind
         public bool   MicroCompactBrainwash    { get; set; } = false;
 
         public bool   AlwaysConfirmPatch       { get; set; } = false;
+
+        /// <summary>
+        /// Whether to confirm every mutation. No runtime toggle in the CLI — it has no
+        /// command surface to flip one — so this is set at launch and left alone.
+        /// </summary>
+        public ApprovalMode ApprovalMode       { get; set; } = ApprovalMode.Auto;
         public int    AgenticLoopMaxDepth      { get; set; } = 5;
         // Context-window utilization % at which the loop pauses to ask. 0 disables.
         public int    AgenticContextLimitPercent { get; set; } = 78;
@@ -123,6 +129,11 @@ namespace DevMind
                         if (Enum.TryParse<LlmServerType>(args[++i], ignoreCase: true, out var st))
                             opts.ServerType = st; break;
                     case "--always-confirm": opts.AlwaysConfirmPatch = true;  break;
+                    case "--mode" when i + 1 < args.Length:
+                        // A typo resolves to the default rather than refusing to start.
+                        if (ApprovalModeText.TryParse(args[++i], out ApprovalMode cliMode))
+                            opts.ApprovalMode = cliMode;
+                        break;
                     case "--debug"         : opts.ShowDebugOutput    = true;  break;
                     case "--thinking"      : opts.ShowLlmThinking    = true;  break;
                     case "--no-thinking"   : opts.ShowLlmThinking    = false; break;
@@ -159,6 +170,8 @@ namespace DevMind
                 if (TryInt(root, "nearlineIngestThresholdChars", out n))  opts.NearlineIngestThresholdChars = n;
 
                 if (TryBool(root, "alwaysConfirmPatch",    out bool b))   opts.AlwaysConfirmPatch      = b;
+                if (TryString(root, "approvalMode",        out string am) && ApprovalModeText.TryParse(am, out ApprovalMode jsonMode))
+                    opts.ApprovalMode = jsonMode;
                 if (TryBool(root, "microCompactSummarize", out b))        opts.MicroCompactSummarize   = b;
                 if (TryBool(root, "microCompactBrainwash", out b))        opts.MicroCompactBrainwash   = b;
                 if (TryBool(root, "showDebug",             out b))        opts.ShowDebugOutput         = b;

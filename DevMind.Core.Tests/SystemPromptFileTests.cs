@@ -154,6 +154,7 @@ namespace DevMind.Core.Tests
             public bool MicroCompactSummarize { get; set; } = false;
             public bool MicroCompactBrainwash { get; set; } = false;
             public bool AlwaysConfirmPatch { get; set; } = false;
+            public ApprovalMode ApprovalMode => ApprovalMode.Auto;
             public int AgenticLoopMaxDepth { get; set; } = 5;
             public int AgenticContextLimitPercent { get; set; } = 0;
         }

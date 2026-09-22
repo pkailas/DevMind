@@ -1,4 +1,4 @@
-// File: HeadlessAgent.cs  v2.4
+// File: HeadlessAgent.cs  v2.5
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Headless agentic runner — the engine behind DevMind.McpServer's devmind_task_*
@@ -61,6 +61,15 @@ namespace DevMind
         public bool   MicroCompactSummarize    { get; set; } = true;
         public bool   MicroCompactBrainwash    { get; set; } = false;
         public bool   AlwaysConfirmPatch       { get; set; } = false;
+
+        /// <summary>
+        /// Always <see cref="ApprovalMode.Auto"/>, and deliberately get-only: a delegated
+        /// job runs unattended, so there is nobody to answer a confirmation. Manual mode
+        /// there would not pause for approval — BufferedAgenticHost.ConfirmContinueCoreAsync
+        /// auto-continues by design — it would merely print a prompt nobody reads while the
+        /// write happens anyway, which is worse than not offering the mode at all.
+        /// </summary>
+        public ApprovalMode ApprovalMode => ApprovalMode.Auto;
         public int    AgenticLoopMaxDepth      { get; set; } = 25;
         public int    AgenticContextLimitPercent { get; set; } = 78;
     }

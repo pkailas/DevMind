@@ -1,4 +1,4 @@
-﻿// File: AgenticExecutor.cs  v7.7
+﻿// File: AgenticExecutor.cs  v7.8
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -69,6 +69,14 @@ namespace DevMind
                     if (!string.IsNullOrEmpty(action.ShellCommand))
                     {
                         var result = new ExecutionResult();
+                        if (!await ApproveMutationAsync(MutationKind.Shell,
+                                $"Run shell: {DescribeCommand(action.ShellCommand)}", result))
+                        {
+                            result.ShellExitCode     = 1;
+                            result.ShellOutput       = "The user declined to run this command in manual approval mode. It was NOT executed \u2014 do not assume any of its effects happened.";
+                            result.LastShellCommand  = action.ShellCommand;
+                            return result;
+                        }
                         try
                         {
                             var (exitCode, output) = await _host.RunShellAsync(action.ShellCommand);
@@ -166,6 +174,9 @@ namespace DevMind
 
                     case BlockType.File:
                         if (!processFiles) break;
+                        if (!await ApproveMutationAsync(MutationKind.CreateFile,
+                                $"Create file {block.FileName} ({block.Content?.Length ?? 0:N0} chars)?", result))
+                            break;
                         try
                         {
                             string savedPath = await _host.SaveFileAsync(block.FileName, block.Content, block.FromToolCall);
@@ -185,6 +196,9 @@ namespace DevMind
 
                     case BlockType.AppendFile:
                         if (!processFiles) break;
+                        if (!await ApproveMutationAsync(MutationKind.AppendFile,
+                                $"Append to {block.FileName} ({block.Content?.Length ?? 0:N0} chars)?", result))
+                            break;
                         try
                         {
                             string appendedPath = await _host.AppendFileAsync(block.FileName, block.Content);
@@ -219,6 +233,19 @@ namespace DevMind
                                 "with an explicit build command.";
                             result.Errors.Add(noCommandMsg);
                             _host.AppendOutput($"[SHELL ERROR] {noCommandMsg}\n", OutputColor.Error);
+                            break;
+                        }
+                        if (!await ApproveMutationAsync(MutationKind.Shell,
+                                $"Run shell: {DescribeCommand(block.Command)}", result))
+                        {
+                            // The model reads ShellOutput verbatim (LoopHelpers' run_shell
+                            // case returns it when non-empty), so the decline reaches it as
+                            // the command's own output rather than as silence it would read
+                            // as success. A non-zero code keeps every "did it work?" check
+                            // on the failure branch.
+                            result.ShellExitCode    = 1;
+                            result.ShellOutput      = "The user declined to run this command in manual approval mode. It was NOT executed \u2014 do not assume any of its effects happened.";
+                            result.LastShellCommand = block.Command;
                             break;
                         }
                         try
@@ -323,6 +350,9 @@ namespace DevMind
                         break;
 
                     case BlockType.Delete:
+                        if (!await ApproveMutationAsync(MutationKind.DeleteFile,
+                                $"Delete file {block.FileName}?", result))
+                            break;
                         try
                         {
                             string deleteResult = await _host.DeleteFileAsync(block.FileName);
@@ -349,6 +379,9 @@ namespace DevMind
                         break;
 
                     case BlockType.Rename:
+                        if (!await ApproveMutationAsync(MutationKind.RenameFile,
+                                $"Rename {block.RenameFrom} to {block.RenameTo}?", result))
+                            break;
                         try
                         {
                             string renameResult = await _host.RenameFileAsync(block.RenameFrom, block.RenameTo);
@@ -756,11 +789,67 @@ namespace DevMind
         /// Resolves all PATCH blocks, determines whether diff preview cards are
         /// needed, shows them if so, and applies approved patches.
         /// </summary>
+
+        /// <summary>
+        /// Asks the host before a mutation when the mode requires it. True means go ahead.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The mode is read from <c>_options</c> HERE, once per mutation, so a runtime /mode
+        /// flip takes effect at the next dispatch and never part-way through a batch that is
+        /// already running.
+        /// </para>
+        /// <para>
+        /// On a decline the cause goes into <c>result.Errors</c> and the caller simply does
+        /// not perform the operation. That is deliberate reuse: an empty FilesCreated /
+        /// FilesAppended / FilesDeleted / FilesRenamed list already makes LoopHelpers build a
+        /// BuildWriteFailure tool_result, and it relays result.Errors as the cause. So a
+        /// declined write reports to the model as a failure with the reason attached, through
+        /// the same path a sandbox refusal takes — rather than a second success-shaped
+        /// message that would have to be kept honest separately.
+        /// </para>
+        /// </remarks>
+        private async Task<bool> ApproveMutationAsync(MutationKind kind, string prompt, ExecutionResult result)
+        {
+            if (!ApprovalPolicy.Requires(_options.ApprovalMode, kind))
+                return true;
+
+            bool approved = await _host.ConfirmContinueAsync(prompt);
+            if (approved)
+                return true;
+
+            result.Errors.Add(
+                "The user declined this action in manual approval mode. It was NOT performed.");
+            _host.AppendOutput($"[SKIPPED] user declined \u2014 {prompt}\n", OutputColor.Warning);
+            return false;
+        }
+
+        /// <summary>
+        /// A shell command as a one-line prompt: first line, plus a length when there is more.
+        /// The full text is already in the transcript above, and a here-string pasted whole
+        /// into a confirm dialog is unreadable at exactly the moment reading matters.
+        /// </summary>
+        private static string DescribeCommand(string command)
+        {
+            string text = (command ?? string.Empty).Trim();
+            int newline = text.IndexOf('\n');
+            if (newline < 0)
+                return text.Length <= 120 ? text : text.Substring(0, 120) + "\u2026";
+
+            string first = text.Substring(0, newline).TrimEnd();
+            if (first.Length > 120) first = first.Substring(0, 120) + "\u2026";
+            return $"{first} \u2026 ({text.Length} chars total)";
+        }
+
         private async Task ExecuteBatchPatchesAsync(
             List<ResponseBlock> patchBlocks,
             ExecutionResult result)
         {
-            bool alwaysConfirm = _options.AlwaysConfirmPatch;
+            // Manual mode means every patch is looked at, exact matches included — which
+            // is precisely what AlwaysConfirmPatch already does, so it is folded in here
+            // rather than given a second mechanism that could disagree with it.
+            bool alwaysConfirm = _options.AlwaysConfirmPatch
+                || ApprovalPolicy.Requires(_options.ApprovalMode, MutationKind.Patch);
 
             // Phase 1: Resolve all patches (parse + match, no side effects)
             var resolved = new List<PatchResolveResult>();

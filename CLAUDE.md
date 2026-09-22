@@ -158,6 +158,7 @@ same thing. Grouping follows `HelpGroups`.
 | `/title <text>` | Set the current session's title |
 | `/steer <text>` | Fold a suggestion into the RUNNING turn at its next iteration boundary (plain text does the same) |
 | `/override <text>` | Redirect the RUNNING turn at its next iteration boundary - stop the current approach and change course |
+| `/mode [auto\|manual]` | Show or set the approval mode: auto applies mutations, manual asks first (Shift+Tab toggles) |
 | **Model** | |
 | `/think on\|off` | Toggle session thinking mode (reasoning display) on/off |
 | `/t <message>` | One-shot: send a message with thinking ON (does not change the /think default) |

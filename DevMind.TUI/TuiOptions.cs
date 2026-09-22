@@ -1,4 +1,4 @@
-﻿// File: TuiOptions.cs  v1.2
+﻿// File: TuiOptions.cs  v1.3
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Minimal ILlmOptions implementation for the TUI.
@@ -54,6 +54,13 @@ namespace DevMind
         public bool   MicroCompactSummarize    { get; set; } = true;
         public bool   MicroCompactBrainwash    { get; set; } = false;
         public bool   AlwaysConfirmPatch       { get; set; } = false;
+
+        /// <summary>
+        /// Whether to confirm every mutation. Settable at runtime: /mode writes here and the
+        /// executor re-reads it on the next dispatch, which is the same way /think flips
+        /// ShowLlmThinking mid-session.
+        /// </summary>
+        public ApprovalMode ApprovalMode        { get; set; } = ApprovalMode.Auto;
         public int    AgenticLoopMaxDepth      { get; set; } = 5;
         // Context-window utilization % at which the loop pauses to ask. 0 disables.
         public int    AgenticContextLimitPercent { get; set; } = 78;
@@ -89,6 +96,12 @@ namespace DevMind
                     case "--endpoint"     when i + 1 < args.Length: opts.EndpointUrl             = args[++i]; break;
                     case "--api-key"      when i + 1 < args.Length: opts.ApiKey                  = args[++i]; break;
                     case "--model"        when i + 1 < args.Length: opts.ModelName               = args[++i]; break;
+                    case "--mode" when i + 1 < args.Length:
+                        // Unknown values are ignored rather than fatal: the safe reading of
+                        // a typo is the default, not a refusal to start.
+                        if (ApprovalModeText.TryParse(args[++i], out ApprovalMode parsedMode))
+                            opts.ApprovalMode = parsedMode;
+                        break;
                     case "--system-prompt" when i + 1 < args.Length:
                         // Both: SystemPrompt keeps every existing reader working,
                         // ExplicitSystemPrompt records that this one was typed.

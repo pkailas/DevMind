@@ -46,6 +46,7 @@ namespace DevMind.Core.Tests
             public bool MicroCompactSummarize => false;
             public bool MicroCompactBrainwash => false;
             public bool AlwaysConfirmPatch => false;
+            public ApprovalMode ApprovalMode => ApprovalMode.Auto;
             public int AgenticLoopMaxDepth => 25;
             public int AgenticContextLimitPercent => 78;
         }

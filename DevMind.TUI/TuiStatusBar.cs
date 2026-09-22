@@ -1,4 +1,4 @@
-﻿// File: TuiStatusBar.cs  v1.1
+﻿// File: TuiStatusBar.cs  v1.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Composed-Labels status row for the DevMind TUI (Phase 2 of the presentation
@@ -65,6 +65,7 @@ namespace DevMind
         private readonly Label _meterLabel;
         private readonly Label _iterLabel;
         private readonly Label _steerLabel;
+        private readonly Label _modeLabel;
         private readonly Label _rateLabel;
 
         public TuiStatusBar(int toolCount, bool lspEnabled, string lspLanguages)
@@ -118,11 +119,15 @@ namespace DevMind
             _steerLabel.X = Pos.Right(_iterLabel);
             _steerLabel.Y = 0;
 
+            _modeLabel = MakeLabel("", FgDim);
+            _modeLabel.X = Pos.Right(_steerLabel);
+            _modeLabel.Y = 0;
+
             _rateLabel = MakeLabel("", FgDim);
-            _rateLabel.X = Pos.Right(_steerLabel);
+            _rateLabel.X = Pos.Right(_modeLabel);
             _rateLabel.Y = 0;
 
-            _rightGroup.Add(_lspDot, _lspText, _meterLabel, _iterLabel, _steerLabel, _rateLabel);
+            _rightGroup.Add(_lspDot, _lspText, _meterLabel, _iterLabel, _steerLabel, _modeLabel, _rateLabel);
             _root.Add(_stateLabel, _hintLabel, _rightGroup);
         }
 
@@ -230,6 +235,24 @@ namespace DevMind
         /// the transcript, where there is room for it.
         /// </para>
         /// </summary>
+        /// <summary>
+        /// Show the approval mode when it is Manual, and nothing when it is Auto.
+        /// <para>
+        /// Only the exceptional state gets a chip. Auto is the long-standing behaviour and
+        /// the overwhelming default, so a permanent "auto" label would be noise that trains
+        /// the eye to skip the very spot where "manual" needs to be noticed.
+        /// </para>
+        /// </summary>
+        public void SetApprovalMode(ApprovalMode mode)
+        {
+            string text = mode == ApprovalMode.Manual ? " \u00b7 approval manual" : "";
+            OnUi(() =>
+            {
+                _modeLabel.Text = text;
+                Pin(_modeLabel, mode == ApprovalMode.Manual ? FgAmber : FgDim);
+            });
+        }
+
         public void SetSteerQueued(SteerMode? mode)
         {
             string text = mode == null
