@@ -1,4 +1,4 @@
-﻿// File: TuiConfig.cs  v1.2
+﻿// File: TuiConfig.cs  v1.3
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Global TUI config persisted to %APPDATA%\devmind\devmind.json.
@@ -56,6 +56,11 @@ namespace DevMind
         /// (use the startup default); 0 means explicitly disabled; 1-99 sets the limit.</summary>
         [JsonPropertyName("contextLimitPercent")]
         public int ContextLimitPercent { get; set; } = -1;
+
+        /// <summary>Persisted transcript line cap for tool output, the value /output-lines
+        /// writes. -1 means "not set" (the built-in default applies); 0 means uncapped.</summary>
+        [JsonPropertyName("outputLineCap")]
+        public int OutputLineCap { get; set; } = -1;
 
         /// <summary>When true, completed turns are captured as JSONL training data.</summary>
         [JsonPropertyName("trainingLogEnabled")]
@@ -162,6 +167,10 @@ namespace DevMind
                 if (root.TryGetProperty("contextLimitPercent", out var clp) && clp.ValueKind == JsonValueKind.Number
                     && clp.TryGetInt32(out int clpVal))
                     config.ContextLimitPercent = clpVal;
+
+                if (root.TryGetProperty("outputLineCap", out var olc) && olc.ValueKind == JsonValueKind.Number
+                    && olc.TryGetInt32(out int olcVal))
+                    config.OutputLineCap = olcVal;
 
                 if (root.TryGetProperty("trainingLogEnabled", out var tle)
                     && (tle.ValueKind == JsonValueKind.True || tle.ValueKind == JsonValueKind.False))

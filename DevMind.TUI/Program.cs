@@ -1,4 +1,4 @@
-﻿// File: Program.cs  v3.4
+﻿// File: Program.cs  v3.5
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 TUI for DevMind.
@@ -301,6 +301,12 @@ namespace DevMind
             var host = new TuiAgenticHost(options.WorkingDirectory, outputView, () => cts.Cancel());
             host.NearlineCache = llmClient.NearlineCache; // for the recall_cache tool
 
+            // Persisted tool-output line cap. -1 means "not set", so the host's own default
+            // stands; 0 is a deliberate "uncapped" and must survive a restart like any other
+            // setting.
+            if (_config.OutputLineCap >= 0)
+                host.OutputLineCap = _config.OutputLineCap;
+
             // Status bar: composed-Labels row — state + hints left, LSP chip + context meter right.
             var (lspEnabled, lspLanguages) = host.GetLspStatus();
             var statusBar = new TuiStatusBar(ToolRegistry.ToolCount, lspEnabled, lspLanguages);
@@ -478,6 +484,20 @@ namespace DevMind
                     key.Handled = true;
                     cts.Cancel();        // ask any running turn to stop
                     app.RequestStop();   // exit the main loop → process returns
+                    return;
+                }
+
+                // ── Ctrl+O — expand what the transcript hid ─────────────────────
+                // Qwen Code's key for the same job, and free here: nothing in this app binds
+                // it, and the input box's own binding (if the Editor grows one) is pre-empted
+                // because app-level KeyDown runs first and this marks the key handled. Same
+                // path as /expand, so the key and the command cannot diverge.
+                if (key.KeyCode == Key.O.WithCtrl.KeyCode)
+                {
+                    key.Handled = true;
+                    ExpandResult expanded = host.Expand(string.Empty);
+                    if (expanded.Lines.Count == 0)
+                        host.AppendOutputLocal(expanded.Message + "\n", OutputColor.Dim);
                     return;
                 }
 
@@ -1274,6 +1294,14 @@ namespace DevMind
                             _config.ContextLimitPercent = n;
                             _config.Save();
                         },
+                        OutputLineCap = host.OutputLineCap,
+                        SetOutputLineCap = (n) =>
+                        {
+                            host.OutputLineCap = n;
+                            _config.OutputLineCap = n;
+                            _config.Save();
+                        },
+                        Expand = (arg) => host.Expand(arg),
                         SetThinking = (on) => { options.ShowLlmThinking = on; },
                         ApprovalMode = options.ApprovalMode,
                         SetApprovalMode = (m) => ApplyApprovalMode(m, options, host, statusBar, app),
@@ -1545,29 +1573,12 @@ namespace DevMind
             bool forceToolChoiceRequired = false; // Layer 2 narration-retry flag
             bool isSyntheticPrompt = false;       // true when currentPrompt was auto-injected by the loop
 
-            // A DevMind-internal status/diagnostic line ([CONTEXT], [LLM], [TOOL_USE], [DIAG…],
-            // [DROPPED], [SQUEEZED], …) emitted through onToken. The engine injects these — some
-            // BEFORE the model streams a single token — so they must not count as model output or
-            // flip the thinking→generating phase (that flipped "Thinking…" to "Generating…" ~50ms
-            // into the turn, before any reasoning, making "Thinking…" effectively invisible).
-            // Matches a leading all-caps bracket tag; mixed-case model brackets (e.g. "[Fact]")
-            // are intentionally NOT matched, so real model content still counts.
-            static bool IsInternalStatusLine(string token)
-            {
-                if (string.IsNullOrEmpty(token)) return false;
-                int i = 0;
-                while (i < token.Length && char.IsWhiteSpace(token[i])) i++;
-                if (i >= token.Length || token[i] != '[') return false;
-                i++;
-                if (i >= token.Length || !char.IsUpper(token[i])) return false;
-                for (; i < token.Length; i++)
-                {
-                    char c = token[i];
-                    if (c == ']') return true;
-                    if (!(char.IsUpper(c) || char.IsDigit(c) || c == '_' || c == '-' || c == ' ')) return false;
-                }
-                return false;
-            }
+            // Both questions the token path asks about a streamed token — "is this the engine
+            // talking?" and "should the transcript show it?" — live in TranscriptNoise, where
+            // they are reachable by a test. Inline here they were reachable only by running
+            // the app and reading the screen, which is how the second one came to be applied
+            // to the wrong door for as long as it was.
+            static bool IsInternalStatusLine(string token) => TranscriptNoise.IsInternalStatusLine(token);
 
             while (true)
             {
@@ -1583,6 +1594,29 @@ namespace DevMind
                 bool timerStopped = false;
                 bool suppressDisplay = false;
                 string lineAccum = string.Empty;
+
+                // Collapsed reasoning (thinking display off): the text is accumulated rather
+                // than dropped, a live "∵ Thinking… Ns" line ticks in its place, and that same
+                // line becomes the dim "∴ Thought for …" summary once the reasoning ends.
+                // /expand can still produce the text. One response, one summary.
+                var thought = new ThoughtCollapse(options.ShowLlmThinking);
+                var thoughtClock = new Stopwatch();
+                bool thoughtSummarized = false;
+                int liveSecond = -1;
+
+                void FlushThoughtSummary()
+                {
+                    if (thoughtSummarized) return;
+                    thoughtClock.Stop();
+                    string summary = thought.Summarize(thoughtClock.Elapsed);
+                    if (summary == null) return;   // nothing was collapsed
+
+                    thoughtSummarized = true;
+                    ((TuiAgenticHost)host).ClearLiveTail();
+                    ((TuiAgenticHost)host).Expansions.ParkThought(thought.Text);
+                    ((TuiAgenticHost)host).AppendOutputLocal(summary + "\n", OutputColor.Dim);
+                    ((TuiAgenticHost)host).MarkThoughtBoundary();
+                }
 
                 // Render prose live (per completed line, so inline markdown — headings,
                 // **bold**, `code` — can be styled with markers consumed), but buffer
@@ -1634,15 +1668,41 @@ namespace DevMind
                         // visible alike, matching the engine's LastGeneratedTokens.
                         if (!isStatus) callbacks.OnStreamToken();
 
-                        string visible = thinkFilter.Process(token, options.ShowLlmThinking,
+                        // Ask for the reasoning text unconditionally. With thinking display on
+                        // it is appended inline exactly as before; with it off it used to be
+                        // discarded inside the filter, which left the transcript silent for the
+                        // whole reasoning phase — indistinguishable from a hang. It is now kept
+                        // so one line can say it happened and /expand can show it. Which of the
+                        // two happens is ThoughtCollapse's decision, not this lambda's.
+                        string visible = thinkFilter.Process(token, showThinking: true,
                             out string thinkText);
 
                        if (!string.IsNullOrEmpty(thinkText))
                         {
                             if (!timerStopped) { callbacks.StopThinkingTimer(); timerStopped = true; }
-                            // Thinking text — append to output in the muted Thinking color.
-                            // No App.Invoke: AppendOutputLocal buffers and the render pump drains it.
-                            ((TuiAgenticHost)host).AppendOutputLocal(thinkText, OutputColor.Thinking);
+                            if (!thoughtClock.IsRunning && !thought.HasThought) thoughtClock.Restart();
+
+                            string inline = thought.Route(thinkText);
+                            if (inline != null)
+                            {
+                                // Thinking text — append to output in the muted Thinking color.
+                                // No App.Invoke: AppendOutputLocal buffers and the render pump drains it.
+                                ((TuiAgenticHost)host).AppendOutputLocal(inline, OutputColor.Thinking);
+                            }
+                            else
+                            {
+                                // Redraw the live line only when the second it shows changes —
+                                // it is rewritten in place, and rewriting it per token would
+                                // put a document edit on the streaming path for no visible
+                                // difference.
+                                int second = (int)thoughtClock.Elapsed.TotalSeconds;
+                                if (second != liveSecond)
+                                {
+                                    liveSecond = second;
+                                    ((TuiAgenticHost)host).SetLiveTail(
+                                        ThoughtCollapse.Live(thoughtClock.Elapsed));
+                                }
+                            }
                         }
 
                         if (string.IsNullOrEmpty(visible)) return;
@@ -1653,6 +1713,24 @@ namespace DevMind
                         if (!isStatus && !timerStopped) { callbacks.StopThinkingTimer(); timerStopped = true; }
 
                         responseBuffer.Append(visible);
+
+                        // The other door. The engine's per-iteration churn — [LLM], [CONTEXT],
+                        // [TOOL_USE], [AGENTIC] Iteration — arrives HERE, not through
+                        // IAgenticHost.AppendOutput, so the host-side filter never saw it and
+                        // it rendered as prose. The status bar already carries every number
+                        // those lines hold, so they are pushed there and kept out of the
+                        // transcript. responseBuffer is deliberately still fed: the loop driver
+                        // parses the raw response, and what the model said is not a display
+                        // question.
+                        if (!TranscriptNoise.ShouldRenderToken(visible, isStatus, TranscriptNoise.Verbose))
+                        {
+                            callbacks.PublishSuppressedStatus();
+                            return;
+                        }
+
+                        // A visible token ends the reasoning phase — summarize it first so the
+                        // one-line stand-in sits above the prose it preceded.
+                        if (!isStatus) FlushThoughtSummary();
 
                         // FILE: / END_FILE suppression.
                         lineAccum += visible;
@@ -1707,6 +1785,9 @@ namespace DevMind
                 finally
                  {
                      if (!timerStopped) callbacks.StopThinkingTimer();
+                     // A response that reasoned and then produced nothing visible (a pure
+                     // tool-call turn) still gets its one line.
+                     FlushThoughtSummary();
                      // Release any buffered code block / held prose (terminated or not).
                      codeStreamer.Flush();
                  }

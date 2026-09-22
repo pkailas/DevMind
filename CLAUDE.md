@@ -170,7 +170,8 @@ same thing. Grouping follows `HelpGroups`.
 | `/depth-cap [N]` | Show or set agentic depth cap (1-200) |
 | `/context-limit [1-99\|off]` | Show or set the context-window % at which the loop pauses to ask |
 | `/cache` | Show nearline cache stats (in-memory + disk tiers, session counters) |
-| `/output-lines [N]` | Show or set tool-call output line limit |
+| `/output-lines [N]` | Show or set the transcript line cap for tool output (0 = uncapped) |
+| `/expand [thought\|output]` | Show what the transcript hid: the last collapsed thought or capped tool output |
 | **Workspace** | |
 | `/dir [path\|-b]` | Change working directory |
 | `/lsp on\|off` | Show or enable/disable language server tools |

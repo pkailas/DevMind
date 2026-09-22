@@ -1,4 +1,4 @@
-﻿// File: TuiAgenticHost.cs  v2.2
+﻿// File: TuiAgenticHost.cs  v2.3
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 implementation of IAgenticHost.
@@ -115,6 +115,23 @@ namespace DevMind
         // became multi-second freezes. 10 fps leaves the redraw comfortable headroom; combined with
         // the scrollback cap (which keeps repaint cheap) the pump stays ahead of the stream.
         private const int FlushIntervalMs = 100; // 10 fps — must stay >= Editor repaint cost
+        // ── Live tail line ───────────────────────────────────────────────────────
+        // The one piece of transcript text that is rewritten rather than appended: the
+        // "∵ Thinking… 11s" line that ticks while the model reasons. Without it the
+        // transcript is silent for the whole reasoning phase and a long think is
+        // indistinguishable from a hang.
+        //
+        // The rewrite is safe because of where it is done, not because the document is
+        // forgiving. The desired text is held here; the render pump — already the only
+        // writer, already on the UI thread — removes whatever tail it rendered last, inserts
+        // the batch, and re-appends the tail. So the live line is ALWAYS the document's last
+        // characters and its span is ALWAYS the last span: removing it is a pop, not
+        // offset surgery, and no ordering can put an append behind it. While the user is
+        // pinned to scrollback the pump does not run and the tail simply stops ticking,
+        // which is exactly what a frozen document should do.
+        private string _liveTail;          // desired text (null = none); guarded by _pendingLock
+        private int _liveTailRendered;     // chars of it currently in the document; UI thread only
+
         private readonly object _pendingLock = new object();
         private readonly List<(string text, Terminal.Gui.Drawing.Attribute attr)> _pending =
             new List<(string, Terminal.Gui.Drawing.Attribute)>();
@@ -235,6 +252,7 @@ namespace DevMind
             CleanupDap();
             _pendingBreaks.Reset();
             DrainPatchBackups();
+            Expansions.Clear();
         }
 
         /// <summary>
@@ -265,7 +283,24 @@ namespace DevMind
             if (IsSuppressedNoise(text)) return;
 
             EnqueueSpan(text, ResolveAttribute(color));
+            _lastWriteWasToolLine = true;
         }
+
+        // Prose rhythm: a tool line and the model's next sentence are different kinds of
+        // utterance, and run together with no gap they read as one paragraph — the single
+        // biggest reason DevMind's transcript looks like a log where Qwen Code's looks like a
+        // conversation. One blank line separates them. It is inserted at the boundary, because
+        // this is the only place that knows what came immediately before the prose.
+        private volatile bool _lastWriteWasToolLine;
+
+        // Qwen's ◆ lead on the first prose line after a collapsed thought, so a response
+        // reads as thought → decision → tools rather than as one undifferentiated column.
+        // Only the first line of the block gets it: a marker on every line is a bullet list,
+        // which says something the model did not.
+        private volatile bool _proseLeadPending;
+
+        /// <summary>The model has finished reasoning: mark the prose that follows as its decision.</summary>
+        public void MarkThoughtBoundary() => _proseLeadPending = true;
 
         // ── Coalesced append pipeline ─────────────────────────────────────────────
         // Versus the old TextView path the underlying insert is dramatically simpler and cheaper:
@@ -386,9 +421,12 @@ namespace DevMind
             }
 
             (string text, Terminal.Gui.Drawing.Attribute attr)[] batch;
+            string liveTail;
             lock (_pendingLock)
             {
-                if (_pending.Count == 0) return;
+                liveTail = _liveTail;
+                // Nothing queued and the live line unchanged: the common idle tick.
+                if (_pending.Count == 0 && _liveTailRendered == LiveTailLength(liveTail)) return;
                 batch = _pending.ToArray();
                 _pending.Clear();
             }
@@ -399,6 +437,11 @@ namespace DevMind
                 Diag($"[FLUSH] SKIP (no document) batch={batch.Length}");
                 return;
             }
+
+            // Take the live line out of the document before anything else lands, so the batch
+            // appends behind real transcript text rather than behind a line that is about to
+            // be replaced. It goes back on at the end of this same pass.
+            RemoveLiveTail(doc);
 
             // Lever A — one Document.Insert per flush, not one per color run. Each Document.Insert
             // under WordWrap triggers a full-document re-wrap in the Editor (no incremental-wrap
@@ -439,6 +482,7 @@ namespace DevMind
             if (combined.Length == 0)
             {
                 Diag($"[FLUSH] spans={batch.Length} empty-after-normalize");
+                AppendLiveTail(doc, liveTail);
                 return;
             }
 
@@ -450,11 +494,15 @@ namespace DevMind
             {
                 // Keep the app alive — an append failure must never take down the UI loop.
                 Diag($"[FLUSH] INSERT EXCEPTION len={combined.Length} ex={ex}");
+                AppendLiveTail(doc, liveTail);
                 return;
             }
             _colorSpans.AddRange(pendingSpans);
 
             TrimScrollbackIfNeeded(doc);
+
+            // Re-attach the live line last, so it is again the document's final characters.
+            AppendLiveTail(doc, liveTail);
 
             // A live mouse selection owns the caret: setting CaretOffset while a selection
             // anchor is active EXTENDS the selection to the end of the document on every
@@ -470,6 +518,86 @@ namespace DevMind
             // at zero permanently; /cls (ClearOutputView) does the same on demand.
             try { doc.UndoStack?.ClearAll(); } catch { /* best effort — never break the UI loop */ }
             Diag($"[FLUSH] spans={batch.Length} runs={pendingSpans.Count} insert=1 total={doc.TextLength}");
+        }
+
+        // ── Live tail: the one line the transcript rewrites ──────────────────────
+
+        /// <summary>
+        /// Set (or replace) the live tail line — a single line, always the last thing in the
+        /// transcript, redrawn on the next render-pump tick. Null or empty removes it.
+        /// <para>
+        /// Only one such line exists at a time and it is not part of the record: as soon as
+        /// real output arrives it is replaced, and whatever should be kept is appended
+        /// normally. Callers may set it as often as they like; the pump only touches the
+        /// document when the text actually changed.
+        /// </para>
+        /// </summary>
+        public void SetLiveTail(string text)
+        {
+            string value = string.IsNullOrEmpty(text) ? null : NormalizeNewlines(text.TrimEnd('\n'));
+            lock (_pendingLock) _liveTail = value;
+        }
+
+        /// <summary>Remove the live tail line, leaving the transcript as it was without it.</summary>
+        public void ClearLiveTail() => SetLiveTail(null);
+
+        // Rendered length of a live tail, including the newline that keeps it on its own line.
+        private static int LiveTailLength(string tail)
+            => tail == null ? 0 : tail.Length + 1;
+
+        // Remove what was rendered for the live line. It is by construction the document's
+        // last characters and the last color span, so this is a truncation plus a pop — the
+        // span-rebasing the front-trim needs has no equivalent here.
+        private void RemoveLiveTail(TextDocument doc)
+        {
+            if (_liveTailRendered <= 0) return;
+
+            int n = _liveTailRendered;
+            _liveTailRendered = 0;
+
+            int start = doc.TextLength - n;
+            if (start < 0)
+            {
+                // The document lost text underneath us (a trim that cut further than expected,
+                // or a clear that raced the pump). Drop the claim rather than removing text
+                // that belongs to somebody else.
+                Diag($"[LIVETAIL] STALE len={n} docLen={doc.TextLength}");
+                return;
+            }
+
+            try { doc.Remove(start, n); }
+            catch (Exception ex)
+            {
+                Diag($"[LIVETAIL] REMOVE EXCEPTION len={n} ex={ex.Message}");
+                return;
+            }
+
+            // Drop the spans that covered the removed range (one, in practice).
+            for (int s = _colorSpans.Count - 1; s >= 0 && _colorSpans[s].Start >= start; s--)
+                _colorSpans.RemoveAt(s);
+        }
+
+        private void AppendLiveTail(TextDocument doc, string tail)
+        {
+            if (tail == null) return;
+
+            string text = tail + "\n";
+            int start = doc.TextLength;
+            try
+            {
+                doc.Insert(start, text);
+            }
+            catch (Exception ex)
+            {
+                Diag($"[LIVETAIL] INSERT EXCEPTION len={text.Length} ex={ex.Message}");
+                return;
+            }
+
+            _colorSpans.Add(new ColorSpan(start, text.Length, ResolveAttribute(OutputColor.Thinking)));
+            _liveTailRendered = text.Length;
+
+            if (!_outputView.HasSelection)
+                _outputView.CaretOffset = doc.TextLength;
         }
 
         // Normalize line endings to the document's '\n' basis — a stray '\r' would render as a
@@ -655,7 +783,12 @@ namespace DevMind
             void DoClear()
             {
                 SetPinnedScrollRows(0);                 // a cleared view has nothing to stay pinned to
-                lock (_pendingLock) _pending.Clear();   // drop queued, not-yet-rendered spans
+                lock (_pendingLock)
+                {
+                    _pending.Clear();                   // drop queued, not-yet-rendered spans
+                    _liveTail = null;                   // and the live line, whose text is about to go
+                }
+                _liveTailRendered = 0;
 
                 TextDocument doc = _outputView.Document;
                 if (doc != null && doc.TextLength > 0)
@@ -743,6 +876,22 @@ namespace DevMind
         {
             if (string.IsNullOrEmpty(line)) return;
 
+            // Open a prose block that follows a tool line with one blank line. A line that is
+            // itself blank needs no help, and would otherwise double the gap.
+            bool blank = line.Trim('\r', '\n', ' ', '\t').Length == 0;
+
+            if (_lastWriteWasToolLine)
+            {
+                _lastWriteWasToolLine = false;
+                if (!blank) EnqueueSpan("\n", ResolveAttribute(OutputColor.Normal));
+            }
+
+            if (_proseLeadPending && !blank)
+            {
+                _proseLeadPending = false;
+                EnqueueSpan("◆ ", ResolveAttribute(OutputColor.Dim));
+            }
+
             string content = line.TrimEnd('\r');
             bool hasNewline = content.Length > 0 && content[content.Length - 1] == '\n';
             int textEnd = hasNewline ? content.Length - 1 : content.Length;
@@ -785,6 +934,7 @@ namespace DevMind
         internal void AppendCode(string code, string language)
         {
             if (string.IsNullOrEmpty(code)) return;
+            _lastWriteWasToolLine = false;
             var tokens = SyntaxHighlighter.Highlight(code, language);
             Terminal.Gui.Drawing.Color bg = _outputView.GetScheme().Normal.Background;
             foreach (var t in tokens)
@@ -841,66 +991,62 @@ namespace DevMind
         }
 
         // ── Quiet-transcript filter ───────────────────────────────────────────────
-        // DevMindShell kept the scrollback clean — model output + tool-output regions only —
-        // with agentic/context/token state in the status bar. The C# engine emits the same
-        // state as bracketed status lines (for the CLI skin + history); we suppress the noisy
-        // subset in the TUI so the transcript matches DevMindShell. Set DEVMIND_TUI_VERBOSE to
-        // restore the full firehose (parity with the roadmap's /verbose).
-        private static readonly bool VerboseOutput =
-            !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DEVMIND_TUI_VERBOSE"));
+        // The decision itself lives in TranscriptNoise, because the host is only one of the
+        // two doors engine status lines arrive through: [LLM], [CONTEXT] and [TOOL_USE] are
+        // emitted on the streaming token path in Program.cs and never reach AppendOutput at
+        // all. Both doors call the same function so they cannot drift.
 
-        private static bool IsSuppressedNoise(string text)
+        private static bool IsSuppressedNoise(string text) => TranscriptNoise.IsSuppressed(text);
+
+        // ── Transcript expansion (/expand) ────────────────────────────────────────
+
+        /// <summary>What <c>/expand</c> draws on: the last hidden thought and tool output.</summary>
+        public ExpandBuffer Expansions { get; } = new ExpandBuffer();
+
+        /// <summary>
+        /// Transcript lines per tool call (0 = uncapped). Settable at runtime by
+        /// <c>/output-lines</c>; the model's copy of the output is never capped.
+        /// </summary>
+        public int OutputLineCap { get; set; } = CappedOutputWriter.DefaultCap;
+
+        /// <summary>
+        /// Serve an <c>/expand</c> request: append the parked lines in their original colours
+        /// and return the message for the command result.
+        /// </summary>
+        public ExpandResult Expand(string argument)
         {
-            if (VerboseOutput) return false;
-
-            // Engine status lines arrive as a complete "[TAG] …\n" call, often with a leading
-            // "\n" (Core's onToken lines). Find the first non-whitespace char and match there.
-            int i = 0;
-            while (i < text.Length && (text[i] == '\n' || text[i] == '\r' || text[i] == ' ' || text[i] == '\t'))
-                i++;
-            if (i >= text.Length) return false;
-
-            // [TOOL_USE] / [LLM] — always per-turn churn.
-            if (StartsAt(text, i, "[TOOL_USE]")) return true;
-            if (StartsAt(text, i, "[LLM]")) return true;
-
-            // [AGENTIC] — drop only the per-iteration counter; KEEP terminal states
-            // (Task complete / Depth cap / Aborted / Cancelled / Run-succeeded).
-            if (StartsAt(text, i, "[AGENTIC] Iteration")) return true;
-
-            // NOTE: [READ] / [SHELL] / [FILE] / [PATCH] / [GREP] / [FIND] / [LSP] are the
-            // actual tool-call lines (green Success / amber Warning) — KEEP them all. Only the
-            // white [TOOL_USE] placeholder above is dropped; the real tool action stays.
-
-            // [CONTEXT] — drop the routine usage meter (numeric / "~" estimate / "Working:");
-            // KEEP signal lines (CRITICAL, Hard/Soft trim, Warning, Compacting, Brainwash, …).
-            if (StartsAt(text, i, "[CONTEXT] "))
-            {
-                int j = i + "[CONTEXT] ".Length;
-                if (j < text.Length)
-                {
-                    char c = text[j];
-                    if (char.IsDigit(c) || c == '~') return true;
-                    if (StartsAt(text, j, "Working:")) return true;
-                }
-            }
-
-            return false;
+            ExpandResult result = Expansions.Resolve(argument);
+            foreach (TranscriptLine line in result.Lines)
+                AppendOutputLocal(line.Text + "\n", line.Color);
+            return result;
         }
-
-        private static bool StartsAt(string s, int offset, string prefix)
-            => offset + prefix.Length <= s.Length
-               && string.CompareOrdinal(s, offset, prefix, 0, prefix.Length) == 0;
 
         // ── IAgenticHost.RunShellAsync ────────────────────────────────────────────
 
        async Task<(int exitCode, string output)> IAgenticHost.RunShellAsync(string command, int? timeoutSeconds)
         {
             AppendOutputLocal($"[SHELL] > {command}\n", OutputColor.Dim);
-            var progress = new Progress<ShellOutputLine>(line =>
-                AppendOutputLocal(line.Line + "\n", line.IsError ? OutputColor.Error : OutputColor.Normal));
-            var (output, exitCode) = await _shellRunner.ExecuteAsync(command, CancellationToken, timeoutSeconds, progress);
-            return (exitCode, output);
+
+            // The transcript gets a capped head/tail view; `output` — what the model and the
+            // history see — is untouched by the cap.
+            var writer = new CappedOutputWriter(OutputLineCap,
+                line => AppendOutputLocal(line.Text + "\n", line.Color));
+            var progress = new SynchronousProgress<ShellOutputLine>(line =>
+                writer.Write(line.Line, line.IsError ? OutputColor.Error : OutputColor.Normal));
+
+            try
+            {
+                var (output, exitCode) = await _shellRunner.ExecuteAsync(command, CancellationToken, timeoutSeconds, progress);
+                return (exitCode, output);
+            }
+            finally
+            {
+                // Release the held tail even when the command threw or was cancelled — the
+                // lines are already on screen's doorstep and losing them would read as output
+                // silently going missing.
+                writer.Flush();
+                Expansions.ParkOutput(writer.Hidden);
+            }
         }
 
         // ── IAgenticHost.SaveFileAsync ────────────────────────────────────────────

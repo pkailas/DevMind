@@ -1,4 +1,4 @@
-﻿// File: SlashCommand.cs  v1.2
+﻿// File: SlashCommand.cs  v1.3
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Slash-command registry and dispatcher for DevMind.TUI.
@@ -69,6 +69,18 @@ namespace DevMind
 
         /// <summary>Called to set the context-window limit percent (0 disables).</summary>
         public Action<int> SetContextLimitPercent { get; set; }
+
+        /// <summary>Transcript line cap for tool output (0 = uncapped).</summary>
+        public int OutputLineCap { get; set; }
+
+        /// <summary>Called to set the tool-output line cap and persist it.</summary>
+        public Action<int> SetOutputLineCap { get; set; }
+
+        /// <summary>
+        /// Appends what the transcript hid — the last collapsed thought or capped tool
+        /// output — and reports what it found. Null in a host that has no transcript.
+        /// </summary>
+        public Func<string, ExpandResult> Expand { get; set; }
 
         /// <summary>Called to toggle thinking mode.</summary>
         public Action<bool> SetThinking { get; set; }
@@ -465,13 +477,14 @@ namespace DevMind
                 DirHandler);
 
             RegisterCommand("/output-lines",
-                "Show or set tool-call output line limit",
+                "Show or set the transcript line cap for tool output (0 = uncapped)",
                 "/output-lines [N]",
-                (args, ctx) => Task.FromResult(new CommandResult
-                {
-                    Message = "/output-lines: not yet implemented in TUI.",
-                    IsError = false,
-                }));
+                OutputLinesHandler);
+
+            RegisterCommand("/expand",
+                "Show what the transcript hid: the last collapsed thought or capped tool output",
+                "/expand [thought|output]",
+                ExpandHandler);
 
             RegisterCommand("/training-log",
                 "Show training-log status (enabled/folder/last write), or toggle it",
@@ -1041,6 +1054,48 @@ namespace DevMind
             return Task.FromResult(new CommandResult { Message = $"Depth cap set to {n}" });
         }
 
+        // -- /output-lines [N] ---------------------------------------------------
+        // How many lines of a tool's output the TRANSCRIPT shows. Not a limit on the output
+        // itself: the model and the history always get every line.
+
+        const int OutputLinesMax = 1000;
+        static Task<CommandResult> OutputLinesHandler(string[] args, CommandContext ctx)
+        {
+            if (args.Length == 0)
+                return Task.FromResult(new CommandResult { Message = DescribeCap(ctx.OutputLineCap) });
+
+            if (!int.TryParse(args[0], out int n) || n < 0 || n > OutputLinesMax)
+                return Task.FromResult(new CommandResult
+                {
+                    Message = $"Usage: /output-lines [0-{OutputLinesMax}]   (0 = uncapped)",
+                    IsError = true,
+                });
+
+            ctx.SetOutputLineCap?.Invoke(n);
+            return Task.FromResult(new CommandResult { Message = DescribeCap(n) });
+        }
+
+        static string DescribeCap(int cap)
+        {
+            if (cap <= 0) return "Tool output is uncapped in the transcript.";
+            var (head, tail) = CappedOutputWriter.Split(cap);
+            return $"Tool output capped at {cap} transcript lines ({head} head + {tail} tail) — /expand shows the rest.";
+        }
+
+        // -- /expand [thought|output] --------------------------------------------
+        static Task<CommandResult> ExpandHandler(string[] args, CommandContext ctx)
+        {
+            if (ctx.Expand == null)
+                return Task.FromResult(new CommandResult
+                {
+                    Message = "/expand is not wired in this host.",
+                    IsError = true,
+                });
+
+            ExpandResult result = ctx.Expand(args.Length > 0 ? args[0] : string.Empty);
+            return Task.FromResult(new CommandResult { Message = result.Message, IsError = result.IsError });
+        }
+
         // -- /context-limit [PCT|off] --------------------------------------------
         // Context-window utilization %; the loop pauses to ask once a round reaches it.
         static Task<CommandResult> ContextLimitHandler(string[] args, CommandContext ctx)
@@ -1182,7 +1237,7 @@ namespace DevMind
         {
             ("Session",    new[] { "/new", "/restart", "/clear", "/cls", "/compact", "/history", "/resume", "/title", "/steer", "/override", "/mode" }),
             ("Model",      new[] { "/think", "/t", "/reasoning", "/rules", "/system_prompt" }),
-            ("Context",    new[] { "/depth-cap", "/context-limit", "/cache", "/output-lines" }),
+            ("Context",    new[] { "/depth-cap", "/context-limit", "/cache", "/output-lines", "/expand" }),
             ("Workspace",  new[] { "/dir", "/lsp", "/resolve", "/debug" }),
             ("Documents",  new[] { "/image", "/digest", "/library" }),
             ("Training",   new[] { "/training-log", "/training-delete-last" }),

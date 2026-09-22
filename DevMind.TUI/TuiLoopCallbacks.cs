@@ -1,4 +1,4 @@
-﻿// File: TuiLoopCallbacks.cs  v3.1
+﻿// File: TuiLoopCallbacks.cs  v3.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 implementation of ILoopCallbacks.
@@ -207,6 +207,27 @@ namespace DevMind
         /// </summary>
         public void ShowSteerQueued(SteerMode? mode) => _statusBar.SetSteerQueued(mode);
 
+        /// <summary>
+        /// An engine status line was kept out of the transcript: push what it was carrying to
+        /// the status bar now, from the client's own counters rather than by re-parsing the
+        /// text. The line's numbers ARE those counters — prompt tokens, window size, generation
+        /// rate — so reading them at the source keeps one truth instead of two, and a change to
+        /// the line's wording cannot quietly stop the meter updating.
+        /// </summary>
+        public void PublishSuppressedStatus()
+        {
+            RefreshContextMeter();
+
+            double rate = _llmClient.LiveTokensPerSecond;
+            if (rate <= 0)
+            {
+                int gen = _llmClient.LastGeneratedTokens;
+                double ms = _llmClient.LastGeneratedMs;
+                if (gen > 0 && ms > 0) rate = gen * 1000.0 / ms;
+            }
+            if (rate > 0) _statusBar.SetTokRate(rate);
+        }
+
         public void RefreshContextMeter()
         {
             var (used, total) = GetContextMetrics();
@@ -235,9 +256,6 @@ namespace DevMind
             // (round 1..depthCap), so display _thinkingDepth + 1 against the configured
             // cap (_thinkingMaxDepth = options.AgenticLoopMaxDepth, the persistent /depth-cap).
             int round = _thinkingDepth + 1;
-            string rounds = _thinkingMaxDepth > 0
-                ? $"round {round}/{_thinkingMaxDepth}"
-                : $"round {round}";
 
             // Server-true live token counts populate during BOTH the thinking and generating
             // phases — llama-server's per-chunk timings (and vLLM usage) advance on reasoning
@@ -253,23 +271,16 @@ namespace DevMind
             double genSecs = firstMs >= 0
                 ? Math.Max(0.1, (_turnClock.ElapsedMilliseconds - firstMs) / 1000.0)
                 : 0;
-            // DevMindShell parity: show input/output split rather than a single count.
-            string tokPart = (inTok > 0 || outTok > 0)
-                ? $", {inTok:N0} in / {outTok:N0} out"
-                : string.Empty;
-
             // Keep the Thinking/Generating label distinction; only the numeric readout is
-            // ungated (the tokPart suffix now shows in both states).
-            if (!generating)
-            {
-                _statusBar.SetState($"{frame} Thinking... ({elapsed}, {rounds}{tokPart})",
-                    StatusState.Thinking);
-            }
-            else
-            {
-                _statusBar.SetState($"{frame} Generating... ({elapsed}, {rounds}{tokPart})",
-                    StatusState.Busy);
-            }
+            // ungated (the token split now shows in both states). Composition — including the
+            // input/output split and the Esc affordance — lives in TuiStatusBar.Compose, so
+            // the one live line has one format and one test.
+            StatusState state = generating ? StatusState.Busy : StatusState.Thinking;
+            _statusBar.SetState(
+                TuiStatusBar.Compose(new StatusFields(
+                    frame, state, elapsed, round, _thinkingMaxDepth, inTok, outTok,
+                    cancellable: true)),
+                state);
 
             // Live tok/s on the far-right rate chip — updates every tick and persists after
             // EndTurn (which finalizes it to the server-true rate), so there's always a tok/s

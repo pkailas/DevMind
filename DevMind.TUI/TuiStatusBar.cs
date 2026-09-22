@@ -1,4 +1,4 @@
-﻿// File: TuiStatusBar.cs  v1.2
+﻿// File: TuiStatusBar.cs  v1.3
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Composed-Labels status row for the DevMind TUI (Phase 2 of the presentation
@@ -39,6 +39,46 @@ namespace DevMind
         Thinking,
         /// <summary>Turn failed (red).</summary>
         Error,
+    }
+
+    /// <summary>
+    /// Everything the left status segment renders for one tick. A struct of plain values so
+    /// <see cref="TuiStatusBar.Compose"/> can be exercised without a terminal.
+    /// </summary>
+    public readonly struct StatusFields
+    {
+        /// <summary>Spinner frame, or empty when idle.</summary>
+        public readonly string Frame;
+
+        /// <summary>Which phase the turn is in — also selects the colour.</summary>
+        public readonly StatusState State;
+
+        /// <summary>Elapsed turn time, already formatted (mm:ss.t).</summary>
+        public readonly string Elapsed;
+
+        /// <summary>1-based agentic round, and the configured cap (0 = no cap shown).</summary>
+        public readonly int Round;
+        public readonly int MaxRounds;
+
+        /// <summary>Server-true token counts for this round.</summary>
+        public readonly int InTokens;
+        public readonly int OutTokens;
+
+        /// <summary>Whether Esc would stop what is running — the affordance is only true while it is.</summary>
+        public readonly bool Cancellable;
+
+        public StatusFields(string frame, StatusState state, string elapsed,
+                            int round, int maxRounds, int inTokens, int outTokens, bool cancellable)
+        {
+            Frame       = frame ?? string.Empty;
+            State       = state;
+            Elapsed     = elapsed ?? string.Empty;
+            Round       = round;
+            MaxRounds   = maxRounds;
+            InTokens    = inTokens;
+            OutTokens   = outTokens;
+            Cancellable = cancellable;
+        }
     }
 
     /// <summary>
@@ -263,6 +303,54 @@ namespace DevMind
                 _steerLabel.Text = text;
                 Pin(_steerLabel, mode == null ? FgDim : FgAmber);
             });
+        }
+
+        // ── Composition ──────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Render the left segment for one tick: spinner, phase, elapsed, round, token split
+        /// and the Esc affordance — the single live line, the way Qwen Code's footer carries
+        /// <c>(35s · ↑1.0k tokens · esc to cancel)</c>.
+        /// <para>
+        /// This is the only line in the app that changes many times a second, which is exactly
+        /// why it is the only place the per-turn numbers belong; the transcript is a record and
+        /// a record should not be rewritten ten times a second. Pure, so the format is pinned
+        /// by a test rather than by squinting at a running terminal.
+        /// </para>
+        /// <para>
+        /// The right-hand chips (context meter, iteration, mode, rate) are NOT composed here:
+        /// each carries its own colour — the meter goes amber then red, a manual approval mode
+        /// is amber — and folding them into one string would flatten that to a single
+        /// attribute. They keep their own labels and their own setters.
+        /// </para>
+        /// </summary>
+        public static string Compose(in StatusFields f)
+        {
+            if (f.State == StatusState.Ready) return "○ Ready";
+
+            string label = f.State == StatusState.Thinking ? "Thinking..."
+                         : f.State == StatusState.Error    ? "Error"
+                         : "Generating...";
+
+            var sb = new System.Text.StringBuilder();
+            if (f.Frame.Length > 0) sb.Append(f.Frame).Append(' ');
+            sb.Append(label);
+
+            // Detail parts are comma-separated inside one paren group; the Esc affordance is
+            // set off with a middle dot because it is an instruction, not another measurement.
+            var parts = new System.Collections.Generic.List<string>(3);
+            if (f.Elapsed.Length > 0) parts.Add(f.Elapsed);
+            if (f.Round > 0)
+                parts.Add(f.MaxRounds > 0 ? $"round {f.Round}/{f.MaxRounds}" : $"round {f.Round}");
+            if (f.InTokens > 0 || f.OutTokens > 0)
+                parts.Add($"{f.InTokens:N0} in / {f.OutTokens:N0} out");
+
+            string detail = string.Join(", ", parts);
+            if (f.Cancellable)
+                detail = detail.Length > 0 ? detail + " · Esc cancels" : "Esc cancels";
+
+            if (detail.Length > 0) sb.Append(" (").Append(detail).Append(')');
+            return sb.ToString();
         }
 
         // ── Helpers ──────────────────────────────────────────────────────────────
