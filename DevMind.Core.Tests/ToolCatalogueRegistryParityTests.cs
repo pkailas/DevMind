@@ -122,9 +122,14 @@ public sealed class ToolCatalogueRegistryParityTests
     [Fact]
     public void ToolCount_ReflectsTheLearnToolRegistration()
     {
-        // Expected registry size as of the learn_* registration (32 prior + 3 learn).
-        // Update this when the tool set intentionally changes; the parity test above
-        // is the real guard for advertised-but-undeclared drift.
+        // 35 = 34 tools built through MakeTool plus `debug`, which is hand-built (its schema
+        // needs an enum command with a nested per-command args object) and added to the same
+        // array. ToolCount is BuildToolsArray().Count, and RegistryToolNames() above reads the
+        // same array, so the hand-built tool is inside both this count and the name-parity
+        // check — an audit that counted MakeTool( occurrences by grep got 35 by including the
+        // method's own definition and concluded debug sat outside; it does not. Update the
+        // literal when the tool set intentionally changes; the parity test above is the real
+        // guard for advertised-but-undeclared drift.
         Assert.Equal(35, ToolRegistry.ToolCount);
     }
 }
