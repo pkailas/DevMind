@@ -1,0 +1,6 @@
+# The system prompt is compared byte-for-byte against the live copy in
+# %APPDATA%\devmind during deploy, and it is whitespace-sensitive to the model.
+# Git must store and check it out verbatim: with core.autocrlf=true and no rule
+# here, its mixed CRLF/LF endings normalise on commit and come back all-CRLF,
+# so a fresh checkout would never match the live file again.
+prompts/system-prompt.md -text

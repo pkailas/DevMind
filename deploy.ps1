@@ -31,6 +31,16 @@
 .PARAMETER Force
     Proceed despite a dirty tree or unpushed commits. The version stamp will be wrong.
 
+.PARAMETER GlobalDir
+    The DevMind global state directory holding the live system-prompt.md. Defaults to
+    DEVMIND_GLOBAL_DIR, else %APPDATA%\devmind - the same order DevMindPaths.GlobalDir
+    uses. Point it at a temp folder to exercise the prompt sync without touching the
+    real one.
+
+.PARAMETER OverwriteLivePrompt
+    Replace a live system-prompt.md that differs from the repo's copy, instead of
+    refusing. The old live copy is kept as system-prompt.md.bak-<timestamp>.
+
 .PARAMETER TimeoutSeconds
     How long to wait for a stopped process to release its file. Default 20.
 
@@ -43,6 +53,8 @@
 param(
     [switch] $SkipBackup,
     [switch] $Force,
+    [string] $GlobalDir,
+    [switch] $OverwriteLivePrompt,
     [int]    $TimeoutSeconds = 20
 )
 
@@ -52,6 +64,14 @@ $dist = Join-Path $repo 'dist'
 $mcp  = Join-Path $dist 'mcp'
 $exe  = Join-Path $mcp  'DevMind.McpServer.exe'
 $tui  = Join-Path $dist 'DevMind.TUI.exe'
+
+# The runtime resolves its state directory as DEVMIND_GLOBAL_DIR else %APPDATA%\devmind
+# (DevMindPaths.GlobalDir, re-read on every access). The prompt only matters at the path
+# the runtime actually reads, so the deploy reconciles against the same one. An explicit
+# -GlobalDir wins; whitespace-only counts as unset, as it does in DevMindPaths.
+if     (-not [string]::IsNullOrWhiteSpace($GlobalDir))             { $globalDirPath = $GlobalDir }
+elseif (-not [string]::IsNullOrWhiteSpace($env:DEVMIND_GLOBAL_DIR)) { $globalDirPath = $env:DEVMIND_GLOBAL_DIR }
+else                                                                { $globalDirPath = Join-Path $env:APPDATA 'devmind' }
 
 function Fail($msg) { Write-Host "`nDEPLOY ABORTED: $msg" -ForegroundColor Red; exit 1 }
 function Step($msg) { Write-Host "`n$msg" -ForegroundColor Cyan }
@@ -64,6 +84,17 @@ function Test-Unlocked([string] $path) {
         $fs.Close(); $fs.Dispose()
         return $true
     } catch { return $false }
+}
+
+# Byte-for-byte equality. Deliberately not a timestamp or line-count compare: the
+# prompt is whitespace-sensitive to the model, so a difference of one space is a
+# real difference and must be reported as one.
+function Test-SameBytes([string] $a, [string] $b) {
+    $x = [System.IO.File]::ReadAllBytes($a)
+    $y = [System.IO.File]::ReadAllBytes($b)
+    if ($x.Length -ne $y.Length) { return $false }
+    for ($i = 0; $i -lt $x.Length; $i++) { if ($x[$i] -ne $y[$i]) { return $false } }
+    return $true
 }
 
 Push-Location $repo
@@ -111,7 +142,58 @@ try {
     }
     Write-Host "  clean, HEAD $head, will publish as 1.0.$count" -ForegroundColor DarkGray
 
-    # ---- 2. refuse to kill a live job ----------------------------------------
+    # ---- 2. reconcile the system prompt ---------------------------------------
+    # system-prompt.md in the global state directory REPLACES the built-in prompt on
+    # every prompt assembly, in all three skins (SystemPromptFile.Load, called from
+    # the TUI, the CLI and the headless agent), so it is the most influential piece
+    # of configuration DevMind has. The repo copy is the source of truth - it is what
+    # gets reviewed, diffed and committed; the live copy is what runs, and editing it
+    # directly stays possible for quick experiments because the runtime re-reads it
+    # every turn.
+    #
+    # Publishing over live edits the repo has never seen would silently destroy them,
+    # which is the loss this step exists to prevent - so drift is a refusal, not a
+    # warning. It runs immediately after the dirty-tree check, so the repo copy being
+    # compared is a committed one, and before anything is stopped or snapshotted, so a
+    # refusal costs nothing: no killed server, no half-taken backup, no touched dist\.
+    Step "Reconciling system-prompt.md..."
+
+    $repoPrompt = Join-Path $repo 'prompts\system-prompt.md'
+    $livePrompt = Join-Path $globalDirPath 'system-prompt.md'
+
+    if (-not (Test-Path $repoPrompt)) {
+        Fail "prompts\system-prompt.md is missing from the repo. It is the source of truth for the live prompt - restore it from git rather than deploying without it. Nothing was published."
+    }
+
+    if (-not (Test-Path $livePrompt)) {
+        # Absence is a normal state, not an error: all three callers fall back to the
+        # built-in prompt when the file is missing. The fix is simply to install it.
+        New-Item -ItemType Directory -Force -Path $globalDirPath | Out-Null
+        Copy-Item -LiteralPath $repoPrompt -Destination $livePrompt -Force
+        Write-Host "  Installed system-prompt.md -> $livePrompt" -ForegroundColor Yellow
+    }
+    elseif (Test-SameBytes $repoPrompt $livePrompt) {
+        Write-Host "  system-prompt.md in sync" -ForegroundColor DarkGray
+    }
+    elseif (-not $OverwriteLivePrompt) {
+        Fail @"
+system-prompt.md differs between the repo (prompts\system-prompt.md) and the live copy
+($livePrompt). The live copy has edits the repo does not. Either
+copy them into prompts\system-prompt.md and commit, or re-run with -OverwriteLivePrompt
+to discard them (a .bak is kept). Nothing was published.
+"@
+    }
+    else {
+        # Named for the moment it was taken, not for a version: the live copy has no
+        # version to name it after - that is the whole problem being fixed here.
+        $bak = "$livePrompt.bak-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+        Copy-Item -LiteralPath $livePrompt -Destination $bak -Force
+        Copy-Item -LiteralPath $repoPrompt -Destination $livePrompt -Force
+        Write-Host "  -OverwriteLivePrompt: live copy saved to $bak" -ForegroundColor Yellow
+        Write-Host "  system-prompt.md replaced from the repo" -ForegroundColor Yellow
+    }
+
+    # ---- 3. refuse to kill a live job ----------------------------------------
     # AgentJobManager writes %TEMP%\devmind\tasks\_active.json for exactly as long as a
     # delegated job is executing, and its own comment (AgentJobManager.cs:714) records
     # why it exists: a deploy once killed a live job by guessing from transcript silence
@@ -150,7 +232,7 @@ try {
         }
     }
 
-    # ---- 3. stop what is running ---------------------------------------------
+    # ---- 4. stop what is running ---------------------------------------------
     Step "Stopping running DevMind processes..."
 
     # Match on image path under dist\ rather than name alone, so a DevMind build
@@ -200,7 +282,7 @@ try {
         Write-Host ("  {0} writable" -f (Split-Path $f -Leaf)) -ForegroundColor DarkGray
     }
 
-    # ---- 4. snapshot the version being replaced ------------------------------
+    # ---- 5. snapshot the version being replaced ------------------------------
     if (-not $SkipBackup -and (Test-Path $exe)) {
         $old = (Get-Item $exe).VersionInfo.FileVersion
         $bak = Join-Path $dist "mcp.bak-$($old -replace '\.0$','')"
@@ -213,12 +295,12 @@ try {
         }
     }
 
-    # ---- 5. publish -----------------------------------------------------------
+    # ---- 6. publish -----------------------------------------------------------
     Step "Publishing..."
     & (Join-Path $repo 'run-deploy.ps1')
     if ($LASTEXITCODE -ne 0) { Fail "run-deploy.ps1 failed (exit $LASTEXITCODE)" }
 
-    # ---- 6. report ------------------------------------------------------------
+    # ---- 7. report ------------------------------------------------------------
     $newMcp = (Get-Item $exe).VersionInfo.FileVersion
     $newTui = if (Test-Path $tui) { (Get-Item $tui).VersionInfo.FileVersion } else { '(not published)' }
 

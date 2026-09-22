@@ -73,6 +73,14 @@ is called with (`DEVMIND_LSP_*`, `DEVMIND_TRACE_*`, `DEVMIND_GLOBAL_DIR`, `DEVMI
 3. `~/.devmind.env` (loaded at startup, applies only if env var not already set)
 4. Hardcoded defaults
 
+The system prompt resolves on its own chain, not the one above: `prompts/system-prompt.md`
+in the repo is the source of truth (reviewed, diffed and committed like code),
+`%APPDATA%\devmind\system-prompt.md` is the runtime copy every skin actually reads and
+hot-reloads, and `deploy.ps1` reconciles the two byte-for-byte before publishing --
+installing the repo copy when the live one is absent, and refusing to deploy when the live
+one has edits the repo does not. Pass `-OverwriteLivePrompt` to discard those live edits
+instead, which keeps them as `system-prompt.md.bak-<timestamp>`.
+
 ---
 
 ## Core Architecture
