@@ -1,4 +1,4 @@
-// File: AgentTaskTools.cs  v1.0
+// File: AgentTaskTools.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // The devmind_task_* MCP tools: delegate whole coding tasks to DevMind's headless
@@ -87,29 +87,7 @@ namespace DevMind.McpServer
         /// </para>
         /// </summary>
         internal static bool LooksLikeRepositoryContainer(string dir)
-        {
-            try
-            {
-                if (HasGitMarker(dir)) return false;
-
-                foreach (string child in Directory.EnumerateDirectories(dir))
-                {
-                    if (HasGitMarker(child)) return true;
-                }
-
-                return false;
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
-        private static bool HasGitMarker(string dir)
-        {
-            string marker = Path.Combine(dir, ".git");
-            return Directory.Exists(marker) || File.Exists(marker);
-        }
+            => WorkspaceRootResolver.LooksLikeRepositoryContainer(dir);
 
         [McpServerTool(Name = "devmind_task_start")]
         [Description(

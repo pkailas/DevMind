@@ -1,9 +1,12 @@
-﻿// File: LanguageServerRouter.cs  v1.1
+﻿// File: LanguageServerRouter.cs  v1.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Routes LSP tool calls to the correct language server (C# vs TypeScript) per file extension.
 // v1.1: FindSymbolAsync — solution-wide workspace/symbol search, routed by language (no file
 //   path); reuses the same per-(kind|root) host instance as the position-based tools.
+// v1.2: FindSymbolAsync refuses to search when no solution/project encloses the resolved
+//   start directory. Falling back to that directory started a server with nothing opened,
+//   whose empty result then claimed a solution that never existed.
 
 using System;
 using System.Collections.Generic;
@@ -101,7 +104,15 @@ namespace DevMind
             string pathHint = null)
         {
             var kind = ResolveLanguageKind(language);
-            string root = ResolveSymbolSearchRoot(kind, pathHint, _workingDirectory);
+            string startDir = ResolveSymbolSearchStartDirectory(pathHint, _workingDirectory);
+
+            // No solution/project at or above the start directory means the server would
+            // start with nothing opened and its "no symbols" would be a false negative that
+            // names a solution nobody loaded. Say what actually happened instead — and do
+            // not spawn a server to say it.
+            string root = TryFindEnclosingProjectRoot(kind, startDir);
+            if (root == null)
+                return BuildNoEnclosingProjectMessage(kind, pathHint, startDir, _workingDirectory);
 
             return await GetOrCreateHost(kind, root)
                 .FindSymbolAsync(query, maxResults, cancellationToken)
@@ -118,6 +129,76 @@ namespace DevMind
         /// </summary>
         public static string ResolveSymbolSearchRoot(
             LanguageServerKind kind, string pathHint, string workingDirectory)
+        {
+            string startDir = ResolveSymbolSearchStartDirectory(pathHint, workingDirectory);
+            return TryFindEnclosingProjectRoot(kind, startDir) ?? startDir;
+        }
+
+        /// <summary>
+        /// The solution directory (C#) or project directory (TypeScript) enclosing
+        /// <paramref name="startDir"/>, walking upward only — or null when none does. Null is
+        /// the whole point: it is the state a caller must not paper over with a fallback.
+        /// </summary>
+        internal static string TryFindEnclosingProjectRoot(LanguageServerKind kind, string startDir)
+        {
+            return kind == LanguageServerKind.CSharp
+                ? WorkspaceRootResolver.FindSolutionDirectory(startDir)
+                : WorkspaceRootResolver.FindTypeScriptProjectDirectory(startDir);
+        }
+
+        /// <summary>
+        /// The message returned when nothing encloses <paramref name="startDir"/>. Three
+        /// shapes: with no hint, either the working directory is a folder of repositories
+        /// (say which ones) or it is simply outside any solution; with a hint, the hint is
+        /// the thing to correct. Wording follows the kind, so a TypeScript miss never
+        /// mentions *.sln.
+        /// </summary>
+        internal static string BuildNoEnclosingProjectMessage(
+            LanguageServerKind kind, string pathHint, string startDir, string workingDirectory)
+        {
+            string language = LanguageServerProfile.ForKind(kind).DisplayName;
+            string unit = kind == LanguageServerKind.CSharp ? "solution" : "project";
+            string markers = kind == LanguageServerKind.CSharp
+                ? "no *.sln or *.slnx at or above it"
+                : "no tsconfig.json, jsconfig.json or package.json at or above it";
+
+            if (!string.IsNullOrWhiteSpace(pathHint))
+            {
+                return "find_symbol: path '" + pathHint + "' resolved to " + startDir +
+                       ", which is not inside a " + language + " " + unit + " (" + markers +
+                       "), so nothing was searched. Pass a path inside the " + unit + " you mean.";
+            }
+
+            string session = string.IsNullOrWhiteSpace(workingDirectory)
+                ? startDir
+                : Path.GetFullPath(workingDirectory);
+
+            if (WorkspaceRootResolver.LooksLikeRepositoryContainer(session))
+            {
+                string[] repos = WorkspaceRootResolver.EnumerateChildRepositories(session, 5);
+                string example = repos.Length > 0 ? Path.Combine(session, repos[0]) : "<one child repo>";
+                string listing = repos.Length > 0
+                    ? " Repositories found here include: " + string.Join(", ", repos) + "."
+                    : "";
+                return "find_symbol: the session working directory " + session +
+                       " is a folder of repositories, not a " + unit + ", so there is nothing to search. " +
+                       "Pass path=<a file or directory inside the repository you mean> \u2014 for example path=" +
+                       example + "." + listing;
+            }
+
+            return "find_symbol: the session working directory " + session + " is not inside a " +
+                   language + " " + unit + " (" + markers + "), so no " + unit +
+                   " was loaded and nothing was searched. Pass path=<a file or directory inside the " +
+                   unit + " to search>.";
+        }
+
+        /// <summary>
+        /// Where the upward walk begins: the hint's directory (a file's parent, or the
+        /// directory itself) resolved against the session, or the session working directory
+        /// when there is no hint. A hint that does not exist throws — see
+        /// <see cref="ResolveSymbolSearchRoot"/>.
+        /// </summary>
+        private static string ResolveSymbolSearchStartDirectory(string pathHint, string workingDirectory)
         {
             string session = string.IsNullOrWhiteSpace(workingDirectory)
                 ? Environment.CurrentDirectory
@@ -148,9 +229,7 @@ namespace DevMind
                         "'). Pass an existing file or directory inside the solution to search.");
             }
 
-            return kind == LanguageServerKind.CSharp
-                ? (WorkspaceRootResolver.FindSolutionDirectory(startDir) ?? startDir)
-                : (WorkspaceRootResolver.FindTypeScriptProjectDirectory(startDir) ?? startDir);
+            return startDir;
         }
 
         public void Dispose()
