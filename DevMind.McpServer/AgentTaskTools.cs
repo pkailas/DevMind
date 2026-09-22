@@ -69,6 +69,48 @@ namespace DevMind.McpServer
             return clamped;
         }
 
+        /// <summary>
+        /// True when the directory looks like a folder that CONTAINS repositories rather
+        /// than being one: it has no .git of its own, but at least one immediate child does.
+        /// An agent rooted there has no project to build, no solution to search, and every
+        /// relative path it writes resolves against a tree that holds none of its work.
+        /// <para>
+        /// .git is the marker because it is language-agnostic. Keying on *.sln would refuse
+        /// a Python or TypeScript repository rooted the same way, which is worse than the
+        /// mistake it prevents. Worktrees and submodules carry .git as a FILE, so both forms
+        /// count.
+        /// </para>
+        /// <para>
+        /// Unreadable directories return false. This is a convenience guard against a
+        /// mistyped working_dir, not a security boundary — the write-root policy is that —
+        /// so when it cannot tell, it lets the job proceed rather than blocking real work.
+        /// </para>
+        /// </summary>
+        internal static bool LooksLikeRepositoryContainer(string dir)
+        {
+            try
+            {
+                if (HasGitMarker(dir)) return false;
+
+                foreach (string child in Directory.EnumerateDirectories(dir))
+                {
+                    if (HasGitMarker(child)) return true;
+                }
+
+                return false;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool HasGitMarker(string dir)
+        {
+            string marker = Path.Combine(dir, ".git");
+            return Directory.Exists(marker) || File.Exists(marker);
+        }
+
         [McpServerTool(Name = "devmind_task_start")]
         [Description(
             "Delegate a whole coding task to DevMind's local agent (runs on a local GPU model at zero " +
@@ -101,6 +143,11 @@ namespace DevMind.McpServer
                 return Err("working_dir must be an absolute path.");
             if (!Directory.Exists(working_dir))
                 return Err($"working_dir does not exist: {working_dir}");
+            if (LooksLikeRepositoryContainer(working_dir))
+                return Err(
+                    $"working_dir looks like a folder that contains repositories, not a repository: {working_dir}. " +
+                    "An agent rooted here has no project to build and no solution to search, and its relative paths " +
+                    "resolve against a tree holding none of its work. Pass the specific repository instead.");
             string baseline = string.IsNullOrWhiteSpace(test_baseline) ? "before-run" : test_baseline;
             if (baseline != "before-run" && baseline != "off")
                 return Err($"test_baseline must be \"before-run\" or \"off\" (got \"{test_baseline}\").");
