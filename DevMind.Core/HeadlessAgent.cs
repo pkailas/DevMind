@@ -1,4 +1,4 @@
-// File: HeadlessAgent.cs  v2.0
+// File: HeadlessAgent.cs  v2.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Headless agentic runner — the engine behind DevMind.McpServer's devmind_task_*
@@ -863,6 +863,14 @@ namespace DevMind
             "answer instead. When the task is complete, call task_done with a concise\n" +
             "summary of what you changed and why.\n" +
             "\n" +
+            "Lead every ask_caller with findings, then questions. State what you established\n" +
+            "— name the files and lines — then what you tried and what each attempt produced,\n" +
+            "and only then ask 1-3 specific questions. A question with no findings attached is\n" +
+            "not a stop, it is an incomplete report: the caller has not read this code and\n" +
+            "cannot answer without what you already know, so a bare question sends it to\n" +
+            "re-derive what you are already holding. Asking is cheap only when the findings\n" +
+            "travel with it.\n" +
+            "\n" +
             "File content never goes through the shell: use create_file or write_file for new\n" +
             "content and patch_file for edits. NEVER build a file with run_shell — no\n" +
             "here-strings, no echo/Out-File redirects, no cat > file. This is not a style\n" +
@@ -885,7 +893,7 @@ namespace DevMind
             "recall_memory / search_memory for repo conventions; (3) web_search the exact\n" +
             "error message. State your new hypothesis and its evidence before the next\n" +
             "patch. If research produces no new hypothesis, call ask_caller instead of\n" +
-            "trying again.\n" +
+            "trying again — findings first, as above.\n" +
             "\n" +
             "TypeScript discipline: after EVERY write to a .ts or .tsx file (create_file,\n" +
             "patch_file, or append_file), immediately call get_diagnostics on that file and\n" +

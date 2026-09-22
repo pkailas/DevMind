@@ -1,4 +1,4 @@
-// File: LoopHelpers.cs  v1.0
+// File: LoopHelpers.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -454,7 +454,7 @@ namespace DevMind
 
             sb.Append("## Termination Contract\n");
             sb.Append("Every response must either contain a tool call OR call task_done. Free-form prose without a tool call is never a valid completion.\n");
-            sb.Append("If you are genuinely blocked and research has not resolved it, ask_caller is the valid way to stop — never guess at facts you could not verify, and never call task_done claiming success you did not verify.\n");
+            sb.Append("If you are genuinely blocked and research has not resolved it, ask_caller is the valid way to stop, with your findings stated before the questions — never guess at facts you could not verify, and never call task_done claiming success you did not verify.\n");
             sb.Append("After you have an answer or have finished a code change, your final action must be task_done with the answer or summary in the summary parameter.\n");
             sb.Append("Do not type a final answer as prose and stop — that is an abandoned task, not a completion.\n\n");
 

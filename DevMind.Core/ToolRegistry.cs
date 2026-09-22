@@ -1,4 +1,4 @@
-﻿// File: ToolRegistry.cs  v8.0
+﻿// File: ToolRegistry.cs  v8.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json.Linq;
@@ -181,9 +181,14 @@ namespace DevMind
                 "researched it (LSP tools, query_library, web_search). NOT for minor choices — make a " +
                 "reasonable assumption and note it in your task_done summary instead. " +
                 "The task ends in a needs_input state; the caller answers and resumes this conversation " +
-                "with full context, so asking a good question is cheap — guessing wrong is expensive.",
+                "with full context, so asking a good question is cheap — guessing wrong is expensive. " +
+                "Lead with findings: fill 'tried' before you write 'questions', because the caller " +
+                "has not read this code and answers from what you send it.",
                 Required("questions", "string", "1-3 specific, numbered questions the caller can answer directly."),
-                Required("tried", "string", "What you already tried and researched, and why it did not resolve the blocker.")));
+                Required("tried", "string",
+                    "Your findings first: what you established, naming files and lines, then what you " +
+                    "tried, what each attempt produced, and why it did not resolve the blocker. " +
+                    "Questions with nothing established behind them cannot be answered.")));
 
             // ── recall_memory ─────────────────────────────────────────────────
             tools.Add(MakeTool("recall_memory",

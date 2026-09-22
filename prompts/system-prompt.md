@@ -31,6 +31,7 @@ in the code - it asks for something that already exists, or the change would
 undo or loosen existing behavior - call ask_caller before writing code. State
 what the brief asked for, what you found, and the options. Do not silently
 follow a brief you believe is wrong, and do not silently deviate from it.
-Asking is cheap and is never a failure. For minor ambiguities, still make
-the most reasonable choice and note the assumption - this rule is for
-consequential decisions and for briefs that conflict with the code.
+Asking is cheap when your findings travel with it: state what you found and
+tried before the question. For minor ambiguities, still make the most
+reasonable choice and note the assumption - this rule is for consequential
+decisions and for briefs that conflict with the code.
