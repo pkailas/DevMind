@@ -138,7 +138,18 @@ namespace DevMind.Core.Tests
         public Task<string> LearnSearchAsync(string query, int? maxResults) => Task.FromResult("");
         public Task<string> LearnFetchAsync(string url) => Task.FromResult("");
         public Task<string> LearnCodeSearchAsync(string query, int? maxResults) => Task.FromResult("");
-        public Task<bool> ConfirmContinueAsync(string message) => Task.FromResult(true);
+        /// <summary>Every prompt the loop asked the operator to confirm, in order. Lets a test
+        /// assert that a confirmation-gated guard actually fired, not merely that the turn ended.</summary>
+        public List<string> ConfirmPrompts { get; } = new();
+
+        /// <summary>What <see cref="ConfirmContinueAsync"/> answers. Default true (continue).</summary>
+        public bool ConfirmAnswer { get; set; } = true;
+
+        public Task<bool> ConfirmContinueAsync(string message)
+        {
+            ConfirmPrompts.Add(message);
+            return Task.FromResult(ConfirmAnswer);
+        }
         public Task<string> RunSqlAsync(string query, string connectionString, string connectionName, bool allowWrite, int maxRows, int commandTimeout)
             => Task.FromResult("");
         public Task<string> RunDebugAsync(string command, IReadOnlyDictionary<string, string> args) => Task.FromResult("");

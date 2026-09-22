@@ -3936,28 +3936,47 @@ namespace DevMind
                 if (predictedN > LiveGeneratedTokens) LiveGeneratedTokens = predictedN;
                 if (predictedMs > 0) LastGeneratedMs = predictedMs;
                 if (nCtx > 0) ServerContextSize = nCtx;
-                if (nPast > 0)
+
+                // n_past is the authoritative in-context count and wins whenever the backend
+                // reports it. llama-server b10499 does not: across 15,135 recorded turns it was
+                // never > 0, so LastContextUsed stayed at 0 for every job and everything gated
+                // on it — the context-window guard, the n_past-based compaction gate, the live
+                // "[CONTEXT] used / n_ctx" meter — was inert while the server itself reported
+                // prompts of 234k tokens against a 262k window.
+                //
+                // prompt_n + cache_n is the same quantity: the full prompt as evaluated plus as
+                // served from cache, which the server's own usage.prompt_tokens equals and which
+                // ParseVllmUsage already treats as "the analogue of n_past" on vLLM. It describes
+                // THIS request's prompt, not the server's cache occupancy, so it tracks history
+                // correctly across a compaction (the request shrinks; cache_n only ever counts
+                // tokens of the current prompt). Like n_past, it excludes tokens generated in the
+                // same turn — the guard has always measured the prompt side.
+                //
+                // Fallback only. The whole block below runs on whichever count was measured, so
+                // the anchor (_lastServerCountIndex) and the growth deltas that feed the predictive
+                // compaction threshold stay paired with LastContextUsed instead of going stale.
+                int measured = nPast > 0 ? nPast : promptTotal;
+                if (measured > 0)
                 {
-                    LastContextUsed = nPast;
+                    LastContextUsed = measured;
                     _lastServerCountIndex = _conversationHistory.Count;
 
                     // Track context growth deltas for predictive threshold
-                    LastContextDelta = (_previousContextUsed > 0 && nPast > _previousContextUsed) ? nPast - _previousContextUsed : 0;
+                    LastContextDelta = (_previousContextUsed > 0 && measured > _previousContextUsed) ? measured - _previousContextUsed : 0;
                     if (LastContextDelta > 0)
                     {
                         _contextDeltas.Add(LastContextDelta);
                         if (_contextDeltas.Count > 5) _contextDeltas.RemoveAt(0);
                     }
-                    _previousContextUsed = nPast;
+                    _previousContextUsed = measured;
                 }
                 else if (_options.ShowDebugOutput)
                 {
-                    // Observability only: timings present but n_past missing/0. This is always
-                    // a "no measurement" signal — a real generation never reports n_past 0.
-                    // The paired anchor (LastContextUsed / _lastServerCountIndex) stays frozen
-                    // by design; flag the widening estimate tail for trace visibility.
+                    // Observability only: timings present but neither n_past nor prompt_n/cache_n
+                    // carried a count. The paired anchor (LastContextUsed / _lastServerCountIndex)
+                    // stays frozen; flag the widening estimate tail for trace visibility.
                     System.Diagnostics.Debug.WriteLine(
-                        "[DevMind TRACE] ParseTimings: timings present but n_past absent/0 — estimate tail widens (anchor frozen).");
+                        "[DevMind TRACE] ParseTimings: timings present but no context count (n_past and prompt_n+cache_n both 0) — estimate tail widens (anchor frozen).");
                 }
             }
             catch
