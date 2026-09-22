@@ -101,8 +101,9 @@ namespace DevMind.McpServer
             return s.Length == 0 ? null : s;
         }
 
-        public McpServices(string workingDirectory, IEnumerable<string>? additionalWriteRoots = null)
-            : this(workingDirectory, additionalWriteRoots, memoryManager: null)
+        public McpServices(string workingDirectory, IEnumerable<string>? additionalWriteRoots = null,
+            bool workingDirectoryIsWriteRoot = true)
+            : this(workingDirectory, additionalWriteRoots, memoryManager: null, workingDirectoryIsWriteRoot)
         {
         }
 
@@ -112,7 +113,7 @@ namespace DevMind.McpServer
         /// Internal so only DevMind.McpServer.Tests (via InternalsVisibleTo) can use it.
         /// </summary>
         internal McpServices(string workingDirectory, IEnumerable<string>? additionalWriteRoots,
-            MemoryManager? memoryManager)
+            MemoryManager? memoryManager, bool workingDirectoryIsWriteRoot = true)
         {
             WorkingDirectory = string.IsNullOrWhiteSpace(workingDirectory)
                 ? Environment.CurrentDirectory
@@ -122,10 +123,13 @@ namespace DevMind.McpServer
                 Console.Error.WriteLine(
                     $"[McpServer] Warning: working directory does not exist: {WorkingDirectory}");
 
-            // Write roots: WorkingDirectory + --dir/env roots form the permanent baseline;
-            // devmind.json allowedWriteRoots entries are merged on top at startup and on
-            // every reload_write_roots call. A config reload can never remove the baseline.
-            WriteRoots = new WriteRootPolicy(WorkingDirectory, additionalWriteRoots);
+            // Write roots: the --dir/env roots form the permanent baseline, joined by
+            // WorkingDirectory unless the caller said otherwise (the --root flag, which
+            // sets where the server is rooted without granting write to it). devmind.json
+            // allowedWriteRoots entries are merged on top at startup and on every
+            // reload_write_roots call. A config reload can never remove the baseline.
+            WriteRoots = new WriteRootPolicy(
+                workingDirectoryIsWriteRoot ? WorkingDirectory : null, additionalWriteRoots);
             ReloadWriteRootsFromConfig();
 
             Memory    = memoryManager ?? new MemoryManager(WorkingDirectory);

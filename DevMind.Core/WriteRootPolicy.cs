@@ -1,4 +1,4 @@
-// File: WriteRootPolicy.cs  v1.0
+﻿// File: WriteRootPolicy.cs  v1.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Reloadable allowed-write-roots policy for file-mutating tools.
@@ -42,8 +42,12 @@ namespace DevMind
         /// Builds the permanent baseline from the working directory and any startup
         /// roots (--dir / env). Invalid or blank entries are skipped; entries are
         /// normalized via Path.GetFullPath and de-duplicated case-insensitively.
+        /// <paramref name="workingDirectory"/> may be null or blank: where the server is
+        /// rooted and what it may write are separate questions (the MCP server's --root
+        /// flag asks only the first), and a null here simply keeps the root out of the
+        /// baseline. The baseline is then the startup roots alone, possibly empty.
         /// </summary>
-        public WriteRootPolicy(string workingDirectory, IEnumerable<string>? startupRoots = null)
+        public WriteRootPolicy(string? workingDirectory, IEnumerable<string>? startupRoots = null)
         {
             var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var ordered = new List<string>();
@@ -156,6 +160,14 @@ namespace DevMind
                 if (fullPath.StartsWith(rootWithSep, StringComparison.OrdinalIgnoreCase))
                     return fullPath;
             }
+
+            if (roots.Count == 0)
+                throw new InvalidOperationException(
+                    $"Path containment violation: '{fullPath}' is outside the allowed write roots, because " +
+                    "there are none: this server was started read-only (--root with no --dir), so every " +
+                    "file create/modify/delete/rename is refused. Reads are unaffected. To grant write " +
+                    "access, restart with --dir <absolute-path>, or add the directory to " +
+                    "\"allowedWriteRoots\" in %APPDATA%\\devmind\\devmind.json and call reload_write_roots.");
 
             string rootsList = string.Join("; ", roots);
             throw new InvalidOperationException(
