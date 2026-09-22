@@ -1,4 +1,4 @@
-﻿// File: TuiAgenticHost.cs  v2.3
+﻿// File: TuiAgenticHost.cs  v2.4
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 implementation of IAgenticHost.
@@ -950,6 +950,12 @@ namespace DevMind
         private static readonly Terminal.Gui.Drawing.Color SynComment = new Terminal.Gui.Drawing.Color(0x6A, 0x99, 0x55); // #6A9955 green
         private static readonly Terminal.Gui.Drawing.Color SynNumber  = new Terminal.Gui.Drawing.Color(0xB5, 0xCE, 0xA8); // #B5CEA8 pale green
         private static readonly Terminal.Gui.Drawing.Color SynPlain   = new Terminal.Gui.Drawing.Color(0xD4, 0xD4, 0xD4); // #D4D4D4 light
+
+        // Diff tints. Dark enough that SynComment green (#6A9955) and SynString orange
+        // (#CE9178) — the two token colours closest to the tints themselves — stay readable
+        // on top, which is the whole point of tinting the line rather than recolouring it.
+        private static readonly Terminal.Gui.Drawing.Color DiffRemovedBg = new Terminal.Gui.Drawing.Color(0x4B, 0x1F, 0x1F); // #4B1F1F
+        private static readonly Terminal.Gui.Drawing.Color DiffAddedBg   = new Terminal.Gui.Drawing.Color(0x1F, 0x3A, 0x1F); // #1F3A1F
 
         private static Terminal.Gui.Drawing.Color SyntaxColor(TokenKind kind)
         {
@@ -1961,7 +1967,11 @@ namespace DevMind
             string[] newLines = normNew.Split('\n');
             string diffResult = DiffHelper.GenerateUnifiedDiff(filename, oldLines, newLines);
 
-            AppendOutputLocal($"[DIFF] {filename}: changes shown ({oldLines.Length} → {newLines.Length} lines)\n", OutputColor.Dim);
+            // The line said "changes shown" and then showed nothing — the diff went to the
+            // model and the reader got a count. Now it is painted, from the same model a
+            // patch uses; what the model receives is still the text above, untouched.
+            AppendOutputLocal($"[DIFF] {filename} ({oldLines.Length} → {newLines.Length} lines)\n", OutputColor.Dim);
+            AppendDiff(normOld, normNew, filename);
             return Task.FromResult(diffResult);
         }
 
@@ -2117,8 +2127,8 @@ namespace DevMind
                 AppendOutputLocal($"[PATCH] Applied to {resolved.FullPath}{(merge.UsedFallback ? " [two-way fallback]" : "")}\n",
                     OutputColor.Success);
 
-                // Show what changed as a colored unified diff
-                AppendPatchDiff(resolved.OriginalContent, result.UpdatedContent, fileNameOnly);
+                // Show what changed, painted rather than printed
+                AppendDiff(resolved.OriginalContent, result.UpdatedContent, fileNameOnly);
 
                 return Task.FromResult((resolved.FullPath, (string)null));
             }
@@ -2172,41 +2182,38 @@ namespace DevMind
             return "[MERGE] Unknown choice. Usage: /resolve accept_proposed | accept_current | cancel";
         }
 
-        // Render a unified diff with per-line color: − removed (red), + added (green),
-        // @@ hunk header (blue), context (dim). Capped so a large edit can't flood.
-        private const int MaxPatchDiffLines = 80;
-        private void AppendPatchDiff(string oldContent, string newContent, string fileName)
+        // ── Painted diffs ─────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Paint a diff into the transcript: dim line-number gutter, <c>+</c>/<c>-</c> marker,
+        /// and the source still syntax-highlighted on a red or green tint.
+        /// <para>
+        /// The decisions live in <see cref="DiffPainter"/>, which holds no view, so what colour
+        /// a line gets is a testable question. All this does is wire the span sink and own the
+        /// palette.
+        /// </para>
+        /// </summary>
+        internal void AppendDiff(string oldContent, string newContent, string path)
         {
             try
             {
-                string[] oldLines = (oldContent ?? string.Empty).Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
-                string[] newLines = (newContent ?? string.Empty).Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
-                string diff = DiffHelper.GenerateUnifiedDiff(fileName, oldLines, newLines);
-                if (string.IsNullOrWhiteSpace(diff)) return;
+                IReadOnlyList<DiffLine> lines = DiffRenderer.Build(oldContent, newContent);
+                if (lines.Count == 0) return;
 
-                string[] lines = diff.Replace("\r\n", "\n").Split('\n');
-                int shown = 0;
-                foreach (string line in lines)
+                Terminal.Gui.Drawing.Color bg = _outputView.GetScheme().Normal.Background;
+                var palette = new DiffPalette
                 {
-                    // The [PATCH] line already names the file — drop the diff's file headers.
-                    if (line.StartsWith("---", StringComparison.Ordinal) ||
-                        line.StartsWith("+++", StringComparison.Ordinal))
-                        continue;
+                    Foreground = SyntaxColor,
+                    Gutter     = new Terminal.Gui.Drawing.Color(0x88, 0x88, 0x88), // OutputColor.Dim
+                    ContextBg  = bg,
+                    RemovedBg  = DiffRemovedBg,
+                    AddedBg    = DiffAddedBg,
+                };
 
-                    if (shown >= MaxPatchDiffLines)
-                    {
-                        AppendOutputLocal($"  … ({lines.Length - shown} more diff lines)\n", OutputColor.Dim);
-                        break;
-                    }
-
-                    OutputColor color;
-                    if (line.StartsWith("@@", StringComparison.Ordinal)) color = OutputColor.Input;   // hunk header
-                    else if (line.StartsWith("+", StringComparison.Ordinal)) color = OutputColor.Success; // added
-                    else if (line.StartsWith("-", StringComparison.Ordinal)) color = OutputColor.Error;   // removed
-                    else color = OutputColor.Dim;                                                          // context
-                    AppendOutputLocal(line + "\n", color);
-                    shown++;
-                }
+                _lastWriteWasToolLine = true;   // the diff is a tool artefact, not prose
+                string notice = DiffPainter.Paint(lines, path, palette, EnqueueSpan);
+                if (notice != null)
+                    AppendOutputLocal(notice + "\n", OutputColor.Dim);
             }
             catch { /* diff display is best-effort — never break a successful patch */ }
         }
@@ -2227,11 +2234,10 @@ namespace DevMind
                 string badge = r.Confidence == PatchConfidence.Fuzzy ? " [Fuzzy ⚠]" : " [Exact ✓]";
 
                 AppendOutputLocal($"\n[PATCH] {r.FileName}{badge}\n", OutputColor.Dim);
-                string patched  = ComputePatchedContent(r);
-                string[] oldLns = r.OriginalContent.Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
-                string[] newLns = patched.Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
-                AppendOutputLocal(DiffHelper.GenerateUnifiedDiff(r.FileName, oldLns, newLns) + "\n",
-                    OutputColor.Normal);
+                // The same painter as an applied patch. A preview that renders differently from
+                // the thing it previews is worse than no preview: the reader learns to check
+                // twice, once for the change and once for the rendering.
+                AppendDiff(r.OriginalContent, ComputePatchedContent(r), r.FileName);
 
                 // Auto-approve — no interactive prompt in TUI.
                 approved.Add(i);
