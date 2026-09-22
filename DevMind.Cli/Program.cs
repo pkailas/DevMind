@@ -1,4 +1,4 @@
-// File: Program.cs  v1.1
+// File: Program.cs  v1.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -321,16 +321,17 @@ namespace DevMind
             string llmDirective = LoopHelpers.BuildToolUsePrompt(
                 buildCommand: ResolveBuildCommand(options), projectNamespace: null);
 
-            // The global system-prompt file (%APPDATA%\devmind\system-prompt.md) replaces
-            // the hardcoded options.SystemPrompt when present. Absence is normal —
-            // fall back to options.SystemPrompt unchanged. An explicit --system-prompt
-            // CLI arg still wins (it sets options.SystemPrompt before this method runs).
-            // Loaded HERE, inside the builder, so both callers — the session-lifetime
+            // Precedence: an explicit --system-prompt beats the authored global file
+            // (%APPDATA%\devmind\system-prompt.md), which beats options.SystemPrompt (the
+            // configured or built-in default). Absence of the file is normal. The explicit
+            // prompt needs its own field because options.SystemPrompt is always populated,
+            // so this site cannot otherwise tell a typed prompt from a default.
+            // Resolved HERE, inside the builder, so both callers — the session-lifetime
             // build and the per-turn closure — follow the same rule, and so editing the
             // file in another editor takes effect on the next turn (hot-reload), exactly
             // as in the TUI and the headless agent.
-            string filePrompt = SystemPromptFile.Load();
-            string basePrompt = filePrompt ?? options.SystemPrompt;
+            string basePrompt = SystemPromptFile.Resolve(
+                options.ExplicitSystemPrompt, SystemPromptFile.Load(), options.SystemPrompt);
 
             string combined = $"{basePrompt}\n\n{llmDirective}";
 
@@ -425,7 +426,7 @@ namespace DevMind
             Console.WriteLine("  --context-size <n>      Override context window size (default: auto-detect)");
             Console.WriteLine("  --eviction <mode>       Context eviction: Off, Balanced, Aggressive (default: Balanced)");
             Console.WriteLine("  --server-type <type>    Server type: LlamaServer, LmStudio, Custom (default: LlamaServer)");
-            Console.WriteLine("  --system-prompt <text>  Override system prompt");
+            Console.WriteLine("  --system-prompt <text>  Override system prompt (wins over system-prompt.md)");
             Console.WriteLine("  --timeout <minutes>     Request timeout in minutes (default: 10)");
             Console.WriteLine("  --debug                 Enable debug output");
             Console.WriteLine("  --thinking              Show <think> tokens");

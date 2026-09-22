@@ -1,4 +1,4 @@
-// File: CliOptions.cs  v1.1
+// File: CliOptions.cs  v1.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -35,6 +35,16 @@ namespace DevMind
         // ── ILlmOptions ───────────────────────────────────────────────────────────
 
         public string SystemPrompt             { get; set; } = DefaultPrompts.System;
+
+        /// <summary>
+        /// The prompt supplied by --system-prompt on this invocation, or null when the
+        /// operator did not type one. Distinct from <see cref="SystemPrompt"/>, which is
+        /// ALWAYS populated (built-in default, or devmind.json) and so cannot tell an
+        /// explicit choice from a default. Only the argument parser sets this; config
+        /// files never do.
+        /// </summary>
+        public string ExplicitSystemPrompt { get; set; }
+
         public string ModelName                { get; set; } = "";
         public int    RequestTimeoutMinutes    { get; set; } = 10;
         public int    FirstTokenTimeoutMinutes { get; set; } = 5;
@@ -93,7 +103,11 @@ namespace DevMind
                     case "--endpoint"     when i + 1 < args.Length: opts.EndpointUrl             = args[++i]; break;
                     case "--api-key"      when i + 1 < args.Length: opts.ApiKey                  = args[++i]; break;
                     case "--model"        when i + 1 < args.Length: opts.ModelName               = args[++i]; break;
-                    case "--system-prompt" when i + 1 < args.Length: opts.SystemPrompt           = args[++i]; break;
+                    case "--system-prompt" when i + 1 < args.Length:
+                        // Both: SystemPrompt keeps every existing reader working,
+                        // ExplicitSystemPrompt records that this one was typed.
+                        opts.ExplicitSystemPrompt = opts.SystemPrompt = args[++i];
+                        break;
                     case "--build-command" when i + 1 < args.Length: opts.BuildCommand           = args[++i]; break;
                     case "--dir"          when i + 1 < args.Length: i++; break; // already applied in pass 1
                     case "--max-depth"    when i + 1 < args.Length:

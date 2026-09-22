@@ -1,4 +1,4 @@
-// File: SystemPromptFile.cs  v1.0
+// File: SystemPromptFile.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Loads the user-editable global system prompt from
@@ -42,6 +42,31 @@ namespace DevMind
         /// whitespace-only. Never throws.
         /// </summary>
         public static string Load() => LoadFrom(Path);
+
+        /// <summary>
+        /// Resolves the base system prompt from the three sources that can supply one,
+        /// in precedence order: an explicit per-invocation prompt, then the authored
+        /// file, then the configured-or-built-in fallback.
+        /// </summary>
+        /// <param name="explicitPrompt">
+        /// A prompt the operator typed for THIS invocation (--system-prompt). It wins,
+        /// because an operator who types it means it, and because a flag whose help text
+        /// says "Override system prompt" must override something. Null or whitespace
+        /// means no explicit prompt was given — not an explicit empty one.
+        /// </param>
+        /// <param name="filePrompt">
+        /// The authored global prompt, normally <see cref="Load"/>'s result. Null when
+        /// absent, empty or whitespace-only, which is a normal state.
+        /// </param>
+        /// <param name="fallback">
+        /// What to use when neither of the above supplied one: the configured prompt
+        /// (devmind.json) or the built-in <see cref="DefaultPrompts.System"/>. A
+        /// configured prompt is standing configuration, not a per-invocation decision,
+        /// so it sits BELOW the authored file rather than above it.
+        /// </param>
+        public static string Resolve(string explicitPrompt, string filePrompt, string fallback)
+            => !string.IsNullOrWhiteSpace(explicitPrompt) ? explicitPrompt
+             : filePrompt ?? fallback;
 
         /// <summary>
         /// Loads the global system prompt from an explicit path. Exposed for

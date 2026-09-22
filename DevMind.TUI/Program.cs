@@ -1,4 +1,4 @@
-﻿// File: Program.cs  v3.1
+﻿// File: Program.cs  v3.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 TUI for DevMind.
@@ -1709,12 +1709,14 @@ static string LoadContextFile(string workingDirectory)
             buildCommand: ResolveBuildCommand(options),
             projectNamespace: null);
 
-        // The global system-prompt file (%APPDATA%\devmind\system-prompt.md) replaces
-        // the hardcoded options.SystemPrompt when present. Absence is normal —
-        // fall back to options.SystemPrompt unchanged. An explicit --system-prompt
-        // CLI arg still wins (it sets options.SystemPrompt before this method runs).
-        string filePrompt = SystemPromptFile.Load();
-        string basePrompt = filePrompt ?? options.SystemPrompt;
+        // Precedence: an explicit --system-prompt beats the authored global file
+        // (%APPDATA%\devmind\system-prompt.md), which beats options.SystemPrompt (the
+        // configured or built-in default). Absence of the file is normal. The explicit
+        // prompt needs its own field because options.SystemPrompt is always populated,
+        // so this site cannot otherwise tell a typed prompt from a default.
+        // The file is read on EVERY assembly, so editing it takes effect next turn.
+        string basePrompt = SystemPromptFile.Resolve(
+            options.ExplicitSystemPrompt, SystemPromptFile.Load(), options.SystemPrompt);
 
         var sb = new StringBuilder();
         sb.Append(basePrompt);

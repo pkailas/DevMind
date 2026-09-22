@@ -1,22 +1,25 @@
-// File: CliSystemPromptFileTests.cs  v1.0
+// File: CliSystemPromptFileTests.cs  v2.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
-// The CLI skin must honour the global system-prompt file
-// (%APPDATA%\devmind\system-prompt.md) under exactly the same rule the TUI
-// (DevMind.TUI/Program.cs) and the headless agent (DevMind.Core/HeadlessAgent.cs)
-// already use:
+// The CLI skin must resolve its base system prompt on the same three-tier precedence the
+// TUI uses (SystemPromptFile.Resolve):
 //
-//   * the file REPLACES options.SystemPrompt when it exists and is non-empty;
-//   * absence / emptiness / whitespace-only falls back to options.SystemPrompt
-//     unchanged;
-//   * an explicit --system-prompt still wins, because it has already been written
-//     into options.SystemPrompt by the time the prompt is assembled — so "wins"
-//     here means the file must NOT be allowed to override a caller-supplied value
-//     silently... which is why these tests pin the fallback direction too.
+//   * an explicit --system-prompt wins outright — a per-invocation decision;
+//   * otherwise the authored global file (%APPDATA%\devmind\system-prompt.md) wins,
+//     re-read on every build so an edit takes effect next turn;
+//   * otherwise options.SystemPrompt — devmind.json's systemPrompt, else the built-in
+//     DefaultPrompts.System.
 //
-// The CLI previously went straight to options.SystemPrompt, so an operator who
-// authored a global prompt got it in the TUI and in delegated jobs and silently
-// did not get it in the CLI.
+// This file's earlier header claimed the explicit argument "has already been written into
+// options.SystemPrompt by the time the prompt is assembled" and therefore won. It did not.
+// Both skins resolved `filePrompt ?? options.SystemPrompt`, so the authored file beat the
+// typed argument every time it existed, while the help text advertised "Override system
+// prompt". The argument now has its own field, because options.SystemPrompt is always
+// populated and cannot distinguish a typed prompt from a default.
+//
+// The fallback-direction tests below did NOT change with that fix and are not asserting the
+// old defect: they set SystemPrompt directly on the options object, which is the configured
+// tier, and the file is still correct to outrank it.
 //
 // DEVMIND_GLOBAL_DIR is DevMindPaths' documented test seam: it redirects
 // SystemPromptFile.Path at a hermetic temp directory so these assertions never
@@ -113,6 +116,80 @@ namespace DevMind.Cli.Tests
 
             Assert.Contains("SECOND-REVISION-MARKER", second);
             Assert.DoesNotContain(FileContent, second);
+        }
+
+        // The defect this file's header used to describe: with an authored file present, a
+        // typed --system-prompt was silently dropped. The argument is the operator deciding
+        // about THIS run, so it outranks a file they authored at some earlier point.
+        [Fact]
+        public void ExplicitArgument_BeatsTheAuthoredFile()
+        {
+            WriteGlobalPrompt(FileContent);
+
+            var options = NewOptions();
+            options.ExplicitSystemPrompt = "EXPLICIT-ARG-MARKER";
+
+            string combined = Program.BuildCombinedSystemPrompt(options, devMindContext: null);
+
+            Assert.Contains("EXPLICIT-ARG-MARKER", combined);
+            Assert.DoesNotContain(FileContent, combined);
+            Assert.DoesNotContain(HardcodedDefault, combined);
+        }
+
+        // A blank argument is not a decision. Treating it as one would let an empty
+        // --system-prompt blank the session's prompt, which is a way to break a run by
+        // accident rather than a capability.
+        [Fact]
+        public void WhitespaceOnlyExplicitArgument_LeavesTheFileInCharge()
+        {
+            WriteGlobalPrompt(FileContent);
+
+            var options = NewOptions();
+            options.ExplicitSystemPrompt = "   ";
+
+            Assert.Contains(FileContent, Program.BuildCombinedSystemPrompt(options, devMindContext: null));
+        }
+
+        // devmind.json's systemPrompt is standing configuration, not a decision about this
+        // run, so it sits BELOW the authored file — unlike the argument, which sits above it.
+        // Parsed through FromArgs so the real pass order (dir -> devmind.json -> flags) is
+        // what is under test, not a hand-built options object.
+        [Fact]
+        public void ConfiguredPrompt_LosesToTheAuthoredFile()
+        {
+            File.WriteAllText(Path.Combine(_workDir, "devmind.json"),
+                "{ \"systemPrompt\": \"CONFIGURED-JSON-MARKER\" }");
+            WriteGlobalPrompt(FileContent);
+
+            var options = CliOptions.FromArgs(new[] { "--dir", _workDir });
+            options.BuildCommand = "dotnet build";
+
+            Assert.Equal("CONFIGURED-JSON-MARKER", options.SystemPrompt);
+            Assert.Null(options.ExplicitSystemPrompt);
+
+            string combined = Program.BuildCombinedSystemPrompt(options, devMindContext: null);
+
+            Assert.Contains(FileContent, combined);
+            Assert.DoesNotContain("CONFIGURED-JSON-MARKER", combined);
+        }
+
+        // ...but the argument still beats it, which is the pass-3-overrides-pass-2 rule
+        // surviving the change.
+        [Fact]
+        public void ExplicitArgument_BeatsBothTheFileAndTheConfiguredPrompt()
+        {
+            File.WriteAllText(Path.Combine(_workDir, "devmind.json"),
+                "{ \"systemPrompt\": \"CONFIGURED-JSON-MARKER\" }");
+            WriteGlobalPrompt(FileContent);
+
+            var options = CliOptions.FromArgs(new[] { "--dir", _workDir, "--system-prompt", "EXPLICIT-ARG-MARKER" });
+            options.BuildCommand = "dotnet build";
+
+            string combined = Program.BuildCombinedSystemPrompt(options, devMindContext: null);
+
+            Assert.Contains("EXPLICIT-ARG-MARKER", combined);
+            Assert.DoesNotContain(FileContent, combined);
+            Assert.DoesNotContain("CONFIGURED-JSON-MARKER", combined);
         }
     }
 }
