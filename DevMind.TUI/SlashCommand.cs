@@ -1,4 +1,4 @@
-﻿// File: SlashCommand.cs  v1.3
+﻿// File: SlashCommand.cs  v1.4
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Slash-command registry and dispatcher for DevMind.TUI.
@@ -1355,7 +1355,11 @@ namespace DevMind
                     var s = sessions[i];
                     string title = string.IsNullOrEmpty(s.Title) ? "(untitled)" : s.Title;
                     string date = s.LastActiveAt.ToString("MMM dd yyyy HH:mm");
+                    // The id is here because --resume takes one and this is the only place to
+                    // read it. The number stays: it is what /resume <n> takes, and it is
+                    // shorter to type when you are already looking at the list.
                     sb.AppendLine($"  [{i + 1}] {title}  |  {date}  |  {s.MessageCount} messages");
+                    sb.AppendLine($"      {s.SessionId}");
                 }
                 if (sessions.Length > 20)
                     sb.AppendLine($"  ... and {sessions.Length - 20} more (showing 20 most recent)");
@@ -1407,128 +1411,14 @@ namespace DevMind
                     return new CommandResult { Message = $"Session \"{sessionTitle}\" has no messages to load." };
                 }
 
-                // Check whether a user-row matches a known synthetic prompt (for legacy rows
-                // that lack the IsSynthetic column flag). Uses the shared constants from Core.
-                static bool IsKnownSyntheticPrompt(string content)
-                {
-                    string trimmed = content?.Trim();
-                    if (string.IsNullOrEmpty(trimmed)) return false;
-                    foreach (var prompt in SyntheticPrompts.All)
-                    {
-                        if (trimmed == prompt) return true;
-                    }
-                    return false;
-                }
+                // The pairing lives in Core so the launch flag (--resume / --continue) and
+                // this command run the same filter. It used to be inline here, which meant the
+                // one piece of resume logic with any subtlety in it — segments, synthetic
+                // rows, decoration stripping — was reachable only by typing into a terminal.
+                var (roles, contents, skipped) = SessionResume.PairMessages(messages);
+                int pairedCount = roles.Length;
 
-                // Strip TUI decoration lines ([CONTEXT], [TOOL_USE], [LLM], [DIAG],
-                // [FLUSH], [DROPPED]) from assistant content wherever they occur.
-                // Returns null if stripping leaves the content empty.
-                static string StripTuiDecorations(string content)
-                {
-                    if (string.IsNullOrEmpty(content)) return null;
-
-                    var lines = content.Split('\n');
-                    var cleaned = new List<string>();
-                    foreach (var line in lines)
-                    {
-                        string trimmed = line.Trim();
-                        if (trimmed.StartsWith("[CONTEXT]") || trimmed.StartsWith("[TOOL_USE]")
-                            || trimmed.StartsWith("[LLM]") || trimmed.StartsWith("[DIAG]")
-                            || trimmed.StartsWith("[FLUSH]") || trimmed.StartsWith("[DROPPED]"))
-                        {
-                            continue; // skip decoration line anywhere in the message
-                        }
-                        cleaned.Add(line);
-                    }
-
-                    string result = string.Join('\n', cleaned).Trim();
-                    return string.IsNullOrEmpty(result) ? null : result;
-                }
-
-                // Filter by SEGMENT: a segment opens at each non-synthetic user row and
-                // collects assistant rows until the next non-synthetic user row (or EOF).
-                // This matches conversational structure — a real question may be followed by
-                // many synthetic continuation turns before the model produces prose.
-                // Guarantees an answer cannot attach to the wrong question because each
-                // assistant row is bound to the segment opened by the most recent real user row.
-                var paired = new List<(string Role, string Content)>();
-                int skipped = 0;
-
-                string segmentQuestion = null;    // null = no open segment
-                var segmentAnswers = new List<string>();
-
-                foreach (var msg in messages)
-                {
-                    // --- User rows ---
-                    if (msg.Role == "user")
-                    {
-                        bool isSynthetic = msg.IsSynthetic || IsKnownSyntheticPrompt(msg.Content);
-
-                        if (isSynthetic)
-                        {
-                            skipped++;
-                            // Do not open or close a segment; this turn belongs to the
-                            // current open segment (if any) as scaffolding.
-                            continue;
-                        }
-
-                        // Non-synthetic user row: close the previous segment (if any) and
-                        // open a new one.
-                        if (segmentQuestion != null)
-                        {
-                            // Flush previous segment.
-                            if (segmentAnswers.Count > 0)
-                            {
-                                paired.Add(("user", segmentQuestion));
-                                paired.Add(("assistant", string.Join("\n\n", segmentAnswers)));
-                            }
-                            else
-                            {
-                                // Segment had no surviving assistant content — drop entirely.
-                                skipped++; // count the user row
-                            }
-                            segmentAnswers.Clear();
-                        }
-
-                        segmentQuestion = msg.Content;
-                    }
-                    // --- Assistant rows ---
-                    else if (msg.Role == "assistant")
-                    {
-                        if (segmentQuestion == null)
-                        {
-                            // Before the first real user row — discard.
-                            skipped++;
-                            continue;
-                        }
-
-                        string cleaned = StripTuiDecorations(msg.Content);
-                        if (cleaned != null)
-                        {
-                            segmentAnswers.Add(cleaned);
-                        }
-                        else
-                        {
-                            skipped++;
-                        }
-                    }
-                }
-
-                // Flush the final segment.
-                if (segmentQuestion != null)
-                {
-                    if (segmentAnswers.Count > 0)
-                    {
-                        paired.Add(("user", segmentQuestion));
-                        paired.Add(("assistant", string.Join("\n\n", segmentAnswers)));
-                    }
-                    else
-                    {
-                        skipped++; // count the user row
-                    }
-                }
-
-                if (paired.Count == 0)
+                if (pairedCount == 0)
                 {
                     string sessionTitle = string.IsNullOrEmpty(session.Title) ? "(untitled)" : session.Title;
                     return new CommandResult
@@ -1537,16 +1427,13 @@ namespace DevMind
                     };
                 }
 
-                // Convert to role/content arrays for PrependMessages.
-                string[] roles = paired.Select(p => p.Role).ToArray();
-                string[] contents = paired.Select(p => p.Content).ToArray();
-
                 ctx.PrependMessages(roles, contents);
 
                 string title = string.IsNullOrEmpty(session.Title) ? "(untitled)" : session.Title;
                 return new CommandResult
                 {
-                    Message = $"Resumed session: {title} ({paired.Count} messages loaded, {skipped} skipped)."
+                    Message = $"Resumed session: {title} ({pairedCount} messages loaded, {skipped} skipped)."
+                            + "\n  " + SessionResume.ToolStateCaveat
                 };
             }
             catch (Exception ex)

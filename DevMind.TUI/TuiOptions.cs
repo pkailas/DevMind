@@ -1,4 +1,4 @@
-﻿// File: TuiOptions.cs  v1.3
+﻿// File: TuiOptions.cs  v1.4
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Minimal ILlmOptions implementation for the TUI.
@@ -65,6 +65,12 @@ namespace DevMind
         // Context-window utilization % at which the loop pauses to ask. 0 disables.
         public int    AgenticContextLimitPercent { get; set; } = 78;
 
+        /// <summary>Session id to reopen at launch (<c>--resume &lt;id&gt;</c>). Blank = a new session.</summary>
+        public string ResumeSessionId { get; set; } = "";
+
+        /// <summary>Reopen the most recent session on this machine (<c>--continue</c> / <c>-c</c>).</summary>
+        public bool   ContinueLatest  { get; set; } = false;
+
         /// <summary>Builds a TuiOptions from command-line args and environment variables.</summary>
         public static TuiOptions FromArgs(string[] args)
         {
@@ -117,6 +123,9 @@ namespace DevMind
                         if (int.TryParse(args[++i], out int cs)) opts.ManualContextSize   = cs; break;
                     case "--timeout"      when i + 1 < args.Length:
                         if (int.TryParse(args[++i], out int to)) opts.RequestTimeoutMinutes = to; break;
+                    case "--resume"       when i + 1 < args.Length: opts.ResumeSessionId        = args[++i]; break;
+                    case "--continue":
+                    case "-c"              : opts.ContinueLatest     = true;  break;
                     case "--thinking"      : opts.ShowLlmThinking    = true;  break;
                     case "--no-thinking"   : opts.ShowLlmThinking    = false; break;
                 }

@@ -45,6 +45,11 @@ dotnet test DevMind.slnx
 # Run the TUI
 dotnet run --project DevMind.TUI -- --dir <repo> --endpoint <llm-endpoint>
 
+# Reopen a past session under its own id (needs DEVMIND_HISTORY_ENABLED + a provider).
+# --continue / -c takes the most recent session on this machine; /history lists the ids.
+dotnet run --project DevMind.TUI -- --resume <session-id>
+dotnet run --project DevMind.TUI -- --continue
+
 # Run the CLI
 dotnet run --project DevMind.Cli -- --dir <repo> --endpoint <llm-endpoint>
 ```

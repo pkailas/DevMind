@@ -1,4 +1,4 @@
-﻿// File: Program.cs  v3.5
+﻿// File: Program.cs  v3.6
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 TUI for DevMind.
@@ -139,6 +139,107 @@ namespace DevMind
                 app.Invoke(() => statusBar.SetReady());
             }
         }
+        /// <summary>
+        /// Resolve <c>--resume &lt;id&gt;</c> / <c>--continue</c> at launch: adopt the session id,
+        /// load its conversation, and prepend it. Returns the lines to print with the banner.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Every failure here is reported and non-fatal. A flag that silently starts a fresh
+        /// session is worse than one that refuses: the operator types their follow-up question
+        /// into a conversation that has never heard of the thing they are following up on, and
+        /// the first sign is an answer that makes no sense.
+        /// </para>
+        /// <para>
+        /// The id is adopted BEFORE the conversation is loaded, so that a load failure still
+        /// leaves the session pointing at the right place — and so that nothing between here
+        /// and the first turn can resolve a different one.
+        /// </para>
+        /// </remarks>
+        static List<(string Text, OutputColor Color)> ResolveResumeAtLaunch(
+            TuiOptions options, IHistoryStore historyStore, LlmClient llmClient)
+        {
+            var report = new List<(string, OutputColor)>();
+            bool wantsResume = !string.IsNullOrWhiteSpace(options.ResumeSessionId);
+
+            if (!wantsResume && !options.ContinueLatest) return report;
+
+            if (wantsResume && options.ContinueLatest)
+            {
+                report.Add(("[RESUME] --resume and --continue both given; they name different " +
+                            "sessions. Starting a fresh session.\n", OutputColor.Error));
+                return report;
+            }
+
+            if (historyStore is NullHistoryStore)
+            {
+                report.Add(("[RESUME] History is not enabled, so there is nothing to resume " +
+                            "(set DEVMIND_HISTORY_ENABLED and a provider). Starting a fresh session.\n",
+                            OutputColor.Warning));
+                return report;
+            }
+
+            try
+            {
+                string machine = SessionId.GetMachineName();
+                string targetId = options.ResumeSessionId?.Trim();
+                SessionSummary[] sessions = historyStore.ListSessionsAsync(machine).GetAwaiter().GetResult();
+
+                // The pick is SessionResume's, not this method's — "the most recent one" is a
+                // contract with the store's ordering, and it is the kind of decision that is
+                // silently wrong rather than loudly broken.
+                SessionSummary target = SessionResume.SelectSession(sessions, targetId, options.ContinueLatest);
+
+                if (target == null)
+                {
+                    if (options.ContinueLatest)
+                    {
+                        report.Add(("[RESUME] No past sessions on this machine. Starting a fresh session.\n",
+                                    OutputColor.Warning));
+                        return report;
+                    }
+
+                    report.Add(($"[RESUME] No session \"{targetId}\" on this machine. Starting a fresh session.\n",
+                                OutputColor.Error));
+                    // Naming the recent ids turns a dead end into a correction — the usual
+                    // cause is a truncated or mistyped copy from /history.
+                    int show = Math.Min(3, sessions.Length);
+                    for (int i = 0; i < show; i++)
+                        report.Add(($"          most recent: {sessions[i].SessionId}\n", OutputColor.Dim));
+                    return report;
+                }
+
+                SessionId.Adopt(target.SessionId);
+
+                HistoryMessage[] messages =
+                    historyStore.LoadSessionMessagesAsync(target.SessionId).GetAwaiter().GetResult();
+                var (roles, contents, skipped) = SessionResume.PairMessages(messages);
+
+                string title = string.IsNullOrEmpty(target.Title) ? "(untitled)" : target.Title;
+
+                if (roles.Length == 0)
+                {
+                    report.Add(($"[RESUME] {title} — {target.SessionId}: nothing to load " +
+                                $"({messages.Length} rows, {skipped} skipped). New turns still append to it.\n",
+                                OutputColor.Warning));
+                    return report;
+                }
+
+                llmClient.PrependMessages(roles, contents);
+
+                report.Add(($"[RESUME] {title} — {target.SessionId} " +
+                            $"({roles.Length} messages loaded, {skipped} skipped)\n", OutputColor.Success));
+                report.Add(($"          {SessionResume.ToolStateCaveat}\n", OutputColor.Dim));
+                return report;
+            }
+            catch (Exception ex)
+            {
+                report.Add(($"[RESUME] Could not reach the history store: {ex.Message} " +
+                            "Starting a fresh session.\n", OutputColor.Error));
+                return report;
+            }
+        }
+
        static async Task<int> Main(string[] args)
         {
             // Load ~/.devmind.env before any env var reads.
@@ -180,6 +281,13 @@ namespace DevMind
             // Falls back to NullHistoryStore when history is disabled.
             var historyStore = HistoryStoreFactory.Create();
             try { historyStore.InitAsync().Wait(); } catch { /* non-fatal — NullHistoryStore fallback */ }
+
+            // --resume / --continue. This runs HERE, before anything reads SessionId.Get(),
+            // because adopting an id after a consumer has cached one splits the session in
+            // two — which is the fork this feature exists to remove. Every failure is
+            // reported and falls through to a fresh session; the lines are held and printed
+            // with the banner, since there is no transcript to write to yet.
+            List<(string Text, OutputColor Color)> resumeReport = ResolveResumeAtLaunch(options, historyStore, llmClient);
 
             var cts = new CancellationTokenSource();
 
@@ -467,7 +575,13 @@ namespace DevMind
             host.AppendOutputLocal(
                 $"DevMind TUI  ·  {options.EndpointUrl}  ·  {options.WorkingDirectory}\n",
                 OutputColor.Dim);
-            host.AppendOutputLocal($"{TuiAgenticHost.ScrollbackCapDescription}\n\n", OutputColor.Dim);
+            host.AppendOutputLocal($"{TuiAgenticHost.ScrollbackCapDescription}\n", OutputColor.Dim);
+
+            // What --resume / --continue did, or why it did nothing.
+            foreach (var (text, color) in resumeReport)
+                host.AppendOutputLocal(text, color);
+
+            host.AppendOutputLocal("\n", OutputColor.Dim);
 
             // Focus the input field. Setting focus before the loop runs is unreliable in
             // Terminal.Gui v2 (layout/focus is resolved during app.Run), so also re-assert it
