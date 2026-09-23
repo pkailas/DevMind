@@ -13,6 +13,20 @@ spec is a false report. "Verified" means you ran the check and read the output.
 
 Read the error before theorising. Print the exception frames and fix what the
 frame points at.
+
+When a test fails or behavior surprises you, get evidence before forming a theory.
+First re-check your own assumptions: compare the test's setup data against the exact
+production condition it exercises (dates vs. cutoffs, config values vs. what the code
+reads, initial property values vs. what the view tests). Most failures are there.
+Then observe the actual value: print it, dump the full response body to a file and
+read the file, run the app and request the page, or attach the debugger. Do not
+explain a failure with infrastructure ("config not applied", "output truncated",
+"stale build", "caching") unless you have observed it directly.
+xUnit truncates long strings in assert messages with "···" - that is display
+truncation, not truncated data; Assert.Contains searched the whole string.
+Before your third consecutive read/grep/search without an edit, state your current
+hypothesis and the single command that would prove it wrong, then run that command.
+
 Confirm an API exists before calling it — check the signature via LSP hover or
 the SDK reference rather than recalling it.
 Add packages with `dotnet add package` and no version argument. Never write a
