@@ -1,4 +1,4 @@
-﻿// File: TuiAgenticHost.cs  v2.6
+﻿// File: TuiAgenticHost.cs  v2.7
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 implementation of IAgenticHost.
@@ -929,6 +929,7 @@ namespace DevMind
                 code:  AppendCode);
             streamer.Feed(text);
             streamer.Flush();
+            FlushProse();
         }
 
         // ── Styled prose append (inline markdown) ─────────────────────────────────────
@@ -938,7 +939,102 @@ namespace DevMind
         // coalesced buffer as AppendCode, so prose keeps strict arrival order with code.
         // Thinking text never flows here — Program.cs appends it directly in the
         // muted Thinking color — so its output is unaffected by this path.
+        /// <summary>
+        /// One completed line of model prose. Pipe-table lines are held here until the table
+        /// ends, because a column width depends on every row — everything else goes straight
+        /// through. The buffer decides; this only carries out what it says.
+        /// </summary>
         internal void AppendProse(string line)
+        {
+            if (string.IsNullOrEmpty(line)) return;
+
+            TableBufferResult result = _tables.Feed(line);
+            Render(result);
+        }
+
+        /// <summary>
+        /// Release anything the table buffer is holding. Called wherever the prose streamer is
+        /// flushed: a table that ends a response has no line after it to close it, and without
+        /// this it would be held until the process exited — which is to say, lost.
+        /// </summary>
+        internal void FlushProse()
+        {
+            Render(_tables.Flush());
+        }
+
+        private void Render(TableBufferResult result)
+        {
+            if (result.Action == TableBufferAction.Table && result.Table != null)
+                AppendTable(result.Table);
+
+            foreach (string prose in result.Prose)
+                AppendProseLine(prose);
+        }
+
+        private readonly TableBuffer _tables = new TableBuffer();
+
+        /// <summary>
+        /// Draw a parsed table as columns.
+        /// <para>
+        /// The width is read HERE, not cached: the terminal resizes, and a table laid out to
+        /// yesterday's width is re-broken by the Editor's own word wrap at whatever column it
+        /// likes — which is worse than the pipe source, because it looks like a table that
+        /// went wrong rather than like markup.
+        /// </para>
+        /// </summary>
+        private void AppendTable(PipeTableModel table)
+        {
+            _block.CloseBlock();
+
+            // The table is a block of the model's own output, so it gets the same separation
+            // from a tool line that prose does, and it ends whatever prose block preceded it.
+            if (_lastWriteWasToolLine)
+            {
+                _lastWriteWasToolLine = false;
+                EnqueueSpan("\n", ResolveAttribute(OutputColor.Normal));
+            }
+            _inProseBlock = false;
+
+            Terminal.Gui.Drawing.Color bg = _outputView.GetScheme().Normal.Background;
+
+            foreach (TableRowLine row in PipeTable.Layout(table, AvailableProseWidth(),
+                                                          MarkdownInlineRenderer.Render, TableRules))
+            {
+                EnqueueSpan(ProseHangingIndent, ResolveAttribute(OutputColor.Normal));
+                foreach (InlineRun run in row.Segments)
+                    EnqueueSpan(run.Text, ProseAttribute(run.Style, bg));
+                EnqueueSpan("\n", ResolveAttribute(OutputColor.Normal));
+            }
+
+            // A blank line after, so the next sentence is not read as another row.
+            EnqueueSpan("\n", ResolveAttribute(OutputColor.Normal));
+        }
+
+        /// <summary>
+        /// The rule characters tables are drawn with. One constant, because no box drawing
+        /// existed anywhere in this TUI before and no terminal here has been asked to render
+        /// any — swapping to <see cref="TableGlyphs.Ascii"/> is a one-line change if a live
+        /// check turns up boxes.
+        /// </summary>
+        private static readonly TableGlyphs TableRules = TableGlyphs.Unicode;
+
+        /// <summary>
+        /// Columns a table may occupy: the view's width now, less the prose block's hanging
+        /// indent and one column of slack so a full-width row cannot itself trigger a wrap.
+        /// </summary>
+        private int AvailableProseWidth()
+        {
+            int width;
+            try { width = _outputView.Viewport.Width; }
+            catch { width = 0; }
+
+            if (width <= 0) width = PipeTable.FallbackWidth;
+
+            return Math.Max(PipeTable.MinColumnWidth * 2,
+                            width - ProseHangingIndent.Length - 1);
+        }
+
+        private void AppendProseLine(string line)
         {
             if (string.IsNullOrEmpty(line)) return;
 

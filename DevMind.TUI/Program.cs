@@ -1,4 +1,4 @@
-﻿// File: Program.cs  v3.6
+﻿// File: Program.cs  v3.7
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 TUI for DevMind.
@@ -1930,6 +1930,9 @@ namespace DevMind
                      FlushThoughtSummary();
                      // Release any buffered code block / held prose (terminated or not).
                      codeStreamer.Flush();
+                     // …and release any table the streamer's last lines were building. A
+                     // table that ends a response has nothing after it to close it.
+                     ((TuiAgenticHost)host).FlushProse();
                  }
 
                 // Save this turn to history (user message + assistant response).
