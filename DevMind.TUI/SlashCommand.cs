@@ -1,4 +1,4 @@
-﻿// File: SlashCommand.cs  v1.4
+﻿// File: SlashCommand.cs  v1.5
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Slash-command registry and dispatcher for DevMind.TUI.
@@ -449,6 +449,29 @@ namespace DevMind
             // many model turns — the agentic-turn pattern, not a quick registry command).
             // Registered here only so /help lists it; this handler is a defensive fallback
             // for hosts that don't wire the interception.
+            // /quit and /exit are intercepted by the host input loop BEFORE dispatch — they
+            // have to work while a turn is running, and Ctrl+Q is XON flow control on many
+            // terminals and never arrives. They are registered here only so /help lists them:
+            // the status bar has said "F10 or /quit" all along, and the one place that
+            // enumerates the commands did not mention either.
+            RegisterCommand("/quit",
+                "Quit DevMind",
+                "/quit",
+                (args, ctx) => Task.FromResult(new CommandResult
+                {
+                    Message = "/quit is handled by the host input loop — this host has not wired it.",
+                    IsError = true,
+                }));
+
+            RegisterCommand("/exit",
+                "Quit DevMind (alias for /quit)",
+                "/exit",
+                (args, ctx) => Task.FromResult(new CommandResult
+                {
+                    Message = "/exit is handled by the host input loop — this host has not wired it.",
+                    IsError = true,
+                }));
+
             RegisterCommand("/digest",
                 "Chunk-summarize an entire PDF on a side conversation, then inject the digest into this session",
                 "/digest <path-to-pdf> [p=N]",
@@ -1235,7 +1258,7 @@ namespace DevMind
         /// </summary>
         static readonly (string Title, string[] Commands)[] HelpGroups =
         {
-            ("Session",    new[] { "/new", "/restart", "/clear", "/cls", "/compact", "/history", "/resume", "/title", "/steer", "/override", "/mode" }),
+            ("Session",    new[] { "/new", "/restart", "/clear", "/cls", "/compact", "/history", "/resume", "/title", "/steer", "/override", "/mode", "/quit", "/exit" }),
             ("Model",      new[] { "/think", "/t", "/reasoning", "/rules", "/system_prompt" }),
             ("Context",    new[] { "/depth-cap", "/context-limit", "/cache", "/output-lines", "/expand" }),
             ("Workspace",  new[] { "/dir", "/lsp", "/resolve", "/debug" }),

@@ -47,6 +47,11 @@ namespace DevMind
         // Tracks whether a turn is currently running (set around RunTurnAsync calls).
         static bool _isTurnRunning;
 
+        // Turns actually written to the history store this session. The exit hint prints
+        // only when this is non-zero: the id of a session nobody said anything in is an id
+        // for nothing, and offering it invites a --resume that reopens silence.
+        static int _turnsSaved;
+
         /// <summary>How long a transient status-bar message stays up before Ready returns.</summary>
         const int StatusFlashMilliseconds = 2500;
 
@@ -1639,9 +1644,24 @@ namespace DevMind
             // Run the application.
             app.Run(window);
 
+            // Tear the TUI down before anything else writes. IApplication is IDisposable and
+            // nothing disposed it before — the terminal was restored by process exit instead,
+            // which was invisible while nothing needed to print afterwards. The exit hint
+            // does: written while the alternate screen is still up it lands on the TUI
+            // surface and is erased with it, so the ordering here IS the feature.
+            try { app.Dispose(); }
+            catch { /* teardown is best-effort — never turn a clean exit into a crash */ }
+
             // The UI exited — drop the session's PATCH backups with it. Without this
             // the undo stack's files outlive the process, orphaned in %TEMP%\DevMind.
             host.DrainPatchBackups();
+
+            // How to get back here. Only when the store actually holds this session.
+            string hint = ResumeHint.Build(
+                historyEnabled: !(historyStore is NullHistoryStore),
+                turnsSaved: _turnsSaved,
+                sessionId: SessionId.Get());
+            if (hint != null) Console.Out.WriteLine(hint);
 
             return 0;
         }
@@ -1945,6 +1965,11 @@ namespace DevMind
                         await historyStore.SaveMessagesAsync(messages);
                         // Upsert the session record.
                         await historyStore.UpsertSessionAsync(sessionId, machineName);
+
+                        // Counted after both writes returned, rather than when the turn
+                        // ended: the hint promises a session that is on disk, and a save
+                        // that threw lands in the catch below without touching this.
+                        _turnsSaved++;
                     }
                     catch
                     {
