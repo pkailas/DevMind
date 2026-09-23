@@ -1,4 +1,4 @@
-﻿// File: TuiAgenticHost.cs  v2.5
+﻿// File: TuiAgenticHost.cs  v2.6
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 implementation of IAgenticHost.
@@ -282,9 +282,23 @@ namespace DevMind
             // KEPT. Swallow only the churn here unless verbose output is enabled.
             if (IsSuppressedNoise(text)) return;
 
-            EnqueueSpan(text, ResolveAttribute(color));
+            // Translate the engine's tags into this transcript's own vocabulary — glyph,
+            // label, and output nested under the call that produced it. This is the only
+            // door tool lines arrive through, which is why the translation happens here and
+            // not at forty emit sites; the tags themselves are untouched, and every other
+            // reader of them (the CLI, the headless transcript) still sees exactly what it
+            // saw before.
+            foreach (TranscriptLine line in _block.Accept(text, color))
+                EnqueueSpan(line.Text, ResolveAttribute(line.Color));
+
             _lastWriteWasToolLine = true;
+            _inProseBlock = false;
         }
+
+        // The block state — whether output is currently nesting under a call. Verbose is
+        // resolved once, with the suppression filter, because both answer the same question:
+        // is this transcript showing the engine raw.
+        private readonly TranscriptBlock _block = new TranscriptBlock(TranscriptNoise.Verbose);
 
         // Prose rhythm: a tool line and the model's next sentence are different kinds of
         // utterance, and run together with no gap they read as one paragraph — the single
@@ -297,10 +311,17 @@ namespace DevMind
         // reads as thought → decision → tools rather than as one undifferentiated column.
         // Only the first line of the block gets it: a marker on every line is a bullet list,
         // which says something the model did not.
-        private volatile bool _proseLeadPending;
+        private volatile bool _inProseBlock;
 
-        /// <summary>The model has finished reasoning: mark the prose that follows as its decision.</summary>
-        public void MarkThoughtBoundary() => _proseLeadPending = true;
+        /// <summary>The diamond, and the hanging indent that lines the block up underneath it.</summary>
+        public const string ProseLead = "◆ ";
+        public const string ProseHangingIndent = "  ";
+
+        /// <summary>
+        /// The model has finished reasoning: the prose that follows is its decision, and so
+        /// starts its own block — which is what earns it the diamond.
+        /// </summary>
+        public void MarkThoughtBoundary() => _inProseBlock = false;
 
         // ── Coalesced append pipeline ─────────────────────────────────────────────
         // Versus the old TextView path the underlying insert is dramatically simpler and cheaper:
@@ -921,6 +942,10 @@ namespace DevMind
         {
             if (string.IsNullOrEmpty(line)) return;
 
+            // Prose is not engine output, so whatever call was open is closed: the model
+            // talking is never something a shell command produced.
+            _block.CloseBlock();
+
             // Open a prose block that follows a tool line with one blank line. A line that is
             // itself blank needs no help, and would otherwise double the gap.
             bool blank = line.Trim('\r', '\n', ' ', '\t').Length == 0;
@@ -931,10 +956,31 @@ namespace DevMind
                 if (!blank) EnqueueSpan("\n", ResolveAttribute(OutputColor.Normal));
             }
 
-            if (_proseLeadPending && !blank)
+            // ask_caller's heading is an event wearing prose clothing: the run has stopped and
+            // is waiting for a person. It gets the question glyph, and the numbered questions
+            // that follow hang under it as the block's continuation.
+            if (!blank && TranscriptVocabulary.IsNeedsInputHeading(line))
             {
-                _proseLeadPending = false;
-                EnqueueSpan("◆ ", ResolveAttribute(OutputColor.Dim));
+                _inProseBlock = true;
+                EnqueueSpan(TranscriptVocabulary.NeedsInputLine + "\n", ResolveAttribute(OutputColor.Warning));
+                return;
+            }
+
+            // The model's own words lead with ◆ and hang under it. One diamond per block, not
+            // per line: a marker on every line is a bullet list, which says something the
+            // model did not. Blank lines inside the block do not end it — a two-paragraph
+            // answer is one thing the model said.
+            if (!blank)
+            {
+                if (!_inProseBlock)
+                {
+                    _inProseBlock = true;
+                    EnqueueSpan(ProseLead, ResolveAttribute(OutputColor.Dim));
+                }
+                else
+                {
+                    EnqueueSpan(ProseHangingIndent, ResolveAttribute(OutputColor.Normal));
+                }
             }
 
             string content = line.TrimEnd('\r');
@@ -980,6 +1026,8 @@ namespace DevMind
         {
             if (string.IsNullOrEmpty(code)) return;
             _lastWriteWasToolLine = false;
+            _inProseBlock = false;
+            _block.CloseBlock();
             var tokens = SyntaxHighlighter.Highlight(code, language);
             Terminal.Gui.Drawing.Color bg = _outputView.GetScheme().Normal.Background;
             foreach (var t in tokens)
@@ -1085,9 +1133,12 @@ namespace DevMind
             var progress = new SynchronousProgress<ShellOutputLine>(line =>
                 writer.Write(line.Line, line.IsError ? OutputColor.Error : OutputColor.Normal));
 
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            int exit = -1;
             try
             {
                 var (output, exitCode) = await _shellRunner.ExecuteAsync(command, CancellationToken, timeoutSeconds, progress);
+                exit = exitCode;
                 return (exitCode, output);
             }
             finally
@@ -1097,6 +1148,15 @@ namespace DevMind
                 // silently going missing.
                 writer.Flush();
                 Expansions.ParkOutput(writer.Hidden);
+
+                // The outcome comes last, because DevMind streams: unlike a runner that
+                // reports when it is done, the call line is already on screen with output
+                // behind it by the time the exit code exists, and rewriting a line that is no
+                // longer the document's tail is not something this transcript can do. So the
+                // verdict is its own line, nested with the output it concludes.
+                clock.Stop();
+                var (line, color) = ShellOutcome.Line(exit, clock.Elapsed);
+                AppendOutputLocal(line + "\n", color);
             }
         }
 
