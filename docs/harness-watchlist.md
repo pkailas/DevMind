@@ -92,5 +92,13 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 ## Model-behaviour notes (not harness defects)
 
 - **Theory before evidence when a test fails** (2026-09-23): job-1643 read xUnit's `···` display truncation as "the page is truncated"; job-1647 blamed "override not applied" instead of comparing test data to the production cutoff; job-1659 blamed a "stale build" for its own first-colon parser bug. Mitigation: evidence rule in `prompts/system-prompt.md`; brief it explicitly.
+- **Stale-build theory via UTF-8 DLL scan, again** (2026-09-24, job-1667): after its own assertion expected `selected>` instead of Razor's
+  `selected="selected"`, the agent grepped the test DLL as UTF-8 for its string literals, found none, and concluded the build was stale.
+  String literals live in the #US heap as UTF-16LE, so the scan is blind by construction (known since 2026-09-21). An override steer
+  ("dump the HTML slice, fix the regex") resolved it in 3 iterations. The evidence rule in prompts/system-prompt.md was committed but not
+  yet deployed; consider adding "DLL string literals are UTF-16 - never infer a stale build from a UTF-8 grep" to it.
+- **Also seen (2026-09-23/24):** `run_shell` cannot start long-lived processes (fakesap died when the command returned - job object kills
+  children); `devmind_task_start` with verify_build hits a locked TestHarness exe when a user runs fakesap - brief jobs to build the test
+  projects directly.
 - **Vacuous tests:** job-1659's page tests passed because the fake server was never used (no listeners -> no comparison). Briefs should require a test to fail before the fix.
 - **Razor-only `<text>` asserted in rendered HTML** (job-1652). Now in `Razor_PITFALLS.md` (RAG id 2700).
