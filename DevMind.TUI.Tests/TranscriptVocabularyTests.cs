@@ -81,6 +81,21 @@ namespace DevMind.TUI.Tests
         }
 
         [Fact]
+        public void AWriteThatNeedsCheckingReadsAsAWarning_WithNoInternalVocabulary()
+        {
+            // The composed end of the write path: WriteEcho builds the detail and the colour,
+            // and the translation turns the colour into the glyph. What the operator must
+            // never see is "[two-way fallback]", which is what the code calls the condition
+            // rather than what it means for them.
+            Assert.Equal("⚠ Write numbers.py (16 lines) (fuzzy merge — verify)",
+                Render("[FILE] Saved numbers.py (16 lines) (fuzzy merge — verify)", OutputColor.Warning));
+
+            Assert.Equal(@"⚠ Write C:\Windows\Temp\x.txt (2 lines) (outside working directory)",
+                Render(@"[FILE] Saved C:\Windows\Temp\x.txt (2 lines) (outside working directory)",
+                       OutputColor.Warning));
+        }
+
+        [Fact]
         public void ASteerIsItsOwnGesture()
         {
             // Neither an outcome nor a loop event: the turn was redirected while it ran.

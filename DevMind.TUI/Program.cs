@@ -2204,9 +2204,12 @@ static string LoadContextFile(string workingDirectory)
 
    static string BuildCombinedSystemPrompt(TuiOptions options, string devMindContext, string behavioralRules, string scratchpad = "")
     {
+        // The directive is reassembled per turn, so a /dir mid-session is reflected in the
+        // very next one — the model is told where it is now, not where it started.
         string llmDirective = LoopHelpers.BuildToolUsePrompt(
             buildCommand: ResolveBuildCommand(options),
-            projectNamespace: null);
+            projectNamespace: null,
+            workingDirectory: options.WorkingDirectory);
 
         // Precedence: an explicit --system-prompt beats the authored global file
         // (%APPDATA%\devmind\system-prompt.md), which beats options.SystemPrompt (the

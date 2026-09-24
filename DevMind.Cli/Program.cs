@@ -1,4 +1,4 @@
-// File: Program.cs  v1.3
+// File: Program.cs  v1.4
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -323,7 +323,8 @@ namespace DevMind
         {
             // projectNamespace is null in CLI context — no VS project loaded.
             string llmDirective = LoopHelpers.BuildToolUsePrompt(
-                buildCommand: ResolveBuildCommand(options), projectNamespace: null);
+                buildCommand: ResolveBuildCommand(options), projectNamespace: null,
+                workingDirectory: options.WorkingDirectory);
 
             // Precedence: an explicit --system-prompt beats the authored global file
             // (%APPDATA%\devmind\system-prompt.md), which beats options.SystemPrompt (the

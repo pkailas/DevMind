@@ -102,7 +102,8 @@ namespace DevMind.Core.Tests
         [Fact]
         public void SharedToolUsePrompt_AgreesWithTheAddendum()
         {
-            string prompt = LoopHelpers.BuildToolUsePrompt(buildCommand: "", projectNamespace: "");
+            string prompt = LoopHelpers.BuildToolUsePrompt(buildCommand: "", projectNamespace: "",
+                                                           workingDirectory: @"C:\work\repo");
 
             Assert.Contains("ask_caller is the valid way to stop, with your findings stated before the questions",
                 prompt, StringComparison.Ordinal);

@@ -1,4 +1,4 @@
-// File: MarkdownInlineRenderer.cs  v1.0
+// File: MarkdownInlineRenderer.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Pure inline-markdown renderer for one completed prose line. Input: the line's
@@ -50,6 +50,32 @@ namespace DevMind
 
     internal static class MarkdownInlineRenderer
     {
+        /// <summary>
+        /// Whether a line opens with a list marker — "- ", "* ", or "1. ".
+        /// <para>
+        /// The prose block's ◆ lead exists to mark where the model started talking. A line
+        /// that already opens with its own marker gets two for one line ("◆ - Use sum()"),
+        /// which reads as a nested bullet the model did not write. Such a line takes the
+        /// block's hanging indent instead and keeps the marker it chose.
+        /// </para>
+        /// </summary>
+        internal static bool IsListItem(string line)
+        {
+            if (string.IsNullOrEmpty(line)) return false;
+
+            string s = line.TrimStart();
+            if (s.Length < 2) return false;
+
+            if ((s[0] == '-' || s[0] == '*' || s[0] == '+') && s[1] == ' ') return true;
+
+            // "1. " / "12) " — an ordered item. A bare "1." with nothing after it is a
+            // sentence fragment, not a list.
+            int i = 0;
+            while (i < s.Length && char.IsDigit(s[i])) i++;
+            if (i == 0 || i > 3 || i + 1 >= s.Length) return false;
+            return (s[i] == '.' || s[i] == ')') && s[i + 1] == ' ';
+        }
+
         /// <summary>Render one completed prose line (without its trailing newline)
         /// into ordered runs with markers consumed.</summary>
         internal static List<InlineRun> Render(string line)

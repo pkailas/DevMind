@@ -1,4 +1,4 @@
-﻿// File: TuiAgenticHost.cs  v2.7
+﻿// File: TuiAgenticHost.cs  v2.8
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 implementation of IAgenticHost.
@@ -1068,13 +1068,19 @@ namespace DevMind
             // answer is one thing the model said.
             if (!blank)
             {
-                if (!_inProseBlock)
+                // A block that opens with the model's own list marker takes the hanging indent
+                // instead of the diamond: "◆ - Use sum()" is two markers for one line, and
+                // reads as a nested bullet nobody wrote.
+                bool opensWithMarker = !_inProseBlock && MarkdownInlineRenderer.IsListItem(line);
+
+                if (!_inProseBlock && !opensWithMarker)
                 {
                     _inProseBlock = true;
                     EnqueueSpan(ProseLead, ResolveAttribute(OutputColor.Dim));
                 }
                 else
                 {
+                    _inProseBlock = true;
                     EnqueueSpan(ProseHangingIndent, ResolveAttribute(OutputColor.Normal));
                 }
             }
@@ -1119,15 +1125,74 @@ namespace DevMind
         // keep strict arrival order and the whole block drains in the next flush rather than one
         // UI hop per token. Bypasses the quiet-transcript filter — this is real code, not churn.
         internal void AppendCode(string code, string language)
+            => AppendCode(code, language, nestUnderCall: false);
+
+        /// <summary>
+        /// Paint highlighted code.
+        /// </summary>
+        /// <param name="nestUnderCall">
+        /// True when this is a TOOL RESULT — the body of a file a Read call returned — so it
+        /// hangs under that call at the same four columns shell output does. False when the
+        /// MODEL wrote the fence in its own prose: that is not a tool result and belongs at
+        /// the prose block's own indent.
+        /// <para>
+        /// A parameter rather than a field because the two callers interleave — an answer
+        /// containing a fenced example can arrive in the same turn as a file listing, and a
+        /// flag set by whichever ran last would give one of them the other's indent.
+        /// </para>
+        /// </summary>
+        internal void AppendCode(string code, string language, bool nestUnderCall)
         {
             if (string.IsNullOrEmpty(code)) return;
             _lastWriteWasToolLine = false;
             _inProseBlock = false;
             _block.CloseBlock();
+
             var tokens = SyntaxHighlighter.Highlight(code, language);
             Terminal.Gui.Drawing.Color bg = _outputView.GetScheme().Normal.Background;
+
+            if (!nestUnderCall)
+            {
+                foreach (var t in tokens)
+                    EnqueueSpan(t.Text, new Terminal.Gui.Drawing.Attribute(SyntaxColor(t.Kind), bg));
+                return;
+            }
+
+            // The indent is prefixed at each line start rather than applied to the block,
+            // because the highlighter's tokens do not align with lines: a comment or a string
+            // can carry its own newline through the middle of one token.
+            string indent = new string(' ', TranscriptBlock.OutputIndent);
+            bool atLineStart = true;
+
             foreach (var t in tokens)
-                EnqueueSpan(t.Text, new Terminal.Gui.Drawing.Attribute(SyntaxColor(t.Kind), bg));
+            {
+                var attr = new Terminal.Gui.Drawing.Attribute(SyntaxColor(t.Kind), bg);
+                foreach (string piece in SplitKeepingNewlines(t.Text))
+                {
+                    bool isBreak = piece.Length == 1 && piece[0] == '\n';
+                    if (atLineStart && !isBreak)
+                    {
+                        EnqueueSpan(indent, ResolveAttribute(OutputColor.Normal));
+                        atLineStart = false;
+                    }
+                    EnqueueSpan(piece, attr);
+                    if (isBreak) atLineStart = true;
+                }
+            }
+        }
+
+        /// <summary>"a\nb" → "a", "\n", "b", so a line start can be recognised between them.</summary>
+        private static IEnumerable<string> SplitKeepingNewlines(string text)
+        {
+            int start = 0;
+            for (int i = 0; i < text.Length; i++)
+            {
+                if (text[i] != '\n') continue;
+                if (i > start) yield return text.Substring(start, i - start);
+                yield return "\n";
+                start = i + 1;
+            }
+            if (start < text.Length) yield return text.Substring(start);
         }
 
         // VS Code Dark+ palette, matching the reference screenshot.
@@ -1174,14 +1239,22 @@ namespace DevMind
             {
                 string[] lines = content.Replace("\r\n", "\n").Split('\n');
                 string head = string.Join("\n", lines, 0, MaxListingLines);
-                AppendCode(head + "\n", lang);
+                // A listing is what a Read call returned, so it hangs under it the way shell
+                // output hangs under a Shell call — the transcript had these two at different
+                // margins for no reason a reader could work out.
+                AppendCode(head + "\n", lang, nestUnderCall: true);
+                // Indented explicitly: painting the listing closed the call block, so the
+                // door will not nest this one, and a truncation notice hanging left of the
+                // text it truncates reads as a new event rather than as part of the listing.
                 AppendOutputLocal(
+                    new string(' ', TranscriptBlock.OutputIndent) +
                     $"… ({lineCount - MaxListingLines:N0} more lines — {lineCount:N0} total)\n",
                     OutputColor.Dim);
             }
             else
             {
-                AppendCode(content.EndsWith("\n", StringComparison.Ordinal) ? content : content + "\n", lang);
+                AppendCode(content.EndsWith("\n", StringComparison.Ordinal) ? content : content + "\n",
+                           lang, nestUnderCall: true);
             }
         }
 
@@ -1298,7 +1371,9 @@ namespace DevMind
                     File.WriteAllText(fullPath, fileContent);
                     _fileCache.Store(FileCacheKey(fullPath), fileContent);
                     int newFileLines = fileContent.Split('\n').Length;
-                    AppendOutputLocal($"[FILE] Saved {fileNameOnly} ({newFileLines} lines)\n", OutputColor.Success);
+                    var created = WriteEcho.Describe(fileNameOnly, fullPath, _shellRunner.WorkingDirectory,
+                                                     usedFallback: false, $"({newFileLines} lines)");
+                    AppendOutputLocal($"[FILE] Saved {created.Detail}\n", created.Color);
                     return fullPath;
                 }
 
@@ -1343,7 +1418,9 @@ namespace DevMind
                 File.WriteAllText(fullPath, finalContent);
                 _fileCache.Store(FileCacheKey(fullPath), finalContent);
                 int savedLines = finalContent.Split('\n').Length;
-                AppendOutputLocal($"[FILE] Saved {fileNameOnly} ({savedLines} lines){(merge.UsedFallback ? " [two-way fallback]" : "")}\n", OutputColor.Success);
+                var saved = WriteEcho.Describe(fileNameOnly, fullPath, _shellRunner.WorkingDirectory,
+                                               merge.UsedFallback, $"({savedLines} lines)");
+                AppendOutputLocal($"[FILE] Saved {saved.Detail}\n", saved.Color);
                 return fullPath;
             }
             catch (Exception ex)
@@ -1440,7 +1517,9 @@ namespace DevMind
 
                 File.WriteAllText(resolvedPath, merge.MergedText);
                 _fileCache.Store(FileCacheKey(resolvedPath), merge.MergedText);
-                AppendOutputLocal($"[APPEND] Appended to {fileNameOnly}{(merge.UsedFallback ? " [two-way fallback]" : "")}\n", OutputColor.Success);
+                var appended = WriteEcho.Describe(fileNameOnly, resolvedPath, _shellRunner.WorkingDirectory,
+                                                  merge.UsedFallback);
+                AppendOutputLocal($"[APPEND] Appended to {appended.Detail}\n", appended.Color);
                 return resolvedPath;
             }
             catch (Exception ex)
@@ -2325,8 +2404,9 @@ namespace DevMind
                 // safety net that is only ever pushed to, evicted from, and drained — nothing
                 // restores from it, and there is no operator command or tool that can. Naming a
                 // depth here told the model it held N reversals it had no way to spend.
-                AppendOutputLocal($"[PATCH] Applied to {resolved.FullPath}{(merge.UsedFallback ? " [two-way fallback]" : "")}\n",
-                    OutputColor.Success);
+                var patched = WriteEcho.Describe(resolved.FullPath, resolved.FullPath,
+                                                 _shellRunner.WorkingDirectory, merge.UsedFallback);
+                AppendOutputLocal($"[PATCH] Applied to {patched.Detail}\n", patched.Color);
 
                 // Show what changed, painted rather than printed
                 AppendDiff(resolved.OriginalContent, result.UpdatedContent, fileNameOnly);

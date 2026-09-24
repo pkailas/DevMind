@@ -1,4 +1,4 @@
-// File: LoopHelpers.cs  v1.1
+// File: LoopHelpers.cs  v1.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -428,9 +428,27 @@ namespace DevMind
         /// <summary>
         /// Builds the runtime tool-use section of the system prompt.
         /// </summary>
-        public static string BuildToolUsePrompt(string buildCommand, string projectNamespace)
+        public static string BuildToolUsePrompt(string buildCommand, string projectNamespace,
+                                                string workingDirectory)
         {
             var sb = new StringBuilder();
+
+            // Where it is. This has to come first, and it has to be here rather than left to
+            // the operator's phrasing, because the rest of this directive makes it load-
+            // bearing: Path Format demands that every file argument be ABSOLUTE, and the only
+            // absolute path the prompt named was the scratch output directory below. Told to
+            // work "in this folder", given no root and one anchor, a model does the reasonable
+            // thing and invents a subfolder under the anchor — writes land in
+            // <temp>\devmind\session1\, the next shell command runs in the real working
+            // directory and cannot find them, and the folder the operator was watching stays
+            // empty. Not a hallucination: a missing fact.
+            if (!string.IsNullOrWhiteSpace(workingDirectory))
+            {
+                sb.Append("## Working Directory\n");
+                sb.Append($"Working directory: {workingDirectory}\n");
+                sb.Append("Relative paths in every tool resolve against it; \"this folder\" means it.\n");
+                sb.Append("Shell commands run there. Write project files there unless told otherwise.\n\n");
+            }
 
             sb.Append("## Tool Catalog\n");
             sb.Append("Reach for the right tool for each step:\n");
@@ -465,6 +483,7 @@ namespace DevMind
             sb.Append("## Large Output & Reports\n");
             sb.Append("When you need to emit a large report, analysis, log, or scratch artifact that is NOT source code belonging in the project, write it with create_file under the dedicated output directory:\n");
             sb.Append($"  {BufferedAgenticHost.OutputDirectory}\n");
+            sb.Append("That directory is for SCRATCH ARTIFACTS, NOT the working tree: it is not where the task's own files go, and it is not a place to create subfolders to work in.\n");
             sb.Append("Never write such files into the working tree — they get committed as clutter. State the written path in your task_done summary so the operator can retrieve it.\n\n");
 
             sb.Append("## Build Verification\n");

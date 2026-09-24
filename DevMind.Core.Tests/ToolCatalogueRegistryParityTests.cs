@@ -61,7 +61,8 @@ public sealed class ToolCatalogueRegistryParityTests
 
     private static HashSet<string> AdvertisedTools()
         => AdvertisedToolsFromSection(ToolCatalogSection(
-            LoopHelpers.BuildToolUsePrompt(buildCommand: "", projectNamespace: "")));
+            LoopHelpers.BuildToolUsePrompt(buildCommand: "", projectNamespace: "",
+                                           workingDirectory: @"C:\work\repo")));
 
     [Fact]
     public void EveryToolNamedInPromptCatalogue_HasASchemaEntry()

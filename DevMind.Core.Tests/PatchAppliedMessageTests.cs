@@ -1,4 +1,4 @@
-// File: PatchAppliedMessageTests.cs  v1.0
+// File: PatchAppliedMessageTests.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Both agentic hosts used to tell the model, after every applied patch:
@@ -102,13 +102,26 @@ namespace DevMind.Core.Tests
             Assert.True(File.Exists(path), $"source not found: {path} — RepoRoot() resolved wrong, the guard is vacuous.");
 
             string[] lines = File.ReadAllLines(path);
-            string? emit = lines.FirstOrDefault(l => l.Contains("[PATCH] Applied to", StringComparison.Ordinal));
+            int at = Array.FindIndex(lines, l => l.Contains("[PATCH] Applied to", StringComparison.Ordinal));
 
-            Assert.True(emit != null, $"{relativePath} no longer emits a '[PATCH] Applied to' line at all.");
-            Assert.Contains(emitter + "(", emit!, StringComparison.Ordinal);
-            Assert.Contains("{resolved.FullPath}", emit!, StringComparison.Ordinal);
-            Assert.Contains("[two-way fallback]", emit!, StringComparison.Ordinal);
-            Assert.DoesNotContain("undo depth", emit!, StringComparison.OrdinalIgnoreCase);
+            Assert.True(at >= 0, $"{relativePath} no longer emits a '[PATCH] Applied to' line at all.");
+            string emit = lines[at];
+
+            // The path and the fallback badge used to be interpolated on this one line. In the
+            // TUI they are now composed a few lines above it — WriteEcho decides whether the
+            // short name would mislead and what the fallback means in words — so the statement
+            // this guard makes is about the EMIT, which is a small region rather than a line.
+            // The intent is unchanged: the message still names the file it patched, still says
+            // when the merge could not be verified, and still claims no undo.
+            string region = string.Join("\n", lines.Skip(Math.Max(0, at - 3)).Take(4));
+
+            Assert.Contains(emitter + "(", emit, StringComparison.Ordinal);
+            Assert.Contains("resolved.FullPath", region, StringComparison.Ordinal);
+            Assert.True(
+                region.Contains("[two-way fallback]", StringComparison.Ordinal) ||
+                region.Contains("UsedFallback", StringComparison.Ordinal),
+                $"{relativePath}'s applied-patch message no longer signals a fallback merge.");
+            Assert.DoesNotContain("undo depth", region, StringComparison.OrdinalIgnoreCase);
         }
 
         [Fact]

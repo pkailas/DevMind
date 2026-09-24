@@ -24,7 +24,9 @@ namespace DevMind.Core.Tests
 {
     public sealed class EditingWorkflowPromptTests
     {
-        private static string Prompt() => LoopHelpers.BuildToolUsePrompt("dotnet build", projectNamespace: null);
+        private static string Prompt() =>
+            LoopHelpers.BuildToolUsePrompt("dotnet build", projectNamespace: null,
+                                           workingDirectory: @"C:\work\repo");
 
         private static string Section(string prompt, string header)
         {

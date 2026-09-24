@@ -1,4 +1,4 @@
-// File: HeadlessAgent.cs  v2.5
+// File: HeadlessAgent.cs  v2.6
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Headless agentic runner — the engine behind DevMind.McpServer's devmind_task_*
@@ -680,7 +680,8 @@ namespace DevMind
 
         private string BuildSystemPrompt()
         {
-            string llmDirective = LoopHelpers.BuildToolUsePrompt(_resolvedBuildCommand, projectNamespace: null);
+            string llmDirective = LoopHelpers.BuildToolUsePrompt(
+                _resolvedBuildCommand, projectNamespace: null, workingDirectory: _workingDirectory);
             // The global system-prompt file (%APPDATA%\devmind\system-prompt.md) replaces
             // options.SystemPrompt when present. Absence is normal — fall back to
             // options.SystemPrompt unchanged. There is no explicit-prompt tier here, unlike

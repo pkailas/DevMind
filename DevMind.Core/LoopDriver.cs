@@ -1,4 +1,4 @@
-// File: LoopDriver.cs  v1.0
+// File: LoopDriver.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -483,7 +483,13 @@ namespace DevMind
             {
                 // No-tool-calls path: model answered in prose or called task_done inline.
                 if (outcome.IsDone)
-                    _agenticHost.AppendOutput("Task complete.\n", OutputColor.Success);
+                {
+                    // Tagged, like the tool-call path above. Untagged it reached the TUI as
+                    // prose, so a run that finished by calling task_done inline ended with a
+                    // bare sentence where the other path ends with a marked event — two
+                    // endings that are the same thing and did not look like it.
+                    _agenticHost.AppendOutput("[AGENTIC] Task complete.\n", OutputColor.Success);
+                }
 
                 string trimmedResponse = assistantResponse?.Trim() ?? "";
                 bool insideAgenticCycle = _state.AgenticDepth > 0 || _state.ShellLoopPending;
