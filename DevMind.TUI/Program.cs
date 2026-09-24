@@ -1,4 +1,4 @@
-﻿// File: Program.cs  v3.7
+﻿// File: Program.cs  v3.8
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 TUI for DevMind.
@@ -145,8 +145,62 @@ namespace DevMind
             }
         }
         /// <summary>
+        /// Draw a restored conversation into the transcript.
+        /// <para>
+        /// Display only. Nothing is re-saved, the turn clock does not move, and
+        /// <c>_turnsSaved</c> is untouched — the model's history is exactly what the prepend
+        /// built, and this is the same pairs made visible. Questions go through the echo the
+        /// input loop uses and answers through the answer path, so the replay renders with the
+        /// markdown, tables and ◆ lead a live turn would have had: it should be impossible to
+        /// tell a replayed exchange from the one you watched arrive.
+        /// </para>
+        /// </summary>
+        static void ReplayResumed(TuiAgenticHost host, string[] roles, string[] contents)
+        {
+            IReadOnlyList<ReplayStep> plan = ResumeReplay.Plan(roles, contents);
+            if (plan.Count == 0) return;
+
+            foreach (ReplayStep step in plan)
+            {
+                switch (step.Kind)
+                {
+                    case ReplayKind.User:
+                        host.AppendOutputLocal($"\n> {step.Text}\n", OutputColor.Input);
+                        break;
+
+                    case ReplayKind.Answer:
+                        host.AppendAnswer(step.Text);
+                        break;
+
+                    default:
+                        // Everything above is drawn by the same code a live turn uses, so
+                        // without this the operator cannot tell what they are adding to from
+                        // what they are looking back at.
+                        host.AppendOutputLocal("\n" + step.Text + "\n\n", OutputColor.Dim);
+                        break;
+                }
+            }
+        }
+
+        /// <summary>
+        /// What a launch-time resume produced: the lines to print, and the pairs that were
+        /// handed to the model. They travel together so the replay cannot be assembled from a
+        /// second, differently-filtered read — a transcript that disagreed with the context
+        /// behind it would be worse than the blank pane it replaced.
+        /// </summary>
+        sealed class ResumeOutcome
+        {
+            public List<(string Text, OutputColor Color)> Report { get; } =
+                new List<(string, OutputColor)>();
+
+            public string[] Roles { get; set; }
+            public string[] Contents { get; set; }
+        }
+
+        /// <summary>
         /// Resolve <c>--resume &lt;id&gt;</c> / <c>--continue</c> at launch: adopt the session id,
-        /// load its conversation, and prepend it. Returns the lines to print with the banner.
+        /// load its conversation, and prepend it. Returns the lines to print with the banner and
+        /// the pairs the model was given, for the replay.
         /// </summary>
         /// <remarks>
         /// <para>
@@ -161,19 +215,20 @@ namespace DevMind
         /// and the first turn can resolve a different one.
         /// </para>
         /// </remarks>
-        static List<(string Text, OutputColor Color)> ResolveResumeAtLaunch(
+        static ResumeOutcome ResolveResumeAtLaunch(
             TuiOptions options, IHistoryStore historyStore, LlmClient llmClient)
         {
-            var report = new List<(string, OutputColor)>();
+            var outcome = new ResumeOutcome();
+            var report = outcome.Report;
             bool wantsResume = !string.IsNullOrWhiteSpace(options.ResumeSessionId);
 
-            if (!wantsResume && !options.ContinueLatest) return report;
+            if (!wantsResume && !options.ContinueLatest) return outcome;
 
             if (wantsResume && options.ContinueLatest)
             {
                 report.Add(("[RESUME] --resume and --continue both given; they name different " +
                             "sessions. Starting a fresh session.\n", OutputColor.Error));
-                return report;
+                return outcome;
             }
 
             if (historyStore is NullHistoryStore)
@@ -181,7 +236,7 @@ namespace DevMind
                 report.Add(("[RESUME] History is not enabled, so there is nothing to resume " +
                             "(set DEVMIND_HISTORY_ENABLED and a provider). Starting a fresh session.\n",
                             OutputColor.Warning));
-                return report;
+                return outcome;
             }
 
             try
@@ -201,7 +256,7 @@ namespace DevMind
                     {
                         report.Add(("[RESUME] No past sessions on this machine. Starting a fresh session.\n",
                                     OutputColor.Warning));
-                        return report;
+                        return outcome;
                     }
 
                     report.Add(($"[RESUME] No session \"{targetId}\" on this machine. Starting a fresh session.\n",
@@ -211,7 +266,7 @@ namespace DevMind
                     int show = Math.Min(3, sessions.Length);
                     for (int i = 0; i < show; i++)
                         report.Add(($"          most recent: {sessions[i].SessionId}\n", OutputColor.Dim));
-                    return report;
+                    return outcome;
                 }
 
                 SessionId.Adopt(target.SessionId);
@@ -227,21 +282,26 @@ namespace DevMind
                     report.Add(($"[RESUME] {title} — {target.SessionId}: nothing to load " +
                                 $"({messages.Length} rows, {skipped} skipped). New turns still append to it.\n",
                                 OutputColor.Warning));
-                    return report;
+                    return outcome;
                 }
 
                 llmClient.PrependMessages(roles, contents);
 
+                // The same arrays, kept for the replay. Not a copy and not a re-read: what is
+                // drawn is exactly what the model was told.
+                outcome.Roles = roles;
+                outcome.Contents = contents;
+
                 report.Add(($"[RESUME] {title} — {target.SessionId} " +
                             $"({roles.Length} messages loaded, {skipped} skipped)\n", OutputColor.Success));
                 report.Add(($"          {SessionResume.ToolStateCaveat}\n", OutputColor.Dim));
-                return report;
+                return outcome;
             }
             catch (Exception ex)
             {
                 report.Add(($"[RESUME] Could not reach the history store: {ex.Message} " +
                             "Starting a fresh session.\n", OutputColor.Error));
-                return report;
+                return outcome;
             }
         }
 
@@ -292,7 +352,7 @@ namespace DevMind
             // two — which is the fork this feature exists to remove. Every failure is
             // reported and falls through to a fresh session; the lines are held and printed
             // with the banner, since there is no transcript to write to yet.
-            List<(string Text, OutputColor Color)> resumeReport = ResolveResumeAtLaunch(options, historyStore, llmClient);
+            ResumeOutcome resumed = ResolveResumeAtLaunch(options, historyStore, llmClient);
 
             var cts = new CancellationTokenSource();
 
@@ -583,10 +643,14 @@ namespace DevMind
             host.AppendOutputLocal($"{TuiAgenticHost.ScrollbackCapDescription}\n", OutputColor.Dim);
 
             // What --resume / --continue did, or why it did nothing.
-            foreach (var (text, color) in resumeReport)
+            foreach (var (text, color) in resumed.Report)
                 host.AppendOutputLocal(text, color);
 
             host.AppendOutputLocal("\n", OutputColor.Dim);
+
+            // …and then the conversation itself, so the operator can see what the model now
+            // knows rather than having to ask it.
+            ReplayResumed(host, resumed.Roles, resumed.Contents);
 
             // Focus the input field. Setting focus before the loop runs is unreliable in
             // Terminal.Gui v2 (layout/focus is resolved during app.Run), so also re-assert it
@@ -1435,6 +1499,7 @@ namespace DevMind
                         SessionId = SessionId.Get(),
                         MachineName = SessionId.GetMachineName(),
                        PrependMessages = (roles, contents) => llmClient.PrependMessages(roles, contents),
+                        ReplayTranscript = (roles, contents) => ReplayResumed(host, roles, contents),
                         // Nearline cache (for the /cache command).
                         NearlineCache = llmClient.NearlineCache,
                         // Multimodal: /image stages an image on the client; the next

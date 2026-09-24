@@ -1,4 +1,4 @@
-﻿// File: SlashCommand.cs  v1.5
+﻿// File: SlashCommand.cs  v1.6
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Slash-command registry and dispatcher for DevMind.TUI.
@@ -98,6 +98,15 @@ namespace DevMind
 
        /// <summary>Prepend messages into the conversation history (for /resume).</summary>
         public Action<string[], string[]> PrependMessages { get; set; }
+
+        /// <summary>
+        /// Draw those same messages into the transcript. Separate from
+        /// <see cref="PrependMessages"/> because they answer to different people — one tells
+        /// the model what happened, the other tells the operator — but they are always given
+        /// the same pairs, so the screen cannot disagree with the context behind it. Null in a
+        /// host with no transcript.
+        /// </summary>
+        public Action<string[], string[]> ReplayTranscript { get; set; }
 
        /// <summary>Set to true by /t to enable one-shot thinking for the next turn only.</summary>
         public bool OneShotThinking { get; set; }
@@ -1451,6 +1460,7 @@ namespace DevMind
                 }
 
                 ctx.PrependMessages(roles, contents);
+                ctx.ReplayTranscript?.Invoke(roles, contents);
 
                 string title = string.IsNullOrEmpty(session.Title) ? "(untitled)" : session.Title;
                 return new CommandResult
