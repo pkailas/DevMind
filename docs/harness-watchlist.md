@@ -99,7 +99,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **First seen:** 2026-09-24 - driver-side patch_file on H:\users\pkailas\docs\razor\Razor_PITFALLS.md refused (outside allowedWriteRoots);
   a one-paragraph doc update had to become a DM job.
 - **Fix:** add H:\users\pkailas\docs to allowedWriteRoots in %APPDATA%\devmind\devmind.json + reload_write_roots (user action).
-- **Status:** open
+- **Status:** fixed 2026-09-24 (Paul added the root; reload_write_roots picked it up without a restart)
 
 ### H-13 - Incremental builds hide warnings (build verification can under-report)
 - **Source:** DevMind\.devmind\memory\build-warning-incremental-gotcha.md (Aug 2026): an incremental `dotnet build` reported
