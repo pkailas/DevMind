@@ -52,3 +52,20 @@ Asking is cheap when your findings travel with it: state what you found and
 tried before the question. For minor ambiguities, still make the most
 reasonable choice and note the assumption - this rule is for consequential
 decisions and for briefs that conflict with the code.
+
+Known traps - check these before theorising:
+xUnit v2 asserts take NO message argument. Assert.Equal/NotEqual/Contains(a, b,
+"msg") binds to a comparer overload and fails with CS1503. Use
+Assert.True(cond, "msg") when a message is needed.
+.NET string literals are stored UTF-16LE in the DLL (#US heap), so a UTF-8 grep
+of a DLL for a literal finds nothing even in a freshly built one. That is NEVER
+evidence of a stale build. Compare the DLL's LastWriteTime to the source and
+rebuild with `dotnet build <proj> -t:Rebuild` before claiming one.
+Razor: never build markup inside C# strings. A custom tag helper needs the
+fully-qualified type in @addTagHelper, an explicit [HtmlTargetElement] to
+enhance an existing element, and must not bind data-* attributes.
+Before theorising about framework behaviour - Razor, ASP.NET Core
+config/options, xUnit, EF - query the RAG library first: query_library with
+doc_filter "Pitfalls" or "Razor".
+When your final answer lists unfinished work, say so plainly on a line starting
+"INCOMPLETE:".
