@@ -90,13 +90,64 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   1660, 1667 where "stale build" was a misdiagnosis - here the agent had evidence: old DLL size/timestamp in the test bin.)
 - **Suspect:** `run_tests` invokes `dotnet test --no-build` (or builds only the test project incrementally without refreshing references).
 - **Proposed fix:** `run_tests` builds the test project (not --no-build) or accepts a flag; report which DLL versions were loaded.
-- **Status:** open (needs confirmation by reading the tool)
+- **Earlier evidence (found 2026-09-24 in DevMind\.devmind\memory\stale-dll-incremental-test-run.md, 2026-09-21):** during a
+  mutation test of the patch_file fix, run_tests reported 10/10 passing against a DLL older than the source; a forced
+  `dotnet build -t:Rebuild` then showed the real result. So this is confirmed twice, not a one-off.
+- **Status:** open
 
 ### H-12 - Write roots don't include the docs repository
 - **First seen:** 2026-09-24 - driver-side patch_file on H:\users\pkailas\docs\razor\Razor_PITFALLS.md refused (outside allowedWriteRoots);
   a one-paragraph doc update had to become a DM job.
 - **Fix:** add H:\users\pkailas\docs to allowedWriteRoots in %APPDATA%\devmind\devmind.json + reload_write_roots (user action).
 - **Status:** open
+
+### H-13 - Incremental builds hide warnings (build verification can under-report)
+- **Source:** DevMind\.devmind\memory\build-warning-incremental-gotcha.md (Aug 2026): an incremental `dotnet build` reported
+  "0 Warning(s)" while a `--no-incremental` rebuild showed 45 pre-existing warnings (up-to-date projects are not recompiled).
+- **Proposed fix:** build_verification uses a full rebuild (or at least reports that the count is incremental). Already listed in the
+  parked tool audit ("build_verification -> .slnx detection + full-rebuild warning counts").
+- **Status:** open
+
+### H-14 - create_file reports success for a path outside the working directory but writes nothing
+- **Source:** DevMind\.devmind\memory\tooling-path-gotchas.md: `create_file` to an absolute path outside the working dir (e.g. %TEMP%)
+  printed "[File created]" and did not write the file. Silent false success.
+- **Proposed fix:** refuse with the same "outside allowed write roots" error the MCP tools give, never report success.
+- **Status:** open (re-verify - may have been fixed when write-root checks were unified)
+
+### H-15 - run_shell mangles unquoted Windows paths
+- **Source:** tooling-path-gotchas.md: `$x = C:\...` (unquoted) gets rewritten into a command invocation. Quote paths.
+- **Proposed fix:** don't rewrite inside assignments; or document in the run_shell tool description.
+- **Status:** open (re-verify)
+
+### H-16 - patch_file: batch is all-or-nothing, very short FIND lines fail, and recall of a read handle is stale after a patch
+- **Source:** Verbella.VLink.Desktop\.devmind\memory\patch-file-failures.md (2026-09-01):
+  - a multi-edit batch fails entirely ("Resolve failed") if any one edit can't be resolved;
+  - a one-word FIND (`End` in VB) failed although it matched byte-for-byte (grep + hex dump) - suspected ambiguity after whitespace
+    normalisation; the agent fell back to rewriting the line by index from PowerShell;
+  - `recall_cache` on an `nl-` handle returns the ORIGINAL read, not the post-patch file.
+- **Proposed fix:** report which edit in the batch failed and why (not found / ambiguous with N matches); reject ambiguous single-token
+  FINDs with a clear message; invalidate/refresh read handles after a patch. Related: H-04 (misplaced anchor), Sep 1 near-duplicate thrash.
+- **Status:** open
+
+### H-17 - patch_file/create_file corrupt quote-heavy content (non-deterministic)
+- **Source:** DevMind\.devmind\memory\patch-file-quote-corruption.md: C# `'\''`, SQL `''''` and Python `\'` sequences sometimes land
+  with a dropped backslash or a wrong quote count; the same patch sometimes lands correctly. Workaround used: quote-free fixer scripts
+  (`chr(39)`) and repr()-based verification.
+- **Proposed fix:** find where the tool layer unescapes/normalises content (JSON decode -> string -> file) and make it byte-exact; add a
+  round-trip test with quote-heavy fixtures.
+- **Status:** open (re-verify against current build)
+
+### H-18 - Older findings from DevMindTestBed\harness-findings.md (Aug 14, QuantEval runs) - status unknown, re-verify
+- **working_dir changes path resolution non-deterministically:** with working_dir = a subfolder, brief paths relative to the repo root
+  were found in one run and "not found" (then asserted nonexistent) in others (jobs 469-471). Fix idea: resolve against the repo root or
+  fail loudly with the resolved path.
+- **A successful run/exec command was treated as task completion** (job-474: "[AGENTIC] Run/exec command succeeded - treating as task
+  complete" after a scratch program ran; the required output was never produced). Likely fixed since (not seen in September jobs) -
+  confirm the rule is gone.
+- **list_files globs return bin/ and obj/** (job-473). Also in the parked tool audit.
+- **Trailing questions end as `done`, not `needs_input`** (jobs 466, 468, 473) - no continuation handle. Same family as H-01.
+- **Write guard auto-approves in headless mode** ("was not read during this task - auto-approved (headless)") - the guard is advisory
+  only under MCP delegation. Decide whether that is intended.
 
 ## Parked
 
