@@ -22,6 +22,8 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   restarted by deploy.ps1 (old AgentJobManager still loaded), or the classifier reads a different text than the final answer (e.g. the
   task_done summary argument vs the transcript), or its line-start match misses "- INCOMPLETE:" (markdown bullet prefix). Check in that
   order: the server's loaded assembly version/timestamp, the text the classifier receives, the bullet prefix.
+  Checked: both DevMind.McpServer processes (dist\mcp) started 16:25:30, i.e. after the deploy - so the new code IS loaded. Remaining
+  suspects: the text the classifier receives, and the "- INCOMPLETE:" bullet prefix (job-1674's lines all start with "- ").
   **Status: fix NOT effective yet.**
 - Also job-1674: a shell write re-saved a test file as UTF-16 (NUL bytes) - PowerShell 5.1 Out-File/Set-Content default; one more
   reason to block file content through run_shell (H-07).
