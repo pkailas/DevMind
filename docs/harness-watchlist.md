@@ -15,6 +15,8 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   code reported a match, job still `done`), job-1668 (final message: "no test run was performed ... red run NOT demonstrated ... resume by
   fixing the 7 CS1503" - test project did not compile - yet `state: done`, `incomplete_reasons: null`). Jobs were run with
   `verify_build: false` (the TestHarness exe is locked by a user-run fakesap), so the harness had no build signal of its own either.
+  job-1670 (LT-04): final message "The core defect is NOT fixed ... the caller must not report LT-04 as fixed ... full test suites NOT
+  run" - still `state: done`. Five occurrences in two days; this is the highest-value harness fix on the list.
 - **Symptom:** the agent's final message lists brief steps under "NOT DONE / caller must finish" (or says a fix is "not verified"), yet the job ends `state: done`, `incomplete_reasons: null`.
 - **Why it matters:** the driver has to read every final message to catch it; `done` is supposed to mean trustworthy-as-is.
 - **Proposed fix:** scan the final answer for explicit incompleteness markers ("NOT DONE", "not verified", "caller must", "did not run", "hit the iteration cap") and set `stopped_incomplete` with reason `self_reported_incomplete`, keeping the text.
@@ -81,6 +83,21 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 
 ---
 
+### H-11 - `run_tests` can run against stale referenced-project DLLs
+- **First seen:** 2026-09-24 - job-1669 (LT-05)
+- **Symptom:** after a fix in Core, a `run_tests` invocation on Core.Tests reproduced the pre-fix failure; the agent inspected the test
+  bin and found the old Core.dll. An explicit `dotnet build <test project>` refreshed it and the tests passed. (Contrast with jobs 1659,
+  1660, 1667 where "stale build" was a misdiagnosis - here the agent had evidence: old DLL size/timestamp in the test bin.)
+- **Suspect:** `run_tests` invokes `dotnet test --no-build` (or builds only the test project incrementally without refreshing references).
+- **Proposed fix:** `run_tests` builds the test project (not --no-build) or accepts a flag; report which DLL versions were loaded.
+- **Status:** open (needs confirmation by reading the tool)
+
+### H-12 - Write roots don't include the docs repository
+- **First seen:** 2026-09-24 - driver-side patch_file on H:\users\pkailas\docs\razor\Razor_PITFALLS.md refused (outside allowedWriteRoots);
+  a one-paragraph doc update had to become a DM job.
+- **Fix:** add H:\users\pkailas\docs to allowedWriteRoots in %APPDATA%\devmind\devmind.json + reload_write_roots (user action).
+- **Status:** open
+
 ## Parked
 
 ### P-01 - No-write-streak nudge
@@ -110,5 +127,11 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Also seen (2026-09-23/24):** `run_shell` cannot start long-lived processes (fakesap died when the command returned - job object kills
   children); `devmind_task_start` with verify_build hits a locked TestHarness exe when a user runs fakesap - brief jobs to build the test
   projects directly.
+- **Test-helper bugs mistaken for product bugs** (2026-09-24, job-1670): a non-verbatim interpolated string with doubled quotes
+  (`$"title=\"\"{x}\"\""`) produced a regex that could never match; the failure message itself printed the correct element. Agents should
+  read their own assertion's pattern when the "actual" in the message looks right.
+- **Razor tag-helper registration rules unknown to the model** (job-1670): bare class name in @addTagHelper, missing HtmlTargetElement,
+  `data-*` attribute binding - now in Razor_PITFALLS.md (RAG, doc_filter "Razor"). The agent did not query the RAG library during the job
+  even though the brief pointed at the Razor docs; consider nudging `library_query` when a build/runtime question matches an ingested topic.
 - **Vacuous tests:** job-1659's page tests passed because the fake server was never used (no listeners -> no comparison). Briefs should require a test to fail before the fix.
 - **Razor-only `<text>` asserted in rendered HTML** (job-1652). Now in `Razor_PITFALLS.md` (RAG id 2700).
