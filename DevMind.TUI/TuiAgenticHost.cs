@@ -1,4 +1,4 @@
-﻿// File: TuiAgenticHost.cs  v2.9
+﻿// File: TuiAgenticHost.cs  v3.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 implementation of IAgenticHost.
@@ -1028,7 +1028,11 @@ namespace DevMind
             try { width = _outputView.Viewport.Width; }
             catch { width = 0; }
 
-            if (width <= 0) width = PipeTable.FallbackWidth;
+            int consoleWidth;
+            try { consoleWidth = Console.WindowWidth; }
+            catch { consoleWidth = 0; }
+
+            width = PipeTable.ResolveWidth(width, consoleWidth);
 
             return Math.Max(PipeTable.MinColumnWidth * 2,
                             width - ProseHangingIndent.Length - 1);

@@ -1,4 +1,4 @@
-// File: PipeTable.cs  v1.1
+// File: PipeTable.cs  v1.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Laying out a GFM pipe table as columns.
@@ -128,8 +128,22 @@ namespace DevMind
         /// <summary>Narrowest a column is ever squeezed to. Below this, wrapping is shredding.</summary>
         public const int MinColumnWidth = 3;
 
-        /// <summary>Assumed width before the view can report one (pre-init, or a zero frame).</summary>
+        /// <summary>Assumed width when neither the view nor the console can report one.</summary>
         public const int FallbackWidth = 100;
+
+        /// <summary>
+        /// The width to lay out against when the view has none yet: the console's own width,
+        /// which is known before Terminal.Gui has laid anything out, and the constant only
+        /// when that is unknown too. A table drawn before the first layout used to fit to
+        /// 100 columns in a 200-column window — a resumed conversation replays before the
+        /// view has a size, so every table in it wrapped at half the screen.
+        /// </summary>
+        public static int ResolveWidth(int viewWidth, int consoleWidth)
+        {
+            if (viewWidth > 0) return viewWidth;
+            if (consoleWidth > 0) return consoleWidth;
+            return FallbackWidth;
+        }
 
         private const string CellSeparator = " ";   // padding either side of the vertical rule
 

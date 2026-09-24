@@ -1,4 +1,4 @@
-﻿// File: Program.cs  v3.8
+﻿// File: Program.cs  v3.9
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 TUI for DevMind.
@@ -649,8 +649,13 @@ namespace DevMind
             host.AppendOutputLocal("\n", OutputColor.Dim);
 
             // …and then the conversation itself, so the operator can see what the model now
-            // knows rather than having to ask it.
-            ReplayResumed(host, resumed.Roles, resumed.Contents);
+            // knows rather than having to ask it. Deferred to the main loop: drawn here, before
+            // the window has been laid out, the output view reports no width and every table
+            // and wrapped line in the replay fits itself to the fallback instead of the screen.
+            // Queued from Initialized so it still lands before the first keystroke is handled.
+            if (resumed.Roles != null)
+                window.Initialized += (s, e) =>
+                    app.Invoke(() => ReplayResumed(host, resumed.Roles, resumed.Contents));
 
             // Focus the input field. Setting focus before the loop runs is unreliable in
             // Terminal.Gui v2 (layout/focus is resolved during app.Run), so also re-assert it
