@@ -1,4 +1,4 @@
-﻿// File: TuiAgenticHost.cs  v3.0
+﻿// File: TuiAgenticHost.cs  v3.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 implementation of IAgenticHost.
@@ -253,6 +253,11 @@ namespace DevMind
             _pendingBreaks.Reset();
             DrainPatchBackups();
             Expansions.Clear();
+
+            // The retained source goes with the session. Without this a /new would keep
+            // re-rendering the previous conversation on every resize.
+            _model.Clear(); _droppedSinceRender = 0;
+            Renderer.Reset();
         }
 
         /// <summary>
@@ -282,46 +287,297 @@ namespace DevMind
             // KEPT. Swallow only the churn here unless verbose output is enabled.
             if (IsSuppressedNoise(text)) return;
 
-            // Translate the engine's tags into this transcript's own vocabulary — glyph,
-            // label, and output nested under the call that produced it. This is the only
-            // door tool lines arrive through, which is why the translation happens here and
-            // not at forty emit sites; the tags themselves are untouched, and every other
-            // reader of them (the CLI, the headless transcript) still sees exactly what it
-            // saw before.
-            foreach (TranscriptLine line in _block.Accept(text, color))
-                EnqueueSpan(line.Text, ResolveAttribute(line.Color));
-
-            _lastWriteWasToolLine = true;
-            _inProseBlock = false;
+            // Retained, then drawn. Every emitter below is now "record the call, render the
+            // one entry" — so the live path and a rebuild at a new width are the same code
+            // given one entry or all of them, and cannot drift apart at a width nobody tried.
+            Record(TranscriptEntry.Output(text, color));
         }
 
-        // The block state — whether output is currently nesting under a call. Verbose is
-        // resolved once, with the suppression filter, because both answer the same question:
-        // is this transcript showing the engine raw.
-        private readonly TranscriptBlock _block = new TranscriptBlock(TranscriptNoise.Verbose);
+        // ── The retained transcript ───────────────────────────────────────────────
 
-        // Prose rhythm: a tool line and the model's next sentence are different kinds of
-        // utterance, and run together with no gap they read as one paragraph — the single
-        // biggest reason DevMind's transcript looks like a log where Qwen Code's looks like a
-        // conversation. One blank line separates them. It is inserted at the boundary, because
-        // this is the only place that knows what came immediately before the prose.
-        private volatile bool _lastWriteWasToolLine;
+        private readonly TranscriptModel _model = new TranscriptModel();
 
-        // Qwen's ◆ lead on the first prose line after a collapsed thought, so a response
-        // reads as thought → decision → tools rather than as one undifferentiated column.
-        // Only the first line of the block gets it: a marker on every line is a bullet list,
-        // which says something the model did not.
-        private volatile bool _inProseBlock;
+        /// <summary>
+        /// Keep an entry and draw it. The trim is the model's now: the document is a
+        /// projection of what survives, so bounding the source bounds the document.
+        /// </summary>
+        private void Record(TranscriptEntry entry)
+        {
+            _model.Append(entry);
+            int dropped = _model.Trim(MaxDocChars, KeepDocChars);
+            if (dropped > 0)
+            {
+                // The oldest entries went; what is painted no longer matches the model, and
+                // only a rebuild can make it match again. Outside a turn that is now, on the
+                // UI thread; inside one it waits for the turn, like a resize does.
+                _droppedSinceRender += dropped;
+                ScheduleRebuild();
+                return;
+            }
+
+            Renderer.Render(entry);
+        }
+
+        // Entries dropped from the front of the model since the document was last rendered
+        // from it. The scroll anchor is an index into the rendered list, so it shifts by this.
+        private int _droppedSinceRender;
+
+        /// <summary>A rebuild, now if the transcript is quiet, at turn end if it is not.</summary>
+        private void ScheduleRebuild()
+        {
+            if (_isStreaming) { RequestRebuild(); return; }
+            InvokeOnUi(RebuildFromModel);
+        }
+
+        /// <summary>
+        /// Run on the UI thread. The document, the spans and the viewport belong to it; the
+        /// callers of this are the pump (already there), the turn loop (a worker) and the
+        /// emitters (whichever thread the engine is on), so the rebuild itself never assumes.
+        /// </summary>
+        private void InvokeOnUi(Action action)
+        {
+            IApplication app = _outputView.App;
+            if (app == null) action(); else app.Invoke(action);
+        }
 
         /// <summary>The diamond, and the hanging indent that lines the block up underneath it.</summary>
-        public const string ProseLead = "◆ ";
-        public const string ProseHangingIndent = "  ";
+        public const string ProseLead = TranscriptRenderer.ProseLead;
+        public const string ProseHangingIndent = TranscriptRenderer.ProseHangingIndent;
 
         /// <summary>
         /// The model has finished reasoning: the prose that follows is its decision, and so
-        /// starts its own block — which is what earns it the diamond.
+        /// starts its own block — which is what earns it the diamond. A blank Prose entry is
+        /// how that reaches the renderer AND the model, so a rebuild puts the diamond back in
+        /// the same place.
         /// </summary>
-        public void MarkThoughtBoundary() => _inProseBlock = false;
+        public void MarkThoughtBoundary() => Record(TranscriptEntry.Prose("\n"));
+
+        // ── The renderer ──────────────────────────────────────────────────────────
+
+        private TranscriptRenderer _renderer;
+
+        /// <summary>
+        /// The one thing that draws a transcript entry, live or on a rebuild. Built lazily
+        /// because it closes over the view's scheme, which is not set until the window is.
+        /// </summary>
+        private TranscriptRenderer Renderer =>
+            _renderer ??= new TranscriptRenderer(
+                sink:        EnqueueSpan,
+                width:       AvailableProseWidth,
+                resolve:     ResolveAttribute,
+                prose:       style => ProseAttribute(style, ViewBackground),
+                syntax:      kind => new Terminal.Gui.Drawing.Attribute(SyntaxColor(kind), ViewBackground),
+                diffPalette: BuildDiffPalette,
+                verbose:     TranscriptNoise.Verbose);
+
+        private Terminal.Gui.Drawing.Color ViewBackground
+        {
+            get
+            {
+                try { return _outputView.GetScheme().Normal.Background; }
+                catch { return new Terminal.Gui.Drawing.Color(0, 0, 0); }
+            }
+        }
+
+        private DiffPalette BuildDiffPalette() => new DiffPalette
+        {
+            Foreground = SyntaxColor,
+            Gutter     = new Terminal.Gui.Drawing.Color(0x88, 0x88, 0x88),
+            ContextBg  = ViewBackground,
+            RemovedBg  = DiffRemovedBg,
+            AddedBg    = DiffAddedBg,
+        };
+
+        // ── Re-rendering when the width changes ───────────────────────────────────
+
+        // The width the document was last drawn at, the width seen on the previous pump
+        // tick, and whether a rebuild is owed but could not be taken yet.
+        private int _renderedWidth = -1;
+        private int _lastSeenWidth = -1;
+        private int _stableTicks;
+        private bool _rebuildPending;
+
+        /// <summary>
+        /// A rebuild is owed. It is not taken here: mid-turn the streamer, the table buffer
+        /// and the live tail hold state the model has not been told about yet, and rebuilding
+        /// over it would drop the partial line the operator is watching arrive.
+        /// </summary>
+        private void RequestRebuild() => _rebuildPending = true;
+
+        /// <summary>Take an owed rebuild now, if one is owed. Called at end of turn.</summary>
+        internal void PerformPendingRebuild()
+        {
+            if (!_rebuildPending) return;
+            _rebuildPending = false;
+            RebuildFromModel();
+        }
+
+        /// <summary>
+        /// Called from the render pump. A resize is only acted on once it has settled, so a
+        /// drag rebuilds once at the end rather than on every pixel.
+        /// </summary>
+        private void CheckForResize()
+        {
+            int width = CurrentViewWidth();
+            if (width <= 0) return;
+
+            if (width != _lastSeenWidth)
+            {
+                _lastSeenWidth = width;
+                _stableTicks = 0;
+                return;
+            }
+
+            if (width == _renderedWidth) return;
+
+            // Two ticks of the 100 ms pump: long enough that a drag is one rebuild, short
+            // enough that letting go feels immediate.
+            if (++_stableTicks < ResizeSettleTicks) return;
+
+            _stableTicks = 0;
+            if (_isStreaming) { RequestRebuild(); return; }
+            RebuildFromModel();
+        }
+
+        /// <summary>Pump ticks a width must hold before the transcript is re-laid out.</summary>
+        private const int ResizeSettleTicks = 2;
+
+        // True between the first token of a turn and its end. A rebuild during that window
+        // would discard the partial state the emitters hold.
+        private volatile bool _isStreaming;
+
+        /// <summary>Told by the turn loop, so a resize mid-answer waits for the answer.</summary>
+        public void SetStreaming(bool streaming)
+        {
+            _isStreaming = streaming;
+            // The turn ends on its worker thread; the rebuild does not run there.
+            if (!streaming && _rebuildPending) InvokeOnUi(PerformPendingRebuild);
+        }
+
+        /// <summary>
+        /// Draw the whole retained transcript again at the current width.
+        /// <para>
+        /// This is the in-place rewrite every brief since 09 declined — made the design
+        /// rather than the exception, because the alternative was a table laid out at 200
+        /// columns being shredded by the Editor at 70 with nothing left to re-lay it out
+        /// from. It is safe now for the reason the live tail was safe: the document is a
+        /// projection of something else, and that something else is still here.
+        /// </para>
+        /// </summary>
+        internal void RebuildFromModel()
+        {
+            TextDocument doc = _outputView.Document;
+            if (doc == null) return;
+
+            // Where the reader was. An offset means nothing after a re-layout, so the anchor
+            // is the ENTRY that offset belonged to.
+            var before = new List<int>(Renderer.EntryOffsets);
+            int topOffset = ApproximateOffsetOfTopRow(doc);
+            int anchorEntry = ScrollAnchor.Find(before, topOffset) - _droppedSinceRender;
+            if (anchorEntry < 0) anchorEntry = 0;
+            _droppedSinceRender = 0;
+            bool pinned = _pinnedScrollRows > 0;
+
+            try
+            {
+                doc.BeginUpdate();
+                try
+                {
+                    if (doc.TextLength > 0) doc.Remove(0, doc.TextLength);
+                    _colorSpans.Clear();
+                    _liveTailRendered = 0;
+
+                    // Straight to the document: a rebuild is not a stream, and routing it
+                    // through the coalescing queue would have the pump redraw it in pieces.
+                    _rebuilding = true;
+                    Renderer.RenderAll(_model.Entries);
+                }
+                finally
+                {
+                    _rebuilding = false;
+                    doc.EndUpdate();
+                }
+
+                AppendLiveTail(doc, _liveTail);
+                try { doc.UndoStack?.ClearAll(); } catch { /* best effort */ }
+            }
+            catch (Exception ex)
+            {
+                Diag($"[REBUILD] EXCEPTION ex={ex.Message}");
+                return;
+            }
+
+            _renderedWidth = CurrentViewWidth();
+
+            if (!pinned)
+            {
+                if (!_outputView.HasSelection) _outputView.CaretOffset = doc.TextLength;
+            }
+            else
+            {
+                int restored = ScrollAnchor.Restore(Renderer.EntryOffsets, anchorEntry);
+                ScrollTopRowToOffset(doc, restored);
+            }
+
+            Diag($"[REBUILD] width={_renderedWidth} entries={_model.Entries.Count} chars={doc.TextLength}");
+        }
+
+        // True while RenderAll is writing straight to the document.
+        private bool _rebuilding;
+
+        private int CurrentViewWidth()
+        {
+            int width;
+            try { width = _outputView.Viewport.Width; }
+            catch { width = 0; }
+
+            int consoleWidth;
+            try { consoleWidth = Console.WindowWidth; }
+            catch { consoleWidth = 0; }
+
+            return PipeTable.ResolveWidth(width, consoleWidth);
+        }
+
+        // The Editor scrolls in visual rows and the anchor works in document offsets, and
+        // under word wrap there is no exposed map between the two. The bridge is proportion:
+        // a row this far down the content is, near enough, an offset this far into the text.
+        // It is approximate by one wrapped paragraph at most, and the anchor rounds it to an
+        // entry, so the reader lands on the block they were reading rather than on a
+        // character index that now belongs to a different one.
+
+        private int ApproximateOffsetOfTopRow(TextDocument doc)
+        {
+            try
+            {
+                int rows = Math.Max(1, _outputView.GetContentSize().Height);
+                int row = Math.Max(0, _outputView.Viewport.Y);
+                long offset = (long)doc.TextLength * row / rows;
+                return (int)Math.Min(doc.TextLength, offset);
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        private void ScrollTopRowToOffset(TextDocument doc, int offset)
+        {
+            try
+            {
+                int rows = Math.Max(1, _outputView.GetContentSize().Height);
+                int length = Math.Max(1, doc.TextLength);
+                int row = (int)((long)rows * Math.Min(offset, length) / length);
+                var vp = _outputView.Viewport;
+                int maxRow = Math.Max(0, rows - vp.Height);
+                _outputView.Viewport = new System.Drawing.Rectangle(vp.X, Math.Min(row, maxRow), vp.Width, vp.Height);
+            }
+            catch
+            {
+                // Fall back to the caret: the view scrolls to keep it visible, which puts
+                // the reader at the block even if not at the same row.
+                try { _outputView.CaretOffset = Math.Min(offset, doc.TextLength); } catch { }
+            }
+        }
 
         // ── Coalesced append pipeline ─────────────────────────────────────────────
         // Versus the old TextView path the underlying insert is dramatically simpler and cheaper:
@@ -390,6 +646,13 @@ namespace DevMind
                     }
                     catch { /* diagnostics only */ }
                     FlushPending();
+
+                    // The transcript is a projection of retained source, so a width change is
+                    // answerable now: re-lay it out rather than leaving a table drawn for a
+                    // window that no longer exists.
+                    try { CheckForResize(); }
+                    catch (Exception ex) { Diag($"[REBUILD] check ex={ex.Message}"); }
+
                     return true; // keep pumping for the app's life
                 });
         }
@@ -401,6 +664,16 @@ namespace DevMind
         private void EnqueueSpan(string text, Terminal.Gui.Drawing.Attribute attr)
         {
             if (string.IsNullOrEmpty(text)) return;
+
+            // A rebuild is not a stream. It runs on the UI thread inside one update group,
+            // so its spans go straight into the document — routing them through the
+            // coalescing queue would have the pump redraw the transcript in pieces, which is
+            // the flicker the debounce exists to avoid.
+            if (_rebuilding)
+            {
+                InsertSpan(text, attr, scroll: false);
+                return;
+            }
 
             if (_outputView.App == null)
             {
@@ -837,6 +1110,11 @@ namespace DevMind
                     _pending.Clear();                   // drop queued, not-yet-rendered spans
                     _liveTail = null;                   // and the live line, whose text is about to go
                 }
+
+                // /cls clears what is PAINTED and what it was painted from — otherwise the
+                // next resize would bring the cleared transcript back.
+                _model.Clear(); _droppedSinceRender = 0;
+                Renderer.Reset();
                 _liveTailRendered = 0;
 
                 TextDocument doc = _outputView.Document;
@@ -947,9 +1225,7 @@ namespace DevMind
         internal void AppendProse(string line)
         {
             if (string.IsNullOrEmpty(line)) return;
-
-            TableBufferResult result = _tables.Feed(line);
-            Render(result);
+            Record(TranscriptEntry.Prose(line));
         }
 
         /// <summary>
@@ -959,56 +1235,14 @@ namespace DevMind
         /// </summary>
         internal void FlushProse()
         {
-            Render(_tables.Flush());
+            Record(TranscriptEntry.ProseFlush());
+
+            // End of a response: the streamer and the table buffer are empty, so a resize
+            // that arrived mid-turn can now be honoured without losing partial state.
+            PerformPendingRebuild();
         }
 
-        private void Render(TableBufferResult result)
-        {
-            if (result.Action == TableBufferAction.Table && result.Table != null)
-                AppendTable(result.Table);
 
-            foreach (string prose in result.Prose)
-                AppendProseLine(prose);
-        }
-
-        private readonly TableBuffer _tables = new TableBuffer();
-
-        /// <summary>
-        /// Draw a parsed table as columns.
-        /// <para>
-        /// The width is read HERE, not cached: the terminal resizes, and a table laid out to
-        /// yesterday's width is re-broken by the Editor's own word wrap at whatever column it
-        /// likes — which is worse than the pipe source, because it looks like a table that
-        /// went wrong rather than like markup.
-        /// </para>
-        /// </summary>
-        private void AppendTable(PipeTableModel table)
-        {
-            _block.CloseBlock();
-
-            // The table is a block of the model's own output, so it gets the same separation
-            // from a tool line that prose does, and it ends whatever prose block preceded it.
-            if (_lastWriteWasToolLine)
-            {
-                _lastWriteWasToolLine = false;
-                EnqueueSpan("\n", ResolveAttribute(OutputColor.Normal));
-            }
-            _inProseBlock = false;
-
-            Terminal.Gui.Drawing.Color bg = _outputView.GetScheme().Normal.Background;
-
-            foreach (TableRowLine row in PipeTable.Layout(table, AvailableProseWidth(),
-                                                          MarkdownInlineRenderer.Render, TableRules))
-            {
-                EnqueueSpan(ProseHangingIndent, ResolveAttribute(OutputColor.Normal));
-                foreach (InlineRun run in row.Segments)
-                    EnqueueSpan(run.Text, ProseAttribute(run.Style, bg));
-                EnqueueSpan("\n", ResolveAttribute(OutputColor.Normal));
-            }
-
-            // A blank line after, so the next sentence is not read as another row.
-            EnqueueSpan("\n", ResolveAttribute(OutputColor.Normal));
-        }
 
         /// <summary>
         /// The rule characters tables are drawn with. One constant, because no box drawing
@@ -1038,83 +1272,6 @@ namespace DevMind
                             width - ProseHangingIndent.Length - 1);
         }
 
-        private void AppendProseLine(string line)
-        {
-            if (string.IsNullOrEmpty(line)) return;
-
-            // Prose is not engine output, so whatever call was open is closed: the model
-            // talking is never something a shell command produced.
-            _block.CloseBlock();
-
-            // Open a prose block that follows a tool line with one blank line. A line that is
-            // itself blank needs no help, and would otherwise double the gap.
-            bool blank = line.Trim('\r', '\n', ' ', '\t').Length == 0;
-
-            if (_lastWriteWasToolLine)
-            {
-                _lastWriteWasToolLine = false;
-                if (!blank) EnqueueSpan("\n", ResolveAttribute(OutputColor.Normal));
-            }
-
-            // ask_caller's heading is an event wearing prose clothing: the run has stopped and
-            // is waiting for a person. It gets the question glyph, and the numbered questions
-            // that follow hang under it as the block's continuation.
-            if (!blank && TranscriptVocabulary.IsNeedsInputHeading(line))
-            {
-                _inProseBlock = true;
-                EnqueueSpan(TranscriptVocabulary.NeedsInputLine + "\n", ResolveAttribute(OutputColor.Warning));
-                return;
-            }
-
-            // The model's own words lead with ◆ and hang under it. One diamond per block, not
-            // per line: a marker on every line is a bullet list, which says something the
-            // model did not. Blank lines inside the block do not end it — a two-paragraph
-            // answer is one thing the model said.
-            if (!blank)
-            {
-                // A block that opens with the model's own list marker takes the hanging indent
-                // instead of the diamond: "◆ - Use sum()" is two markers for one line, and
-                // reads as a nested bullet nobody wrote.
-                bool opensWithMarker = !_inProseBlock && MarkdownInlineRenderer.IsListItem(line);
-
-                if (!_inProseBlock && !opensWithMarker)
-                {
-                    _inProseBlock = true;
-                    EnqueueSpan(ProseLead, ResolveAttribute(OutputColor.Dim));
-                }
-                else
-                {
-                    _inProseBlock = true;
-                    EnqueueSpan(ProseHangingIndent, ResolveAttribute(OutputColor.Normal));
-                }
-            }
-
-            string content = line.TrimEnd('\r');
-            bool hasNewline = content.Length > 0 && content[content.Length - 1] == '\n';
-            int textEnd = hasNewline ? content.Length - 1 : content.Length;
-
-            Terminal.Gui.Drawing.Color bg = _outputView.GetScheme().Normal.Background;
-
-            // Wrapped here rather than by the Editor, which breaks to column zero and so
-            // flattens a list into unrelated lines. The width is read now, not cached: the
-            // terminal resizes, and the next line laid out should use the size it has.
-            IReadOnlyList<ProseLine> planned =
-                ProseWrap.Plan(content.Substring(0, textEnd), ProseHangingIndent, AvailableProseWidth());
-
-            for (int i = 0; i < planned.Count; i++)
-            {
-                ProseLine planLine = planned[i];
-
-                if (i > 0) EnqueueSpan("\n", ResolveAttribute(OutputColor.Normal));
-                if (planLine.Indent.Length > 0)
-                    EnqueueSpan(planLine.Indent, ResolveAttribute(OutputColor.Normal));
-
-                foreach (InlineRun run in planLine.Runs)
-                    EnqueueSpan(run.Text, ProseAttribute(run.Style, bg));
-            }
-
-            if (hasNewline) EnqueueSpan("\n", ResolveAttribute(OutputColor.Normal));
-        }
 
         // Inline-markdown palette — VS Code Dark+ values already used by the code path
         // (Syn* constants below) so the styled spans read as part of the same scheme:
@@ -1148,72 +1305,20 @@ namespace DevMind
             => AppendCode(code, language, nestUnderCall: false);
 
         /// <summary>
-        /// Paint highlighted code.
-        /// </summary>
-        /// <param name="nestUnderCall">
-        /// True when this is a TOOL RESULT — the body of a file a Read call returned — so it
-        /// hangs under that call at the same four columns shell output does. False when the
-        /// MODEL wrote the fence in its own prose: that is not a tool result and belongs at
-        /// the prose block's own indent.
-        /// <para>
-        /// A parameter rather than a field because the two callers interleave — an answer
-        /// containing a fenced example can arrive in the same turn as a file listing, and a
-        /// flag set by whichever ran last would give one of them the other's indent.
-        /// </para>
+        /// Paint highlighted code. <paramref name="nestUnderCall"/> is true for a TOOL RESULT
+        /// — a file a Read call returned — which hangs under that call at the same four
+        /// columns shell output does; false when the MODEL wrote the fence in its own prose.
         /// </summary>
         internal void AppendCode(string code, string language, bool nestUnderCall)
         {
             if (string.IsNullOrEmpty(code)) return;
-            _lastWriteWasToolLine = false;
-            _inProseBlock = false;
-            _block.CloseBlock();
-
-            var tokens = SyntaxHighlighter.Highlight(code, language);
-            Terminal.Gui.Drawing.Color bg = _outputView.GetScheme().Normal.Background;
-
-            if (!nestUnderCall)
-            {
-                foreach (var t in tokens)
-                    EnqueueSpan(t.Text, new Terminal.Gui.Drawing.Attribute(SyntaxColor(t.Kind), bg));
-                return;
-            }
-
-            // The indent is prefixed at each line start rather than applied to the block,
-            // because the highlighter's tokens do not align with lines: a comment or a string
-            // can carry its own newline through the middle of one token.
-            string indent = new string(' ', TranscriptBlock.OutputIndent);
-            bool atLineStart = true;
-
-            foreach (var t in tokens)
-            {
-                var attr = new Terminal.Gui.Drawing.Attribute(SyntaxColor(t.Kind), bg);
-                foreach (string piece in SplitKeepingNewlines(t.Text))
-                {
-                    bool isBreak = piece.Length == 1 && piece[0] == '\n';
-                    if (atLineStart && !isBreak)
-                    {
-                        EnqueueSpan(indent, ResolveAttribute(OutputColor.Normal));
-                        atLineStart = false;
-                    }
-                    EnqueueSpan(piece, attr);
-                    if (isBreak) atLineStart = true;
-                }
-            }
+            Record(TranscriptEntry.Code(code, language, nestUnderCall));
         }
 
-        /// <summary>"a\nb" → "a", "\n", "b", so a line start can be recognised between them.</summary>
-        private static IEnumerable<string> SplitKeepingNewlines(string text)
-        {
-            int start = 0;
-            for (int i = 0; i < text.Length; i++)
-            {
-                if (text[i] != '\n') continue;
-                if (i > start) yield return text.Substring(start, i - start);
-                yield return "\n";
-                start = i + 1;
-            }
-            if (start < text.Length) yield return text.Substring(start);
-        }
+        private void AppendHighlightedListing(string content, string fullPath, int lineCount)
+            => Record(TranscriptEntry.Listing(content, fullPath, lineCount));
+
+
 
         // VS Code Dark+ palette, matching the reference screenshot.
         private static readonly Terminal.Gui.Drawing.Color SynKeyword = new Terminal.Gui.Drawing.Color(0x56, 0x9C, 0xD6); // #569CD6 blue
@@ -1251,32 +1356,6 @@ namespace DevMind
         // loop reading many files) cannot flood the scrollback.
         private const int MaxListingLines = 400;
 
-        private void AppendHighlightedListing(string content, string fullPath, int lineCount)
-        {
-            string lang = SyntaxHighlighter.LanguageFromExtension(fullPath);
-
-            if (lineCount > MaxListingLines)
-            {
-                string[] lines = content.Replace("\r\n", "\n").Split('\n');
-                string head = string.Join("\n", lines, 0, MaxListingLines);
-                // A listing is what a Read call returned, so it hangs under it the way shell
-                // output hangs under a Shell call — the transcript had these two at different
-                // margins for no reason a reader could work out.
-                AppendCode(head + "\n", lang, nestUnderCall: true);
-                // Indented explicitly: painting the listing closed the call block, so the
-                // door will not nest this one, and a truncation notice hanging left of the
-                // text it truncates reads as a new event rather than as part of the listing.
-                AppendOutputLocal(
-                    new string(' ', TranscriptBlock.OutputIndent) +
-                    $"… ({lineCount - MaxListingLines:N0} more lines — {lineCount:N0} total)\n",
-                    OutputColor.Dim);
-            }
-            else
-            {
-                AppendCode(content.EndsWith("\n", StringComparison.Ordinal) ? content : content + "\n",
-                           lang, nestUnderCall: true);
-            }
-        }
 
         // ── Quiet-transcript filter ───────────────────────────────────────────────
         // The decision itself lives in TranscriptNoise, because the host is only one of the
@@ -2495,29 +2574,7 @@ namespace DevMind
         /// </para>
         /// </summary>
         internal void AppendDiff(string oldContent, string newContent, string path)
-        {
-            try
-            {
-                IReadOnlyList<DiffLine> lines = DiffRenderer.Build(oldContent, newContent);
-                if (lines.Count == 0) return;
-
-                Terminal.Gui.Drawing.Color bg = _outputView.GetScheme().Normal.Background;
-                var palette = new DiffPalette
-                {
-                    Foreground = SyntaxColor,
-                    Gutter     = new Terminal.Gui.Drawing.Color(0x88, 0x88, 0x88), // OutputColor.Dim
-                    ContextBg  = bg,
-                    RemovedBg  = DiffRemovedBg,
-                    AddedBg    = DiffAddedBg,
-                };
-
-                _lastWriteWasToolLine = true;   // the diff is a tool artefact, not prose
-                string notice = DiffPainter.Paint(lines, path, palette, EnqueueSpan);
-                if (notice != null)
-                    AppendOutputLocal(notice + "\n", OutputColor.Dim);
-            }
-            catch { /* diff display is best-effort — never break a successful patch */ }
-        }
+            => Record(TranscriptEntry.Diff(oldContent, newContent, path));
 
         // ── Approval mode ─────────────────────────────────────────────────────────
 

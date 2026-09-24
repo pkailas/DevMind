@@ -997,7 +997,7 @@ namespace DevMind
                     inputBox.View.CanFocus = false;
                     inputBox.SetActive(false);
                     statusBar.SetBusy("Digesting...");
-                    _isTurnRunning = true;
+                    _isTurnRunning = true;  host.SetStreaming(true);
                     try
                     {
                         await Task.Run(async () =>
@@ -1047,7 +1047,7 @@ namespace DevMind
                     }
                     finally
                     {
-                        _isTurnRunning = false;
+                        _isTurnRunning = false; host.SetStreaming(false);
                         inputBox.View.CanFocus = true;
                         inputBox.SetActive(true);
                         inputBox.View.SetFocus();
@@ -1248,7 +1248,7 @@ namespace DevMind
                         inputBox.View.CanFocus = false;
                         inputBox.SetActive(false);
                         statusBar.SetBusy("Replacing library range...");
-                        _isTurnRunning = true;
+                        _isTurnRunning = true;  host.SetStreaming(true);
                         try
                         {
                             await Task.Run(async () =>
@@ -1280,7 +1280,7 @@ namespace DevMind
                         }
                         finally
                         {
-                            _isTurnRunning = false;
+                            _isTurnRunning = false; host.SetStreaming(false);
                             inputBox.View.CanFocus = true;
                             inputBox.SetActive(true);
                             inputBox.View.SetFocus();
@@ -1346,7 +1346,7 @@ namespace DevMind
                         inputBox.View.CanFocus = false;
                         inputBox.SetActive(false);
                         statusBar.SetBusy("Ingesting...");
-                        _isTurnRunning = true;
+                        _isTurnRunning = true;  host.SetStreaming(true);
                         try
                         {
                             await Task.Run(async () =>
@@ -1381,7 +1381,7 @@ namespace DevMind
                         }
                         finally
                         {
-                            _isTurnRunning = false;
+                            _isTurnRunning = false; host.SetStreaming(false);
                             inputBox.View.CanFocus = true;
                             inputBox.SetActive(true);
                             inputBox.View.SetFocus();
@@ -1613,7 +1613,7 @@ namespace DevMind
                             // The box stays live: typing during an agentic turn is a steer
                             // (SteerInputRouter), not a new prompt. Esc/Ctrl+C still cancel.
                             statusBar.SetBusy("Processing...");
-                            _isTurnRunning = true;
+                            _isTurnRunning = true;  host.SetStreaming(true);
                             callbacks.BeginTurn();
 
                             try
@@ -1632,7 +1632,7 @@ namespace DevMind
                                 // exception — EndTurn disposes the turn ticker (otherwise
                                 // it re-orphans and "Generating" returns) and shows Ready.
                                 options.ShowLlmThinking = previousThinking; // revert one-shot thinking
-                                _isTurnRunning = false;
+                                _isTurnRunning = false; host.SetStreaming(false);
                                 inputBox.View.CanFocus = true;
                                 inputBox.SetActive(true);
                                 inputBox.View.SetFocus();
@@ -1659,7 +1659,7 @@ namespace DevMind
                 // The box stays live during agentic processing: typing is a steer
                 // (SteerInputRouter), not a new prompt. Esc/Ctrl+C still cancel.
                 statusBar.SetBusy("Processing...");
-                _isTurnRunning = true;
+                _isTurnRunning = true;  host.SetStreaming(true);
                 callbacks.BeginTurn();
 
                 try
@@ -1679,7 +1679,7 @@ namespace DevMind
                     // re-orphans it and "Generating" comes right back), syncs the
                     // context meter to server truth, publishes the turn's tok/s, and
                     // shows Ready.
-                    _isTurnRunning = false;
+                    _isTurnRunning = false; host.SetStreaming(false);
                     inputBox.View.CanFocus = true;
                     inputBox.SetActive(true);
                     inputBox.View.SetFocus();

@@ -27,6 +27,13 @@ using System.Text.RegularExpressions;
 
 namespace DevMind
 {
+    /// <summary>How a table is drawn: as columns, or as one record per row.</summary>
+    internal enum TableForm
+    {
+        Grid,
+        Vertical,
+    }
+
     /// <summary>Column alignment, from the separator row's colons.</summary>
     internal enum TableAlign
     {
@@ -273,6 +280,9 @@ namespace DevMind
             glyphs = glyphs ?? TableGlyphs.Unicode;
             if (availableWidth <= 0) availableWidth = FallbackWidth;
 
+            if (ChooseLayout(table, availableWidth, inline) == TableForm.Vertical)
+                return LayoutVertical(table, availableWidth, inline, glyphs);
+
             int columns = table.ColumnCount;
 
             // Every cell as runs, header forced bold. Code spans stay code: bold-and-teal is
@@ -313,6 +323,123 @@ namespace DevMind
                 lines.Add(RenderFrame(widths, glyphs, glyphs.BottomLeft, glyphs.TeeUp, glyphs.BottomRight));
 
             return lines;
+        }
+
+        // -- Choosing a form -----------------------------------------------------
+
+        /// <summary>Below this a grid is not a grid: the columns are narrower than the words.</summary>
+        public const int AbsoluteMinHorizontalWidth = 24;
+
+        /// <summary>Slack so a full-width grid cannot itself provoke the Editor's own wrap.</summary>
+        public const int SafetyMargin = 4;
+
+        /// <summary>
+        /// A cell wrapped past this many lines makes its row taller than it is wide, at which
+        /// point the grid costs more than it explains.
+        /// </summary>
+        public const int MaxRowLines = 4;
+
+        /// <summary>Widest a between-records rule gets: it separates, it is not the page.</summary>
+        public const int MaxRecordRuleWidth = 40;
+
+        /// <summary>
+        /// Grid or records.
+        /// <para>
+        /// The grid is the better form right up until it is not, and the two things that
+        /// break it are the two a reader notices: too little width for the columns to hold
+        /// words, and cells so tall that a "row" has become a paragraph. Past either, the
+        /// vertical form states the same facts with no columns to keep aligned.
+        /// </para>
+        /// </summary>
+        public static TableForm ChooseLayout(PipeTableModel table, int availableWidth,
+                                             Func<string, IReadOnlyList<InlineRun>> inline)
+        {
+            if (table == null || table.Rows.Count == 0) return TableForm.Grid;
+            if (availableWidth <= 0) availableWidth = FallbackWidth;
+
+            int columns = table.ColumnCount;
+            int borderOverhead = 1 + columns * 3;
+            int minHorizontal = Math.Max(AbsoluteMinHorizontalWidth,
+                                         columns * MinColumnWidth + borderOverhead + SafetyMargin);
+
+            if (availableWidth < minHorizontal) return TableForm.Vertical;
+
+            // How tall the tallest cell WOULD be, if this were laid out as a grid.
+            var headerRuns = new List<IReadOnlyList<InlineRun>>();
+            foreach (string cell in table.Header) headerRuns.Add(inline(cell));
+
+            var bodyRuns = new List<List<IReadOnlyList<InlineRun>>>();
+            foreach (string[] row in table.Rows)
+            {
+                var cells = new List<IReadOnlyList<InlineRun>>();
+                foreach (string cell in row) cells.Add(inline(cell));
+                bodyRuns.Add(cells);
+            }
+
+            int[] widths = FitColumns(headerRuns, bodyRuns, columns, availableWidth, TableGlyphs.Unicode);
+
+            int tallest = 1;
+            foreach (var row in bodyRuns)
+                for (int c = 0; c < columns && c < row.Count; c++)
+                    tallest = Math.Max(tallest, WrapRuns(row[c], widths[c]).Count);
+
+            return tallest > MaxRowLines ? TableForm.Vertical : TableForm.Grid;
+        }
+
+        /// <summary>
+        /// One record per row: "Header: value", a line at a time, a rule between records.
+        /// <para>
+        /// Nothing is aligned across records, which is the point — alignment is what needs
+        /// width, and this form is chosen precisely when there is not enough. The header is
+        /// repeated on every line instead, so a value is never orphaned from the thing it is
+        /// a value for.
+        /// </para>
+        /// </summary>
+        private static IReadOnlyList<TableRowLine> LayoutVertical(
+            PipeTableModel table, int availableWidth,
+            Func<string, IReadOnlyList<InlineRun>> inline, TableGlyphs glyphs)
+        {
+            var lines = new List<TableRowLine>();
+            int columns = table.ColumnCount;
+
+            for (int r = 0; r < table.Rows.Count; r++)
+            {
+                if (r > 0) lines.Add(RecordRule(availableWidth, glyphs));
+
+                string[] row = table.Rows[r];
+                for (int c = 0; c < columns; c++)
+                {
+                    string label = (c < table.Header.Length ? table.Header[c] : string.Empty) + ": ";
+                    string value = c < row.Length ? row[c] : string.Empty;
+
+                    // A wrapped value hangs under itself, not under the label: starting a
+                    // continuation at column zero would read as the next field.
+                    int valueWidth = Math.Max(MinColumnWidth, availableWidth - label.Length);
+                    string indent = new string(' ', Math.Max(0, availableWidth - valueWidth));
+
+                    List<List<InlineRun>> wrapped = WrapRuns(inline(value), valueWidth);
+
+                    for (int i = 0; i < wrapped.Count; i++)
+                    {
+                        var line = new TableRowLine();
+                        line.Segments.Add(new InlineRun(
+                            i == 0 ? label : indent,
+                            i == 0 ? InlineTextStyle.Heading : InlineTextStyle.Normal));
+                        foreach (InlineRun run in wrapped[i]) line.Segments.Add(run);
+                        lines.Add(line);
+                    }
+                }
+            }
+
+            return lines;
+        }
+
+        private static TableRowLine RecordRule(int availableWidth, TableGlyphs glyphs)
+        {
+            int width = Math.Max(1, Math.Min(availableWidth - 1, MaxRecordRuleWidth));
+            var rule = new TableRowLine();
+            rule.Segments.Add(new InlineRun(Repeat(glyphs.Horizontal, width), InlineTextStyle.Normal));
+            return rule;
         }
 
         /// <summary>

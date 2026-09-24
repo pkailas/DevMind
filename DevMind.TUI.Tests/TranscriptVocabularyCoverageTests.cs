@@ -37,7 +37,7 @@ namespace DevMind.TUI.Tests
         private static readonly HashSet<string> NeverReachesTheTranscript = new(StringComparer.Ordinal)
         {
             // Diagnostics: written to the trace file or DevMindLog, not to the output view.
-            "DIAG", "FLUSH", "TRIM", "CLS", "LIVETAIL", "INIT", "PASTE",
+            "DIAG", "FLUSH", "TRIM", "CLS", "LIVETAIL", "INIT", "PASTE", "REBUILD",
 
             // The quiet filter drops these before the translator ever sees them (brief 09):
             // their numbers live in the status bar.
