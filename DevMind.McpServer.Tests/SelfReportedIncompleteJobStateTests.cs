@@ -44,6 +44,28 @@ namespace DevMind.McpServer.Tests
         }
 
         [Fact]
+        public void Job1674sRealFinalAnswer_EndsStoppedIncomplete()
+        {
+            // job-1674 ended state=done, incomplete_reasons=null after b1df22d was deployed and
+            // loaded. Its final answer — verbatim from job-1674.result.json, the same `answer`
+            // devmind_task_result returns and the same Result.Answer the classifier reads —
+            // put the declaration under a "**INCOMPLETE:**" header as five "- INCOMPLETE:"
+            // bullets, and v1.0 only matched a line opening with the bare word.
+            string answer = File.ReadAllText(
+                Path.Combine(AppContext.BaseDirectory, "Fixtures", "job-1674.answer.md"));
+            Assert.Contains("\n- INCOMPLETE: Full `Service.Tests` and `Core.Tests` runs", answer.Replace("\r\n", "\n"));
+
+            var job = JobEndingWith(answer);
+
+            Assert.True(job.IsIncomplete);
+            string[] reasons = job.IncompleteReasons();
+            Assert.Contains(SelfReportedIncompleteDetector.Reason, reasons);
+            // The header carries no content, so the first bullet under it is what is quoted.
+            Assert.Contains(reasons, r => r.StartsWith(
+                "- INCOMPLETE: `AdminInputWidthTests` re-run after the `ElementWith` fix is unexecuted", StringComparison.Ordinal));
+        }
+
+        [Fact]
         public void TheFullAnswerIsKeptExactlyAsBefore()
         {
             // The classifier reads the answer; it does not edit it.

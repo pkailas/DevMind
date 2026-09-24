@@ -24,13 +24,18 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   order: the server's loaded assembly version/timestamp, the text the classifier receives, the bullet prefix.
   Checked: both DevMind.McpServer processes (dist\mcp) started 16:25:30, i.e. after the deploy - so the new code IS loaded. Remaining
   suspects: the text the classifier receives, and the "- INCOMPLETE:" bullet prefix (job-1674's lines all start with "- ").
-  **Status: fix NOT effective yet.**
+  **Root cause (2026-09-24):** the classifier WAS reading the right text - `AgentJob.SelfReportedIncomplete` runs
+  `SelfReportedIncompleteDetector.Detect(Result?.Answer)`, the same `answer` devmind_task_result and the sidecar return. The miss was
+  the marker match: v1.0 did `line.Trim().StartsWith("INCOMPLETE:")`, and job-1674 wrote a `**INCOMPLETE:**` header followed by
+  five `- INCOMPLETE: ...` bullets; none of its lines hit the phrase list either ("unexecuted", "not observed", "not yet executed").
+  v1.1 matches the marker after indent, `>`, `#`, list bullets (`-` `*` `+` `1.` `1)`) and emphasis (`**` `__` `*` `_`); a bare
+  marker header quotes the line under it. job-1674's real answer is pinned as a test fixture (DevMind.McpServer.Tests/Fixtures).
 - Also job-1674: a shell write re-saved a test file as UTF-16 (NUL bytes) - PowerShell 5.1 Out-File/Set-Content default; one more
   reason to block file content through run_shell (H-07).
 - **Symptom:** the agent's final message lists brief steps under "NOT DONE / caller must finish" (or says a fix is "not verified"), yet the job ends `state: done`, `incomplete_reasons: null`.
 - **Why it matters:** the driver has to read every final message to catch it; `done` is supposed to mean trustworthy-as-is.
 - **Proposed fix:** scan the final answer for explicit incompleteness markers ("NOT DONE", "not verified", "caller must", "did not run", "hit the iteration cap") and set `stopped_incomplete` with reason `self_reported_incomplete`, keeping the text.
-- **Status:** fixed, pending deploy - commit "H-01: self-reported incomplete final answers end as stopped_incomplete (self_reported_incomplete)" (the fix and this line are the same commit, so it cannot name its own hash)
+- **Status:** fixed, pending deploy - commit "H-01: detect bulleted INCOMPLETE markers; classify the returned final answer" (follow-up to b1df22d; the fix and this line are the same commit, so it cannot name its own hash). Verify on the next job that ends with an INCOMPLETE list.
 
 ### H-02 - `devmind_task_continue` times out without starting a job
 - **First seen:** 2026-09-23 - job-1643 (two attempts, ~4 min each)

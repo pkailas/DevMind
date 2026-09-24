@@ -1,4 +1,4 @@
-// File: SelfReportedIncompleteDetector.cs  v1.0
+// File: SelfReportedIncompleteDetector.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // When the agent's own final answer says the work is not finished.
@@ -18,6 +18,12 @@
 // caller one extra look at an answer they were going to read anyway; a false negative is
 // what produced the five jobs. Fenced code is skipped because a phrase in a diff or a log
 // excerpt is quoting something, not reporting on the work.
+//
+// v1.1: the explicit marker is matched after markdown list/emphasis decoration. job-1674 ended
+// `done` with five lines reading "- INCOMPLETE: ..." under a "**INCOMPLETE:**" header — the
+// classifier was reading the right text (the answer devmind_task_result returns), but v1.0
+// only matched a line that opened with the bare word, and agents write their lists in
+// markdown.
 
 using System;
 using System.Collections.Generic;
@@ -87,6 +93,15 @@ namespace DevMind
         // ``` or ~~~ opening or closing a fenced block, with optional leading whitespace.
         private static readonly Regex Fence = new Regex(@"^\s*(```|~~~)", RegexOptions.Compiled);
 
+        // The explicit marker, allowing the markdown an agent actually wraps it in: indent,
+        // blockquote ">", a heading "#", a list bullet ("-", "*", "+", "1.", "1)") and emphasis
+        // ("**", "__", "*", "_") around the word — "- INCOMPLETE:", "1. **INCOMPLETE:** x",
+        // "**INCOMPLETE**: x". The marker must still START the line's content: "is incomplete:"
+        // mid-sentence is not a declaration.
+        private static readonly Regex Marker = new Regex(
+            @"^\s*(?:>\s*)*(?:#{1,6}\s+)?(?:(?:[-*+]|\d+[.)])\s+)?(?:\*\*|__|\*|_)?INCOMPLETE(?:\*\*|__|\*|_)?:(?:\*\*|__|\*|_)?",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
         /// <summary>
         /// Examine a final answer.
         /// </summary>
@@ -100,6 +115,7 @@ namespace DevMind
             if (string.IsNullOrWhiteSpace(answer)) return SelfReportedIncomplete.None;
 
             bool inFence = false;
+            string bareMarker = null;     // a marker line with nothing after it, e.g. "**INCOMPLETE:**"
 
             foreach (string raw in answer.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
             {
@@ -113,10 +129,19 @@ namespace DevMind
                 string line = raw.Trim();
                 if (line.Length == 0) continue;
 
+                // A bare marker is a heading over the list that says what is unfinished; the
+                // line under it is the one worth quoting in the reason field.
+                if (bareMarker != null) return new SelfReportedIncomplete(true, Trim(line));
+
                 // The explicit convention first: it is a declaration, not a guess, so it is
                 // checked before the phrase list and never subject to it.
-                if (line.StartsWith(ExplicitMarker, StringComparison.OrdinalIgnoreCase))
-                    return new SelfReportedIncomplete(true, Trim(line));
+                Match marker = Marker.Match(line);
+                if (marker.Success)
+                {
+                    if (line.Length > marker.Length) return new SelfReportedIncomplete(true, Trim(line));
+                    bareMarker = line;
+                    continue;
+                }
 
                 foreach (string phrase in Phrases)
                 {
@@ -125,7 +150,9 @@ namespace DevMind
                 }
             }
 
-            return SelfReportedIncomplete.None;
+            return bareMarker != null
+                ? new SelfReportedIncomplete(true, Trim(bareMarker))
+                : SelfReportedIncomplete.None;
         }
 
         private static string Trim(string line)

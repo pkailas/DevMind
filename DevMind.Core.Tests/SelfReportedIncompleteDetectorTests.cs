@@ -50,6 +50,64 @@ namespace DevMind.Core.Tests
             Assert.True(Fires("incomplete: the parser still rejects two inputs"));
         }
 
+        // job-1674 ended `done` with five lines like the first one below: v1.0 only matched
+        // a line that opened with the bare word, and agents write their lists in markdown.
+        [Theory]
+        [InlineData("- INCOMPLETE: `AdminInputWidthTests` re-run after the `ElementWith` fix is unexecuted")]
+        [InlineData("  - INCOMPLETE: nested bullet")]
+        [InlineData("* INCOMPLETE: star bullet")]
+        [InlineData("+ INCOMPLETE: plus bullet")]
+        [InlineData("1. INCOMPLETE: numbered")]
+        [InlineData("12) INCOMPLETE: numbered with a paren")]
+        [InlineData("**INCOMPLETE:** bold, colon inside")]
+        [InlineData("**INCOMPLETE**: bold, colon outside")]
+        [InlineData("- **INCOMPLETE:** bold in a bullet")]
+        [InlineData("3. **INCOMPLETE:** bold in a numbered item")]
+        [InlineData("__INCOMPLETE:__ underscore bold")]
+        [InlineData("_INCOMPLETE:_ italic")]
+        [InlineData("> INCOMPLETE: quoted block")]
+        [InlineData("## INCOMPLETE: as a heading")]
+        [InlineData("\tINCOMPLETE: tab-indented")]
+        public void TheExplicitMarkerIsDetectedThroughMarkdownDecoration(string line)
+        {
+            var result = SelfReportedIncompleteDetector.Detect("Patched three files.\n" + line + "\nMore prose.");
+
+            Assert.True(result.Detected, $"missed: {line}");
+            Assert.Equal(line.Trim(), result.Line);
+        }
+
+        [Theory]
+        // The marker must open the line's content; mid-sentence it is not a declaration.
+        [InlineData("The first pass was incomplete: the second one fixed it. All green.")]
+        [InlineData("- Replaced the INCOMPLETE: placeholder in the template.")]
+        // No colon, no declaration.
+        [InlineData("- INCOMPLETE handling of nulls was reworked; suite green.")]
+        public void TheMarkerWordAloneIsNotADeclaration(string answer)
+        {
+            Assert.False(Fires(answer), $"false positive: {answer}");
+        }
+
+        [Fact]
+        public void ABareMarkerHeaderQuotesTheLineUnderIt()
+        {
+            // "**INCOMPLETE:**" on its own line is a header over the list that says what is
+            // unfinished; that list line is what a reason field should carry.
+            var result = SelfReportedIncompleteDetector.Detect(
+                "Done with the markup.\n\n**INCOMPLETE:**\n- Full suite not yet executed.\n");
+
+            Assert.True(result.Detected);
+            Assert.Equal("- Full suite not yet executed.", result.Line);
+        }
+
+        [Fact]
+        public void ABareMarkerAtTheEndStillCounts()
+        {
+            var result = SelfReportedIncompleteDetector.Detect("Done with the markup.\n**INCOMPLETE:**");
+
+            Assert.True(result.Detected);
+            Assert.Equal("**INCOMPLETE:**", result.Line);
+        }
+
         [Fact]
         public void TheReportedLineIsTheOneThatSaidSo()
         {
