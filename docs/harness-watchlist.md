@@ -11,7 +11,10 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 ## Open
 
 ### H-01 - "Task complete" reported with unfinished brief steps
-- **First seen:** 2026-09-23 - job-1652, job-1654 (VLink.Warehouses, docs repo)
+- **First seen:** 2026-09-23 - job-1652, job-1654 (VLink.Warehouses, docs repo). **Again 2026-09-24:** job-1667 (grep for leftover debug
+  code reported a match, job still `done`), job-1668 (final message: "no test run was performed ... red run NOT demonstrated ... resume by
+  fixing the 7 CS1503" - test project did not compile - yet `state: done`, `incomplete_reasons: null`). Jobs were run with
+  `verify_build: false` (the TestHarness exe is locked by a user-run fakesap), so the harness had no build signal of its own either.
 - **Symptom:** the agent's final message lists brief steps under "NOT DONE / caller must finish" (or says a fix is "not verified"), yet the job ends `state: done`, `incomplete_reasons: null`.
 - **Why it matters:** the driver has to read every final message to catch it; `done` is supposed to mean trustworthy-as-is.
 - **Proposed fix:** scan the final answer for explicit incompleteness markers ("NOT DONE", "not verified", "caller must", "did not run", "hit the iteration cap") and set `stopped_incomplete` with reason `self_reported_incomplete`, keeping the text.
@@ -92,6 +95,13 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 ## Model-behaviour notes (not harness defects)
 
 - **Theory before evidence when a test fails** (2026-09-23): job-1643 read xUnit's `···` display truncation as "the page is truncated"; job-1647 blamed "override not applied" instead of comparing test data to the production cutoff; job-1659 blamed a "stale build" for its own first-colon parser bug. Mitigation: evidence rule in `prompts/system-prompt.md`; brief it explicitly.
+- **xUnit v2 3-argument `Assert.Equal/NotEqual(a, b, "message")`** (2026-09-24, job-1668, 5 call sites; also job-1660 `Assert.Contains`
+  3-arg): no such overload exists, it binds to the comparer overloads -> CS1503. Known since Sep 3; still recurring. Candidate for the
+  system-prompt known-traps list: "xUnit v2 asserts take no message argument (except Assert.True/False); put the message in a comment or
+  use Assert.True(cond, msg)".
+- **Harness can't build when a test tool is running** (2026-09-24): with fakesap started from a user terminal, the TestHarness exe is
+  locked, so full-solution builds fail and jobs must run with verify_build:false. Idea: let build_verification target a project list
+  (e.g. the test projects) instead of the whole solution.
 - **Stale-build theory via UTF-8 DLL scan, again** (2026-09-24, job-1667): after its own assertion expected `selected>` instead of Razor's
   `selected="selected"`, the agent grepped the test DLL as UTF-8 for its string literals, found none, and concluded the build was stale.
   String literals live in the #US heap as UTF-16LE, so the scan is blind by construction (known since 2026-09-21). An override steer
