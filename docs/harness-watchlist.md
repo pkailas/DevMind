@@ -17,6 +17,14 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   `verify_build: false` (the TestHarness exe is locked by a user-run fakesap), so the harness had no build signal of its own either.
   job-1670 (LT-04): final message "The core defect is NOT fixed ... the caller must not report LT-04 as fixed ... full test suites NOT
   run" - still `state: done`. Five occurrences in two days; this is the highest-value harness fix on the list.
+- **Fix committed b1df22d (Claude Code, 2026-09-24), deployed by Paul ~16:25 - but job-1674 (16:44-16:54) still ended `state: done`,
+  `incomplete_reasons: null` with FIVE lines starting "INCOMPLETE:" in its final answer.** Either the running MCP server process was not
+  restarted by deploy.ps1 (old AgentJobManager still loaded), or the classifier reads a different text than the final answer (e.g. the
+  task_done summary argument vs the transcript), or its line-start match misses "- INCOMPLETE:" (markdown bullet prefix). Check in that
+  order: the server's loaded assembly version/timestamp, the text the classifier receives, the bullet prefix.
+  **Status: fix NOT effective yet.**
+- Also job-1674: a shell write re-saved a test file as UTF-16 (NUL bytes) - PowerShell 5.1 Out-File/Set-Content default; one more
+  reason to block file content through run_shell (H-07).
 - **Symptom:** the agent's final message lists brief steps under "NOT DONE / caller must finish" (or says a fix is "not verified"), yet the job ends `state: done`, `incomplete_reasons: null`.
 - **Why it matters:** the driver has to read every final message to catch it; `done` is supposed to mean trustworthy-as-is.
 - **Proposed fix:** scan the final answer for explicit incompleteness markers ("NOT DONE", "not verified", "caller must", "did not run", "hit the iteration cap") and set `stopped_incomplete` with reason `self_reported_incomplete`, keeping the text.
