@@ -1,4 +1,4 @@
-// File: PipeTable.cs  v1.0
+// File: PipeTable.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Laying out a GFM pipe table as columns.
@@ -59,18 +59,50 @@ namespace DevMind
         public string Vertical { get; }
         public string Cross { get; }
 
-        private TableGlyphs(string horizontal, string vertical, string cross)
+        // The frame. A rule between every row is what makes a table with wrapped cells
+        // readable: without it a row's second line sits directly above the next row's first
+        // and the eye has nothing to tell them apart.
+        public string TopLeft { get; }
+        public string TopRight { get; }
+        public string BottomLeft { get; }
+        public string BottomRight { get; }
+        public string TeeLeft { get; }
+        public string TeeRight { get; }
+        public string TeeDown { get; }
+        public string TeeUp { get; }
+
+        private TableGlyphs(string horizontal, string vertical, string cross,
+                            string topLeft, string topRight, string bottomLeft, string bottomRight,
+                            string teeLeft, string teeRight, string teeDown, string teeUp)
         {
-            Horizontal = horizontal;
-            Vertical   = vertical;
-            Cross      = cross;
+            Horizontal  = horizontal;
+            Vertical    = vertical;
+            Cross       = cross;
+            TopLeft     = topLeft;
+            TopRight    = topRight;
+            BottomLeft  = bottomLeft;
+            BottomRight = bottomRight;
+            TeeLeft     = teeLeft;
+            TeeRight    = teeRight;
+            TeeDown     = teeDown;
+            TeeUp       = teeUp;
         }
 
         /// <summary>Box drawing. Reads as a table rather than as punctuation.</summary>
-        public static readonly TableGlyphs Unicode = new TableGlyphs("─", "│", "┼");
+        public static readonly TableGlyphs Unicode = new TableGlyphs(
+            "─", "│", "┼",
+            "┌", "┐", "└", "┘",
+            "├", "┤", "┬", "┴");
 
-        /// <summary>For a terminal whose font has no box drawing — a row of boxes is unreadable.</summary>
-        public static readonly TableGlyphs Ascii = new TableGlyphs("-", "|", "+");
+        /// <summary>
+        /// For a terminal whose font has no box drawing — a grid of replacement boxes is
+        /// worse than no grid. Every junction is "+", which is what every plain-text table
+        /// has used since before any of these characters existed.
+        /// </summary>
+        public static readonly TableGlyphs Ascii = new TableGlyphs(
+            "-", "|", "+",
+            "+", "+", "+", "+",
+            "+", "+", "+", "+");
     }
 
     /// <summary>One laid-out visual line of a table: styled segments, already padded.</summary>
@@ -233,7 +265,7 @@ namespace DevMind
             // not a style this palette has, and the teal is the more informative of the two.
             var headerRuns = new List<IReadOnlyList<InlineRun>>();
             foreach (string cell in table.Header)
-                headerRuns.Add(Embolden(inline(cell)));
+                headerRuns.Add(AsHeader(inline(cell)));
 
             var bodyRuns = new List<List<IReadOnlyList<InlineRun>>>();
             foreach (string[] row in table.Rows)
@@ -246,10 +278,25 @@ namespace DevMind
             int[] widths = FitColumns(headerRuns, bodyRuns, columns, availableWidth, glyphs);
 
             var lines = new List<TableRowLine>();
+
+            lines.Add(RenderFrame(widths, glyphs, glyphs.TopLeft, glyphs.TeeDown, glyphs.TopRight));
             lines.AddRange(RenderRow(headerRuns, widths, table.Aligns, glyphs));
-            lines.Add(RenderRule(widths, glyphs));
-            foreach (var row in bodyRuns)
-                lines.AddRange(RenderRow(row, widths, table.Aligns, glyphs));
+            lines.Add(RenderFrame(widths, glyphs, glyphs.TeeLeft, glyphs.Cross, glyphs.TeeRight));
+
+            for (int r = 0; r < bodyRuns.Count; r++)
+            {
+                lines.AddRange(RenderRow(bodyRuns[r], widths, table.Aligns, glyphs));
+
+                bool last = r == bodyRuns.Count - 1;
+                lines.Add(last
+                    ? RenderFrame(widths, glyphs, glyphs.BottomLeft, glyphs.TeeUp, glyphs.BottomRight)
+                    : RenderFrame(widths, glyphs, glyphs.TeeLeft, glyphs.Cross, glyphs.TeeRight));
+            }
+
+            // A header with no rows still closes: an empty table is a fact about the answer,
+            // and a frame with no bottom reads as a rendering that gave up.
+            if (bodyRuns.Count == 0)
+                lines.Add(RenderFrame(widths, glyphs, glyphs.BottomLeft, glyphs.TeeUp, glyphs.BottomRight));
 
             return lines;
         }
@@ -278,7 +325,10 @@ namespace DevMind
                     if (c < row.Count) widths[c] = Math.Max(widths[c], Width(row[c]));
             }
 
-            int overhead = SeparatorWidth(glyphs) * (columns - 1);
+            // Interior separators plus the outer frame. Leaving the frame out of the budget
+            // is how a table that "fits" still gets re-wrapped by the Editor: four columns is
+            // not a rounding error on a six-column table.
+            int overhead = SeparatorWidth(glyphs) * (columns - 1) + FrameWidth(glyphs);
             int budget = Math.Max(columns * MinColumnWidth, availableWidth - overhead);
 
             int total = 0;
@@ -301,6 +351,10 @@ namespace DevMind
         private static int SeparatorWidth(TableGlyphs glyphs)
             => CellSeparator.Length * 2 + glyphs.Vertical.Length;
 
+        /// <summary>Columns the outer frame occupies: a rule and a pad at each edge.</summary>
+        private static int FrameWidth(TableGlyphs glyphs)
+            => (glyphs.Vertical.Length + CellSeparator.Length) * 2;
+
         private static int Width(IReadOnlyList<InlineRun> runs)
         {
             int n = 0;
@@ -308,14 +362,20 @@ namespace DevMind
             return n;
         }
 
-        private static IReadOnlyList<InlineRun> Embolden(IReadOnlyList<InlineRun> runs)
+        /// <summary>
+        /// Header cells take the HEADING style — the same blue-bold a "## Steps" line gets —
+        /// so a table header and a section header are the same thing on screen instead of two
+        /// different kinds of emphasis. Code spans keep their own colour: bold-and-teal is not
+        /// a style this palette has, and the teal is the more informative of the two.
+        /// </summary>
+        private static IReadOnlyList<InlineRun> AsHeader(IReadOnlyList<InlineRun> runs)
         {
-            var bold = new List<InlineRun>(runs.Count);
+            var styled = new List<InlineRun>(runs.Count);
             foreach (InlineRun run in runs)
-                bold.Add(run.Style == InlineTextStyle.InlineCode
+                styled.Add(run.Style == InlineTextStyle.InlineCode
                     ? run
-                    : new InlineRun(run.Text, InlineTextStyle.Bold));
-            return bold;
+                    : new InlineRun(run.Text, InlineTextStyle.Heading));
+            return styled;
         }
 
         private static List<TableRowLine> RenderRow(
@@ -338,6 +398,9 @@ namespace DevMind
             for (int line = 0; line < height; line++)
             {
                 var row = new TableRowLine();
+                row.Segments.Add(new InlineRun(glyphs.Vertical, InlineTextStyle.Normal));
+                row.Segments.Add(new InlineRun(CellSeparator, InlineTextStyle.Normal));
+
                 for (int c = 0; c < columns; c++)
                 {
                     if (c > 0)
@@ -354,25 +417,39 @@ namespace DevMind
                     AppendPadded(row.Segments, content, widths[c],
                                  c < aligns.Length ? aligns[c] : TableAlign.Left);
                 }
+
+                row.Segments.Add(new InlineRun(CellSeparator, InlineTextStyle.Normal));
+                row.Segments.Add(new InlineRun(glyphs.Vertical, InlineTextStyle.Normal));
                 result.Add(row);
             }
 
             return result;
         }
 
-        private static TableRowLine RenderRule(int[] widths, TableGlyphs glyphs)
+        /// <summary>
+        /// A horizontal line across the whole table: the top frame, a rule between rows, or
+        /// the bottom frame. The three differ only in which junction glyphs they use, so they
+        /// are one function — a frame drawn by three near-copies is a frame that eventually
+        /// stops lining up.
+        /// </summary>
+        private static TableRowLine RenderFrame(int[] widths, TableGlyphs glyphs,
+                                                string left, string junction, string right)
         {
             var rule = new TableRowLine();
+            rule.Segments.Add(new InlineRun(left, InlineTextStyle.Normal));
+
             for (int c = 0; c < widths.Length; c++)
             {
-                if (c > 0)
-                {
-                    rule.Segments.Add(new InlineRun(glyphs.Horizontal, InlineTextStyle.Normal));
-                    rule.Segments.Add(new InlineRun(glyphs.Cross, InlineTextStyle.Normal));
-                    rule.Segments.Add(new InlineRun(glyphs.Horizontal, InlineTextStyle.Normal));
-                }
-                rule.Segments.Add(new InlineRun(Repeat(glyphs.Horizontal, widths[c]), InlineTextStyle.Normal));
+                if (c > 0) rule.Segments.Add(new InlineRun(junction, InlineTextStyle.Normal));
+
+                // The +2 covers the one space of padding either side of the cell, so the rule
+                // spans exactly what the row above it spans.
+                rule.Segments.Add(new InlineRun(
+                    Repeat(glyphs.Horizontal, widths[c] + CellSeparator.Length * 2),
+                    InlineTextStyle.Normal));
             }
+
+            rule.Segments.Add(new InlineRun(right, InlineTextStyle.Normal));
             return rule;
         }
 

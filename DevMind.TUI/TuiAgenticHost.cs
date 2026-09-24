@@ -1,4 +1,4 @@
-﻿// File: TuiAgenticHost.cs  v2.8
+﻿// File: TuiAgenticHost.cs  v2.9
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 implementation of IAgenticHost.
@@ -1090,8 +1090,24 @@ namespace DevMind
             int textEnd = hasNewline ? content.Length - 1 : content.Length;
 
             Terminal.Gui.Drawing.Color bg = _outputView.GetScheme().Normal.Background;
-            foreach (var run in MarkdownInlineRenderer.Render(content.Substring(0, textEnd)))
-                EnqueueSpan(run.Text, ProseAttribute(run.Style, bg));
+
+            // Wrapped here rather than by the Editor, which breaks to column zero and so
+            // flattens a list into unrelated lines. The width is read now, not cached: the
+            // terminal resizes, and the next line laid out should use the size it has.
+            IReadOnlyList<ProseLine> planned =
+                ProseWrap.Plan(content.Substring(0, textEnd), ProseHangingIndent, AvailableProseWidth());
+
+            for (int i = 0; i < planned.Count; i++)
+            {
+                ProseLine planLine = planned[i];
+
+                if (i > 0) EnqueueSpan("\n", ResolveAttribute(OutputColor.Normal));
+                if (planLine.Indent.Length > 0)
+                    EnqueueSpan(planLine.Indent, ResolveAttribute(OutputColor.Normal));
+
+                foreach (InlineRun run in planLine.Runs)
+                    EnqueueSpan(run.Text, ProseAttribute(run.Style, bg));
+            }
 
             if (hasNewline) EnqueueSpan("\n", ResolveAttribute(OutputColor.Normal));
         }

@@ -111,12 +111,12 @@ namespace DevMind.TUI.Tests
             var lines = Lay(Parse(Fixture), 80);
 
             // Header, rule, and one line per row — nothing needed wrapping.
-            Assert.Equal(4, lines.Count);
+            Assert.Equal(7, lines.Count);   // top + header + rule + (row + rule) x 2
             Assert.All(lines, l => Assert.True(l.Text.Length <= 80, $"too wide: \"{l.Text}\""));
 
             // Widest cells set the columns: "Leave local-only" (16) and the 25-char risk.
-            Assert.Contains("Option", lines[0].Text);
-            Assert.Contains("history lives on one disk", lines[3].Text);
+            Assert.Contains("Option", lines[1].Text);
+            Assert.Contains("history lives on one disk", lines[5].Text);
         }
 
         [Fact]
@@ -128,7 +128,7 @@ namespace DevMind.TUI.Tests
                 $"{l.Text.Length} > 40: \"{l.Text}\""));
 
             // It did not fit on one line per row, so something wrapped rather than overflowed.
-            Assert.True(lines.Count > 4);
+            Assert.True(lines.Count > 7);
 
             // And the text survived the wrap — no cell was dropped to make room.
             string all = string.Concat(lines.Select(l => l.Text));
@@ -175,12 +175,14 @@ namespace DevMind.TUI.Tests
         }
 
         [Fact]
-        public void TheHeaderIsBold()
+        public void TheHeaderTakesTheHeadingStyle()
         {
+            // The same blue-bold a "## Steps" line gets, so a table header and a section
+            // header are one kind of emphasis rather than two.
             var lines = Lay(Parse(Fixture), 80);
 
-            Assert.Contains(lines[0].Segments,
-                s => s.Style == InlineTextStyle.Bold && s.Text.Contains("Option"));
+            Assert.Contains(lines[1].Segments,
+                s => s.Style == InlineTextStyle.Heading && s.Text.Contains("Option"));
         }
 
         [Fact]
@@ -209,8 +211,8 @@ namespace DevMind.TUI.Tests
 
             var lines = Lay(table, 80);
 
-            Assert.Equal(lines[0].Text.Length, lines[2].Text.Length);
-            Assert.DoesNotContain("**", lines[2].Text);
+            Assert.Equal(lines[1].Text.Length, lines[3].Text.Length);
+            Assert.DoesNotContain("**", lines[3].Text);
         }
 
         [Fact]
@@ -222,7 +224,8 @@ namespace DevMind.TUI.Tests
                 "| a | b | c |");
 
             var lines = Lay(table, 80);
-            string row = lines[2].Text;
+            string outer = lines[3].Text;
+            string row = outer.Substring(2, outer.Length - 4);   // inside the frame
 
             Assert.StartsWith("a", row);          // left: content first
             Assert.EndsWith("c", row);            // right: content last
@@ -230,13 +233,63 @@ namespace DevMind.TUI.Tests
         }
 
         [Fact]
-        public void TheRuleSitsUnderTheHeaderAndMatchesItsWidth()
+        public void EveryLineOfTheGridIsTheSameWidth()
+        {
+            // The frame only reads as a frame if its sides line up; one row a character wide
+            // of the rest and the whole thing looks broken rather than merely plain.
+            var lines = Lay(Parse(Fixture), 80);
+
+            int width = lines[0].Text.Length;
+            Assert.All(lines, l => Assert.Equal(width, l.Text.Length));
+        }
+
+        [Fact]
+        public void TheGridIsFramedTopAndBottom_WithARuleBetweenEveryRow()
         {
             var lines = Lay(Parse(Fixture), 80);
 
-            Assert.Equal(lines[0].Text.Length, lines[1].Text.Length);
-            Assert.Contains("─", lines[1].Text);   // ─
-            Assert.Contains("┼", lines[1].Text);   // ┼
+            Assert.StartsWith(TableGlyphs.Unicode.TopLeft, lines[0].Text);
+            Assert.EndsWith(TableGlyphs.Unicode.TopRight, lines[0].Text);
+            Assert.StartsWith(TableGlyphs.Unicode.BottomLeft, lines[6].Text);
+            Assert.EndsWith(TableGlyphs.Unicode.BottomRight, lines[6].Text);
+
+            // The header rule, and one between the two rows — the separation that makes a
+            // table with wrapped cells scannable.
+            Assert.StartsWith(TableGlyphs.Unicode.TeeLeft, lines[2].Text);
+            Assert.StartsWith(TableGlyphs.Unicode.TeeLeft, lines[4].Text);
+            Assert.Contains(TableGlyphs.Unicode.Cross, lines[2].Text);
+        }
+
+        [Fact]
+        public void EveryRowLineIsClosedOnBothSides()
+        {
+            var lines = Lay(Parse(Fixture), 80);
+
+            foreach (int i in new[] { 1, 3, 5 })
+            {
+                Assert.StartsWith(TableGlyphs.Unicode.Vertical, lines[i].Text);
+                Assert.EndsWith(TableGlyphs.Unicode.Vertical, lines[i].Text);
+            }
+        }
+
+        [Fact]
+        public void TheWidthBudgetIncludesTheFrame()
+        {
+            // A table that "fits" by the old budget is four columns too wide once framed, and
+            // the Editor re-wraps it — which looks like the grid is broken rather than like a
+            // budget that forgot something.
+            PipeTableModel wide = Parse(
+                "| One | Two | Three | Four | Five | Six |",
+                "|---|---|---|---|---|---|",
+                "| a reasonably long cell | another one here | and a third | plus four | five | six |",
+                "| short | short | short | short | short | short |");
+
+            foreach (int width in new[] { 120, 80, 60, 40 })
+            {
+                var lines = Lay(wide, width);
+                Assert.All(lines, l => Assert.True(l.Text.Length <= width,
+                    $"{l.Text.Length} > {width}"));
+            }
         }
 
         [Fact]
@@ -245,9 +298,9 @@ namespace DevMind.TUI.Tests
             var lines = PipeTable.Layout(Parse(Fixture), 80,
                 MarkdownInlineRenderer.Render, TableGlyphs.Ascii);
 
-            Assert.Contains("-", lines[1].Text);
-            Assert.Contains("+", lines[1].Text);
-            Assert.DoesNotContain("─", lines[1].Text);
+            Assert.Contains("-", lines[2].Text);
+            Assert.Contains("+", lines[2].Text);
+            Assert.DoesNotContain("─", lines[2].Text);
             Assert.All(lines, l => Assert.All(l.Text, c => Assert.True(c < 128)));
         }
 
@@ -269,7 +322,7 @@ namespace DevMind.TUI.Tests
             var lines = Lay(Parse(Fixture), 0);
 
             Assert.All(lines, l => Assert.True(l.Text.Length <= PipeTable.FallbackWidth));
-            Assert.Contains("history lives on one disk", lines[3].Text);
+            Assert.Contains("history lives on one disk", lines[5].Text);
         }
     }
 }
