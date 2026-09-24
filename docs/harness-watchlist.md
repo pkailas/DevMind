@@ -93,6 +93,13 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Earlier evidence (found 2026-09-24 in DevMind\.devmind\memory\stale-dll-incremental-test-run.md, 2026-09-21):** during a
   mutation test of the patch_file fix, run_tests reported 10/10 passing against a DLL older than the source; a forced
   `dotnet build -t:Rebuild` then showed the real result. So this is confirmed twice, not a one-off.
+- **Confirmed at the source (2026-09-24, job-1672):** the transcript shows the tool running
+  `dotnet test <proj> --no-build --verbosity normal --filter ...` - it never builds. Any change is only picked up if something else
+  built first. Fix: drop `--no-build` (or build the test project first) inside run_tests.
+- **Counter-example, same day (job-1673):** a flip-flopping page test was blamed on "stale binary" again, but the real cause was the
+  test's own `html.Contains("0 MB")` matching Disk free values like "58,030 MB". Stale builds happen (above) AND get over-diagnosed.
+- **Also seen in job-1672/1673:** `devmind_task_continue` worked immediately this time (H-02 did not reproduce); the agent used the new
+  prompt rules (checked DLL timestamps before rebuilding, stopped with ask_caller on a genuine-looking contradiction).
 - **Status:** open
 
 ### H-12 - Write roots don't include the docs repository
