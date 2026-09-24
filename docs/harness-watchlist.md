@@ -202,6 +202,10 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   projects directly.
 - **H-01 verified live after c032a9b (2026-09-24):** job-1675 ended `stopped_incomplete: needs_input`, job-1676 ended
   `stopped_incomplete: self_reported_incomplete` with the first INCOMPLETE line as the reason. Working as intended.
+- **H-01 false positive (2026-09-24, job-1679):** a finished job ended with the line "INCOMPLETE: none." (the brief said "anything
+  unfinished on a line starting INCOMPLETE:") and was classified stopped_incomplete / self_reported_incomplete with reason
+  "INCOMPLETE: none.". Detector fix: treat "INCOMPLETE: none|nothing|n/a|-" (optionally with punctuation) as NOT incomplete. Brief
+  fix (driver side, applied from job-1680 on): "only if something is unfinished, add a line starting INCOMPLETE: - otherwise omit it".
 - **API misknowledge -> dangerous proposals** (job-1675): the agent decided .NET 10 has no SAN builder (it searched for
   `X509SubjectAlternativeNameBuilder`; the type is `SubjectAlternativeNameBuilder`), hand-built ASN.1 with non-existent types, then
   offered to DROP the SANs. It spent many iterations on scratch console projects and PE-string scans instead of `hover` /
