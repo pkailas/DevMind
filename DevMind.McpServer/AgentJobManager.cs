@@ -88,7 +88,23 @@ namespace DevMind.McpServer
                 || (Result?.NeedsInput ?? false)
                 || (Result?.ThrashStopped ?? false)
                 || Build is { Succeeded: false }
-                || Tests is { Succeeded: false });
+                || Tests is { Succeeded: false }
+                || SelfReportedIncomplete.Detected);
+
+        /// <summary>
+        /// What the agent's own final answer said about whether it finished.
+        /// <para>
+        /// Every other signal above is one the HARNESS measured. This is the one the AGENT
+        /// reported, and it is the only one that catches a job whose build was skipped and
+        /// whose tests were never run — which is exactly the shape of the five jobs that
+        /// ended `done` while their final message said "the caller must not report this as
+        /// fixed". Computed once: the answer does not change after the run ends.
+        /// </para>
+        /// </summary>
+        public SelfReportedIncomplete SelfReportedIncomplete =>
+            _selfReported ??= SelfReportedIncompleteDetector.Detect(Result?.Answer);
+
+        private SelfReportedIncomplete? _selfReported;
 
         /// <summary>Why the job is incomplete (empty when it isn't).</summary>
         public string[] IncompleteReasons()
@@ -100,6 +116,17 @@ namespace DevMind.McpServer
             if (Result?.HitDepthCap ?? false) reasons.Add("hit_depth_cap");
             if (Build is { Succeeded: false }) reasons.Add("build_verification_failed");
             if (Tests is { Succeeded: false }) reasons.Add("test_verification_failed");
+
+            // The agent's own words, and the line it said them in — a caller reading
+            // incomplete_reasons should not have to go back to the answer to find out which
+            // sentence tripped it.
+            SelfReportedIncomplete self = SelfReportedIncomplete;
+            if (self.Detected)
+            {
+                reasons.Add(SelfReportedIncompleteDetector.Reason);
+                if (self.Line.Length > 0) reasons.Add(self.Line);
+            }
+
             return reasons.ToArray();
         }
 

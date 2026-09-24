@@ -20,7 +20,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Symptom:** the agent's final message lists brief steps under "NOT DONE / caller must finish" (or says a fix is "not verified"), yet the job ends `state: done`, `incomplete_reasons: null`.
 - **Why it matters:** the driver has to read every final message to catch it; `done` is supposed to mean trustworthy-as-is.
 - **Proposed fix:** scan the final answer for explicit incompleteness markers ("NOT DONE", "not verified", "caller must", "did not run", "hit the iteration cap") and set `stopped_incomplete` with reason `self_reported_incomplete`, keeping the text.
-- **Status:** open
+- **Status:** fixed, pending deploy - commit "H-01: self-reported incomplete final answers end as stopped_incomplete (self_reported_incomplete)" (the fix and this line are the same commit, so it cannot name its own hash)
 
 ### H-02 - `devmind_task_continue` times out without starting a job
 - **First seen:** 2026-09-23 - job-1643 (two attempts, ~4 min each)
