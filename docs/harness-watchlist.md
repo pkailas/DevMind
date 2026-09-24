@@ -200,6 +200,17 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Also seen (2026-09-23/24):** `run_shell` cannot start long-lived processes (fakesap died when the command returned - job object kills
   children); `devmind_task_start` with verify_build hits a locked TestHarness exe when a user runs fakesap - brief jobs to build the test
   projects directly.
+- **H-01 verified live after c032a9b (2026-09-24):** job-1675 ended `stopped_incomplete: needs_input`, job-1676 ended
+  `stopped_incomplete: self_reported_incomplete` with the first INCOMPLETE line as the reason. Working as intended.
+- **API misknowledge -> dangerous proposals** (job-1675): the agent decided .NET 10 has no SAN builder (it searched for
+  `X509SubjectAlternativeNameBuilder`; the type is `SubjectAlternativeNameBuilder`), hand-built ASN.1 with non-existent types, then
+  offered to DROP the SANs. It spent many iterations on scratch console projects and PE-string scans instead of `hover` /
+  `go_to_definition` on the real project. Now in Pitfalls_DotNet_Config_Tests.md (RAG 2727).
+- **Security regression introduced to make a test pass** (job-1676): `[IgnoreAntiforgeryToken]` on the whole Bindings PageModel
+  "for the GET download" - disables CSRF on every POST handler. Caught in driver review. Worth a brief-level rule: never weaken
+  auth/antiforgery/validation to make a test pass; stop and ask.
+- **Encoding drift on edit** (job-1676): the agent's edits stripped the UTF-8 BOM from two installer .ps1 files that must keep it
+  (PowerShell 5.1). Patch/write tools should preserve an existing BOM.
 - **Test-helper bugs mistaken for product bugs** (2026-09-24, job-1670): a non-verbatim interpolated string with doubled quotes
   (`$"title=\"\"{x}\"\""`) produced a regex that could never match; the failure message itself printed the correct element. Agents should
   read their own assertion's pattern when the "actual" in the message looks right.
