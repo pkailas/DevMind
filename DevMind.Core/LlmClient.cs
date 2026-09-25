@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v7.30
+// File: LlmClient.cs  v7.31
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -1563,6 +1563,17 @@ namespace DevMind
             }
             catch (Exception ex)
             {
+                // A failed send used to leave one [ERROR] line in the transcript and nothing on
+                // disk. When the server itself dies mid-session (a CUDA allocation failing under
+                // another process's load, say) the transcript line is gone with the window, and
+                // the only record that anything happened is a gap in the training log. The
+                // innermost message is the one that names the cause: the socket error under an
+                // HttpRequestException, not the wrapper.
+                Exception root = ex;
+                while (root.InnerException != null) root = root.InnerException;
+                DevMindLog.Write($"[DevMind] LLM request FAILED: {ex.GetType().Name}: {ex.Message}"
+                    + (ReferenceEquals(root, ex) ? "" : $" <- {root.GetType().Name}: {root.Message}")
+                    + $" | endpoint={_baseUrl} n_past={LastContextUsed} turn={_currentTurn}");
                 onError(ex);
             }
         }
