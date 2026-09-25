@@ -954,7 +954,7 @@ namespace DevMind
         /// ("[CONTEXT] …", "[TOOL_USE] …", "[LLM] …", "[AGENTIC] …") so only the model's
         /// own prose remains. Returns "" when nothing else was there.
         /// </summary>
-        internal static string StripStatusLines(string text)
+        public static string StripStatusLines(string text)
         {
             if (string.IsNullOrEmpty(text)) return "";
             var keep = new List<string>();

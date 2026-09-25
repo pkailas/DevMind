@@ -197,7 +197,16 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Proposed fix:** disable the implicit-done fallback for headless/MCP-delegated jobs (they always end with task_done; the fallback was
   for chat models that never call it), or require an explicit opt-in. At minimum a job must never end `done` without a final answer -
   classify that as stopped_incomplete: no_final_answer.
-- **Status:** open (high value - silent false "done")
+- **Actual trigger:** the fallback matched any command *containing* `dotnet run`/`dotnet exec`. job-1693's script wrote a probe
+  Program.cs with `Set-Content` (run_shell, so no mutation was recorded) and ran `dotnet run --project $dir` - first run, "pure shell".
+- **Fix:** the implicit-done fallback is removed for every host, not just headless. Nothing depended on it except
+  `LoopDriverRunExecTests` (which pinned the rescue): headless jobs end on task_done, and an interactive model that never calls it
+  still ends through the prose-finish re-prompt (one extra iteration). `LoopHelpers.IsRunOrExecCommand` and the
+  `HadFileMutationThisTurn` / `RunExecSucceededThisTurn` gate flags went with it. Safety net in `AgentJob`: a `done` job whose answer
+  is empty after stripping harness status lines (`[CONTEXT]`/`[TOOL_USE]`/`[LLM]`/`[AGENTIC]`) is `stopped_incomplete` with reason
+  `no_final_answer` - job-1693's verbatim answer is a test case.
+- **Status:** fixed, pending deploy - commit "H-20: no implicit done for headless jobs; empty answer is incomplete". Verify on the
+  next job that runs a `dotnet run` probe mid-research.
 
 ## Parked
 

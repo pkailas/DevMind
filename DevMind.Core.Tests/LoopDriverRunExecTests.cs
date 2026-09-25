@@ -1,15 +1,21 @@
 // File: LoopDriverRunExecTests.cs
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
-// Covers the run/exec implicit-DONE fallback in LoopDriver:
-//   * preserved: a successful `dotnet run` as the ONLY shell work of a pure-shell
-//     turn still terminates the loop (rescues "build and run this" tasks that
-//     never emit task_done).
-//   * fixed bug: a successful `dotnet run` AFTER file work (scaffold → run) or
-//     after a prior successful run/exec is an intermediate step — the loop must
-//     re-trigger, not truncate the task (e.g. "run this and report on it").
-//   * IsRunOrExecCommand no longer classifies bare "*.exe" commands.
-//   * explicit task_done still wins (checked before the fallback).
+// H-20: a successful run/exec is NEVER an implicit DONE.
+//
+// LoopDriver used to end the turn when a `dotnet run`/`dotnet exec` succeeded as the
+// first run of a pure-shell turn (a rescue for chat models that never call task_done).
+// These tests used to pin that rescue plus its two exemptions (run after file work,
+// second run). The rescue itself was the bug: job-1693 (2026-09-25) ran ONE PowerShell
+// research script — it wrote a probe Program.cs with Set-Content, which no mutation gate
+// sees, and `dotnet run` it — after ~20 read/grep iterations, and the headless job ended
+// `done` after 112 s with no answer and no work. The fallback is removed for every host:
+// headless jobs always end on task_done, and an interactive model that never calls it
+// still ends through the prose-finish re-prompt below. What is pinned now:
+//   * every successful run/exec shape re-triggers the loop (the job-1693 script, the old
+//     "build and run" pure-shell turn, run after scaffolding, a second run);
+//   * a failing run re-triggers too;
+//   * explicit task_done still ends the turn, even packed with a run.
 
 using System.Collections.Generic;
 using System.Threading;
@@ -21,87 +27,67 @@ namespace DevMind.Core.Tests
 {
     public sealed class LoopDriverRunExecTests
     {
-        // ── IsRunOrExecCommand classification ────────────────────────────────────
-
-        [Theory]
-        [InlineData("dotnet run", true)]
-        [InlineData("dotnet run --project src/App", true)]
-        [InlineData("dotnet exec app.dll", true)]
-        [InlineData("dotnet run; echo done", true)]
-        [InlineData("dotnet build", false)]
-        [InlineData("dotnet test", false)]
-        [InlineData(@"C:\temp\app\bin\app.exe", false)]          // bare .exe — dropped on purpose
-        [InlineData(@"C:\temp\app.exe --check", false)]          // bare .exe with args
-        [InlineData(@"MSBuild.exe My.csproj", false)]
-        [InlineData("", false)]
-        [InlineData("git status", false)]
-        public void IsRunOrExecCommand_Classifies(string command, bool expected)
-        {
-            Assert.Equal(expected, LoopHelpers.IsRunOrExecCommand(command));
-        }
+        // ── Successful run/exec never ends the turn ────────────────────────────────
 
         [Fact]
-        public void LoopState_ResetForUserTurn_ClearsRunExecGateFlags()
-        {
-            var state = new LoopState
-            {
-                HadFileMutationThisTurn  = true,
-                RunExecSucceededThisTurn = true,
-            };
-
-            state.ResetForUserTurn();
-
-            Assert.False(state.HadFileMutationThisTurn);
-            Assert.False(state.RunExecSucceededThisTurn);
-        }
-
-        // ── LoopDriver fallback behaviour ─────────────────────────────────────────
-
-        [Fact]
-        public async Task RunExec_PureShellTurn_FirstRun_Terminates()
+        public async Task Job1693_ResearchScriptWithDotnetRun_FirstShellCommand_Continues()
         {
             using var env = new Env();
-            // "Build and run this": no file tools, no task_done — the run is the deliverable.
+            // job-1693's triggering command, shape-for-shape: a PowerShell script that writes
+            // a probe project through Set-Content (no file tool, so no mutation is recorded)
+            // and runs it. It is the first shell command of the turn and it succeeds.
+            const string script =
+                "$dir = Join-Path $env:TEMP 'skdump'\n" +
+                "New-Item -ItemType Directory -Force $dir | Out-Null\n" +
+                "$code = @\"\nusing System; class P { static void Main() { } }\n\"@\n" +
+                "Set-Content -Path \"$dir\\Program.cs\" -Value $code -Encoding UTF8\n" +
+                "dotnet run --project $dir 2>&1";
+            var call = new ToolCallResult { Name = "run_shell", Id = "call_1" };
+            call.Arguments["command"] = script;
+
+            var turn = await env.RunToolTurn(call);
+
+            Assert.Equal(LoopIterationKind.ShouldReTrigger, turn.Kind);
+            Assert.DoesNotContain("treating as task complete", env.Host.Output);
+            Assert.DoesNotContain("Task complete.", env.Host.Output);
+        }
+
+        [Fact]
+        public async Task RunExec_PureShellTurn_FirstRun_Continues()
+        {
+            using var env = new Env();
+            // The case the fallback was written for ("build and run this", no task_done).
+            // It now continues: the model reports and calls task_done, or finishes in prose
+            // and meets the prose-finish re-prompt — one extra iteration, never a silent end.
             var turn1 = await env.RunToolTurn(Tool("run_shell", "{\"command\":\"dotnet build\"}"));
-            Assert.Equal(LoopIterationKind.ShouldReTrigger, turn1.Kind); // build ≠ run/exec — loop continues
-
-            var turn2 = await env.RunToolTurn(Tool("run_shell", "{\"command\":\"dotnet run\"}"));
-            Assert.Equal(LoopIterationKind.Terminal, turn2.Kind);
-            Assert.Contains("Run/exec command succeeded", env.Host.Output);
-        }
-
-        [Fact]
-        public async Task RunExec_AfterScaffolding_Files_DoesNotTerminate()
-        {
-            using var env = new Env();
-            // The observed bug: task is "produce a written analysis". The model scaffolds
-            // a throwaway app (file work) and runs it to probe runtime behaviour, then must
-            // still write the analysis. The successful run must NOT end the task.
-            var turn1 = await env.RunToolTurn(Tool("create_file",
-                "{\"filename\":\"probe.cs\",\"content\":\"using System;\\nstatic class P{static void Main(){System.Console.WriteLine(1);}}\"}"));
             Assert.Equal(LoopIterationKind.ShouldReTrigger, turn1.Kind);
-            Assert.True(env.State.HadFileMutationThisTurn);
 
-            // Before the fix, this iteration returned Terminal ("treating as task complete").
             var turn2 = await env.RunToolTurn(Tool("run_shell", "{\"command\":\"dotnet run\"}"));
             Assert.Equal(LoopIterationKind.ShouldReTrigger, turn2.Kind);
             Assert.DoesNotContain("treating as task complete", env.Host.Output);
-            Assert.True(env.State.RunExecSucceededThisTurn);
         }
 
         [Fact]
-        public async Task RunExec_SecondSuccessfulRunSameTurn_DoesNotTerminate()
+        public async Task RunExec_AfterScaffolding_Files_Continues()
         {
             using var env = new Env();
-            // A successful run that was gated by prior file work sets the
-            // RunExecSucceededThisTurn flag; a LATER run/exec in the same turn is
-            // always an intermediate compare-and-check step, never the deliverable.
-            await env.RunToolTurn(Tool("create_file",
-                "{\"filename\":\"probe.cs\",\"content\":\"x\"}"));
+            // Task is "produce a written analysis": the model scaffolds a throwaway app and
+            // runs it to probe runtime behaviour, then must still write the analysis.
+            var turn1 = await env.RunToolTurn(Tool("create_file",
+                "{\"filename\":\"probe.cs\",\"content\":\"using System;\\nstatic class P{static void Main(){System.Console.WriteLine(1);}}\"}"));
+            Assert.Equal(LoopIterationKind.ShouldReTrigger, turn1.Kind);
 
+            var turn2 = await env.RunToolTurn(Tool("run_shell", "{\"command\":\"dotnet run\"}"));
+            Assert.Equal(LoopIterationKind.ShouldReTrigger, turn2.Kind);
+            Assert.DoesNotContain("treating as task complete", env.Host.Output);
+        }
+
+        [Fact]
+        public async Task RunExec_SecondSuccessfulRunSameTurn_Continues()
+        {
+            using var env = new Env();
             var run1 = await env.RunToolTurn(Tool("run_shell", "{\"command\":\"dotnet run\"}"));
             Assert.Equal(LoopIterationKind.ShouldReTrigger, run1.Kind);
-            Assert.True(env.State.RunExecSucceededThisTurn);
 
             var run2 = await env.RunToolTurn(Tool("run_shell", "{\"command\":\"dotnet run --variant two\"}"));
             Assert.Equal(LoopIterationKind.ShouldReTrigger, run2.Kind);
@@ -109,7 +95,7 @@ namespace DevMind.Core.Tests
         }
 
         [Fact]
-        public async Task RunExec_Failing_DoesNotTerminate()
+        public async Task RunExec_Failing_Continues()
         {
             using var env = new Env();
             env.Host.ShellResults["dotnet run"] = (exitCode: 1, output: "Unhandled exception");
@@ -117,15 +103,13 @@ namespace DevMind.Core.Tests
             var turn = await env.RunToolTurn(Tool("run_shell", "{\"command\":\"dotnet run\"}"));
 
             Assert.Equal(LoopIterationKind.ShouldReTrigger, turn.Kind);
-            Assert.False(env.State.RunExecSucceededThisTurn);
         }
 
         [Fact]
-        public async Task ExplicitTaskDone_TakesPrecedenceOverRunExecFallback()
+        public async Task ExplicitTaskDone_WithARun_StillEndsTheTurn()
         {
             using var env = new Env();
-            // Model packs a final shell run together with task_done: the explicit
-            // DONE check must win (order preserved — the fallback stays a fallback).
+            // Model packs a final shell run together with task_done: task_done ends the turn.
             var turn = await env.RunToolTurn(
                 Tool("run_shell", "{\"command\":\"dotnet run\"}"),
                 Tool("task_done", "{\"summary\":\"done\"}"));

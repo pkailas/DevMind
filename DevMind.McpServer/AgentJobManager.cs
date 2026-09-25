@@ -89,7 +89,19 @@ namespace DevMind.McpServer
                 || (Result?.ThrashStopped ?? false)
                 || Build is { Succeeded: false }
                 || Tests is { Succeeded: false }
+                || NoFinalAnswer
                 || SelfReportedIncomplete.Detected);
+
+        /// <summary>
+        /// H-20: the run ended but left no answer — nothing but harness status lines
+        /// ("[CONTEXT] …", "[TOOL_USE] …"), or nothing at all. A finished task always says
+        /// what it did (task_done carries a summary), so an empty answer means the loop
+        /// stopped for some other reason. job-1693 ended `done` this way after one research
+        /// shell command, and nothing downstream could tell. False when there is no Result
+        /// to judge.
+        /// </summary>
+        public bool NoFinalAnswer =>
+            Result != null && HeadlessAgent.StripStatusLines(Result.Answer).Trim().Length == 0;
 
         /// <summary>
         /// What the agent's own final answer said about whether it finished.
@@ -116,6 +128,7 @@ namespace DevMind.McpServer
             if (Result?.HitDepthCap ?? false) reasons.Add("hit_depth_cap");
             if (Build is { Succeeded: false }) reasons.Add("build_verification_failed");
             if (Tests is { Succeeded: false }) reasons.Add("test_verification_failed");
+            if (NoFinalAnswer) reasons.Add("no_final_answer");
 
             // The agent's own words, and the line it said them in — a caller reading
             // incomplete_reasons should not have to go back to the answer to find out which

@@ -110,5 +110,41 @@ namespace DevMind.McpServer.Tests
 
         [Fact]
         public void AQueuedJobIsUntouched() => AssertUntouched(AgentJobState.Queued);
+
+        // ── H-20: done with no final answer ──────────────────────────────────────────
+        // job-1693 ended state=done, incomplete_reasons=[] after an implicit-done fallback
+        // stopped it mid-research. Its answer was only harness status lines — nothing an
+        // H-01 classifier could read — so the empty answer itself is the signal.
+
+        [Theory]
+        [InlineData("")]
+        [InlineData("   \n\t ")]
+        // job-1693's answer, verbatim from job-1693.result.json.
+        [InlineData("[CONTEXT] 72,356 / 262,144 (27%) | Avg delta: 777 | Safe ceiling: 259,813\n\n[TOOL_USE] Processing tool call(s)...")]
+        public void ADoneJobWithNoFinalAnswer_EndsStoppedIncomplete(string answer)
+        {
+            var job = JobEndingWith(answer);
+
+            Assert.True(job.IsIncomplete);
+            Assert.Contains("no_final_answer", job.IncompleteReasons());
+        }
+
+        [Fact]
+        public void ARealAnswerAfterStatusLines_IsNotNoFinalAnswer()
+        {
+            var job = JobEndingWith("[CONTEXT] 1,000 / 262,144 (0%)\nAdded the handler; build 0/0.");
+
+            Assert.False(job.IsIncomplete);
+            Assert.DoesNotContain("no_final_answer", job.IncompleteReasons());
+        }
+
+        [Fact]
+        public void AFailedJobWithNoAnswer_IsUntouched()
+        {
+            var job = JobEndingWith("", AgentJobState.Failed);
+
+            Assert.False(job.IsIncomplete);
+            Assert.Empty(job.IncompleteReasons());
+        }
     }
 }

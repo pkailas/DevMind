@@ -17,23 +17,6 @@ namespace DevMind
         private static string _cachedMSBuildPath;
 
         /// <summary>
-        /// Returns true if the shell command is an explicit run/exec invocation
-        /// (dotnet run / dotnet exec). Bare "*.exe" commands are deliberately NOT
-        /// classified here: running a built exe is typically a follow-up verification
-        /// step ("run this and report on it"), not the task's deliverable, and
-        /// treating it as terminal truncated such tasks. See LoopDriver's
-        /// run/exec fallback, which additionally requires a pure-shell turn.
-        /// </summary>
-        public static bool IsRunOrExecCommand(string command)
-        {
-            if (string.IsNullOrEmpty(command))
-                return false;
-            string cmd = command.Trim().ToLowerInvariant();
-            return cmd.Contains("dotnet run")
-                || cmd.Contains("dotnet exec");
-        }
-
-        /// <summary>
         /// Returns true if the shell command would execute (run) a program or test host.
         /// This is the denylist used by <c>BufferedAgenticHost.NoExecute</c>: when set, these
         /// specific invocations are blocked. Build commands are NOT considered execution.

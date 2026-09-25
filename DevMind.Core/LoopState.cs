@@ -45,28 +45,6 @@ namespace DevMind
         /// </summary>
         public bool   ResearchNudgeIssued       { get; set; }
 
-        // ── Run/exec terminal-fallback gate ─────────────────────────────
-        // The run/exec fallback (LoopDriver) treats a successful run/exec as an
-        // implicit DONE only when the run was the task's deliverable. A turn that
-        // already mutated files, or that already saw a successful run/exec, is a
-        // build-verify / inspect-and-report workflow in progress — the model must
-        // signal task_done itself.
-
-        /// <summary>
-        /// True once a file was created/patched/appended/deleted/renamed anywhere
-        /// in the current user turn. A successful run/exec after file work is a
-        /// verification step, not the deliverable — the run/exec fallback is
-        /// suppressed for the rest of the turn.
-        /// </summary>
-        public bool   HadFileMutationThisTurn   { get; set; }
-
-        /// <summary>
-        /// True once a run/exec command exited 0 during the current user turn.
-        /// A second successful run/exec means running is an intermediate step
-        /// (compare-and-check workflow), so the run/exec fallback never fires again.
-        /// </summary>
-        public bool   RunExecSucceededThisTurn  { get; set; }
-
         /// <summary>
         /// Resets all fields to initial values for a new user-initiated turn.
         /// Does NOT clear _taskReadFiles — the caller handles that separately.
@@ -83,8 +61,6 @@ namespace DevMind
             LastFailureSignature      = null;
             RepeatedFailureCount      = 0;
             ResearchNudgeIssued       = false;
-            HadFileMutationThisTurn   = false;
-            RunExecSucceededThisTurn  = false;
         }
     }
 }
