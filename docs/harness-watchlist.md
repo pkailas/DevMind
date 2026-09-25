@@ -187,6 +187,18 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Status:** fixed, pending deploy - commit "harness: xUnit message-argument lint on test-file writes + CS1503/CS1929 build hint"
   (the fix and this line are the same commit, so it cannot name its own hash)
 
+### H-20 - "Run/exec command succeeded - treating as task complete" still ends real jobs (implicit-done fallback)
+- **Seen 2026-09-25, job-1693 (VLink PDF composer):** after ~20 read/grep iterations the agent ran one PowerShell script (a reflection
+  dump of SkiaSharp's API - research, not the deliverable). The harness printed "[AGENTIC] Run/exec command succeeded - treating as task
+  complete." and ended the job after 112 s: state `done`, incomplete_reasons null, NO final answer, nothing written. H-01 could not help
+  (no answer text to classify). Restarted as job-1694.
+- **Code:** DevMind.Core/LoopDriver.cs ~L284-308. The August fix narrowed the fallback to "the turn so far was pure shell (no file
+  mutations) and no run/exec already succeeded" - which is exactly the situation of any job's FIRST shell command during research.
+- **Proposed fix:** disable the implicit-done fallback for headless/MCP-delegated jobs (they always end with task_done; the fallback was
+  for chat models that never call it), or require an explicit opt-in. At minimum a job must never end `done` without a final answer -
+  classify that as stopped_incomplete: no_final_answer.
+- **Status:** open (high value - silent false "done")
+
 ## Parked
 
 ### P-01 - No-write-streak nudge
