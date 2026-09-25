@@ -66,6 +66,21 @@ namespace DevMind.McpServer.Tests
         }
 
         [Fact]
+        public void Job1686sRealFinalAnswer_EndsDone()
+        {
+            // job-1686 finished (473 green, clean build) and ended stopped_incomplete with reason
+            // "## Caller must know" — a notes-section HEADER. Verbatim from job-1686.result.json.
+            string answer = File.ReadAllText(
+                Path.Combine(AppContext.BaseDirectory, "Fixtures", "job-1686.answer.md"));
+            Assert.Contains("\n## Caller must know\n", answer.Replace("\r\n", "\n"));
+
+            var job = JobEndingWith(answer);
+
+            Assert.False(job.IsIncomplete);
+            Assert.Empty(job.IncompleteReasons());
+        }
+
+        [Fact]
         public void TheFullAnswerIsKeptExactlyAsBefore()
         {
             // The classifier reads the answer; it does not edit it.

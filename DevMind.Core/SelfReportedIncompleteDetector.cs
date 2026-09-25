@@ -1,4 +1,4 @@
-// File: SelfReportedIncompleteDetector.cs  v1.2
+// File: SelfReportedIncompleteDetector.cs  v1.3
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // When the agent's own final answer says the work is not finished.
@@ -29,6 +29,14 @@
 // wrote "INCOMPLETE: none." — the brief had asked for unfinished items on INCOMPLETE: lines —
 // and ended stopped_incomplete. A marker whose text is only none / nothing / n/a / na / - / —
 // (or nothing at all, with no list under it) now reads as the all-clear it is.
+//
+// v1.3: a markdown header is a section title, not a statement about the work. job-1686 finished
+// cleanly (tests green, build clean) and ended stopped_incomplete because its notes section was
+// titled "## Caller must know". Header lines (# to ######) are no longer read by the phrase
+// list — the INCOMPLETE: marker still counts in a header — and "caller must" is dropped from
+// the list: agents now use the INCOMPLETE: convention consistently, and "caller must" was only
+// ever the weakest of the backups ("the caller must not report X as fixed" is still caught by
+// "must not report" and "not fixed").
 
 using System;
 using System.Collections.Generic;
@@ -87,7 +95,6 @@ namespace DevMind
             "was not run",
             "were not run",
             "never executed",
-            "caller must",
             "must not report",
             "remaining work",
             "still failing",
@@ -106,6 +113,11 @@ namespace DevMind
         private static readonly Regex Marker = new Regex(
             @"^\s*(?:>\s*)*(?:#{1,6}\s+)?(?:(?:[-*+]|\d+[.)])\s+)?(?:\*\*|__|\*|_)?INCOMPLETE(?:\*\*|__|\*|_)?:(?:\*\*|__|\*|_)?",
             RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        // A markdown ATX header: "#" to "######" then whitespace or end of line, after optional
+        // indent/">". "#hashtag" and "#123" are not headers.
+        private static readonly Regex Header = new Regex(
+            @"^\s*(?:>\s*)*#{1,6}(?:\s|$)", RegexOptions.Compiled);
 
         // A list item: "-", "*", "+", "1.", "1)" followed by whitespace, after optional indent/">".
         private static readonly Regex ListItem = new Regex(
@@ -174,6 +186,9 @@ namespace DevMind
                     else if (!NothingUnfinished.IsMatch(rest)) return new SelfReportedIncomplete(true, Trim(line));
                     continue;
                 }
+
+                // A header titles a section; it does not report on the work ("## Caller must know").
+                if (Header.IsMatch(line)) continue;
 
                 foreach (string phrase in Phrases)
                 {

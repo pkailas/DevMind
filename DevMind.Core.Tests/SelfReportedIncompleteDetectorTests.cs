@@ -220,9 +220,72 @@ namespace DevMind.Core.Tests
         [Fact]
         public void TildeFencesCountAsFencesToo()
         {
-            string answer = "~~~\nthe caller must do something\n~~~\nAll green.";
+            // (Was "the caller must do something" — "caller must" left the phrase list in v1.3,
+            // and a phrase that no longer fires would make this test pass for the wrong reason.)
+            string answer = "~~~\nthe fix is not verified\n~~~\nAll green.";
 
             Assert.False(Fires(answer));
+        }
+
+        // ── v1.3: headers and "caller must" (job-1686) ───────────────────────────
+
+        [Fact]
+        public void Job1686_CallerMustKnowHeaderOverACleanAnswer_IsNotIncomplete()
+        {
+            // job-1686 finished (473 green, build clean) and ended stopped_incomplete only
+            // because its notes section was titled "## Caller must know".
+            string answer =
+                "LT-21 fixed: the tracker is seeded from persisted history at startup.\n\n" +
+                "## Test results (observed)\n" +
+                "- Service.Tests: 473 passed / 0 failed / 1 skipped.\n\n" +
+                "## Caller must know\n" +
+                "- SeedAsync was added to the ITargetHealthTracker interface.\n" +
+                "- No git commit/push performed, as instructed.";
+
+            Assert.False(Fires(answer));
+        }
+
+        [Theory]
+        [InlineData("# Not done")]
+        [InlineData("### Remaining work")]
+        [InlineData("###### Still failing (fixed below)")]
+        [InlineData("  > ## Not verified")]
+        [InlineData("##")]
+        public void APhraseInAMarkdownHeader_IsATitle_NotAClaim(string header)
+        {
+            Assert.False(Fires("All green.\n" + header + "\nNothing outstanding."), $"false positive: {header}");
+        }
+
+        [Theory]
+        // Not a header: no space after the hashes, so the line is prose and the phrase counts.
+        [InlineData("#1 remaining work: wire the handler")]
+        [InlineData("####### not done")]   // seven hashes is not a markdown header
+        public void AHashThatIsNotAHeader_StillCounts(string line)
+        {
+            Assert.True(Fires(line), $"missed: {line}");
+        }
+
+        [Fact]
+        public void TheMarkerInAHeader_StillCounts()
+        {
+            // The header skip is for the phrase list only; the explicit marker is a declaration.
+            Assert.True(Fires("All green.\n## INCOMPLETE: the migration was not applied"));
+        }
+
+        [Fact]
+        public void CallerMust_IsNoLongerAPhrase()
+        {
+            Assert.DoesNotContain("caller must", SelfReportedIncompleteDetector.Phrases);
+            Assert.False(Fires("The caller must restart the service to pick up the new config."));
+        }
+
+        [Fact]
+        public void CallerMust_BehindTheMarker_IsStillIncomplete()
+        {
+            var result = SelfReportedIncompleteDetector.Detect("Patched the schema.\nINCOMPLETE: caller must run the migration");
+
+            Assert.True(result.Detected);
+            Assert.Equal("INCOMPLETE: caller must run the migration", result.Line);
         }
 
         [Fact]

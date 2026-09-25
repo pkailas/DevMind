@@ -258,6 +258,10 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   notes section) - the backup phrase list matches "caller must" anywhere. Suggested fix: apply the phrase list only to lines that are
   not markdown headers, and require the phrase to be followed by an action ("caller must finish/run/fix/...") or drop "caller must" from
   the list now that the INCOMPLETE: convention exists and is used consistently.
+  **Fixed** - commit "H-01: headers and 'caller must' no longer trigger self_reported_incomplete" (SelfReportedIncompleteDetector
+  v1.3): markdown ATX header lines (# to ######) are skipped by the phrase list (the INCOMPLETE: marker still counts in a header), and
+  "caller must" is dropped from the phrase list ("INCOMPLETE: caller must run the migration" still fires via the marker). job-1686's
+  verbatim answer is a fixture and now ends `done`. Pending deploy.
 - **H-17 recurrence (2026-09-25, job-1690):** the agent's first patch to AdminUiPagesTests.cs corrupted a PRE-EXISTING line (164) -
   "double-quote mangled" in its own words - CS1010 "Newline in constant". It fixed it itself within 2 iterations. Evidence that the
   quote corruption also hits lines adjacent to the edit, not only the new content.
