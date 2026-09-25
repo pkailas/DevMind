@@ -231,6 +231,16 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   notes section) - the backup phrase list matches "caller must" anywhere. Suggested fix: apply the phrase list only to lines that are
   not markdown headers, and require the phrase to be followed by an action ("caller must finish/run/fix/...") or drop "caller must" from
   the list now that the INCOMPLETE: convention exists and is used consistently.
+- **H-17 recurrence (2026-09-25, job-1690):** the agent's first patch to AdminUiPagesTests.cs corrupted a PRE-EXISTING line (164) -
+  "double-quote mangled" in its own words - CS1010 "Newline in constant". It fixed it itself within 2 iterations. Evidence that the
+  quote corruption also hits lines adjacent to the edit, not only the new content.
+- **RAG consulted but not applied (job-1690):** the Razor em-dash-as-&#x2014; rule is in Pitfalls_DotNet_Config_Tests, yet the agent
+  spent ~8 iterations writing debug dumps before a steer pointed at it. Retrieval happens at the start of a job; the knowledge is not
+  recalled at the moment a matching symptom (non-ASCII + Contains failure) appears. Idea: a build/test-output hint (like H-19 layer 2)
+  for "Assert.Contains failure where the expected string has non-ASCII chars" -> "Razor HTML-encodes non-ASCII; decode first".
+- **Swift-variant scorecard (2026-09-25, jobs 1683-1690):** 8 jobs, typical 4-10 min, 25-65 iterations; red-first in 7/8; driver fixes
+  in 5/8 (test arithmetic, unbounded query, a duplicate confirm handler, a process-wide WAL guard, Serilog reflection hack); zero
+  "stale build" spirals.
 - **xUnit lint (H-19) first live job (job-1686):** 0 [LINT] and 0 [HINT] lines - the model did not make the mistake this time, so no
   evidence yet either way.
 - **API misknowledge -> dangerous proposals** (job-1675): the agent decided .NET 10 has no SAN builder (it searched for
