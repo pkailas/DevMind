@@ -77,7 +77,13 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   - `cmd /c "... > log 2>&1"` inside the wrapper wrote only "The system cannot find the path specified." with exit 0;
   - CLIXML error blocks still appear for stderr from some commands.
 - **Proposed fix:** return stdout+stderr inline (capped) as UTF-8 text; set `$OutputEncoding`/`[Console]::OutputEncoding` to UTF-8 in the wrapper; document that redirect-to-file is unnecessary.
-- **Status:** open
+- **Binary in output (2026-09-25, job-1694):** a PowerShell PDF dump put several KB of raw JPEG bytes (NUL runs, control chars,
+  "JFIF", `├┐├` mojibake) into the context. **Fixed** - commit "harness: collapse binary runs in shell output":
+  `BinaryOutputMask.Collapse` in AgenticExecutor.WithBuildHints (run_shell / run_build / run_tests tool results) replaces a region
+  of >=16 control chars (bridging printable gaps of <=8, control chars >=50% of it) with "[... N bytes of binary data ...]". Text,
+  non-ASCII letters, box-drawing and ANSI-coloured output are untouched. The live transcript still shows the raw bytes (the host
+  streams it before the executor sees the output). Pending deploy.
+- **Status:** open (binary part fixed)
 
 ### H-08 - `run_tests` has no `--blame-hang` option
 - **First seen:** 2026-09-23 - job-1652 ("run_tests tool has no arg for them")

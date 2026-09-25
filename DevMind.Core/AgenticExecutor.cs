@@ -884,10 +884,12 @@ namespace DevMind
             catch { /* lint is advisory \u2014 never fail the patch over it */ }
         }
 
-        /// <summary>Build/test output as the agent will read it, with any known-trap hints appended.</summary>
+        /// <summary>Build/test output as the agent will read it: binary regions collapsed to a
+        /// marker (job-1694 dumped raw JPEG bytes into its context), then any known-trap hints appended.</summary>
         private string WithBuildHints(string output)
         {
             if (string.IsNullOrEmpty(output)) return output ?? string.Empty;
+            output = BinaryOutputMask.Collapse(output);
             string workingDirectory;
             try { workingDirectory = _host.GetWorkingDirectory(); }
             catch { workingDirectory = null; }
