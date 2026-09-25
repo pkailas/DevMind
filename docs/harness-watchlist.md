@@ -226,6 +226,13 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   text is only none / nothing / n/a / na / - / (em/en) dash, case-insensitive, optionally emphasised with trailing punctuation, is
   NOT incomplete; "INCOMPLETE: none of the tests ran" still is. An empty marker counts only as a header over a list (first item
   quoted, unless that item is itself "none"); an empty marker with no list under it declares nothing. Pending deploy.
+- **H-01 false positive #2 (2026-09-25, job-1686, after deploy of 90d5365):** a fully finished job (tests 473/75 green, clean build)
+  ended stopped_incomplete / self_reported_incomplete because its summary contained the markdown HEADER "## Caller must know" (a
+  notes section) - the backup phrase list matches "caller must" anywhere. Suggested fix: apply the phrase list only to lines that are
+  not markdown headers, and require the phrase to be followed by an action ("caller must finish/run/fix/...") or drop "caller must" from
+  the list now that the INCOMPLETE: convention exists and is used consistently.
+- **xUnit lint (H-19) first live job (job-1686):** 0 [LINT] and 0 [HINT] lines - the model did not make the mistake this time, so no
+  evidence yet either way.
 - **API misknowledge -> dangerous proposals** (job-1675): the agent decided .NET 10 has no SAN builder (it searched for
   `X509SubjectAlternativeNameBuilder`; the type is `SubjectAlternativeNameBuilder`), hand-built ASN.1 with non-existent types, then
   offered to DROP the SANs. It spent many iterations on scratch console projects and PE-string scans instead of `hover` /
