@@ -287,14 +287,10 @@ namespace DevMind
 
             if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
             {
-                // UTF-8 with BOM detected.
-                // For script files (.cmd, .bat, .sh, .ps1), strip the BOM so the patched file
-                // is written back without one — prevents garbled output in shells that don't
-                // expect a BOM (cmd.exe, PowerShell, bash).
-                bool isScriptFile = IsScriptFileExtension(path);
-                if (isScriptFile)
-                    return (new UTF8Encoding(true).GetString(bytes, 3, bytes.Length - 3),
-                            new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+                // UTF-8 with BOM: written back WITH it, whatever the extension. This used to
+                // strip it from .ps1/.cmd/.bat/.sh, which broke Windows PowerShell 5.1 scripts
+                // that need it to read non-ASCII text as UTF-8 (job-1676). A BOM already in
+                // the file is the author's choice; an edit is not the place to change it.
                 return (new UTF8Encoding(true).GetString(bytes, 3, bytes.Length - 3),
                         new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
             }
@@ -305,16 +301,6 @@ namespace DevMind
                         Encoding.BigEndianUnicode);
 
             return (Encoding.UTF8.GetString(bytes), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
-        }
-
-        /// <summary>
-        /// Returns true for script file extensions where a UTF-8 BOM causes problems
-        /// (cmd.exe, PowerShell, bash interpret the BOM bytes as part of the shebang/command).
-        /// </summary>
-        private static bool IsScriptFileExtension(string path)
-        {
-           string ext = Path.GetExtension(path)?.ToLowerInvariant() ?? "";
-            return ext == ".cmd" || ext == ".bat" || ext == ".sh" || ext == ".ps1";
         }
 
         /// <summary>

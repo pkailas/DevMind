@@ -493,8 +493,8 @@ namespace DevMind
                 }
 
                 // No conflicts — write the merged text
-                string finalContent = merge.MergedText;
-                File.WriteAllText(fullPath, finalContent);
+                // Existing file: keep its BOM/encoding and dominant line ending.
+                string finalContent = TextFileFormat.WritePreserving(fullPath, merge.MergedText);
                 _fileCache.Store(FileCacheKey(fullPath), finalContent);
                 int lineCount = finalContent.Split('\n').Length;
                 AppendOutput($"[FILE] Saved {fileNameOnly} ({lineCount} lines){(merge.UsedFallback ? " [two-way fallback]" : "")}\n", OutputColor.Success);
@@ -570,9 +570,11 @@ namespace DevMind
                 string currentText = File.ReadAllText(resolvedPath);
                 _fileCache.Store(FileCacheKey(resolvedPath), currentText);
 
-                // For append: proposed = currentText + separator + content
-                string separator = currentText.Length > 0 && !currentText.EndsWith("\n", StringComparison.Ordinal) ? "\n" : "";
-                string proposedText = currentText + separator + content;
+                // For append: proposed = currentText + separator + content. The appended text
+                // takes the file's dominant line ending, and the write keeps its BOM/encoding.
+                var format = TextFileFormat.Detect(resolvedPath);
+                string separator = currentText.Length > 0 && !currentText.EndsWith("\n", StringComparison.Ordinal) ? (format.NewLine ?? "\n") : "";
+                string proposedText = currentText + separator + format.NormalizeLineEndings(content);
 
                 string baseText = _fileCache.GetFull(FileCacheKey(resolvedPath));
 
@@ -611,7 +613,7 @@ namespace DevMind
                 }
 
                 // No conflicts — write the merged text
-                File.WriteAllText(resolvedPath, merge.MergedText);
+                format.Write(resolvedPath, merge.MergedText);
                 _fileCache.Store(FileCacheKey(resolvedPath), merge.MergedText);
                 AppendOutput($"[APPEND] Appended to {fileNameOnly}{(merge.UsedFallback ? " [two-way fallback]" : "")}\n", OutputColor.Success);
                 RecordAction("append", resolvedPath);
@@ -662,9 +664,9 @@ namespace DevMind
             {
                 try
                 {
-                    File.WriteAllText(pc.FilePath, pc.ProposedContent);
+                    string written = TextFileFormat.WritePreserving(pc.FilePath, pc.ProposedContent);
                     string fileNameOnly = SafeGetFileName(pc.FilePath);
-                    _fileCache.Store(FileCacheKey(pc.FilePath), pc.ProposedContent);
+                    _fileCache.Store(FileCacheKey(pc.FilePath), written);
                     _pendingConflict = null;
                     AppendOutput($"[MERGE] Accepted proposed content for {fileNameOnly}\n", OutputColor.Success);
                     return $"[MERGE] Accepted proposed content for {fileNameOnly}";

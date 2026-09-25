@@ -748,7 +748,8 @@ public sealed class StripHallucinatedTerminatorsTests
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ReadFilePreservingEncoding — non-BOM and script-file BOM stripping
+// ReadFilePreservingEncoding — non-BOM, and BOM preserved for every extension
+// (script files used to have it stripped; that broke PowerShell 5.1 scripts — job-1676)
 // ─────────────────────────────────────────────────────────────────────────────
 
 public sealed class ReadFilePreservingEncodingEdgeCases
@@ -773,9 +774,9 @@ public sealed class ReadFilePreservingEncodingEdgeCases
         finally { try { File.Delete(tmpPath); } catch { } }
     }
 
-    // ── Script file (.ps1) with BOM → BOM stripped from returned encoding ────
+    // ── Script file (.ps1) with BOM → BOM preserved (job-1676) ────────────────
     [Fact]
-    public void ScriptFileWithBom_BomStrippedFromEncoding()
+    public void ScriptFileWithBom_BomPreserved()
     {
         string tmpPath = Path.Combine(Path.GetTempPath(), $"dm_test_{Guid.NewGuid():N}.ps1");
         try
@@ -788,15 +789,15 @@ public sealed class ReadFilePreservingEncodingEdgeCases
             Assert.Equal("# PowerShell script", content);
             Assert.IsType<UTF8Encoding>(encoding);
             var preamble = ((UTF8Encoding)encoding).GetPreamble();
-            // Script files should return encoding WITHOUT BOM
-            Assert.Empty(preamble);
+            // A .ps1 that has a BOM keeps it: Windows PowerShell 5.1 needs it for non-ASCII text.
+            Assert.Equal(new byte[] { 0xEF, 0xBB, 0xBF }, preamble);
         }
         finally { try { File.Delete(tmpPath); } catch { } }
     }
 
-    // ── Script file (.sh) with BOM → BOM stripped ────────────────────────────
+    // ── Script file (.sh) with BOM → BOM preserved ───────────────────────────
     [Fact]
-    public void ShellScriptWithBom_BomStripped()
+    public void ShellScriptWithBom_BomPreserved()
     {
         string tmpPath = Path.Combine(Path.GetTempPath(), $"dm_test_{Guid.NewGuid():N}.sh");
         try
@@ -808,14 +809,14 @@ public sealed class ReadFilePreservingEncodingEdgeCases
 
             Assert.Equal("#!/bin/bash", content);
             var preamble = ((UTF8Encoding)encoding).GetPreamble();
-            Assert.Empty(preamble);
+            Assert.Equal(new byte[] { 0xEF, 0xBB, 0xBF }, preamble);
         }
         finally { try { File.Delete(tmpPath); } catch { } }
     }
 
-    // ── Script file (.cmd) with BOM → BOM stripped ───────────────────────────
+    // ── Script file (.cmd) with BOM → BOM preserved ──────────────────────────
     [Fact]
-    public void CmdScriptWithBom_BomStripped()
+    public void CmdScriptWithBom_BomPreserved()
     {
         string tmpPath = Path.Combine(Path.GetTempPath(), $"dm_test_{Guid.NewGuid():N}.cmd");
         try
@@ -827,14 +828,14 @@ public sealed class ReadFilePreservingEncodingEdgeCases
 
             Assert.Equal("@echo off", content);
             var preamble = ((UTF8Encoding)encoding).GetPreamble();
-            Assert.Empty(preamble);
+            Assert.Equal(new byte[] { 0xEF, 0xBB, 0xBF }, preamble);
         }
         finally { try { File.Delete(tmpPath); } catch { } }
     }
 
-    // ── Script file (.bat) with BOM → BOM stripped ───────────────────────────
+    // ── Script file (.bat) with BOM → BOM preserved ──────────────────────────
     [Fact]
-    public void BatScriptWithBom_BomStripped()
+    public void BatScriptWithBom_BomPreserved()
     {
         string tmpPath = Path.Combine(Path.GetTempPath(), $"dm_test_{Guid.NewGuid():N}.bat");
         try
@@ -846,7 +847,7 @@ public sealed class ReadFilePreservingEncodingEdgeCases
 
             Assert.Equal("@echo off", content);
             var preamble = ((UTF8Encoding)encoding).GetPreamble();
-            Assert.Empty(preamble);
+            Assert.Equal(new byte[] { 0xEF, 0xBB, 0xBF }, preamble);
         }
         finally { try { File.Delete(tmpPath); } catch { } }
     }

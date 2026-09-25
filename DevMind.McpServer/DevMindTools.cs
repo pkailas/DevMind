@@ -1175,12 +1175,14 @@ internal sealed class DevMindTools
                     if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                         Directory.CreateDirectory(dir);
 
-                    // Script files (.cmd/.bat/.sh/.ps1) always get UTF-8 without BOM to prevent
-                    // garbled output in shells that don't expect a BOM preamble.
+                    // New file: script files (.cmd/.bat/.sh/.ps1) get UTF-8 without BOM to prevent
+                    // garbled output in shells that don't expect a BOM preamble; others get a BOM.
+                    // Existing file (overwrite): keeps the BOM/encoding and dominant line ending
+                    // it already had — job-1676 stripped the BOM a PowerShell 5.1 script needs.
                     var fileEncoding = IsScriptFileExtension(fullPath)
                         ? new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)
                         : System.Text.Encoding.UTF8;
-                    File.WriteAllText(fullPath, content, fileEncoding);
+                    content = TextFileFormat.WritePreserving(fullPath, content, fileEncoding);
 
                     int lineCount       = content.Split('\n').Length;
                     string cacheKey     = Path.GetFullPath(fullPath);
@@ -1235,20 +1237,22 @@ internal sealed class DevMindTools
                 if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                     Directory.CreateDirectory(dir);
 
-               // Script files (.cmd/.bat/.sh/.ps1) always get UTF-8 without BOM.
-                var appendEncoding = IsScriptFileExtension(fullPath)
-                    ? new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)
-                    : System.Text.Encoding.UTF8;
-
                 // Ensure a newline separator between existing content and appended content.
+                // An existing file keeps its BOM/encoding, and the appended text takes its
+                // dominant line ending.
                 if (existed)
                 {
+                    var format       = TextFileFormat.Detect(fullPath);
                     string existing  = File.ReadAllText(fullPath);
-                    string separator = existing.Length > 0 && !existing.EndsWith("\n", StringComparison.Ordinal) ? "\n" : "";
-                    File.WriteAllText(fullPath, existing + separator + content, appendEncoding);
+                    string separator = existing.Length > 0 && !existing.EndsWith("\n", StringComparison.Ordinal) ? (format.NewLine ?? "\n") : "";
+                    format.Write(fullPath, existing + separator + format.NormalizeLineEndings(content));
                 }
                 else
                 {
+                    // New file: script files (.cmd/.bat/.sh/.ps1) get UTF-8 without BOM.
+                    var appendEncoding = IsScriptFileExtension(fullPath)
+                        ? new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)
+                        : System.Text.Encoding.UTF8;
                     File.WriteAllText(fullPath, content, appendEncoding);
                 }
 

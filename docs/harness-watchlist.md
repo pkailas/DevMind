@@ -296,6 +296,12 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   auth/antiforgery/validation to make a test pass; stop and ask.
 - **Encoding drift on edit** (job-1676): the agent's edits stripped the UTF-8 BOM from two installer .ps1 files that must keep it
   (PowerShell 5.1). Patch/write tools should preserve an existing BOM.
+  **Fixed** - commit "harness: patch/append/overwrite preserve BOM and line endings". Cause: `PatchEngine.ReadFilePreservingEncoding`
+  deliberately dropped the BOM for .ps1/.cmd/.bat/.sh; host create_file-overwrite/append wrote BOM-less UTF-8 regardless; the MCP
+  write_file/append_file forced BOM-less for scripts and ADDED a BOM to every other file. Now an EXISTING file keeps its BOM (any
+  extension) and its dominant line ending (`TextFileFormat`, DevMind.Core) on patch_file, create_file/write_file overwrite, append_file
+  and /resolve accept_proposed, in BufferedAgenticHost, TuiAgenticHost and the MCP tools. New files: unchanged per-tool behaviour.
+  Pending deploy.
 - **Test-helper bugs mistaken for product bugs** (2026-09-24, job-1670): a non-verbatim interpolated string with doubled quotes
   (`$"title=\"\"{x}\"\""`) produced a regex that could never match; the failure message itself printed the correct element. Agents should
   read their own assertion's pattern when the "actual" in the message looks right.
