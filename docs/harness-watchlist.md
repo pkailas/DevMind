@@ -206,6 +206,10 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   unfinished on a line starting INCOMPLETE:") and was classified stopped_incomplete / self_reported_incomplete with reason
   "INCOMPLETE: none.". Detector fix: treat "INCOMPLETE: none|nothing|n/a|-" (optionally with punctuation) as NOT incomplete. Brief
   fix (driver side, applied from job-1680 on): "only if something is unfinished, add a line starting INCOMPLETE: - otherwise omit it".
+  **Detector fixed** - commit "H-01: 'INCOMPLETE: none' is not incomplete" (SelfReportedIncompleteDetector v1.2): a marker whose
+  text is only none / nothing / n/a / na / - / (em/en) dash, case-insensitive, optionally emphasised with trailing punctuation, is
+  NOT incomplete; "INCOMPLETE: none of the tests ran" still is. An empty marker counts only as a header over a list (first item
+  quoted, unless that item is itself "none"); an empty marker with no list under it declares nothing. Pending deploy.
 - **API misknowledge -> dangerous proposals** (job-1675): the agent decided .NET 10 has no SAN builder (it searched for
   `X509SubjectAlternativeNameBuilder`; the type is `SubjectAlternativeNameBuilder`), hand-built ASN.1 with non-existent types, then
   offered to DROP the SANs. It spent many iterations on scratch console projects and PE-string scans instead of `hover` /

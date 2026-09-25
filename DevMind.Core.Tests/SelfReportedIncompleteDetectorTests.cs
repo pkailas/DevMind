@@ -100,12 +100,55 @@ namespace DevMind.Core.Tests
         }
 
         [Fact]
-        public void ABareMarkerAtTheEndStillCounts()
+        public void ABareMarkerWithNoListUnderItDeclaresNothing()
         {
-            var result = SelfReportedIncompleteDetector.Detect("Done with the markup.\n**INCOMPLETE:**");
+            // An empty marker is only a declaration when it heads a list of unfinished items.
+            Assert.False(Fires("Done with the markup.\n**INCOMPLETE:**"));
+            Assert.False(Fires("INCOMPLETE:\nAll tests pass, build 0 errors / 0 warnings."));
+        }
 
-            Assert.True(result.Detected);
-            Assert.Equal("**INCOMPLETE:**", result.Line);
+        [Fact]
+        public void ABareMarkerDoesNotSwallowTheLineAfterIt()
+        {
+            // No list under the header, but the next line reports unfinished work on its own.
+            Assert.True(Fires("INCOMPLETE:\nThe core defect is NOT fixed."));
+        }
+
+        // job-1679 finished its work and wrote "INCOMPLETE: none." — the all-clear, not a
+        // declaration of unfinished work.
+        [Theory]
+        [InlineData("INCOMPLETE: none.")]
+        [InlineData("- **INCOMPLETE:** None")]
+        [InlineData("INCOMPLETE: n/a")]
+        [InlineData("INCOMPLETE: N/A.")]
+        [InlineData("INCOMPLETE: na")]
+        [InlineData("INCOMPLETE: nothing!")]
+        [InlineData("INCOMPLETE: -")]
+        [InlineData("INCOMPLETE: —")]
+        [InlineData("INCOMPLETE: **none**")]
+        [InlineData("1. INCOMPLETE: NONE;")]
+        [InlineData("**INCOMPLETE:**\n- none")]
+        public void AMarkerThatDeclaresNothingUnfinished_IsNotIncomplete(string line)
+        {
+            Assert.False(Fires("Patched the parser and rebuilt clean. Suite green.\n" + line), $"false positive: {line}");
+        }
+
+        [Theory]
+        [InlineData("INCOMPLETE: none of the tests ran")]
+        [InlineData("INCOMPLETE: nothing was verified")]
+        [InlineData("INCOMPLETE: n/a for build, but the tests are red")]
+        public void AMarkerThatOnlyStartsWithANoneWord_IsStillIncomplete(string line)
+        {
+            var result = SelfReportedIncompleteDetector.Detect("Patched the parser.\n" + line);
+
+            Assert.True(result.Detected, $"missed: {line}");
+            Assert.Equal(line, result.Line);
+        }
+
+        [Fact]
+        public void ANoneMarkerDoesNotHideALaterDeclaration()
+        {
+            Assert.True(Fires("INCOMPLETE: none.\nINCOMPLETE: the migration was not applied"));
         }
 
         [Fact]

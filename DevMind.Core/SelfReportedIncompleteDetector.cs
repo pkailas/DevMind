@@ -1,4 +1,4 @@
-// File: SelfReportedIncompleteDetector.cs  v1.1
+// File: SelfReportedIncompleteDetector.cs  v1.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // When the agent's own final answer says the work is not finished.
@@ -24,6 +24,11 @@
 // classifier was reading the right text (the answer devmind_task_result returns), but v1.0
 // only matched a line that opened with the bare word, and agents write their lists in
 // markdown.
+//
+// v1.2: a marker that declares nothing is not a declaration. job-1679 finished its work and
+// wrote "INCOMPLETE: none." — the brief had asked for unfinished items on INCOMPLETE: lines —
+// and ended stopped_incomplete. A marker whose text is only none / nothing / n/a / na / - / —
+// (or nothing at all, with no list under it) now reads as the all-clear it is.
 
 using System;
 using System.Collections.Generic;
@@ -102,6 +107,17 @@ namespace DevMind
             @"^\s*(?:>\s*)*(?:#{1,6}\s+)?(?:(?:[-*+]|\d+[.)])\s+)?(?:\*\*|__|\*|_)?INCOMPLETE(?:\*\*|__|\*|_)?:(?:\*\*|__|\*|_)?",
             RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
+        // A list item: "-", "*", "+", "1.", "1)" followed by whitespace, after optional indent/">".
+        private static readonly Regex ListItem = new Regex(
+            @"^\s*(?:>\s*)*(?:[-*+]|\d+[.)])\s+", RegexOptions.Compiled);
+
+        // The text after a marker that says there is nothing unfinished: none, nothing, n/a, na,
+        // "-" or a dash, optionally emphasised and followed by punctuation. Empty is handled by
+        // the caller, because an empty marker may be a header over a list.
+        private static readonly Regex NothingUnfinished = new Regex(
+            @"^(?:\*\*|__|\*|_)?(?:none|nothing|n/a|na|-|—|–)(?:\*\*|__|\*|_)?[.!;,]*(?:\*\*|__|\*|_)?$",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
         /// <summary>
         /// Examine a final answer.
         /// </summary>
@@ -130,16 +146,32 @@ namespace DevMind
                 if (line.Length == 0) continue;
 
                 // A bare marker is a heading over the list that says what is unfinished; the
-                // line under it is the one worth quoting in the reason field.
-                if (bareMarker != null) return new SelfReportedIncomplete(true, Trim(line));
+                // first item under it is the one worth quoting in the reason field — unless that
+                // item itself says "none". A bare marker with no list under it declares nothing,
+                // and the line that follows is read on its own merits.
+                if (bareMarker != null)
+                {
+                    bareMarker = null;
+                    Match item = ListItem.Match(line);
+                    if (item.Success)
+                    {
+                        string itemText = line.Substring(item.Length).Trim();
+                        Match inner = Marker.Match(itemText);
+                        if (inner.Success) itemText = itemText.Substring(inner.Length).Trim();
+                        if (itemText.Length == 0 || NothingUnfinished.IsMatch(itemText)) continue;
+                        return new SelfReportedIncomplete(true, Trim(line));
+                    }
+                }
 
                 // The explicit convention first: it is a declaration, not a guess, so it is
-                // checked before the phrase list and never subject to it.
+                // checked before the phrase list and never subject to it — including when it
+                // declares that nothing is unfinished ("INCOMPLETE: none.").
                 Match marker = Marker.Match(line);
                 if (marker.Success)
                 {
-                    if (line.Length > marker.Length) return new SelfReportedIncomplete(true, Trim(line));
-                    bareMarker = line;
+                    string rest = line.Substring(marker.Length).Trim();
+                    if (rest.Length == 0) bareMarker = line;
+                    else if (!NothingUnfinished.IsMatch(rest)) return new SelfReportedIncomplete(true, Trim(line));
                     continue;
                 }
 
@@ -150,9 +182,7 @@ namespace DevMind
                 }
             }
 
-            return bareMarker != null
-                ? new SelfReportedIncomplete(true, Trim(bareMarker))
-                : SelfReportedIncomplete.None;
+            return SelfReportedIncomplete.None;
         }
 
         private static string Trim(string line)
