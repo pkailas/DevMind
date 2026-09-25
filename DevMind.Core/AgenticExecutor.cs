@@ -81,7 +81,7 @@ namespace DevMind
                         {
                             var (exitCode, output) = await _host.RunShellAsync(action.ShellCommand);
                             result.ShellExitCode     = exitCode;
-                            result.ShellOutput       = output ?? string.Empty;
+                            result.ShellOutput       = WithBuildHints(output);
                             result.LastShellCommand  = action.ShellCommand;
                         }
                         catch (Exception ex)
@@ -183,6 +183,8 @@ namespace DevMind
                             if (!string.IsNullOrEmpty(savedPath))
                             {
                                 result.FilesCreated.Add(savedPath);
+                                // A created file is all new: every line is a changed line.
+                                RecordLint(result, savedPath, block.Content, null);
                                 _lastReadKey = null;
                                 _lastReadRepeatCount = 0;
                             }
@@ -205,6 +207,7 @@ namespace DevMind
                             if (!string.IsNullOrEmpty(appendedPath))
                             {
                                 result.FilesAppended.Add(appendedPath);
+                                RecordAppendLint(result, appendedPath, block.Content);
                                 _lastReadKey = null;
                                 _lastReadRepeatCount = 0;
                             }
@@ -252,7 +255,7 @@ namespace DevMind
                         {
                            var (exitCode, output) = await _host.RunShellAsync(block.Command, block.ShellTimeoutSeconds);
                             result.ShellExitCode    = exitCode;
-                            result.ShellOutput      = output ?? string.Empty;
+                            result.ShellOutput      = WithBuildHints(output);
                             result.LastShellCommand = block.Command;
                             _lastReadKey = null;
                             _lastReadRepeatCount = 0;
@@ -441,7 +444,7 @@ namespace DevMind
                             _host.AppendOutput(testSummary + "\n",
                                 allPassed ? OutputColor.Success : OutputColor.Error);
                             // Inject results into shell context so the agentic loop sees them
-                            result.ShellOutput      = testSummary ?? string.Empty;
+                            result.ShellOutput      = WithBuildHints(testSummary);
                             result.ShellExitCode    = allPassed ? 0 : 1;
                             result.LastShellCommand = $"TEST {block.TestProject}";
                             _lastReadKey = null;
@@ -841,6 +844,56 @@ namespace DevMind
             return $"{first} \u2026 ({text.Length} chars total)";
         }
 
+        // \u2500\u2500 Write-time lint and build hints (H-19) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+        // Advisory only: a rule that fires appends a line to the tool result; nothing here can
+        // fail or undo the write or the build it is commenting on.
+
+        /// <summary>Lint <paramref name="content"/> (the file as written) and file any lines under its path.</summary>
+        private static void RecordLint(ExecutionResult result, string fullPath, string content, ISet<int> changedLines)
+        {
+            IReadOnlyList<string> notes = WriteLint.Check(fullPath, content, changedLines);
+            if (notes.Count == 0) return;
+            if (!result.LintNotes.TryGetValue(fullPath, out List<string> list))
+                result.LintNotes[fullPath] = list = new List<string>();
+            foreach (string n in notes)
+                if (!list.Contains(n)) list.Add(n);
+        }
+
+        /// <summary>The appended text is the changed region: the last N lines of the file now on disk.</summary>
+        private static void RecordAppendLint(ExecutionResult result, string fullPath, string appended)
+        {
+            if (string.IsNullOrEmpty(appended)) return;
+            try
+            {
+                string after = System.IO.File.ReadAllText(fullPath);
+                int total = WriteLint.SplitLines(after).Length;
+                int added = WriteLint.SplitLines(appended.TrimEnd('\r', '\n')).Length;
+                RecordLint(result, fullPath, after, WriteLint.LineRange(total - added + 1, added + 1));
+            }
+            catch { /* lint is advisory \u2014 never fail the append over it */ }
+        }
+
+        /// <summary>The changed region of a patch: lines of the patched file that were not in the original.</summary>
+        private static void RecordPatchLint(ExecutionResult result, string fullPath, string before)
+        {
+            try
+            {
+                string after = System.IO.File.ReadAllText(fullPath);
+                RecordLint(result, fullPath, after, WriteLint.ChangedLines(before ?? string.Empty, after));
+            }
+            catch { /* lint is advisory \u2014 never fail the patch over it */ }
+        }
+
+        /// <summary>Build/test output as the agent will read it, with any known-trap hints appended.</summary>
+        private string WithBuildHints(string output)
+        {
+            if (string.IsNullOrEmpty(output)) return output ?? string.Empty;
+            string workingDirectory;
+            try { workingDirectory = _host.GetWorkingDirectory(); }
+            catch { workingDirectory = null; }
+            return BuildErrorHints.Annotate(output, workingDirectory);
+        }
+
         private async Task ExecuteBatchPatchesAsync(
             List<ResponseBlock> patchBlocks,
             ExecutionResult result)
@@ -905,6 +958,7 @@ namespace DevMind
                         {
                             result.PatchesApplied++;
                             result.PatchedPaths.Add(patchedPath);
+                            RecordPatchLint(result, patchedPath, r.OriginalContent);
                             string ctxEcho = _host.TakePatchContextEcho(patchedPath);
                             if (!string.IsNullOrEmpty(ctxEcho))
                                 result.ToolResultContents[patchedPath] = ctxEcho;
@@ -969,6 +1023,7 @@ namespace DevMind
                             {
                                 result.PatchesApplied++;
                                 result.PatchedPaths.Add(patchedPath);
+                                RecordPatchLint(result, patchedPath, needPreview[i].OriginalContent);
                                 string ctxEcho = _host.TakePatchContextEcho(patchedPath);
                                 if (!string.IsNullOrEmpty(ctxEcho))
                                     result.ToolResultContents[patchedPath] = ctxEcho;

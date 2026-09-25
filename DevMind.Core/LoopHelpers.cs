@@ -122,6 +122,22 @@ namespace DevMind
         }
 
         /// <summary>
+        /// A write tool's success text followed by the write-time lint lines ("[LINT] ...") for
+        /// the files it wrote (H-19). Unchanged when no rule fired, so a clean write's result is
+        /// byte-identical to what it always was.
+        /// </summary>
+        private static string WithLintNotes(string body, IEnumerable<string> paths, ExecutionResult result)
+        {
+            if (result.LintNotes == null || result.LintNotes.Count == 0 || paths == null) return body;
+            var sb = new StringBuilder(body);
+            foreach (string p in paths.Distinct(StringComparer.OrdinalIgnoreCase))
+                if (result.LintNotes.TryGetValue(p, out List<string> notes))
+                    foreach (string n in notes)
+                        sb.Append('\n').Append(n);
+            return sb.ToString();
+        }
+
+        /// <summary>
         /// Builds the result content string for a single tool call based on the execution result.
         /// </summary>
         public static string BuildToolResultContent(ToolCallResult tc, ExecutionResult result,
@@ -199,11 +215,13 @@ namespace DevMind
                             string failureLine = patchErrors.Count == result.PatchesFailed
                                 ? $"[PATCH-FAILED: {string.Join("; ", patchErrors)}]"
                                 : $"[PATCH-FAILED: {string.Join("; ", patchErrors)} ({patchErrors.Count} of {result.PatchesFailed} recorded patch failures shown)]";
-                            return patchBody != null ? patchBody + "\n" + failureLine : failureLine;
+                            return patchBody != null
+                                ? WithLintNotes(patchBody + "\n" + failureLine, result.PatchedPaths, result)
+                                : failureLine;
                         }
 
                         if (patchBody != null)
-                            return patchBody;
+                            return WithLintNotes(patchBody, result.PatchedPaths, result);
 
                         // Nothing was patched and no patch failure was recorded. Do NOT report
                         // this as "[PATCH processed]" — that reads as success for a call that
@@ -215,7 +233,7 @@ namespace DevMind
 
                 case "create_file":
                     if (result.FilesCreated != null && result.FilesCreated.Count > 0)
-                        return $"[File created: {string.Join(", ", result.FilesCreated)}]";
+                        return WithLintNotes($"[File created: {string.Join(", ", result.FilesCreated)}]", result.FilesCreated, result);
                     // Nothing was written — the host returned null (path outside the
                     // allowed write roots, write guard, pending merge conflict) or threw.
                     // MUST be reported as a failure: "[File created]" made an agent
@@ -231,7 +249,7 @@ namespace DevMind
 
                 case "append_file":
                     if (result.FilesAppended != null && result.FilesAppended.Count > 0)
-                        return $"[Content appended to {string.Join(", ", result.FilesAppended)}]";
+                        return WithLintNotes($"[Content appended to {string.Join(", ", result.FilesAppended)}]", result.FilesAppended, result);
                     return BuildWriteFailure(
                         "append_file",
                         GetToolPathArg(tc, "filename"),

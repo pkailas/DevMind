@@ -171,6 +171,22 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Write guard auto-approves in headless mode** ("was not read during this task - auto-approved (headless)") - the guard is advisory
   only under MCP delegation. Decide whether that is intended.
 
+### H-19 - xUnit message argument (`Assert.Equal(a, b, "msg")`) written again and again
+- **First seen:** Sep 3; recurring - jobs 1660 (`Assert.Contains` 3-arg), 1668 (5 call sites), 1683 and others (see Model-behaviour
+  notes). xUnit v2/v3 have no message overload on these asserts; the string binds to a comparer/other overload -> CS1503 / CS1929,
+  and agents spend iterations on it or misdiagnose a "stale build".
+- **Fix (harness, generic, table-driven - `DevMind.Core/WriteLint.cs`):**
+  - *Write-time lint:* after a successful create_file / append_file / patch_file (`AgenticExecutor` -> `ExecutionResult.LintNotes`,
+    appended in `LoopHelpers.BuildToolResultContent`), files named `*Test*.cs` or containing `using Xunit;` are scanned on the CHANGED
+    lines only; Assert.Equal/NotEqual/Same/NotSame/Contains/DoesNotContain/StartsWith/EndsWith/Matches/DoesNotMatch (3+ args) and
+    Empty/NotEmpty (2+ args) whose last argument is a single string literal add ONE `[LINT] xUnit: ...` line per file. Never blocks.
+    Calls inside strings/comments are ignored. Scan of 13,833 existing .cs files under source\repos: 0 hits.
+  - *Build hint:* run_shell / run_build / run_tests output gets one `[HINT] CS1503/CS1929 on an Assert.* call ...` line when such an
+    error's source line contains `Assert.` (`BuildErrorHints`, rows are {Codes, LinePredicate, Message}; Razor hints not added yet).
+  - Not covered: the caller-facing `build_verification.output_tail` in devmind_task_result (agent never reads it).
+- **Status:** fixed, pending deploy - commit "harness: xUnit message-argument lint on test-file writes + CS1503/CS1929 build hint"
+  (the fix and this line are the same commit, so it cannot name its own hash)
+
 ## Parked
 
 ### P-01 - No-write-streak nudge

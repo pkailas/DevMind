@@ -1,4 +1,4 @@
-// File: ExecutionResult.cs  v1.4.0
+// File: ExecutionResult.cs  v1.5.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -37,6 +37,12 @@ namespace DevMind
         /// </summary>
         public Dictionary<string, string> ToolResultContents { get; set; }
 
+        /// <summary>
+        /// Write-time lint lines ("[LINT] ...") per written file, keyed by the full path the
+        /// host returned. Appended to that file's create/append/patch tool result; advisory only.
+        /// </summary>
+        public Dictionary<string, List<string>> LintNotes { get; set; }
+
         public ExecutionResult()
         {
             ShellOutput          = string.Empty;
@@ -48,6 +54,7 @@ namespace DevMind
             FilesAppended        = new List<string>();
             Errors               = new List<string>();
             ToolResultContents   = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            LintNotes            = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
         }
 
         /// <summary>
