@@ -238,6 +238,14 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   spent ~8 iterations writing debug dumps before a steer pointed at it. Retrieval happens at the start of a job; the knowledge is not
   recalled at the moment a matching symptom (non-ASCII + Contains failure) appears. Idea: a build/test-output hint (like H-19 layer 2)
   for "Assert.Contains failure where the expected string has non-ASCII chars" -> "Razor HTML-encodes non-ASCII; decode first".
+- **Tests that check the shape but not the substance (2026-09-25, job-1692):** the agent hand-built EXIF orientation matrices with
+  `new SKMatrix { ... }` object initializers - every unset field stayed 0 (including Persp2, which must be 1) and several mappings were
+  simply wrong; orientation 6 (the normal "phone held upright" case) produced a solid-black image. Its test only asserted the swapped
+  width/height and the absence of EXIF, so it passed. Driver added a pixel test for all 8 orientations (red/green corner markers) and
+  confirmed it fails on the old matrix. Brief-level rule worth adding for image/geometry work: "assert on pixel content, not only
+  dimensions". Also: the job used learn_search for SkiaSharp APIs (good) and verified signatures against the compiler when the online
+  docs did not match SkiaSharp 3.119.4.
+- **list_files glob `**/config/**` returned 200 files (job-1692)** - bin/obj noise (H-18), agent fell back to the shell.
 - **Swift-variant scorecard (2026-09-25, jobs 1683-1690):** 8 jobs, typical 4-10 min, 25-65 iterations; red-first in 7/8; driver fixes
   in 5/8 (test arithmetic, unbounded query, a duplicate confirm handler, a process-wide WAL guard, Serilog reflection hack); zero
   "stale build" spirals.
