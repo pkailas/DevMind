@@ -1679,7 +1679,9 @@ internal sealed class DevMindTools
     [McpServerTool(Name = "run_tests")]
     [Description(
         "Run dotnet test and return test output. Use run_tests after making changes to verify " +
-        "correctness. Omit project to run all tests in the working directory. " +
+        "correctness. Builds the project and its references first (a build failure is returned instead of " +
+        "test results); a test that hangs for 45s is killed and named. " +
+        "Omit project to run all tests in the working directory. " +
         "Progress notifications stream test output to the client during the run.")]
     public async Task<string> RunTests(
         [Description("Project file name (e.g., 'MyProject.csproj'). Omit to run all tests.")] string? project = null,
@@ -2700,17 +2702,17 @@ internal sealed class DevMindTools
     }
 
     /// <summary>
-    /// Builds the dotnet test command string from optional project and filter arguments.
+    /// Builds the dotnet test argv from optional project and filter arguments: the shared
+    /// DotnetTestCommand line (builds before testing, blame-hang on) with the project resolved.
     /// </summary>
-    private List<string> BuildTestArgs(string? project, string? filter)
+    internal List<string> BuildTestArgs(string? project, string? filter)
     {
         string wd = _svc.WorkingDirectory;
-        var args = new List<string> { "test", "--no-build", "--verbosity", "normal" };
+        string? projectPath = null;
 
         if (!string.IsNullOrWhiteSpace(project))
         {
             // Resolve project: absolute path → use as-is; bare name → search under WorkingDirectory.
-            string projectPath;
             if (Path.IsPathRooted(project))
             {
                 projectPath = project;
@@ -2733,16 +2735,9 @@ internal sealed class DevMindTools
                     projectPath = found.Length > 0 ? found[0] : candidate;
                 }
             }
-            args.Add(projectPath);
         }
 
-        if (!string.IsNullOrWhiteSpace(filter))
-        {
-            args.Add("--filter");
-            args.Add(filter);
-        }
-
-       return args;
+        return DotnetTestCommand.Arguments(projectPath!, filter!);
     }
 
     /// <summary>

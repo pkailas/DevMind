@@ -2293,9 +2293,8 @@ namespace DevMind
                 catch { }
             }
 
-            string filterArg = !string.IsNullOrWhiteSpace(filter) ? $" --filter \"{filter.Trim('\"')}\"" : "";
-            string quotedProject = project.Contains(' ') ? $"\"{project}\"" : project;
-            string cmd = $"dotnet test {quotedProject} --no-build --verbosity normal{filterArg}";
+            // Builds before testing (H-11) and carries the blame-hang guard (H-08).
+            string cmd = DotnetTestCommand.CommandLine(project, filter);
 
             AppendOutputLocal($"[TEST] > {cmd}\n", OutputColor.Dim);
 

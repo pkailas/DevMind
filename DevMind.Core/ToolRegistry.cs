@@ -144,6 +144,8 @@ namespace DevMind
                 "Run dotnet test and return structured pass/fail results. " +
                 "Output is compact — only failed tests show details. " +
                 "Use run_tests after making changes to verify correctness. " +
+                "It builds the test project and its references first, so it always tests your latest edits; " +
+                "a build failure is returned instead of test results. A test that hangs for 45s is killed and named. " +
                 "Default timeout is 120s (overridable via timeout_seconds or DEVMIND_SHELL_TIMEOUT env var). " +
                 "If tests fail, fix the code with patch_file and run_tests again.",
                 Optional("project", "string", "Project file name (e.g., 'MyProject.csproj') or its path (relative to the working directory or absolute). If omitted, the FIRST top-level .csproj file in the working directory is used — omitting does NOT run the whole suite, and the call fails if the working directory has no top-level .csproj files. To run a specific project, pass its name or path."),

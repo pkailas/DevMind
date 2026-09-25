@@ -89,7 +89,9 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **First seen:** 2026-09-23 - job-1652 ("run_tests tool has no arg for them")
 - **Symptom:** briefs require `--blame-hang --blame-hang-timeout 45s --blame-hang-dump-type none` (testhost hangs seen Sep 18); the tool can't pass them, so agents skip the guard or fall back to shell.
 - **Proposed fix:** always add the blame-hang flags in `run_tests` (configurable timeout), or accept extra args.
-- **Status:** open
+- **Status:** fixed, pending deploy - commit "H-11: run_tests builds before testing (+ blame-hang)": every run_tests (headless, TUI and
+  the MCP tool) now carries `--blame-hang --blame-hang-timeout 45s --blame-hang-dump-type none` (DotnetTestCommand.BlameHangArgs; fixed
+  45s, not configurable yet).
 
 ### H-09 - Test verification not forced when a change can affect tests
 - **First seen:** 2026-09-23 - job-1658 (VersionMajorMinor bump in Directory.Build.props)
@@ -121,7 +123,10 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   test's own `html.Contains("0 MB")` matching Disk free values like "58,030 MB". Stale builds happen (above) AND get over-diagnosed.
 - **Also seen in job-1672/1673:** `devmind_task_continue` worked immediately this time (H-02 did not reproduce); the agent used the new
   prompt rules (checked DLL timestamps before rebuilding, stopped with ask_caller on a genuine-looking contradiction).
-- **Status:** open
+- **Status:** fixed, pending deploy - commit "H-11: run_tests builds before testing (+ blame-hang)". `--no-build` dropped: the one
+  command line now comes from `DotnetTestCommand` (DevMind.Core) for BufferedAgenticHost, TuiAgenticHost and the MCP run_tests tool, so
+  `dotnet test` incrementally builds the test project and its references first; a build failure is the tool result. Tool descriptions
+  say so. Smoke-run of the exact line on DevMind.Cli.Tests: build + 20/20 with the Blame collector active.
 
 ### H-12 - Write roots don't include the docs repository
 - **First seen:** 2026-09-24 - driver-side patch_file on H:\users\pkailas\docs\razor\Razor_PITFALLS.md refused (outside allowedWriteRoots);
