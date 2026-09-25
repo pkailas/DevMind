@@ -1,4 +1,4 @@
-﻿// File: TuiAgenticHost.cs  v3.1
+﻿// File: TuiAgenticHost.cs  v3.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 implementation of IAgenticHost.
@@ -446,10 +446,18 @@ namespace DevMind
         // would discard the partial state the emitters hold.
         private volatile bool _isStreaming;
 
+        // What AppendAnswer drew this turn: task_done's summary, ask_caller's questions.
+        private readonly AnswerCapture _answers = new AnswerCapture();
+
+        /// <summary>The answers drawn since the last take, or null; clears them.</summary>
+        internal string TakeAnswersForHistory() => _answers.Take();
+
         /// <summary>Told by the turn loop, so a resize mid-answer waits for the answer.</summary>
         public void SetStreaming(bool streaming)
         {
             _isStreaming = streaming;
+            // A turn starting forgets any answer a previous one drew but never took.
+            if (streaming) _answers.Clear();
             // The turn ends on its worker thread; the rebuild does not run there.
             if (!streaming && _rebuildPending) InvokeOnUi(PerformPendingRebuild);
         }
@@ -1202,6 +1210,11 @@ namespace DevMind
         public void AppendAnswer(string text)
         {
             if (string.IsNullOrEmpty(text)) return;
+
+            // Held for history. The turn's row is written before the executor draws this,
+            // so without the capture a tool-driven turn is saved with an empty answer.
+            _answers.Append(text);
+
             var streamer = new CodeBlockStreamer(
                 prose: AppendProse,
                 code:  AppendCode);

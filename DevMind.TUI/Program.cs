@@ -1,4 +1,4 @@
-﻿// File: Program.cs  v3.9
+﻿// File: Program.cs  v4.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 TUI for DevMind.
@@ -179,6 +179,42 @@ namespace DevMind
                         host.AppendOutputLocal("\n" + step.Text + "\n\n", OutputColor.Dim);
                         break;
                 }
+            }
+        }
+
+        /// <summary>
+        /// Persist the answer the executor drew at the end of a turn as one more assistant
+        /// row. The pairing that rebuilds a resume joins a segment's assistant rows, so this
+        /// lands at the end of the exchange it answers. Nothing is written when nothing was
+        /// drawn — an empty row on top of the empty row would say nothing twice.
+        /// </summary>
+        static async Task SaveDrawnAnswerAsync(TuiAgenticHost host, IHistoryStore historyStore,
+                                               LlmClient llmClient, string sessionId,
+                                               string machineName, CancellationToken token)
+        {
+            string answer = host.TakeAnswersForHistory();
+            if (historyStore == null || string.IsNullOrWhiteSpace(answer) || token.IsCancellationRequested)
+                return;
+
+            try
+            {
+                await historyStore.SaveMessagesAsync(new[]
+                {
+                    new HistoryMessage
+                    {
+                        SessionId = sessionId,
+                        MachineName = machineName,
+                        TurnIndex = llmClient.CurrentTurn,
+                        Role = "assistant",
+                        Content = answer,
+                        CreatedAt = DateTime.UtcNow,
+                    },
+                });
+                await historyStore.UpsertSessionAsync(sessionId, machineName);
+            }
+            catch
+            {
+                // Non-fatal, like the per-iteration save: history must never break a turn.
             }
         }
 
@@ -2069,6 +2105,14 @@ namespace DevMind
                 {
                     case LoopIterationKind.Terminal:
                     case LoopIterationKind.Cancelled:
+                        // The answer itself — task_done's summary or ask_caller's questions —
+                        // was drawn by the executor just now, AFTER this iteration's row was
+                        // saved above. Without this row the turn's assistant text is whatever
+                        // prose preceded the tools, usually nothing, and a resume rebuilt from
+                        // history reopens a session that has forgotten what it last said.
+                        await SaveDrawnAnswerAsync((TuiAgenticHost)host, historyStore, llmClient,
+                                                   sessionId, machineName, cts.Token);
+
                         // Record whether this turn stopped needing input (ask_caller). If so,
                         // the next user send is an ANSWER resuming this turn — it must not
                         // advance the turn clock a second time (see TurnClock).
