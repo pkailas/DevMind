@@ -33,6 +33,8 @@ using DmTrace = DevMind.Trace;
 //        Strictly additive and strictly degradable: if ANY part of the job setup fails
 //        (non-Windows, API error, nested-job access-denied, process already gone) the
 //        command runs exactly as it did in v1.10. See WindowsJobObject.cs.
+// v1.12: the PowerShell `&&` -> `;` rewrite is token-aware (TranslateChainOperators): quoted strings,
+//        here-strings and comments are no longer touched (job-1697, watchlist H-21).
 
 namespace DevMind
 {
@@ -105,7 +107,7 @@ namespace DevMind
             // cmd.exe supports && natively; only rewrite for PowerShell.
             if (usePowerShell)
             {
-                command = command.Replace(" && ", "; ");
+                command = TranslateChainOperators(command);
 
                 // %VAR% is cmd syntax — PowerShell passes it through literally, and a
                 // live agent's "-p:OutDir=%TEMP%\..." created directories literally
@@ -621,6 +623,91 @@ namespace DevMind
             int space = command.IndexOf(' ');
             string first = space < 0 ? command : command.Substring(0, space);
             return _cmdShims.Contains(first);
+        }
+
+        /// <summary>
+        /// Rewrites a statement-level <c> &amp;&amp; </c> to <c>; </c> — Windows PowerShell 5.1 (the
+        /// shell run_shell uses) has no <c>&amp;&amp;</c> operator and rejects it as a parse error.
+        /// Text inside <c>'…'</c> and <c>"…"</c> strings, <c>@'…'@</c> / <c>@"…"@</c> here-strings,
+        /// <c>#</c> line comments and <c>&lt;# … #&gt;</c> block comments passes through verbatim:
+        /// the old blind <c>Replace</c> turned C# <c>wpid == pid &amp;&amp; IsWindowVisible(h)</c> inside
+        /// an Add-Type here-string into <c>wpid == pid; IsWindowVisible(h)</c> (job-1697).
+        /// <c>;</c> runs the next statement even when the previous one failed — unchanged behaviour.
+        /// </summary>
+        internal static string TranslateChainOperators(string command)
+        {
+            if (string.IsNullOrEmpty(command) || command.IndexOf(" && ", StringComparison.Ordinal) < 0)
+                return command;
+
+            var sb = new StringBuilder(command.Length);
+            int n = command.Length;
+            int i = 0;
+            while (i < n)
+            {
+                char c = command[i];
+                int end = -1;
+
+                if (c == '@' && i + 1 < n && (command[i + 1] == '\'' || command[i + 1] == '"')
+                    && IsHereStringOpener(command, i + 2))
+                {
+                    // Terminator: the quote + '@' at column 0 of a later line.
+                    int close = command.IndexOf("\n" + command[i + 1] + "@", i + 2, StringComparison.Ordinal);
+                    end = close < 0 ? n : close + 3;
+                }
+                else if (c == '\'')
+                {
+                    // '' inside a single-quoted string closes and reopens — same span either way.
+                    int close = command.IndexOf('\'', i + 1);
+                    end = close < 0 ? n : close + 1;
+                }
+                else if (c == '"')
+                {
+                    int j = i + 1;
+                    while (j < n && command[j] != '"')
+                        j += command[j] == '`' ? 2 : 1;   // backtick escapes the next char
+                    end = j >= n ? n : j + 1;
+                }
+                else if (c == '<' && i + 1 < n && command[i + 1] == '#')
+                {
+                    int close = command.IndexOf("#>", i + 2, StringComparison.Ordinal);
+                    end = close < 0 ? n : close + 2;
+                }
+                else if (c == '#' && (i == 0 || char.IsWhiteSpace(command[i - 1]) || ";({|".IndexOf(command[i - 1]) >= 0))
+                {
+                    int close = command.IndexOf('\n', i);
+                    end = close < 0 ? n : close;
+                }
+                else if (c == ' ' && string.CompareOrdinal(command, i, " && ", 0, 4) == 0)
+                {
+                    sb.Append("; ");
+                    i += 4;
+                    continue;
+                }
+
+                if (end > i)
+                {
+                    sb.Append(command, i, end - i);
+                    i = end;
+                }
+                else
+                {
+                    sb.Append(c);
+                    i++;
+                }
+            }
+            return sb.ToString();
+        }
+
+        // A here-string opener (@' or @") must be followed by nothing but whitespace up to the newline.
+        private static bool IsHereStringOpener(string command, int afterQuote)
+        {
+            for (int j = afterQuote; j < command.Length; j++)
+            {
+                char c = command[j];
+                if (c == '\n' || c == '\r') return true;
+                if (c != ' ' && c != '\t') return false;
+            }
+            return false;
         }
 
         /// <summary>

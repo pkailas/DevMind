@@ -1391,7 +1391,10 @@ internal sealed class DevMindTools
         "command text, newlines included, reaches PowerShell verbatim — that is what lets a " +
         "genuinely multi-line command (a loop, a multi-step script) run as written, and it is " +
         "NOT a file-writing mechanism: a here-string or redirect that emits file content is " +
-        "the wrong tool, not a clever one. Default timeout 120s — override with " +
+        "the wrong tool, not a clever one. The shell is Windows PowerShell 5.1, which has no " +
+        "&&: a ' && ' between statements is rewritten to '; ' (the next statement runs even if " +
+        "the previous one failed); && inside quotes, here-strings or comments is left alone. " +
+        "Default timeout 120s — override with " +
         "timeout_seconds. For anything expected to run longer than ~45s (installs, deploys, " +
         "long test runs), pass background=true: the call returns a shell_job_id immediately " +
         "and the command runs detached — poll shell_job_status. This avoids the MCP " +
