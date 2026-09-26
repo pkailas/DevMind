@@ -258,11 +258,12 @@ namespace DevMind.McpServer
             "CHANGES (e.g. running -> done/needs_input/failed) or that many seconds elapse, then " +
             "returns the same payload — a waiter gets the fresh state in one call instead of " +
             "re-polling. Omitted or 0 returns immediately (the default, unchanged); values above " +
-            "60 are clamped to 60, not rejected. Use it in place of your own sleep-and-retry loop.")]
+            "55 are clamped to 55, not rejected. Use it in place of your own sleep-and-retry loop.")]
         public async Task<string> TaskStatus(
             [Description("The job_id returned by devmind_task_start.")] string job_id,
             [Description("Optional: seconds to wait for the job's state to change before returning " +
-                        "(returns the moment it does; clamped to 60). Omitted or 0 = return " +
+                        "(returns the moment it does; clamped to 55 (leaves headroom under a 60 s " +
+                        "transport timeout)). Omitted or 0 = return " +
                         "immediately, as before.")] int? wait_seconds = null,
             CancellationToken cancellationToken = default)
         {

@@ -515,8 +515,11 @@ namespace DevMind.McpServer
         /// <summary>Cap for devmind_task_status wait_seconds — beyond this the
         /// caller is polling faster than a task ever finishes anyway, and a stuck
         /// MCP tool call is worse than a short wait. Values above the cap are
-        /// CLAMPED, not rejected: a caller asking for 300s gets 60s, not an error.</summary>
-        public const int MaxWaitSeconds = 60;
+        /// CLAMPED, not rejected: a caller asking for 300s gets 55s, not an error.
+        /// 55, not 60: over Claude's remote-devices bridge the transport's own call
+        /// timeout is 60s, so a full 60s wait always lost the race ("Device did not
+        /// respond within 60s") while the job kept running (watchlist H-23).</summary>
+        public const int MaxWaitSeconds = 55;
 
         /// <summary>Clamps a requested wait_seconds to [0, MaxWaitSeconds] (0 =
         /// return immediately, the long-standing default). Public static so the

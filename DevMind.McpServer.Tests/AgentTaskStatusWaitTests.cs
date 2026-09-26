@@ -21,7 +21,7 @@ public sealed class ClampWaitSecondsTests
     [Theory]
     [InlineData(0)]    // omitted/null coalesces to 0 -> immediate
     [InlineData(1)]
-    [InlineData(60)]   // exactly at the cap stays
+    [InlineData(55)]   // exactly at the cap stays
     public void WithinRange_IsUnchanged(int requested)
         => Assert.Equal(requested, DevMind.McpServer.AgentJobManager.ClampWaitSeconds(requested));
 
@@ -32,9 +32,10 @@ public sealed class ClampWaitSecondsTests
         => Assert.Equal(0, DevMind.McpServer.AgentJobManager.ClampWaitSeconds(requested));
 
     [Theory]
-    [InlineData(61, 60)]
-    [InlineData(300, 60)]   // clamp, not reject
-    [InlineData(int.MaxValue, 60)]
+    [InlineData(56, 55)]
+    [InlineData(60, 55)]    // H-23: 60 would race a 60 s transport timeout
+    [InlineData(300, 55)]   // clamp, not reject
+    [InlineData(int.MaxValue, 55)]
     public void AboveCap_IsClampedNotRejected(int requested, int expected)
         => Assert.Equal(expected, DevMind.McpServer.AgentJobManager.ClampWaitSeconds(requested));
 }
@@ -103,8 +104,8 @@ public sealed class WaitForStateChangeTests
 
     // ── Above-cap wait is clamped, not rejected ───────────────────────────────
     // The clamp is the exact unit the wait's deadline feeds from, so pinning it is
-    // pinning the behavior: 300s requested -> 60s deadline, never an error. The
-    // StateChange early-return test (which requests 60s — already at the cap) shows
+    // pinning the behavior: 300s requested -> 55s deadline, never an error. The
+    // StateChange early-return test (which requests 60s — clamped to the cap) shows
     // the helper honors that clamped budget end-to-end.
     [Fact]
     public void AboveCapWait_ClampedToMaxNotRejected()
@@ -113,7 +114,7 @@ public sealed class WaitForStateChangeTests
             DevMind.McpServer.AgentJobManager.ClampWaitSeconds(300));
         // The helper's immediate-return path is what an above-cap request reduces
         // to for its deadline computation — clamp(300) is what the deadline uses.
-        Assert.Equal(60, DevMind.McpServer.AgentJobManager.ClampWaitSeconds(300));
+        Assert.Equal(55, DevMind.McpServer.AgentJobManager.ClampWaitSeconds(300));
     }
 
     // ── Cancellation ends the wait immediately ────────────────────────────────

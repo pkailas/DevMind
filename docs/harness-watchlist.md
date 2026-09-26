@@ -249,7 +249,10 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Symptom:** every `devmind_task_status` call with `wait_seconds=60` fails with "Device 'beast' did not respond within 60s" - the
   bridge's own timeout is 60 s, so a full-length wait plus overhead always loses the race. `wait_seconds=55` works.
 - **Proposed fix:** clamp `wait_seconds` to 55 in the tool (and say so in its description).
-- **Status:** open
+- **Fix:** `AgentJobManager.MaxWaitSeconds` 60 -> 55; the tool and parameter descriptions say "clamped to 55 (leaves headroom
+  under a 60 s transport timeout)".
+- **Status:** fixed, pending deploy - commit "fix(mcp): clamp task_status wait_seconds to 55 for 60 s transports" (the fix and
+  this line are the same commit, so it cannot name its own hash)
 
 ### H-24 - Child processes started by run_shell die when the call returns
 - **First seen:** 2026-09-23/24 (fakesap, see Model-behaviour notes); **again 2026-09-26** - jobs 1697, 1698.
