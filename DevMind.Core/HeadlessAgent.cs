@@ -227,6 +227,11 @@ namespace DevMind
         // wording a delegating caller reads back.
         private readonly SteerMailbox _steer = new SteerMailbox();
 
+        // Harness nudges (H-25/H-26): optional-work spend guard and repeated-compile-error
+        // nudge. Session-scoped — optional items persist across continuations; compile-error
+        // counts reset per turn.
+        private readonly HarnessNudges _nudges = new HarnessNudges();
+
         private void EmitToTurn(string text)
         {
             if (string.IsNullOrEmpty(text)) return;
@@ -278,6 +283,8 @@ namespace DevMind
             _state.ResetForUserTurn();
             _host.ResetTaskContext();
             _host.ClearActions(); // result.Actions is THIS turn's journal
+            _nudges.AddBrief(prompt);
+            _nudges.ResetCompileErrors();
 
             // Turn clock: ONE increment per user turn, at the turn boundary — NOT inside the
             // agentic loop below. The loop re-triggers many iterations for a single turn and
@@ -483,6 +490,7 @@ namespace DevMind
                     // it must not latch across iterations.
                     forceToolChoiceRequired = iter.ForceToolChoiceRequired;
                     _callbacks.SetInputText(string.Empty);
+                    AppendHarnessNudges(ref currentPrompt, lastResponse, iter);
                 }
             }
             finally
@@ -601,6 +609,22 @@ namespace DevMind
                 EmitToTurn($"[STEER] superseded (not consumed): {superseded.Message}\n");
             }
             return result;
+        }
+
+        // Feed this iteration's evidence to the harness nudges (H-25/H-26) and append any that
+        // fire to the next prompt, framed as the harness's own voice (not a caller steer).
+        // Journalled as "nudge" and shown in the transcript.
+        private void AppendHarnessNudges(ref string currentPrompt, string assistantResponse, LoopIterationResult iter)
+        {
+            List<string> nudges = _nudges.ObserveIteration(
+                HarnessNudgeEvidence.AgentText(assistantResponse, iter.ToolCalls),
+                HarnessNudgeEvidence.ToolOutput(iter.Result));
+            foreach (string nudge in nudges)
+            {
+                currentPrompt = HarnessNudgeEvidence.Fold(currentPrompt, nudge);
+                _host.RecordNudge(nudge);
+                EmitToTurn($"[GUARD] nudge injected at this iteration boundary. {nudge}\n");
+            }
         }
 
         // Fold the pending steer (if any) into the prompt about to be sent this iteration.
@@ -844,6 +868,8 @@ namespace DevMind
             "patch. If research produces no new hypothesis, call ask_caller instead of\n" +
             "trying again — findings first, as above.\n" +
             "\n" +
+            NoToolchainQuirkRule +
+            "\n" +
             "TypeScript discipline: after EVERY write to a .ts or .tsx file (create_file,\n" +
             "patch_file, or append_file), immediately call get_diagnostics on that file and\n" +
             "fix all reported errors before doing anything else. A type error caught at\n" +
@@ -901,6 +927,15 @@ namespace DevMind
             return HeadlessAddendum +
                    (harnessVerifiesTests ? HarnessVerifiesTestsRule : NoHarnessSafetyNetRule);
         }
+
+        /// <summary>H-25 (job-1699): the agent twice blamed "a recurring quirk" of the net48
+        /// compile context for its own CS1061 — it had typed the variable as Control, not
+        /// ContainerControl — then abandoned a line of inquiry on the strength of it.</summary>
+        internal const string NoToolchainQuirkRule =
+            "Never attribute a failure to a 'quirk' of the compiler, SDK or toolchain without a\n" +
+            "minimal reproduction that excludes your own code. If you cannot produce one within\n" +
+            "two attempts, state that the cause is unknown and report it — do not build on the\n" +
+            "assumption.\n";
 
         internal const string NoCommitRule =
             "Do NOT run git commit, git push, or any other git command that rewrites history\n" +

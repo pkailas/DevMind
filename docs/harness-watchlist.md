@@ -278,7 +278,16 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   quirk.
 - **Proposed fix:** (harness) on a repeated CS1061/CS0117 naming the same member, inject a nudge "check the declared type of the
   receiver"; (prompt) a claim of a toolchain quirk must come with a minimal repro or be retracted.
-- **Status:** open
+- **Fix:** (harness) `HarnessNudges` (DevMind.Core) counts compiler errors by code + member (`CS1061 'AutoScaleMode'`) in the
+  shell/build/test output and tool errors of each headless iteration - once per iteration, since dotnet build prints each error
+  twice. On the 3rd iteration carrying the same key, HeadlessSession appends "[HARNESS GUARD] The same compile error has repeated
+  three times - stop and re-read the declaration you are calling; do not attribute it to the toolchain." to the next prompt. Once
+  per key; counts reset per turn; journalled as kind "nudge" and shown as "[GUARD]" in the transcript. get_diagnostics output is
+  not counted (LSP diagnostics carry no stable CS code). (prompt) `HeadlessAgent.NoToolchainQuirkRule` in the built-in headless
+  rules: never blame a compiler/SDK/toolchain "quirk" without a minimal repro that excludes your own code; after two attempts,
+  report the cause as unknown.
+- **Status:** fixed, pending deploy - commit "feat(harness): optional-work spend guard and repeated-compile-error nudge; no-quirk rule" (the fix and this line are the same commit, so
+  it cannot name its own hash)
 
 ### H-26 - Rabbit hole on work the brief marked optional
 - **First seen:** 2026-09-26 - job-1698
@@ -287,7 +296,14 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Related:** P-01 (no-write-streak nudge).
 - **Proposed fix:** spend guard - when the brief marks an item optional and the agent has spent N iterations on it (or the same
   compiler error repeats twice), inject "optional - drop it and continue".
-- **Status:** open
+- **Fix:** `HarnessNudges.FindOptionalItems` records each brief sentence (per line, then per sentence) marked "optional", "if
+  quick", "nice to have" or "skip this if" ("optionally", "not optional" and "non-optional" do not count). Its keywords are its
+  4+-letter non-stopwords that do not occur (up to a plural s) in the brief's other sentences. An iteration references the item
+  when the agent's prose or tool-call arguments mention min(2, keyword count) of them; after 8 consecutive such iterations the
+  next prompt gets "[HARNESS GUARD] This item was marked optional in the brief. Drop it and continue with the required work." with
+  the sentence quoted. Once per item per session (continuation prompts are scanned too). The repeated-compile-error half is the
+  H-25 nudge. New heuristic - the thrash guard matches failure signatures, not keywords, so there was nothing to reuse.
+- **Status:** fixed, pending deploy - same commit as H-25
 
 ### H-27 - run_shell expands %VAR% inside quoted content and comments
 - **First seen:** 2026-09-26 - found while fixing H-21 (same defect class, the next lines of `ShellRunner.ExecuteAsync`).

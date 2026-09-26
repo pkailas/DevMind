@@ -324,6 +324,13 @@ namespace DevMind
             RecordAction(kind, detail, success);
         }
 
+        /// <summary>
+        /// Public audit seam for the harness nudges (<see cref="HarnessNudges"/>): records an
+        /// injected nudge in the action journal as kind "nudge", so a change of course at
+        /// iteration N is explainable from the journal alone, like a steer.
+        /// </summary>
+        public void RecordNudge(string message) => RecordAction("nudge", message);
+
         // ── Context lifecycle helpers called by the REPL ──────────────────────────
 
         /// <summary>Called at the start of each user-initiated turn to reset the write guard set.</summary>
