@@ -1175,14 +1175,11 @@ internal sealed class DevMindTools
                     if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                         Directory.CreateDirectory(dir);
 
-                    // New file: script files (.cmd/.bat/.sh/.ps1) get UTF-8 without BOM to prevent
-                    // garbled output in shells that don't expect a BOM preamble; others get a BOM.
+                    // New file: UTF-8 without BOM, whatever the extension — a BOM on a new
+                    // commit-message file put U+FEFF at the start of the git subject (H-22).
                     // Existing file (overwrite): keeps the BOM/encoding and dominant line ending
                     // it already had — job-1676 stripped the BOM a PowerShell 5.1 script needs.
-                    var fileEncoding = IsScriptFileExtension(fullPath)
-                        ? new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)
-                        : System.Text.Encoding.UTF8;
-                    content = TextFileFormat.WritePreserving(fullPath, content, fileEncoding);
+                    content = TextFileFormat.WritePreserving(fullPath, content);
 
                     int lineCount       = content.Split('\n').Length;
                     string cacheKey     = Path.GetFullPath(fullPath);
@@ -1249,11 +1246,8 @@ internal sealed class DevMindTools
                 }
                 else
                 {
-                    // New file: script files (.cmd/.bat/.sh/.ps1) get UTF-8 without BOM.
-                    var appendEncoding = IsScriptFileExtension(fullPath)
-                        ? new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)
-                        : System.Text.Encoding.UTF8;
-                    File.WriteAllText(fullPath, content, appendEncoding);
+                    // New file: UTF-8 without BOM, whatever the extension (H-22).
+                    File.WriteAllText(fullPath, content, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
                 }
 
                 string cacheKey = Path.GetFullPath(fullPath);
@@ -2803,16 +2797,6 @@ internal sealed class DevMindTools
 
         if (inTok) tokens.Add(sb.ToString());
         return tokens;
-    }
-
-    /// <summary>
-    /// Returns true for script file extensions where a UTF-8 BOM causes problems
-    /// (cmd.exe, PowerShell, bash interpret the BOM bytes as part of the shebang/command).
-    /// </summary>
-    private static bool IsScriptFileExtension(string path)
-    {
-        string ext = Path.GetExtension(path)?.ToLowerInvariant() ?? "";
-       return ext == ".cmd" || ext == ".bat" || ext == ".sh" || ext == ".ps1";
     }
 
     /// <summary>

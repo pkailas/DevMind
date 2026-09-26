@@ -4,8 +4,8 @@
 // The MCP write_file / append_file / patch_file tools write an EXISTING file back with the BOM
 // (or lack of one) and dominant line ending it had. They used to force UTF-8 without BOM on
 // .ps1/.cmd/.bat/.sh (stripping the BOM Windows PowerShell 5.1 needs — job-1676) and UTF-8
-// WITH a BOM on everything else (adding one to files that never had it). New files keep the
-// old per-extension rule.
+// WITH a BOM on everything else (adding one to files that never had it). New files are UTF-8
+// without BOM whatever the extension (H-22: a BOM'd commit-message file put U+FEFF in the subject).
 
 using System.Text;
 using Xunit;
@@ -73,16 +73,74 @@ namespace DevMind.McpServer.Tests
         }
 
         [Fact]
-        public async Task WriteFile_NewFiles_KeepThePerExtensionRule()
+        public async Task WriteFile_OverBomCs_KeepsBom()
         {
-            string ps1 = Path.Combine(_dir, "new.ps1");
-            string cs = Path.Combine(_dir, "New.cs");
+            string path = WriteBytes("Legacy.cs", "class A {}\n", bom: true);
 
-            await _tools.WriteFile(ps1, "x\n");
-            await _tools.WriteFile(cs, "x\n");
+            await _tools.WriteFile(path, "class B {}\n");
 
-            Assert.False(HasBom(ps1));
-            Assert.True(HasBom(cs));
+            Assert.True(HasBom(path), "write_file stripped the BOM from a file that had one");
+            Assert.Equal("class B {}\n", Text(path));
+        }
+
+        [Theory]
+        [InlineData("COMMIT_MSG.txt")]
+        [InlineData("New.cs")]
+        [InlineData("new.ps1")]
+        public async Task WriteFile_NewFile_HasNoBom(string name)
+        {
+            string path = Path.Combine(_dir, name);
+
+            string r = await _tools.WriteFile(path, "fix: subject\n");
+
+            Assert.StartsWith("write_file: created", r);
+            Assert.False(HasBom(path), "write_file put a BOM on a new file");
+        }
+
+        [Fact]
+        public async Task CreateFile_NewFile_HasNoBom()
+        {
+            // H-22 repro: a commit-message file written by the tool, then `git commit -F`,
+            // gave a subject starting with U+FEFF.
+            string path = Path.Combine(_dir, "COMMIT_MSG.txt");
+
+            string r = await _tools.CreateFile(path, "fix: subject\n");
+
+            Assert.StartsWith("create_file: created", r);
+            Assert.False(HasBom(path), "create_file put a BOM on a new file");
+            Assert.Equal("fix: subject\n", Text(path));
+        }
+
+        [Fact]
+        public async Task AppendFile_NewFile_HasNoBom()
+        {
+            string path = Path.Combine(_dir, "notes.md");
+
+            string r = await _tools.AppendFile(path, "# notes\n");
+
+            Assert.StartsWith("append_file: created", r);
+            Assert.False(HasBom(path), "append_file put a BOM on a new file");
+        }
+
+        [Fact]
+        public async Task AppendFile_BomFile_NeverInsertsBomMidFile()
+        {
+            string path = WriteBytes("Log.cs", "// one\n", bom: true);
+
+            await _tools.AppendFile(path, "// two\n");
+            await _tools.AppendFile(path, "// three\n");
+
+            byte[] b = File.ReadAllBytes(path);
+            Assert.True(HasBom(path), "append_file stripped the leading BOM");
+            Assert.Equal(-1, IndexOfBom(b, from: 3));
+            Assert.Equal("// one\n// two\n// three\n", Text(path));
+        }
+
+        private static int IndexOfBom(byte[] b, int from)
+        {
+            for (int i = from; i + 2 < b.Length; i++)
+                if (b[i] == 0xEF && b[i + 1] == 0xBB && b[i + 2] == 0xBF) return i;
+            return -1;
         }
 
         [Fact]

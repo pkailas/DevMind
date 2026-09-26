@@ -238,7 +238,11 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Related:** the "Encoding drift on edit" fix (commit "harness: patch/append/overwrite preserve BOM and line endings") made EXISTING
   files keep their BOM, but left new-file behaviour unchanged - and the MCP write_file adds a BOM to every non-script new file.
 - **Proposed fix:** write new files with `UTF8Encoding(false)`; keep a BOM only when the existing file had one.
-- **Status:** open
+- **Fix:** the MCP write_file/create_file and append_file new-file branches now write UTF-8 without BOM for every extension (the
+  per-extension rule and `IsScriptFileExtension` are gone). Existing files already kept their BOM or lack of one via
+  `TextFileFormat`; the Core/TUI hosts and PatchEngine already wrote new files BOM-less.
+- **Status:** fixed, pending deploy - commit "fix(files): write UTF-8 without BOM unless the file already had one" (the fix and
+  this line are the same commit, so it cannot name its own hash)
 
 ### H-23 - devmind_task_status `wait_seconds=60` always fails over the remote-devices bridge
 - **First seen:** 2026-09-26 - driving jobs 1697-1702 over the Claude remote-devices bridge.
