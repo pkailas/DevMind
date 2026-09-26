@@ -238,7 +238,7 @@ namespace DevMind.Core.Tests
                 => Task.FromResult(new List<int>());
 
             // ── Inert members (unused by a patch-only turn) ──────────────────
-            public Task<(int, string)> RunShellAsync(string command, int? timeoutSeconds = null)
+            public Task<(int, string)> RunShellAsync(string command, int? timeoutSeconds = null, bool detach = false)
                 => Task.FromResult((0, ""));
             public Task<string> SaveFileAsync(string fileName, string content, bool fromToolCall = false)
                 => Task.FromResult(fileName);

@@ -69,4 +69,37 @@ public sealed class ToolCallMapperTests
         var pairs = PatchEngine.ParsePatchBlocks(block.Content, fromToolCall: true);
         Assert.Equal(("fallback find", "fallback replace"), Assert.Single(pairs));
     }
+
+    // ── run_shell: detach (H-24) ─────────────────────────────────────────────
+    // Tool-call arguments arrive as strings; a JSON boolean stringifies as "True"/"False".
+
+    private static ResponseBlock MapShell(Dictionary<string, string> args)
+    {
+        var tc = new ToolCallResult { Name = "run_shell", Arguments = args };
+        var blocks = ToolCallMapper.Map(new List<ToolCallResult> { tc }, buildCommand: "dotnet build");
+        return Assert.Single(blocks);
+    }
+
+    [Theory]
+    [InlineData("true", true)]
+    [InlineData("True", true)]
+    [InlineData("false", false)]
+    [InlineData("False", false)]
+    public void RunShell_DetachPresent_IsMapped(string value, bool expected)
+    {
+        var block = MapShell(new Dictionary<string, string> { ["command"] = "Start-Process app.exe", ["detach"] = value });
+
+        Assert.Equal(BlockType.Shell, block.Type);
+        Assert.Equal("Start-Process app.exe", block.Command);
+        Assert.Equal(expected, block.ShellDetach);
+    }
+
+    [Fact]
+    public void RunShell_DetachAbsent_IsFalse_AndTimeoutStillMapped()
+    {
+        var block = MapShell(new Dictionary<string, string> { ["command"] = "dotnet build", ["timeout_seconds"] = "300" });
+
+        Assert.False(block.ShellDetach);
+        Assert.Equal(300, block.ShellTimeoutSeconds);
+    }
 }

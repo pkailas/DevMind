@@ -1403,7 +1403,7 @@ namespace DevMind
 
         // ── IAgenticHost.RunShellAsync ────────────────────────────────────────────
 
-       async Task<(int exitCode, string output)> IAgenticHost.RunShellAsync(string command, int? timeoutSeconds)
+       async Task<(int exitCode, string output)> IAgenticHost.RunShellAsync(string command, int? timeoutSeconds, bool detach)
         {
             AppendOutputLocal($"[SHELL] > {command}\n", OutputColor.Dim);
 
@@ -1418,7 +1418,7 @@ namespace DevMind
             int exit = -1;
             try
             {
-                var (output, exitCode) = await _shellRunner.ExecuteAsync(command, CancellationToken, timeoutSeconds, progress);
+                var (output, exitCode) = await _shellRunner.ExecuteAsync(command, CancellationToken, timeoutSeconds, progress, detach);
                 exit = exitCode;
                 return (exitCode, output);
             }

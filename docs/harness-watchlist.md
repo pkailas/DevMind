@@ -263,8 +263,11 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Fix:** MCP run_shell takes `detach` (default false; also honoured with background=true). `ShellRunner.ExecuteAsync(detach: true)`
   arms JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK on the per-command job: the shell itself stays in the job (timeout/cancel kill
   unchanged), the processes it starts are left out, so closing the job on return does not kill them. A timeout or cancel still
-  taskkill-reaps the whole tree. Both run_shell descriptions (MCP and the agent's ToolRegistry) now state the lifetime rule; the
-  agent-side tool has no detach parameter yet.
+  taskkill-reaps the whole tree. Both run_shell descriptions (MCP and the agent's ToolRegistry) now state the lifetime rule.
+- **Agent side:** delegated agents can set it too - commit "feat(agent): expose run_shell detach to delegated agents": ToolRegistry
+  run_shell takes `detach` (boolean, default false) -> ToolCallMapper (`ResponseBlock.ShellDetach`) -> AgenticExecutor ->
+  `IAgenticHost.RunShellAsync(command, timeoutSeconds, detach = false)` -> BufferedAgenticHost (headless jobs) / TuiAgenticHost ->
+  `ShellRunner.ExecuteAsync(..., detach)`. Existing calls are unchanged (new trailing optional parameter).
 - **Status:** fixed, pending deploy - commit "feat(shell): run_shell detach option; document child-process lifetime" (the fix and
   this line are the same commit, so it cannot name its own hash)
 

@@ -20,8 +20,10 @@ namespace DevMind
         /// Returns the exit code and combined stdout+stderr output.
         /// Uses the current terminal working directory.
         /// <paramref name="timeoutSeconds"/> overrides the default timeout (null = use default from DEVMIND_SHELL_TIMEOUT or 120s).
+        /// <paramref name="detach"/> lets processes the command starts outlive the call
+        /// (<see cref="ShellRunner.ExecuteAsync"/>); by default they are terminated on return.
         /// </summary>
-        Task<(int exitCode, string output)> RunShellAsync(string command, int? timeoutSeconds = null);
+        Task<(int exitCode, string output)> RunShellAsync(string command, int? timeoutSeconds = null, bool detach = false);
 
         /// <summary>
         /// Save a FILE: block to disk. The fileName may be relative (resolved

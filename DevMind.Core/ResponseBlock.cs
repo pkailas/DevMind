@@ -12,6 +12,7 @@ namespace DevMind
         public string FileName { get; set; }  // for File, Patch, ReadRequest, Grep
        public string Command { get; set; }   // for Shell
         public int?   ShellTimeoutSeconds { get; set; }  // for Shell — override timeout in seconds (null = use default)
+        public bool   ShellDetach { get; set; }          // for Shell — started processes outlive the call (run_shell detach)
         public int  RangeStart    { get; set; }  // for ReadRequest/Grep line-range (0 = full read)
         public int  RangeEnd      { get; set; }  // for ReadRequest/Grep line-range (0 = full read)
         public bool ForceFullRead { get; set; }  // READ! — bypass outline-first behavior

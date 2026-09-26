@@ -87,12 +87,14 @@ namespace DevMind
                 "Execute a shell command and return its output. " +
                 "Commands run via powershell.exe with a default 120-second timeout (overridable via timeout_seconds or DEVMIND_SHELL_TIMEOUT env var). " +
                 "Use this for git commands, one-off scripts, and operations no other tool covers. " +
-                "Child processes started by the command are terminated when the call returns. " +
+                "Child processes started by the command are terminated when the call returns unless detach=true " +
+                "(e.g. Start-Process an app you check in a later call; stop it yourself when done). " +
                 "Do NOT use run_shell to list, search, or find files — use list_files for enumeration, " +
                 "find_in_files for content search across files, or grep_file for content search in a known file. " +
                 "Use run_build for build commands and run_tests for tests.",
                 Required("command", "string", "The shell command to execute"),
-                Optional("timeout_seconds", "integer", "Override the default command timeout in seconds. Use for long builds or test runs. Omit or pass 0/negative to use the default (from DEVMIND_SHELL_TIMEOUT env var or 120s fallback).")));
+                Optional("timeout_seconds", "integer", "Override the default command timeout in seconds. Use for long builds or test runs. Omit or pass 0/negative to use the default (from DEVMIND_SHELL_TIMEOUT env var or 120s fallback)."),
+                Optional("detach", "boolean", "When true, processes the command starts keep running after the call returns (default false: they are terminated on return). A timeout still kills them.")));
 
             // ── grep_file ────────────────────────────────────────────────────
             tools.Add(MakeTool("grep_file",

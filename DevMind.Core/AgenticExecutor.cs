@@ -253,7 +253,7 @@ namespace DevMind
                         }
                         try
                         {
-                           var (exitCode, output) = await _host.RunShellAsync(block.Command, block.ShellTimeoutSeconds);
+                           var (exitCode, output) = await _host.RunShellAsync(block.Command, block.ShellTimeoutSeconds, block.ShellDetach);
                             result.ShellExitCode    = exitCode;
                             result.ShellOutput      = WithBuildHints(output);
                             result.LastShellCommand = block.Command;

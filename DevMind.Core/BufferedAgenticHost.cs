@@ -370,7 +370,7 @@ namespace DevMind
 
         // ── IAgenticHost.RunShellAsync ────────────────────────────────────────────
 
-        async Task<(int exitCode, string output)> IAgenticHost.RunShellAsync(string command, int? timeoutSeconds)
+        async Task<(int exitCode, string output)> IAgenticHost.RunShellAsync(string command, int? timeoutSeconds, bool detach)
         {
             // no_execute: denylist the execution invocations. Guard clause only — when the
             // flag is false this check is a no-op and the rest of the method is untouched.
@@ -395,7 +395,7 @@ namespace DevMind
             AppendOutput($"[SHELL] > {command}\n", OutputColor.Dim);
             var progress = new Progress<ShellOutputLine>(line =>
                 AppendOutput(line.Line + "\n", line.IsError ? OutputColor.Error : OutputColor.Normal));
-            var (output, exitCode) = await _shellRunner.ExecuteAsync(command, CancellationToken, timeoutSeconds, progress);
+            var (output, exitCode) = await _shellRunner.ExecuteAsync(command, CancellationToken, timeoutSeconds, progress, detach);
             RecordAction("shell", $"{command} (exit {exitCode})", exitCode == 0);
             return (exitCode, output);
         }

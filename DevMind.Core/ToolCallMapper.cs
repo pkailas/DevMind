@@ -120,7 +120,8 @@ namespace DevMind
                         {
                             Type = BlockType.Shell,
                             Command = GetArg(tc, "command"),
-                            ShellTimeoutSeconds = timeoutVal > 0 ? (int?)timeoutVal : null
+                            ShellTimeoutSeconds = timeoutVal > 0 ? (int?)timeoutVal : null,
+                            ShellDetach = GetBoolArg(tc, "detach")
                         };
                     }
 

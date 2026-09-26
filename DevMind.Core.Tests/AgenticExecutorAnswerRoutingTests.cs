@@ -120,7 +120,7 @@ namespace DevMind.Core.Tests
             public void AppendAnswer(string text) => Answers.Add(text);
 
             // ── Inert members (unused by answer-only turns) ───────────────────
-            public Task<(int, string)> RunShellAsync(string command, int? timeoutSeconds = null)
+            public Task<(int, string)> RunShellAsync(string command, int? timeoutSeconds = null, bool detach = false)
                 => Task.FromResult((0, ""));
             public Task<string> SaveFileAsync(string fileName, string content, bool fromToolCall = false)
                 => Task.FromResult(fileName);
@@ -186,7 +186,7 @@ namespace DevMind.Core.Tests
             public void UpdateScratchpad(string content) { }
             public string TaskScratchpad => "";
             public string GetWorkingDirectory() => "";
-            public Task<(int, string)> RunShellAsync(string command, int? timeoutSeconds = null)
+            public Task<(int, string)> RunShellAsync(string command, int? timeoutSeconds = null, bool detach = false)
                 => Task.FromResult((0, ""));
             public Task<string> SaveFileAsync(string fileName, string content, bool fromToolCall = false)
                 => Task.FromResult(fileName);

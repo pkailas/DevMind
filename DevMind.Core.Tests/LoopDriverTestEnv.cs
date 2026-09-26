@@ -92,8 +92,12 @@ namespace DevMind.Core.Tests
 
         public FakeHost(string dir) => _dir = dir;
 
-        public Task<(int, string)> RunShellAsync(string command, int? timeoutSeconds = null)
+        /// <summary>The detach flag of the most recent RunShellAsync call (null = never called).</summary>
+        public bool? LastShellDetach { get; private set; }
+
+        public Task<(int, string)> RunShellAsync(string command, int? timeoutSeconds = null, bool detach = false)
         {
+            LastShellDetach = detach;
             ShellResults.TryGetValue(command, out var r);
             return Task.FromResult(r.exitCode != 0 ? r : (0, ""));
         }
