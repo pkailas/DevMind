@@ -1394,6 +1394,9 @@ internal sealed class DevMindTools
         "the wrong tool, not a clever one. The shell is Windows PowerShell 5.1, which has no " +
         "&&: a ' && ' between statements is rewritten to '; ' (the next statement runs even if " +
         "the previous one failed); && inside quotes, here-strings or comments is left alone. " +
+        "Cmd-style %VAR% is sugar for $env:VAR and follows PowerShell interpolation rules: " +
+        "expanded at statement level and inside \"...\", left alone inside '...', here-strings " +
+        "and comments — use single quotes for a literal %NAME%. " +
         "Default timeout 120s — override with " +
         "timeout_seconds. For anything expected to run longer than ~45s (installs, deploys, " +
         "long test runs), pass background=true: the call returns a shell_job_id immediately " +

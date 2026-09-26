@@ -227,7 +227,10 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   does not understand.
 - **Proposed fix:** the cmd->PowerShell chaining translation must skip quoted strings and here-strings (`@'...'@`, `@"..."@`), or be
   removed.
-- **Status:** open
+- **Fix:** `ShellRunner.TranslateChainOperators` rewrites ` && ` only in statement-level code; quoted strings, here-strings and
+  comments pass through verbatim. The rewrite is kept (not removed): run_shell runs Windows PowerShell 5.1, where `&&` is a parse
+  error. The MCP run_shell description now says so.
+- **Status:** fixed in 739af47, pending deploy
 
 ### H-22 - write_file/create_file emit a UTF-8 BOM on new files
 - **First seen:** 2026-09-26 - driver session on the PSCP connector jobs (jobs 1697-1702).
@@ -269,6 +272,19 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Proposed fix:** spend guard - when the brief marks an item optional and the agent has spent N iterations on it (or the same
   compiler error repeats twice), inject "optional - drop it and continue".
 - **Status:** open
+
+### H-27 - run_shell expands %VAR% inside quoted content and comments
+- **First seen:** 2026-09-26 - found while fixing H-21 (same defect class, the next lines of `ShellRunner.ExecuteAsync`).
+- **Symptom:** the cmd-style `%VAR%` expansion ran `Environment.ExpandEnvironmentVariables` over the whole command, so `%NAME%` inside
+  a string, here-string or comment was replaced whenever NAME was a real environment variable (a `%TEMP%` in a single-quoted
+  literal, a C# format string in an Add-Type here-string).
+- **Fix:** a shared tokenizer, `ShellRunner.TokenizeShellSpans`, splits the command into code, `'...'`, `"..."`, here-string and
+  comment spans, and each rewrite pass picks the kinds it applies to. `&&` is rewritten in code only. `%VAR%` is sugar for
+  `$env:VAR`, so it follows PowerShell interpolation rules: expanded at statement level and inside `"..."` (the existing
+  `"%USERNAME%"` guardrail test still pins this), left alone inside `'...'`, here-strings and comments - single quotes give a
+  literal `%NAME%`. The MCP run_shell description says so.
+- **Status:** fixed, pending deploy - commit "fix(shell): expand %VAR% only outside quoted content; share the shell tokenizer" (the
+  fix and this line are the same commit, so it cannot name its own hash)
 
 ## Parked
 

@@ -35,6 +35,9 @@ using DmTrace = DevMind.Trace;
 //        command runs exactly as it did in v1.10. See WindowsJobObject.cs.
 // v1.12: the PowerShell `&&` -> `;` rewrite is token-aware (TranslateChainOperators): quoted strings,
 //        here-strings and comments are no longer touched (job-1697, watchlist H-21).
+// v1.13: %VAR% expansion uses the same tokenizer (TokenizeShellSpans) and follows PowerShell
+//        interpolation rules: expanded at statement level and inside "...", never inside '...',
+//        here-strings or comments (watchlist H-27).
 
 namespace DevMind
 {
@@ -110,11 +113,10 @@ namespace DevMind
                 command = TranslateChainOperators(command);
 
                 // %VAR% is cmd syntax — PowerShell passes it through literally, and a
-                // live agent's "-p:OutDir=%TEMP%\..." created directories literally
-                // named "%TEMP%" inside the repo. Expand known env vars up front;
-                // unknown %...% sequences are left untouched.
-                if (command.IndexOf('%') >= 0)
-                    command = Environment.ExpandEnvironmentVariables(command);
+                // live agent's -p:OutDir=%TEMP%\... created directories literally
+                // named "%TEMP%" inside the repo. Treated as sugar for $env:VAR, so it
+                // follows PowerShell interpolation rules (H-27).
+                command = ExpandCmdStyleEnvironmentVariables(command);
             }
 
             // Multi-line test is computed on the ORIGINAL command, before wrapping,
@@ -628,40 +630,84 @@ namespace DevMind
         /// <summary>
         /// Rewrites a statement-level <c> &amp;&amp; </c> to <c>; </c> — Windows PowerShell 5.1 (the
         /// shell run_shell uses) has no <c>&amp;&amp;</c> operator and rejects it as a parse error.
-        /// Text inside <c>'…'</c> and <c>"…"</c> strings, <c>@'…'@</c> / <c>@"…"@</c> here-strings,
-        /// <c>#</c> line comments and <c>&lt;# … #&gt;</c> block comments passes through verbatim:
-        /// the old blind <c>Replace</c> turned C# <c>wpid == pid &amp;&amp; IsWindowVisible(h)</c> inside
-        /// an Add-Type here-string into <c>wpid == pid; IsWindowVisible(h)</c> (job-1697).
+        /// Only <see cref="TokenizeShellSpans"/> code spans are rewritten: the old blind
+        /// <c>Replace</c> turned C# <c>wpid == pid &amp;&amp; IsWindowVisible(h)</c> inside an Add-Type
+        /// here-string into <c>wpid == pid; IsWindowVisible(h)</c> (job-1697).
         /// <c>;</c> runs the next statement even when the previous one failed — unchanged behaviour.
         /// </summary>
         internal static string TranslateChainOperators(string command)
         {
             if (string.IsNullOrEmpty(command) || command.IndexOf(" && ", StringComparison.Ordinal) < 0)
                 return command;
+            return RewriteSpans(command, kind => kind == ShellSpanKind.Code, code => code.Replace(" && ", "; "));
+        }
 
+        /// <summary>
+        /// Expands cmd-style <c>%VAR%</c>. <c>%VAR%</c> is sugar for <c>$env:VAR</c>, so it follows
+        /// PowerShell interpolation rules: expanded at statement level and inside <c>"…"</c>, left
+        /// alone inside <c>'…'</c>, here-strings and comments — use single quotes for a literal
+        /// <c>%NAME%</c>. Unknown <c>%...%</c> sequences are left untouched
+        /// (<see cref="Environment.ExpandEnvironmentVariables"/>). Before H-27 the whole command was
+        /// expanded, corrupting e.g. a C# format string inside an Add-Type here-string.
+        /// </summary>
+        internal static string ExpandCmdStyleEnvironmentVariables(string command)
+        {
+            if (string.IsNullOrEmpty(command) || command.IndexOf('%') < 0)
+                return command;
+            return RewriteSpans(command,
+                kind => kind == ShellSpanKind.Code || kind == ShellSpanKind.DoubleQuoted,
+                Environment.ExpandEnvironmentVariables);
+        }
+
+        private static string RewriteSpans(string command, Func<ShellSpanKind, bool> applies, Func<string, string> rewrite)
+        {
             var sb = new StringBuilder(command.Length);
+            foreach (var (start, length, kind) in TokenizeShellSpans(command))
+            {
+                string text = command.Substring(start, length);
+                sb.Append(applies(kind) ? rewrite(text) : text);
+            }
+            return sb.ToString();
+        }
+
+        internal enum ShellSpanKind { Code, SingleQuoted, DoubleQuoted, HereString, Comment }
+
+        /// <summary>
+        /// Splits a PowerShell command into consecutive spans that together cover it exactly:
+        /// statement-level <see cref="ShellSpanKind.Code"/>, <c>'…'</c> and <c>"…"</c> strings
+        /// (<c>''</c> and backtick escapes), <c>@'…'@</c> / <c>@"…"@</c> here-strings (terminator at
+        /// column 0), and <c>#</c> line / <c>&lt;# … #&gt;</c> block comments. Each rewrite pass picks
+        /// the kinds it applies to. An unterminated span runs to the end of the command.
+        /// </summary>
+        internal static IEnumerable<(int Start, int Length, ShellSpanKind Kind)> TokenizeShellSpans(string command)
+        {
             int n = command.Length;
+            int codeStart = 0;
             int i = 0;
             while (i < n)
             {
                 char c = command[i];
                 int end = -1;
+                var kind = ShellSpanKind.Code;
 
                 if (c == '@' && i + 1 < n && (command[i + 1] == '\'' || command[i + 1] == '"')
                     && IsHereStringOpener(command, i + 2))
                 {
+                    kind = ShellSpanKind.HereString;
                     // Terminator: the quote + '@' at column 0 of a later line.
                     int close = command.IndexOf("\n" + command[i + 1] + "@", i + 2, StringComparison.Ordinal);
                     end = close < 0 ? n : close + 3;
                 }
                 else if (c == '\'')
                 {
+                    kind = ShellSpanKind.SingleQuoted;
                     // '' inside a single-quoted string closes and reopens — same span either way.
                     int close = command.IndexOf('\'', i + 1);
                     end = close < 0 ? n : close + 1;
                 }
                 else if (c == '"')
                 {
+                    kind = ShellSpanKind.DoubleQuoted;
                     int j = i + 1;
                     while (j < n && command[j] != '"')
                         j += command[j] == '`' ? 2 : 1;   // backtick escapes the next char
@@ -669,33 +715,30 @@ namespace DevMind
                 }
                 else if (c == '<' && i + 1 < n && command[i + 1] == '#')
                 {
+                    kind = ShellSpanKind.Comment;
                     int close = command.IndexOf("#>", i + 2, StringComparison.Ordinal);
                     end = close < 0 ? n : close + 2;
                 }
                 else if (c == '#' && (i == 0 || char.IsWhiteSpace(command[i - 1]) || ";({|".IndexOf(command[i - 1]) >= 0))
                 {
+                    kind = ShellSpanKind.Comment;
                     int close = command.IndexOf('\n', i);
                     end = close < 0 ? n : close;
-                }
-                else if (c == ' ' && string.CompareOrdinal(command, i, " && ", 0, 4) == 0)
-                {
-                    sb.Append("; ");
-                    i += 4;
-                    continue;
                 }
 
                 if (end > i)
                 {
-                    sb.Append(command, i, end - i);
+                    if (i > codeStart) yield return (codeStart, i - codeStart, ShellSpanKind.Code);
+                    yield return (i, end - i, kind);
                     i = end;
+                    codeStart = end;
                 }
                 else
                 {
-                    sb.Append(c);
                     i++;
                 }
             }
-            return sb.ToString();
+            if (n > codeStart) yield return (codeStart, n - codeStart, ShellSpanKind.Code);
         }
 
         // A here-string opener (@' or @") must be followed by nothing but whitespace up to the newline.

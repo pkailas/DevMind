@@ -309,6 +309,17 @@ namespace DevMind.Core.Tests
             Assert.DoesNotContain("%USERNAME%", output);
         }
 
+        [Fact]
+        public async Task ShellRunner_LeavesCmdStyleEnvVarsLiteral_InSingleQuotes()
+        {
+            // H-27: %VAR% follows PowerShell interpolation rules — '...' is literal.
+            var runner = new ShellRunner(_dir);
+            var (output, exitCode) = await runner.ExecuteAsync("Write-Output '%USERNAME%'");
+
+            Assert.Equal(0, exitCode);
+            Assert.Contains("%USERNAME%", output);
+        }
+
         // ── Knowledge access: search_memory / query_library ──────────────────
 
         [Fact]
