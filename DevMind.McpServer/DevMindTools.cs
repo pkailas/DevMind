@@ -1391,6 +1391,9 @@ internal sealed class DevMindTools
         "Cmd-style %VAR% is sugar for $env:VAR and follows PowerShell interpolation rules: " +
         "expanded at statement level and inside \"...\", left alone inside '...', here-strings " +
         "and comments — use single quotes for a literal %NAME%. " +
+        "Child processes started by the command are terminated when the call returns unless " +
+        "detach=true (e.g. Start-Process a GUI to inspect in a later call); a timeout or cancel " +
+        "still kills the whole tree. " +
         "Default timeout 120s — override with " +
         "timeout_seconds. For anything expected to run longer than ~45s (installs, deploys, " +
         "long test runs), pass background=true: the call returns a shell_job_id immediately " +
@@ -1401,11 +1404,13 @@ internal sealed class DevMindTools
         [Description("The shell command to execute. Newlines are preserved, so a command that genuinely spans lines runs as written. Do NOT assemble file content here — no here-strings, no echo/Out-File redirects: use create_file or write_file for new content and patch_file for edits.")] string command,
         [Description("Timeout in seconds (default 120, max 3600). Ignored when background=true (background default 1800).")] int? timeout_seconds = null,
         [Description("Run detached and return a shell_job_id to poll with shell_job_status (default false).")] bool? background = null,
+        [Description("Let child processes the command starts keep running after the call returns (default false: they are terminated on return). Use for Start-Process of an app you check in a later call; kill it yourself when done.")] bool? detach = null,
         IProgress<ProgressNotificationValue>? progress = null,
         CancellationToken cancellationToken = default)
     {
+        bool detachChildren = detach == true;
         if (background == true)
-            return StartBackgroundShell(command, timeout_seconds);
+            return StartBackgroundShell(command, timeout_seconds, detachChildren);
 
         int? timeout = timeout_seconds is > 0 ? Math.Min(timeout_seconds.Value, 3600) : null;
         return await _svc.EnqueueAsync(async () =>
@@ -1418,7 +1423,8 @@ internal sealed class DevMindTools
                     : null;
 
                 var (output, exitCode) = await _svc.Shell.ExecuteAsync(
-                    command, cancellationToken, timeoutSeconds: timeout, onLine: bridgedProgress);
+                    command, cancellationToken, timeoutSeconds: timeout, onLine: bridgedProgress,
+                    detach: detachChildren);
 
                 return CapShellOutput(output, exitCode);
             }
@@ -1458,7 +1464,7 @@ internal sealed class DevMindTools
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, ShellJob> _shellJobs = new();
     private static int _nextShellJobId;
 
-    private string StartBackgroundShell(string command, int? timeoutSeconds)
+    private string StartBackgroundShell(string command, int? timeoutSeconds, bool detach)
     {
         try
         {
@@ -1483,7 +1489,7 @@ internal sealed class DevMindTools
                 }
             });
 
-            var run = Task.Run(() => runner.ExecuteAsync(command, cts.Token, timeoutSeconds: timeout, onLine: onLine));
+            var run = Task.Run(() => runner.ExecuteAsync(command, cts.Token, timeoutSeconds: timeout, onLine: onLine, detach: detach));
             job = new ShellJob { Id = id, Command = command, Run = run, Cts = cts };
             _shellJobs[id] = job;
 

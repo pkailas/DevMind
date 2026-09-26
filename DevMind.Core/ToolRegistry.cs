@@ -87,6 +87,7 @@ namespace DevMind
                 "Execute a shell command and return its output. " +
                 "Commands run via powershell.exe with a default 120-second timeout (overridable via timeout_seconds or DEVMIND_SHELL_TIMEOUT env var). " +
                 "Use this for git commands, one-off scripts, and operations no other tool covers. " +
+                "Child processes started by the command are terminated when the call returns. " +
                 "Do NOT use run_shell to list, search, or find files — use list_files for enumeration, " +
                 "find_in_files for content search across files, or grep_file for content search in a known file. " +
                 "Use run_build for build commands and run_tests for tests.",

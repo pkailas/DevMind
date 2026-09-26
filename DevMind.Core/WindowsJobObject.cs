@@ -92,6 +92,7 @@ namespace DevMind
 
         private const uint JobObjectExtendedLimitInformation = 9;
         private const uint JobObjectLimitKillOnJobClose      = 0x2000;
+        private const uint JobObjectLimitSilentBreakawayOk   = 0x1000;
 
         // Classic DllImport P/Invoke (not LibraryImport source generation): the latter
         // hard-requires <AllowUnsafeBlocks> in the csproj (SYSLIB1062), which would add the
@@ -126,8 +127,16 @@ namespace DevMind
         /// any Win32 exception from the interop calls) returns a null handle
         /// plus a human-readable <paramref name="reason"/>, and the caller
         /// falls back to the pre-job behavior.
+        /// <para>
+        /// <paramref name="allowChildBreakaway"/> (run_shell detach=true) also arms
+        /// JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK: <paramref name="proc"/> itself stays in the
+        /// job — its timeout/cancel kill is unchanged — but every process it creates from
+        /// then on is left out of the job, so closing the job does not terminate them. If
+        /// the host sits in a parent job that forbids breakaway, the children stay in that
+        /// parent job (they outlive the call, not the host).
+        /// </para>
         /// </summary>
-        public static (IntPtr jobHandle, string reason) TryCreateAndAssignJob(Process proc)
+        public static (IntPtr jobHandle, string reason) TryCreateAndAssignJob(Process proc, bool allowChildBreakaway = false)
         {
             IntPtr job = IntPtr.Zero;
             try
@@ -150,7 +159,8 @@ namespace DevMind
                 // with ERROR_INVALID_PARAMETER (Win32 87) and arms nothing. All
                 // fields except LimitFlags stay zero (no memory/time caps).
                 var limit = new JobObjectExtendedLimitInfo();
-                limit.BasicLimitInformation.LimitFlags = JobObjectLimitKillOnJobClose;
+                limit.BasicLimitInformation.LimitFlags = JobObjectLimitKillOnJobClose
+                    | (allowChildBreakaway ? JobObjectLimitSilentBreakawayOk : 0);
                 IntPtr infoPtr = Marshal.AllocHGlobal(Marshal.SizeOf<JobObjectExtendedLimitInfo>());
                 bool setOk = false;
                 try
@@ -222,7 +232,8 @@ namespace DevMind
                 DmTrace.Event("info", "mcp.shell.job", new System.Collections.Generic.Dictionary<string, object>
                 {
                     ["pid"]                   = proc.Id,
-                    ["assigned_immediately"]  = justAssigned
+                    ["assigned_immediately"]  = justAssigned,
+                    ["child_breakaway"]       = allowChildBreakaway
                 });
                 return (job, null);
             }

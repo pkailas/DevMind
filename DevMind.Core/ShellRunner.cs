@@ -35,6 +35,8 @@ using DmTrace = DevMind.Trace;
 //        command runs exactly as it did in v1.10. See WindowsJobObject.cs.
 // v1.12: the PowerShell `&&` -> `;` rewrite is token-aware (TranslateChainOperators): quoted strings,
 //        here-strings and comments are no longer touched (job-1697, watchlist H-21).
+// v1.14: ExecuteAsync(detach: true) — the per-command job gets SILENT_BREAKAWAY_OK, so processes the
+//        shell starts outlive the call (run_shell detach, watchlist H-24). The shell itself stays in the job.
 // v1.13: %VAR% expansion uses the same tokenizer (TokenizeShellSpans) and follows PowerShell
 //        interpolation rules: expanded at statement level and inside "...", never inside '...',
 //        here-strings or comments (watchlist H-27).
@@ -91,12 +93,19 @@ namespace DevMind
         /// no quoting, no SanitizeCommand — so a value can never break out into command syntax.
         /// (Resolves the former Stage 7 Item 3 quoting TODO, now that DevMind.Core targets net10.0.)
         /// </para>
+        /// <para>
+        /// Child processes the command starts are terminated when the call returns (per-command
+        /// job, KILL_ON_JOB_CLOSE). <paramref name="detach"/> = true lets them outlive the call —
+        /// e.g. <c>Start-Process app.exe</c> to inspect in a later call. The shell process itself
+        /// stays contained either way, and a timeout/cancel still reaps the whole tree.
+        /// </para>
         /// </summary>
        public async Task<(string output, int exitCode)> ExecuteAsync(
             string command,
             CancellationToken cancellationToken = default,
             int? timeoutSeconds = null,
-            IProgress<ShellOutputLine> onLine = null)
+            IProgress<ShellOutputLine> onLine = null,
+            bool detach = false)
         {
             int effectiveTimeout = ResolveTimeout(timeoutSeconds);
             // npm/npx/yarn/pnpm/bun are .cmd shims on Windows. When PowerShell spawns them it
@@ -149,7 +158,7 @@ namespace DevMind
             var psi = new ProcessStartInfo(shell, args);
            return await RunProcessAsync(
                 psi, shell, args, sanitized, usePowerShell, forceCmdExe,
-                cancellationToken, effectiveTimeout, onLine);
+                cancellationToken, effectiveTimeout, onLine, allowChildBreakaway: detach);
         }
 
         /// <summary>
@@ -199,7 +208,8 @@ namespace DevMind
             bool traceForceCmdExe,
             CancellationToken cancellationToken,
             int timeoutSeconds,
-            IProgress<ShellOutputLine> onLine)
+            IProgress<ShellOutputLine> onLine,
+            bool allowChildBreakaway = false)
         {
             // Per-command containment: a Job Object with KILL_ON_JOB_CLOSE, assigned to
             // the child right after Start(). Job membership is inherited by descendants
@@ -320,7 +330,9 @@ namespace DevMind
                 // the v1.10 behavior — the command is NEVER blocked by the job layer.
                 if (jobHandle == IntPtr.Zero)
                 {
-                    var job = WindowsJobObject.TryCreateAndAssignJob(proc);
+                    // allowChildBreakaway (detach): the shell stays in the job; the processes
+                    // it starts are left out of it, so the close below does not kill them.
+                    var job = WindowsJobObject.TryCreateAndAssignJob(proc, allowChildBreakaway);
                     jobHandle = job.jobHandle;
                     if (job.jobHandle == IntPtr.Zero && job.reason != null)
                         DmTrace.Event("info", "mcp.shell.job.degraded",

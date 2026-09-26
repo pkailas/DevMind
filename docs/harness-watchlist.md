@@ -260,7 +260,13 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   the first run_shell returns. Both the driver and the agent lost iterations on it; nothing in the tool description warns about it.
 - **Proposed fix:** a `detach: true` option on run_shell that starts the child outside the job object; either way, one sentence in
   the tool description stating that children are killed when the call returns.
-- **Status:** open
+- **Fix:** MCP run_shell takes `detach` (default false; also honoured with background=true). `ShellRunner.ExecuteAsync(detach: true)`
+  arms JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK on the per-command job: the shell itself stays in the job (timeout/cancel kill
+  unchanged), the processes it starts are left out, so closing the job on return does not kill them. A timeout or cancel still
+  taskkill-reaps the whole tree. Both run_shell descriptions (MCP and the agent's ToolRegistry) now state the lifetime rule; the
+  agent-side tool has no detach parameter yet.
+- **Status:** fixed, pending deploy - commit "feat(shell): run_shell detach option; document child-process lifetime" (the fix and
+  this line are the same commit, so it cannot name its own hash)
 
 ### H-25 - Agent attributes its own compile errors to the toolchain
 - **First seen:** 2026-09-26 - job-1699
