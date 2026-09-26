@@ -1,10 +1,11 @@
 // File: HistoryCommandTests.cs  v1.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
-// /history [count|all] and /resume <n>. /history used to hard-cap the listing at 20 with no
+// /history [count|all|a-b] and /resume <n>. /history used to hard-cap the listing at 20 with no
 // way to see older sessions, and /resume capped its index at 20 too, so a session past the
 // 20th was unreachable. Now /history takes a count or "all" (default 20), and /resume
 // indexes the full list — the number any /history listing shows resolves to that session.
+// "a-b" lists sessions a through b in that same numbering.
 
 using DevMind;
 using Xunit;
@@ -109,7 +110,7 @@ namespace DevMind.TUI.Tests
             var result = await SlashCommand.Dispatch(input, Context(30));
 
             Assert.True(result.IsError);
-            Assert.Contains("/history [count|all]", result.Message);
+            Assert.Contains("/history [count|all|a-b]", result.Message);
         }
 
         [Fact]
@@ -149,7 +150,84 @@ namespace DevMind.TUI.Tests
         public void Help_ShowsTheNewUsage()
         {
             var cmd = SlashCommand.ListCommands().Single(c => c.Name == "/history");
-            Assert.Equal("/history [count|all]", cmd.Usage);
+            Assert.Equal("/history [count|all|a-b]", cmd.Usage);
+        }
+
+        // ── Range form: /history a-b ─────────────────────────────────────────
+
+        private static List<int> ListedNumbers(string message) =>
+            System.Text.RegularExpressions.Regex.Matches(message, @"^\s*\[(\d+)\]", System.Text.RegularExpressions.RegexOptions.Multiline)
+                .Select(m => int.Parse(m.Groups[1].Value)).ToList();
+
+        [Fact]
+        public async Task Range_ShowsExactlyThoseSessions_InResumeNumbering()
+        {
+            var result = await SlashCommand.Dispatch("/history 21-40", Context(50));
+
+            Assert.False(result.IsError, result.Message);
+            Assert.Equal(Enumerable.Range(21, 20), ListedNumbers(result.Message));
+            Assert.Contains("[21] Session 21", result.Message);   // same session /resume 21 loads
+            Assert.Contains("[40] Session 40", result.Message);
+            Assert.Contains("sessions 21-40 of 50", result.Message);
+            Assert.DoesNotContain("use /history all", result.Message);
+        }
+
+        [Fact]
+        public async Task Range_PastTheEnd_IsClampedToTheLastSession()
+        {
+            var result = await SlashCommand.Dispatch("/history 45-60", Context(50));
+
+            Assert.False(result.IsError, result.Message);
+            Assert.Equal(Enumerable.Range(45, 6), ListedNumbers(result.Message));
+            Assert.Contains("45-50 of 50", result.Message);
+        }
+
+        [Fact]
+        public async Task Range_StartingPastTheEnd_SaysSo()
+        {
+            var result = await SlashCommand.Dispatch("/history 60-70", Context(50));
+
+            Assert.False(result.IsError, result.Message);
+            Assert.Empty(ListedNumbers(result.Message));
+            Assert.Contains("No sessions in that range (50 total)", result.Message);
+        }
+
+        [Fact]
+        public async Task Range_SingleSession()
+        {
+            var result = await SlashCommand.Dispatch("/history 7-7", Context(50));
+
+            Assert.Equal(new[] { 7 }, ListedNumbers(result.Message));
+            Assert.Contains("sessions 7-7 of 50", result.Message);
+        }
+
+        [Theory]
+        [InlineData("/history 5-2")]
+        [InlineData("/history 0-9")]
+        [InlineData("/history a-")]
+        [InlineData("/history -5")]
+        [InlineData("/history x-y")]
+        [InlineData("/history 3-")]
+        public async Task Range_Invalid_IsAnErrorNamingTheAcceptedForms(string input)
+        {
+            var result = await SlashCommand.Dispatch(input, Context(50));
+
+            Assert.True(result.IsError, result.Message);
+            Assert.Contains("/history [count|all|a-b]", result.Message);
+            Assert.Contains("a-b", result.Message);
+            Assert.Contains("count", result.Message);
+        }
+
+        [Fact]
+        public async Task CountForms_AreUnchanged_WithTheTruncationFooter()
+        {
+            var byDefault = await SlashCommand.Dispatch("/history", Context(50));
+            var byCount = await SlashCommand.Dispatch("/history 5", Context(50));
+
+            Assert.Equal(Enumerable.Range(1, 20), ListedNumbers(byDefault.Message));
+            Assert.Contains("... and 30 more (showing 20 most recent)", byDefault.Message);
+            Assert.Equal(Enumerable.Range(1, 5), ListedNumbers(byCount.Message));
+            Assert.DoesNotContain(" of 50", byCount.Message);
         }
     }
 }

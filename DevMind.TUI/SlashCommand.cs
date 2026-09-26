@@ -382,8 +382,8 @@ namespace DevMind
            // -- History commands -------------------------------------------------
 
             RegisterCommand("/history",
-                "List past sessions from history (20 most recent by default)",
-                "/history [count|all]",
+                "List past sessions from history (20 most recent by default; a-b lists sessions a through b)",
+                HistoryUsage,
                 HistoryHandler);
 
             RegisterCommand("/resume",
@@ -1365,20 +1365,43 @@ namespace DevMind
             return result;
         }
 
-        // -- /history [count|all] ------------------------------------------------------
+        // -- /history [count|all|a-b] --------------------------------------------------
 
         /// <summary>How many sessions /history lists when no count is given.</summary>
         internal const int DefaultHistoryCount = 20;
 
+        /// <summary>The registered usage and the error text both come from here.</summary>
+        internal const string HistoryUsage = "/history [count|all|a-b]";
+
         /// <summary>
-        /// /history's optional argument: none → <see cref="DefaultHistoryCount"/>, a positive
-        /// integer → that many, "all" → every session. Null when the argument is invalid.
+        /// Which sessions /history lists: <see cref="Start"/> through <see cref="End"/>, 1-based
+        /// and inclusive in the most-recent-first numbering /resume &lt;n&gt; uses.
+        /// <see cref="End"/> may exceed the list (the handler clamps it).
         /// </summary>
-        internal static int? ParseHistoryCount(string[] args)
+        internal readonly record struct HistorySelection(int Start, int End, bool IsRange);
+
+        /// <summary>
+        /// /history's optional argument: none → 1-<see cref="DefaultHistoryCount"/>, a positive
+        /// integer n → 1-n, "all" → every session, "a-b" (1 ≤ a ≤ b) → sessions a through b.
+        /// Null when the argument is invalid.
+        /// </summary>
+        internal static HistorySelection? ParseHistorySelection(string[] args)
         {
-            if (args == null || args.Length == 0) return DefaultHistoryCount;
-            if (string.Equals(args[0], "all", StringComparison.OrdinalIgnoreCase)) return int.MaxValue;
-            return int.TryParse(args[0], out int n) && n > 0 ? n : null;
+            if (args == null || args.Length == 0) return new HistorySelection(1, DefaultHistoryCount, false);
+            string arg = args[0];
+            if (string.Equals(arg, "all", StringComparison.OrdinalIgnoreCase))
+                return new HistorySelection(1, int.MaxValue, false);
+
+            var range = System.Text.RegularExpressions.Regex.Match(arg, @"^(\d+)-(\d+)$");
+            if (range.Success)
+            {
+                if (int.TryParse(range.Groups[1].Value, out int a) && int.TryParse(range.Groups[2].Value, out int b)
+                    && a >= 1 && b >= a)
+                    return new HistorySelection(a, b, true);
+                return null;
+            }
+
+            return int.TryParse(arg, out int n) && n > 0 ? new HistorySelection(1, n, false) : null;
         }
 
         /// <summary>
@@ -1393,24 +1416,28 @@ namespace DevMind
             if (ctx.HistoryStore == null)
                 return new CommandResult { Message = "History is not enabled.", IsError = true };
 
-            int? limit = ParseHistoryCount(args);
-            if (limit == null)
+            HistorySelection? parsed = ParseHistorySelection(args);
+            if (parsed == null)
                 return new CommandResult
                 {
-                    Message = "Usage: /history [count|all]  (count must be a positive integer)",
+                    Message = $"Usage: {HistoryUsage}  (count: a positive integer; all: every session; " +
+                              "a-b: sessions a through b, e.g. 21-40, with 1 <= a <= b)",
                     IsError = true,
                 };
+            HistorySelection sel = parsed.Value;
 
             try
             {
                 var sessions = await ListSessionsAsync(ctx);
-                int count = Math.Min(sessions.Length, limit.Value);
-                if (count == 0)
+                if (sel.IsRange && sel.Start > sessions.Length)
+                    return new CommandResult { Message = $"No sessions in that range ({sessions.Length} total)." };
+                int end = Math.Min(sessions.Length, sel.End);   // 1-based, inclusive
+                if (end == 0)
                     return new CommandResult { Message = "No past sessions found." };
 
                 var sb = new System.Text.StringBuilder();
                 sb.AppendLine("Past sessions (most recent first):");
-                for (int i = 0; i < count; i++)
+                for (int i = sel.Start - 1; i < end; i++)
                 {
                     var s = sessions[i];
                     string title = string.IsNullOrEmpty(s.Title) ? "(untitled)" : s.Title;
@@ -1421,8 +1448,10 @@ namespace DevMind
                     sb.AppendLine($"  [{i + 1}] {title}  |  {date}  |  {s.MessageCount} messages");
                     sb.AppendLine($"      {s.SessionId}");
                 }
-                if (sessions.Length > count)
-                    sb.AppendLine($"  ... and {sessions.Length - count} more (showing {count} most recent) — use /history all to see every session");
+                if (sel.IsRange)
+                    sb.AppendLine($"  sessions {sel.Start}-{end} of {sessions.Length}");
+                else if (sessions.Length > end)
+                    sb.AppendLine($"  ... and {sessions.Length - end} more (showing {end} most recent) — use /history all to see every session");
                 return new CommandResult { Message = sb.ToString().TrimEnd() };
             }
             catch (Exception ex)

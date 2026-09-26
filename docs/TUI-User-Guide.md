@@ -95,7 +95,7 @@ History:
 
 | Command | Description |
 |---|---|
-| `/history [count\|all]` | List past sessions — the 20 most recent by default, `count` of them, or `all` |
+| `/history [count\|all\|a-b]` | List past sessions — the 20 most recent by default, `count` of them, `all`, or sessions `a-b` (e.g. `21-40`) |
 | `/resume <n>` | Resume a past session by number from any `/history` listing (numbers index the full list) |
 | `/title <text>` | Set the current session's title |
 

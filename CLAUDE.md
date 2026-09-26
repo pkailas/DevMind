@@ -158,7 +158,7 @@ same thing. Grouping follows `HelpGroups`.
 | `/clear` | Clear screen and reset conversation |
 | `/cls` | Clear the screen only — keeps conversation, context, and session (UI reset) |
 | `/compact` | Force a context compaction pass now |
-| `/history [count\|all]` | List past sessions from history (20 most recent by default) |
+| `/history [count\|all\|a-b]` | List past sessions from history (20 most recent by default; a-b lists sessions a through b) |
 | `/resume <n>` | Resume a past session by number (from /history listing) |
 | `/title <text>` | Set the current session's title |
 | `/steer <text>` | Fold a suggestion into the RUNNING turn at its next iteration boundary (plain text does the same) |
