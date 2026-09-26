@@ -219,6 +219,57 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Status:** fixed, pending deploy - commit "H-20: no implicit done for headless jobs; empty answer is incomplete". Verify on the
   next job that runs a `dotnet run` probe mid-research.
 
+### H-21 - run_shell rewrites `&&` inside quoted content and here-strings
+- **First seen:** 2026-09-26 - job-1697 (VLink.PSCPConnector); also hit the driver the same day.
+- **Symptom:** C# passed to `Add-Type` through a PowerShell here-string came back as `wpid == pid; IsWindowVisible(h)` - the `&&`
+  had been replaced by `;`, so the type failed to compile. Cost the agent several iterations before it found the cause.
+- **Related:** H-15 (run_shell rewriting unquoted paths) - same family: the cmd->PowerShell translation edits command text it
+  does not understand.
+- **Proposed fix:** the cmd->PowerShell chaining translation must skip quoted strings and here-strings (`@'...'@`, `@"..."@`), or be
+  removed.
+- **Status:** open
+
+### H-22 - write_file/create_file emit a UTF-8 BOM on new files
+- **First seen:** 2026-09-26 - driver session on the PSCP connector jobs (jobs 1697-1702).
+- **Symptom:** a commit-message file written by write_file started with U+FEFF, which ended up at the start of the git subject.
+- **Related:** the "Encoding drift on edit" fix (commit "harness: patch/append/overwrite preserve BOM and line endings") made EXISTING
+  files keep their BOM, but left new-file behaviour unchanged - and the MCP write_file adds a BOM to every non-script new file.
+- **Proposed fix:** write new files with `UTF8Encoding(false)`; keep a BOM only when the existing file had one.
+- **Status:** open
+
+### H-23 - devmind_task_status `wait_seconds=60` always fails over the remote-devices bridge
+- **First seen:** 2026-09-26 - driving jobs 1697-1702 over the Claude remote-devices bridge.
+- **Symptom:** every `devmind_task_status` call with `wait_seconds=60` fails with "Device 'beast' did not respond within 60s" - the
+  bridge's own timeout is 60 s, so a full-length wait plus overhead always loses the race. `wait_seconds=55` works.
+- **Proposed fix:** clamp `wait_seconds` to 55 in the tool (and say so in its description).
+- **Status:** open
+
+### H-24 - Child processes started by run_shell die when the call returns
+- **First seen:** 2026-09-23/24 (fakesap, see Model-behaviour notes); **again 2026-09-26** - jobs 1697, 1698.
+- **Symptom:** a two-call "Start-Process the dialog, then check it" always reports NOT RUNNING - the job object kills the child when
+  the first run_shell returns. Both the driver and the agent lost iterations on it; nothing in the tool description warns about it.
+- **Proposed fix:** a `detach: true` option on run_shell that starts the child outside the job object; either way, one sentence in
+  the tool description stating that children are killed when the call returns.
+- **Status:** open
+
+### H-25 - Agent attributes its own compile errors to the toolchain
+- **First seen:** 2026-09-26 - job-1699
+- **Symptom:** the agent twice declared "AutoScaleMode won't resolve in the probe's net48 compile context - a recurring quirk", when
+  it had typed the variable as `Control` instead of `ContainerControl`; it then abandoned a line of inquiry because of the phantom
+  quirk.
+- **Proposed fix:** (harness) on a repeated CS1061/CS0117 naming the same member, inject a nudge "check the declared type of the
+  receiver"; (prompt) a claim of a toolchain quirk must come with a minimal repro or be retracted.
+- **Status:** open
+
+### H-26 - Rabbit hole on work the brief marked optional
+- **First seen:** 2026-09-26 - job-1698
+- **Symptom:** ~30 iterations spent trying to make `InternalsVisibleTo` expose private Designer fields for a test the brief marked
+  optional, editing csproj/AssemblyInfo it later reverted; it took an override steer to get it back on the required work.
+- **Related:** P-01 (no-write-streak nudge).
+- **Proposed fix:** spend guard - when the brief marks an item optional and the agent has spent N iterations on it (or the same
+  compiler error repeats twice), inject "optional - drop it and continue".
+- **Status:** open
+
 ## Parked
 
 ### P-01 - No-write-streak nudge
@@ -310,3 +361,9 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   even though the brief pointed at the Razor docs; consider nudging `library_query` when a build/runtime question matches an ingested topic.
 - **Vacuous tests:** job-1659's page tests passed because the fake server was never used (no listeners -> no comparison). Briefs should require a test to fail before the fix.
 - **Razor-only `<text>` asserted in rendered HTML** (job-1652). Now in `Razor_PITFALLS.md` (RAG id 2700).
+- **Evidence-free conclusion (2026-09-26, job-1699):** the agent concluded the defect was "a 125%+ DPI interaction" and self-reported
+  incomplete; the machine was at 96 DPI and the driver had to supply the diagnosis. Note only - handled brief-side ("state assumptions
+  as claims to verify"). Status: noted.
+- **What worked (2026-09-26, PSCP connector jobs 1697-1702):** override steers were consumed at the next iteration boundary every
+  time; continue chains kept full context across four hops; build/test reporting was honest throughout; the
+  reflection-into-private-fields on-screen probe was an effective verification instrument once the driver directed the agent to it.
