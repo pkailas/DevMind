@@ -382,8 +382,8 @@ namespace DevMind
            // -- History commands -------------------------------------------------
 
             RegisterCommand("/history",
-                "List past sessions from history",
-                "/history",
+                "List past sessions from history (20 most recent by default)",
+                "/history [count|all]",
                 HistoryHandler);
 
             RegisterCommand("/resume",
@@ -1365,18 +1365,46 @@ namespace DevMind
             return result;
         }
 
-        // -- /history --------------------------------------------------------------
+        // -- /history [count|all] ------------------------------------------------------
+
+        /// <summary>How many sessions /history lists when no count is given.</summary>
+        internal const int DefaultHistoryCount = 20;
+
+        /// <summary>
+        /// /history's optional argument: none → <see cref="DefaultHistoryCount"/>, a positive
+        /// integer → that many, "all" → every session. Null when the argument is invalid.
+        /// </summary>
+        internal static int? ParseHistoryCount(string[] args)
+        {
+            if (args == null || args.Length == 0) return DefaultHistoryCount;
+            if (string.Equals(args[0], "all", StringComparison.OrdinalIgnoreCase)) return int.MaxValue;
+            return int.TryParse(args[0], out int n) && n > 0 ? n : null;
+        }
+
+        /// <summary>
+        /// The session list /history numbers and /resume indexes — one source, so the number
+        /// shown by any /history listing (default, count or all) resolves to the same session.
+        /// </summary>
+        static Task<SessionSummary[]> ListSessionsAsync(CommandContext ctx)
+            => ctx.HistoryStore.ListSessionsAsync(ctx.MachineName);
 
         static async Task<CommandResult> HistoryHandler(string[] args, CommandContext ctx)
         {
             if (ctx.HistoryStore == null)
                 return new CommandResult { Message = "History is not enabled.", IsError = true };
 
+            int? limit = ParseHistoryCount(args);
+            if (limit == null)
+                return new CommandResult
+                {
+                    Message = "Usage: /history [count|all]  (count must be a positive integer)",
+                    IsError = true,
+                };
+
             try
             {
-                var sessions = await ctx.HistoryStore.ListSessionsAsync(ctx.MachineName);
-                // Cap at 20 most recent.
-                int count = Math.Min(sessions.Length, 20);
+                var sessions = await ListSessionsAsync(ctx);
+                int count = Math.Min(sessions.Length, limit.Value);
                 if (count == 0)
                     return new CommandResult { Message = "No past sessions found." };
 
@@ -1393,8 +1421,8 @@ namespace DevMind
                     sb.AppendLine($"  [{i + 1}] {title}  |  {date}  |  {s.MessageCount} messages");
                     sb.AppendLine($"      {s.SessionId}");
                 }
-                if (sessions.Length > 20)
-                    sb.AppendLine($"  ... and {sessions.Length - 20} more (showing 20 most recent)");
+                if (sessions.Length > count)
+                    sb.AppendLine($"  ... and {sessions.Length - count} more (showing {count} most recent) — use /history all to see every session");
                 return new CommandResult { Message = sb.ToString().TrimEnd() };
             }
             catch (Exception ex)
@@ -1426,12 +1454,15 @@ namespace DevMind
 
             try
             {
-                var sessions = await ctx.HistoryStore.ListSessionsAsync(ctx.MachineName);
-                int count = Math.Min(sessions.Length, 20);
-                if (n > count)
+                // The FULL list, not the /history display cap: a number shown by
+                // "/history 50" or "/history all" must resolve here too.
+                var sessions = await ListSessionsAsync(ctx);
+                if (n > sessions.Length)
                     return new CommandResult
                     {
-                        Message = $"Session #{n} not found. Valid range: 1-{count} (run /history to refresh).",
+                        Message = sessions.Length == 0
+                            ? "No past sessions found."
+                            : $"Session #{n} not found. Valid range: 1-{sessions.Length} (run /history to refresh).",
                         IsError = true,
                     };
 

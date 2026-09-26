@@ -95,8 +95,8 @@ History:
 
 | Command | Description |
 |---|---|
-| `/history` | List past sessions |
-| `/resume <n>` | Resume a past session by number from the `/history` listing |
+| `/history [count\|all]` | List past sessions — the 20 most recent by default, `count` of them, or `all` |
+| `/resume <n>` | Resume a past session by number from any `/history` listing (numbers index the full list) |
 | `/title <text>` | Set the current session's title |
 
 Documents and images (requires a vision model + mmproj):
