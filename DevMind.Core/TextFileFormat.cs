@@ -12,7 +12,7 @@
 // for everything else.
 //
 // The rule now: an existing file keeps its BOM (or lack of one) and its dominant line ending.
-// New files are untouched by this — each tool keeps its own new-file behaviour.
+// New files: WriteNew — UTF-8 without BOM, line ending chosen by NewFileLineEnding (H-30).
 //
 // Encoding detection is PatchEngine.ReadFilePreservingEncoding — one BOM detector, shared.
 
@@ -72,20 +72,29 @@ namespace DevMind
         public void Write(string path, string text) => File.WriteAllText(path, text, Encoding);
 
         /// <summary>
+        /// Creates a NEW text file: <paramref name="text"/> normalised to the line ending
+        /// <see cref="NewFileLineEnding.Choose"/> picks for the path (H-30), written with
+        /// <paramref name="newFileEncoding"/> (default: UTF-8 without BOM — H-22). Every tool
+        /// path that creates a file goes through here. Returns the text actually written, for
+        /// callers that cache it.
+        /// </summary>
+        public static string WriteNew(string path, string text, Encoding newFileEncoding = null)
+        {
+            string written = NewFileLineEnding.Apply(path, text ?? string.Empty);
+            File.WriteAllText(path, written, newFileEncoding ?? new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            return written;
+        }
+
+        /// <summary>
         /// Replaces the whole content of <paramref name="path"/>. An existing file keeps its
-        /// BOM/encoding and dominant line ending; a new file is written with
-        /// <paramref name="newFileEncoding"/> (default: UTF-8 without BOM — what
-        /// File.WriteAllText(path, text) writes) and its text as given.
+        /// BOM/encoding and dominant line ending; a new file goes through <see cref="WriteNew"/>.
         /// Returns the text actually written, for callers that cache it.
         /// </summary>
         public static string WritePreserving(string path, string text, Encoding newFileEncoding = null)
         {
             text ??= string.Empty;
             if (!File.Exists(path))
-            {
-                File.WriteAllText(path, text, newFileEncoding ?? new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
-                return text;
-            }
+                return WriteNew(path, text, newFileEncoding);
             var format = Detect(path);
             string written = format.NormalizeLineEndings(text);
             format.Write(path, written);

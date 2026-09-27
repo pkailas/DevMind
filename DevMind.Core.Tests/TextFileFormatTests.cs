@@ -164,14 +164,17 @@ namespace DevMind.Core.Tests
         }
 
         [Fact]
-        public async Task CreateNewFile_Unchanged_NoBom_AsGiven()
+        public async Task CreateNewFile_NoBom_MixedEndingsNormalised()
         {
+            // No BOM on a new file (H-22); mixed endings from the model are normalised to ONE
+            // ending (H-30). Which one depends on the folder's surroundings — _dir is empty, so
+            // NewFileLineEnding samples its parent (%TEMP%) — and is pinned in NewFileLineEndingTests.
             var host = await HostWithRead();
             Assert.NotNull(await host.SaveFileAsync("brand-new.ps1", "a\r\nb\n", fromToolCall: true));
 
             string path = Path.Combine(_dir, "brand-new.ps1");
             Assert.False(HasBom(path));
-            Assert.Equal("a\r\nb\n", Text(path));
+            Assert.Contains(Text(path), new[] { "a\r\nb\r\n", "a\nb\n" });
         }
 
         // ── append_file ──────────────────────────────────────────────────────────

@@ -108,7 +108,9 @@ namespace DevMind.McpServer.Tests
 
             Assert.StartsWith("create_file: created", r);
             Assert.False(HasBom(path), "create_file put a BOM on a new file");
-            Assert.Equal("fix: subject\n", Text(path));
+            // H-30 picks the line ending from the surroundings (pinned in NewFileLineEndingToolTests);
+            // the text itself is unchanged apart from that.
+            Assert.Contains(Text(path), new[] { "fix: subject\r\n", "fix: subject\n" });
         }
 
         [Fact]

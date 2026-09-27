@@ -339,9 +339,13 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **First seen:** 2026-09-27 - job-1714 created DevMind.TUI/PromptHistory.cs and DevMind.TUI.Tests/PromptHistoryTests.cs; `git add`
   warned "LF will be replaced by CRLF". Existing files keep their line endings (H-22 / TextFileFormat); only the new-file branch is
   affected.
+- **Second hit:** job-1715 - SlashCompletion.cs, SlashCompletionPopup.cs, SlashCompletionTests.cs.
 - **Proposed fix:** for a new file, pick the dominant line ending of sibling files in the same folder (or .gitattributes /
   core.autocrlf), falling back to CRLF on Windows.
-- **Status:** open
+- **Status:** fixed, pending deploy - commit "H-30: new files take the repo's line ending". Rule (NewFileLineEnding, via
+  TextFileFormat.WriteNew on every new-file path): .gitattributes eol= for the path (-text/binary = as given) > .sh is LF > dominant
+  ending of up to 10 neighbouring files (same extension, then any, in the folder, then its parent) > CRLF on Windows; the content is
+  normalised fully. core.autocrlf and $GIT_DIR/info/attributes are not read. No BOM on new files, as before.
 
 ### H-31 - self_reported_incomplete fires on a finished job ("not run by me - the harness verifies it")
 - **First seen:** 2026-09-27 - job-1714 ended `stopped_incomplete`, reason `self_reported_incomplete`, quoting the line "The full

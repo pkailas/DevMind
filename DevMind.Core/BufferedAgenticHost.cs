@@ -490,7 +490,7 @@ namespace DevMind
                 // New file — no merge gate needed
                 if (!File.Exists(fullPath))
                 {
-                    File.WriteAllText(fullPath, fileContent);
+                    fileContent = TextFileFormat.WriteNew(fullPath, fileContent);   // H-30: repo line ending
                     _fileCache.Store(FileCacheKey(fullPath), fileContent);
                     int newFileLines = fileContent.Split('\n').Length;
                     AppendOutput($"[FILE] Saved {fileNameOnly} ({newFileLines} lines)\n", OutputColor.Success);
@@ -608,7 +608,7 @@ namespace DevMind
                     string dir = Path.GetDirectoryName(resolvedPath);
                     if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                         Directory.CreateDirectory(dir);
-                    File.WriteAllText(resolvedPath, content);
+                    content = TextFileFormat.WriteNew(resolvedPath, content);       // H-30: repo line ending
                     _fileCache.Store(FileCacheKey(resolvedPath), content);
                     AppendOutput($"[APPEND] Created {fileNameOnly}\n", OutputColor.Success);
                     RecordAction("append", $"{resolvedPath} (created)");

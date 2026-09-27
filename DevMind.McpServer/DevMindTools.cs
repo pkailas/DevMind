@@ -1176,7 +1176,8 @@ internal sealed class DevMindTools
                         Directory.CreateDirectory(dir);
 
                     // New file: UTF-8 without BOM, whatever the extension — a BOM on a new
-                    // commit-message file put U+FEFF at the start of the git subject (H-22).
+                    // commit-message file put U+FEFF at the start of the git subject (H-22) —
+                    // and the repo's line ending (H-30, TextFileFormat.WriteNew).
                     // Existing file (overwrite): keeps the BOM/encoding and dominant line ending
                     // it already had — job-1676 stripped the BOM a PowerShell 5.1 script needs.
                     content = TextFileFormat.WritePreserving(fullPath, content);
@@ -1246,8 +1247,9 @@ internal sealed class DevMindTools
                 }
                 else
                 {
-                    // New file: UTF-8 without BOM, whatever the extension (H-22).
-                    File.WriteAllText(fullPath, content, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+                    // New file: UTF-8 without BOM, whatever the extension (H-22), with the
+                    // repo's line ending (H-30).
+                    TextFileFormat.WriteNew(fullPath, content);
                 }
 
                 string cacheKey = Path.GetFullPath(fullPath);
