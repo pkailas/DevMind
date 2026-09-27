@@ -249,6 +249,60 @@ namespace DevMind
             }
         }
 
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool TerminateJobObject(IntPtr hJob, uint uExitCode);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool QueryInformationJobObject(
+            IntPtr hJob, int jobObjectInfoClass, IntPtr lpJobObjectInfo, uint cbJobObjectInfoLength, out uint lpReturnLength);
+
+        private const int JobObjectBasicProcessIdList = 3;
+        private const int MaxListedProcesses = 512;
+
+        /// <summary>
+        /// H-29: kills every process in the job NOW — the primary kill on a cancel/timeout, one
+        /// OS operation over the whole lineage-contained set (taskkill /T only walks the current
+        /// parent/child links). Processes terminate asynchronously; poll <see cref="ActiveProcessIds"/>.
+        /// Returns false when the call failed or there is no job. Never throws.
+        /// </summary>
+        public static bool TryTerminate(IntPtr jobHandle)
+        {
+            if (jobHandle == IntPtr.Zero) return false;
+            try { return TerminateJobObject(jobHandle, 1); }
+            catch { return false; }
+        }
+
+        /// <summary>
+        /// The PIDs of the processes still running in the job (JOBOBJECT_BASIC_PROCESS_ID_LIST),
+        /// or null when the list cannot be read. An exited process leaves the list, so this is a
+        /// liveness check with no PID-reuse hazard: a reused PID is not a member of this job.
+        /// Never throws.
+        /// </summary>
+        public static int[] ActiveProcessIds(IntPtr jobHandle)
+        {
+            if (jobHandle == IntPtr.Zero) return null;
+            int size = 8 + MaxListedProcesses * IntPtr.Size;   // two DWORD counts, then ULONG_PTR ids
+            IntPtr buffer = IntPtr.Zero;
+            try
+            {
+                buffer = Marshal.AllocHGlobal(size);
+                // ERROR_MORE_DATA still fills the first MaxListedProcesses ids — enough to say "not empty".
+                if (!QueryInformationJobObject(jobHandle, JobObjectBasicProcessIdList, buffer, (uint)size, out _)
+                    && Marshal.GetLastWin32Error() != 234 /* ERROR_MORE_DATA */)
+                    return null;
+                int listed = Marshal.ReadInt32(buffer, 4);
+                var ids = new int[Math.Min(listed, MaxListedProcesses)];
+                for (int i = 0; i < ids.Length; i++)
+                    ids[i] = (int)Marshal.ReadIntPtr(buffer, 8 + i * IntPtr.Size).ToInt64();
+                return ids;
+            }
+            catch { return null; }
+            finally
+            {
+                if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer);
+            }
+        }
+
         /// <summary>
         /// Close the job handle. With KILL_ON_JOB_CLOSE armed, this tears down
         /// the entire contained process tree — the authoritative kill for any

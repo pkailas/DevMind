@@ -335,7 +335,26 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   PID 103952 was already gone when checked a minute later, so nothing leaked this time.
 - **Question:** why does taskkill report failure (process already exited? access? job object already closed it?) when ShellRunner is
   supposed to kill via a job object. A false "failed to reap" is noise; a real one leaks runaway processes.
-- **Status:** open
+- **Findings (2026-09-27, 18 instrumented runs: nested `powershell ... Start-Sleep 60`, 3 per route):** a false alarm. Every cancel
+  ran TWO taskkills concurrently - a "best-effort early" kill registered on the cancel token and the reap - and the loser hit a tree
+  already dying. No child survived in any run.
+
+  | Route | taskkills | Exit codes seen (loser) | taskkill's words | False "Failed to reap" | Child survived |
+  |---|---|---|---|---|---|
+  | job cancel, detach=false | 2, racing | 128 | "not found" / "no running instance" / "operation not supported" | 0/3 | 0/3 |
+  | job cancel, detach=true | 2, racing | 255, 128 | 255: children killed, root "no running instance"; 128 with children "Access is denied" | 0/3 | 0/3 |
+  | timeout, either | 1 | 0 | all SUCCESS | 0/6 | 0/6 |
+  | interrupt, detach=false | 2, racing | 128 | "no running instance" / "operation not supported" | 0/3 | 0/3 |
+  | interrupt, detach=true (/F, no /T) | 2, racing | 1 | "Access is denied" / "no running instance" | 1/3 | 0/3 |
+
+  The old classifier accepted only 0 and 128, so 255 (job-1713) and 1 (reproduced) became "Failed to reap". The job object was
+  meant to be the authoritative kill but only ran implicitly (handle close) after the taskkill verdict.
+- **Status:** fixed, pending deploy - commit "H-29: one reap per call, job object first, verdict by what survived". The racing early
+  kill is gone (the cancel wakes the reap immediately anyway). ReapCall: TerminateJobObject is the primary kill; taskkill runs only
+  without a job (degraded path), for a detach call's full reap (its children broke away from the job), and as a second attempt on
+  survivors. The verdict is liveness - the job's live PID list plus the root process (without a job: the PIDs taskkill named that are
+  still running and started after the call) - polled up to 2 s. ClassifyReapResult(exit, stderr, survivors) is pure: nothing alive =
+  success whatever taskkill said; anything alive = "still alive after the reap: PID ..." with taskkill's first stderr line.
 
 ### H-30 - New files created by DM tools are LF in a CRLF repo
 - **First seen:** 2026-09-27 - job-1714 created DevMind.TUI/PromptHistory.cs and DevMind.TUI.Tests/PromptHistoryTests.cs; `git add`

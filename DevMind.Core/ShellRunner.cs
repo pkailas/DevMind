@@ -17,7 +17,9 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using DmTrace = DevMind.Trace;
@@ -277,6 +279,9 @@ namespace DevMind
                 psi.EnvironmentVariables["MSBUILDDISABLENODEREUSE"] = "1";
 
                 long spawnStartTicks = Stopwatch.GetTimestamp();
+                // Wall-clock lower bound for any process this call started — guards the degraded
+                // (no-job) liveness check against a reused PID.
+                DateTime spawnStartTime = DateTime.Now.AddSeconds(-1);
                 long stdoutBytes = 0;
                 long stderrBytes = 0;
                 long stdoutLines = 0;
@@ -372,29 +377,11 @@ namespace DevMind
                 proc.BeginOutputReadLine();
                 proc.BeginErrorReadLine();
 
-                // Kill the process tree when the caller cancels (Stop button or Ctrl+C).
-                // proc.Kill() only kills the immediate process; child processes (e.g. ping.exe
-                // spawned by powershell.exe) inherit the pipe handle and keep writing until
-                // natural completion. taskkill /F /T kills the entire tree atomically.
-                // Windows-specific — cross-platform kill mechanism deferred with rest of
-                // cross-platform shell support (Phase C.10+).
-                callToken.Register(() =>
-                {
-                    // Best-effort early kill on cancel. The authoritative reap — with outcome
-                    // reporting — happens below in the timeout/cancel branch (ReapProcessTree).
-                    try
-                    {
-                        Process.Start(new ProcessStartInfo
-                        {
-                            FileName        = "taskkill",
-                            Arguments       = SpareDetached() ? $"/F /PID {proc.Id}" : $"/F /T /PID {proc.Id}",
-                            CreateNoWindow  = true,
-                            UseShellExecute = false
-                        })?.WaitForExit(2000);
-                    }
-                    catch { /* process may have already exited naturally */ }
-                });
-
+                // A cancel wakes the wait below at once (cancelTask), and the reap runs right after
+                // it. There used to be a second, "best-effort early" taskkill registered on the
+                // token as well: it raced the reap's taskkill on every cancel, and whichever lost
+                // hit a tree already dying — exit 255 / 1 / 128, "no running instance of the task",
+                // "Access is denied" — which surfaced as a false "Failed to reap" (H-29, job-1713).
                 var timeoutTask = Task.Delay(timeoutSeconds * 1_000);
                 var cancelTask  = Task.Delay(Timeout.Infinite, callToken);
 
@@ -408,16 +395,13 @@ namespace DevMind
                 string reapMessage = null;
                 if (timedOut || cancelled)
                 {
-                    var reap = ReapProcessTree(proc.Id, tree: !SpareDetached());
+                    var reap = ReapCall(proc, jobHandle, allowChildBreakaway, SpareDetached(), spawnStartTime);
                     reapMessage = reap.Succeeded ? null : $"[SHELL] Failed to reap process tree (PID {proc.Id}): {reap.Reason}";
                     if (reapMessage != null)
                         onLine?.Report(new ShellOutputLine(reapMessage, isError: true));
 
-                    // Authoritative kill: closing the job handle (KILL_ON_JOB_CLOSE) tears
-                    // down the ENTIRE contained tree in one OS operation — including the
-                    // orphaned grandchildren that taskkill /F /T already failed to reach.
-                    // IN ADDITION TO the taskkill reap above, never instead of it (the taskkill
-                    // path is still the only mechanism on the degraded/no-job path).
+                    // Closing the job handle (KILL_ON_JOB_CLOSE) is the last word for anything
+                    // still contained; ReapCall has already terminated the job and verified it empty.
                     if (jobHandle != IntPtr.Zero)
                         WindowsJobObject.ReleaseJob(jobHandle);
                     jobHandle = IntPtr.Zero;
@@ -524,53 +508,174 @@ namespace DevMind
         }
 
         /// <summary>
-        /// Classify a <c>taskkill /F /T</c> outcome as a success or a failure.
-        /// Exit 0 (killed) and exit 128 (process not found — already exited) are BOTH
-        /// non-failures. Anything else is a failure: we do not assert a cause, only
-        /// report the observed code/exception.
+        /// Classify a <c>taskkill /F /T</c> outcome when nothing is known about what is still
+        /// alive: exit 0 (killed) and exit 128 (not found — already exited) are non-failures,
+        /// anything else is a failure. Prefer the overload that takes the survivors.
         /// </summary>
         public static ReapResult ClassifyReapResult(int? taskkillExitCode, Exception exception = null)
+            => ClassifyReapResult(taskkillExitCode, null, null, exception);
+
+        /// <summary>
+        /// H-29: classify a reap by what is still ALIVE afterwards, not by taskkill's exit code.
+        /// <paramref name="survivors"/> is the call's processes still running after the reap
+        /// (job members plus the root; detach=true children are outside it by design), or null
+        /// when that could not be determined. Empty → success whatever taskkill said (its 255 / 1 /
+        /// 128 with "no running instance of the task" or "Access is denied" is a process that was
+        /// already exiting). Non-empty → failure naming the PIDs and taskkill's own words. Unknown
+        /// → the exit-code rule (0 and 128 succeed). Pure.
+        /// </summary>
+        public static ReapResult ClassifyReapResult(
+            int? taskkillExitCode, string taskkillStderr, IReadOnlyCollection<int> survivors, Exception exception = null)
         {
+            string taskkillNote = exception != null ? $"taskkill threw: {exception.Message}"
+                : taskkillExitCode == null ? null
+                : taskkillExitCode == 0 ? null
+                : $"taskkill exit {taskkillExitCode}" + (FirstLine(taskkillStderr) is { } err ? $": {err}" : "");
+
+            if (survivors != null && survivors.Count > 0)
+                return ReapResult.Fail(
+                    $"still alive after the reap: PID {string.Join(", ", survivors.OrderBy(p => p))}"
+                    + (taskkillNote != null ? $"; {taskkillNote}" : ""));
+
+            if (survivors != null)
+                return ReapResult.Ok(taskkillNote == null
+                    ? "process tree gone"
+                    : $"process tree gone ({taskkillNote} - a process already exiting, not a survivor)");
+
             if (exception != null)
-                return ReapResult.Fail($"taskkill threw: {exception.Message}");
+                return ReapResult.Fail(taskkillNote);
             if (taskkillExitCode == null)
                 return ReapResult.Fail("taskkill produced no exit code");
             if (taskkillExitCode == 0)
                 return ReapResult.Ok("process tree killed");
             if (taskkillExitCode == 128)
                 return ReapResult.Ok("process not found (already exited)");
-            return ReapResult.Fail($"taskkill exited with code {taskkillExitCode}");
+            return ReapResult.Fail(taskkillNote);
+        }
+
+        private static string FirstLine(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return null;
+            string line = text.Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.Length > 0);
+            return line == null ? null : line.Length <= 200 ? line : line.Substring(0, 199) + "…";
+        }
+
+        private sealed class TaskkillOutcome
+        {
+            public int? ExitCode;
+            public string Stdout = "";
+            public string Stderr = "";
+            public Exception Exception;
         }
 
         /// <summary>
-        /// Kill the process tree rooted at <paramref name="pid"/> via <c>taskkill /F /T</c> and
-        /// report the outcome. The previous implementation swallowed every failure (bare catch,
-        /// exit code never read) so a runaway survivor was invisible — this is the observability
-        /// half of the fix. The other half is <c>MSBUILDDISABLENODEREUSE=1</c> (see above), which
-        /// prevents the common MSBuild-worker-leaves-the-tree case in the first place. Windows
-        /// only; on other platforms taskkill is unavailable and the failure is reported honestly.
+        /// H-29: reap a cancelled or timed-out call and report what is still alive.
+        /// <list type="bullet">
+        /// <item>Primary: <see cref="WindowsJobObject.TryTerminate"/> — the per-command job holds the
+        /// whole lineage (including re-parented grandchildren taskkill cannot walk to). On an
+        /// override-steer interrupt of a detach call that is exactly right: the detached children
+        /// broke away from the job, so only the shell dies.</item>
+        /// <item>taskkill: first, when there is no job (degraded path), or when a detach call gets a
+        /// FULL reap (job cancel / timeout) — its broken-away children are reachable only through
+        /// the parent/child tree, which needs the root still alive. Also the second attempt on any
+        /// job member that survived TerminateJobObject.</item>
+        /// <item>Verdict: the job's live PID list plus the root process (and, without a job, the
+        /// PIDs taskkill named that are still running and started after this call), polled for up to
+        /// 2 s — so a tree that is gone is a success whatever taskkill's exit code was.</item>
+        /// </list>
         /// </summary>
-        private static ReapResult ReapProcessTree(int pid, bool tree = true)
+        private static ReapResult ReapCall(Process proc, IntPtr job, bool breakaway, bool spareDetached, DateTime spawnStart)
         {
+            int pid = proc.Id;
+            TaskkillOutcome tk = null;
+            if (job == IntPtr.Zero || (breakaway && !spareDetached))
+                tk = RunTaskkill(pid, tree: !spareDetached);
+
+            WindowsJobObject.TryTerminate(job);
+            List<int> survivors = WaitForSurvivors(proc, job, tk, spawnStart, TimeSpan.FromSeconds(2));
+
+            if (survivors.Count > 0)
+            {
+                // Second attempt: taskkill each survivor directly, then look again.
+                foreach (int survivor in survivors)
+                {
+                    var retry = RunTaskkill(survivor, tree: survivor == pid && !spareDetached);
+                    if (tk == null || (retry.ExitCode ?? -1) != 0) tk = retry;
+                }
+                survivors = WaitForSurvivors(proc, job, tk, spawnStart, TimeSpan.FromSeconds(2));
+            }
+
+            return ClassifyReapResult(tk?.ExitCode, tk?.Stderr, survivors, tk?.Exception);
+        }
+
+        private static List<int> WaitForSurvivors(Process proc, IntPtr job, TaskkillOutcome tk, DateTime spawnStart, TimeSpan budget)
+        {
+            var sw = Stopwatch.StartNew();
+            while (true)
+            {
+                var survivors = new HashSet<int>();
+                bool rootAlive;
+                try { rootAlive = !proc.HasExited; } catch { rootAlive = false; }
+                if (rootAlive) survivors.Add(proc.Id);
+
+                int[] members = WindowsJobObject.ActiveProcessIds(job);
+                if (members != null)
+                    survivors.UnionWith(members);
+                else if (tk != null)
+                    // No job to ask: the processes taskkill named (killed or not) that are still
+                    // running and started after this call began — the start time rules out a reused PID.
+                    foreach (Match m in TaskkillPid.Matches(tk.Stdout + "\n" + tk.Stderr))
+                        if (int.TryParse(m.Groups[1].Value, out int named) && named != proc.Id && IsAliveSince(named, spawnStart))
+                            survivors.Add(named);
+
+                if (survivors.Count == 0 || sw.Elapsed >= budget)
+                    return survivors.ToList();
+                Thread.Sleep(50);
+            }
+        }
+
+        // "The process with PID 123 (child process of PID 456)": the first PID of each clause.
+        private static readonly Regex TaskkillPid = new Regex(@"process with PID (\d+)", RegexOptions.CultureInvariant);
+
+        private static bool IsAliveSince(int pid, DateTime since)
+        {
+            try
+            {
+                using var p = Process.GetProcessById(pid);
+                return !p.HasExited && p.StartTime >= since;
+            }
+            catch { return false; }
+        }
+
+        private static TaskkillOutcome RunTaskkill(int pid, bool tree)
+        {
+            var outcome = new TaskkillOutcome();
             try
             {
                 using var tk = Process.Start(new ProcessStartInfo
                 {
-                    FileName        = "taskkill",
-                    Arguments       = tree ? $"/F /T /PID {pid}" : $"/F /PID {pid}",
-                    CreateNoWindow  = true,
-                    UseShellExecute = false
+                    FileName               = "taskkill",
+                    Arguments              = tree ? $"/F /T /PID {pid}" : $"/F /PID {pid}",
+                    CreateNoWindow         = true,
+                    UseShellExecute        = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError  = true,
                 });
-                if (tk == null) return ReapResult.Fail("taskkill did not start");
-                tk.WaitForExit(2000);
-                int? code;
-                try { code = tk.ExitCode; } catch { code = null; }
-                return ClassifyReapResult(code);
+                if (tk == null) { outcome.Exception = new InvalidOperationException("taskkill did not start"); return outcome; }
+                var stdout = tk.StandardOutput.ReadToEndAsync();
+                var stderr = tk.StandardError.ReadToEndAsync();
+                if (tk.WaitForExit(5_000))
+                {
+                    outcome.ExitCode = tk.ExitCode;
+                    outcome.Stdout = stdout.Result;
+                    outcome.Stderr = stderr.Result;
+                }
             }
             catch (Exception ex)
             {
-                return ClassifyReapResult(null, ex);
+                outcome.Exception = ex;
             }
+            return outcome;
         }
 
         /// <summary>Long-command budget when DEVMIND_SHELL_TIMEOUT is unset: solution builds need it.</summary>
