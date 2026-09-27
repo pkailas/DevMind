@@ -69,6 +69,42 @@ namespace DevMind.Core.Tests
             Assert.Empty(host.Outputs);
         }
 
+        // The TUI collapses a task_done summary that repeats streamed prose, but only once it
+        // KNOWS the answer is a task_done — the kind is set immediately before AppendAnswer.
+        // ask_caller sets AskCaller. Pin the call so a skin that relies on the kind cannot be
+        // blindsided by a reordering.
+        [Fact]
+        public async Task DoneBlock_SetsTaskDoneKind_BeforeAppendAnswer()
+        {
+            var host = new AnswerRecordingHost();
+            var executor = new AgenticExecutor(host, new FakeLlmOptions());
+            executor.SetCancellationToken(CancellationToken.None);
+
+            await executor.ExecuteAsync(
+                new AgenticAction { Type = ActionType.ApplyAndBuild },
+                Outcome(new ResponseBlock { Type = BlockType.Done, Content = "the summary" }));
+
+            Assert.Equal(2, host.Order.Count);
+            Assert.Equal("SetAnswerKind:TaskDone", host.Order[0]);
+            Assert.Equal("AppendAnswer", host.Order[1]);
+        }
+
+        [Fact]
+        public async Task NeedsInputBlock_SetsAskCallerKind_BeforeAppendAnswer()
+        {
+            var host = new AnswerRecordingHost();
+            var executor = new AgenticExecutor(host, new FakeLlmOptions());
+            executor.SetCancellationToken(CancellationToken.None);
+
+            await executor.ExecuteAsync(
+                new AgenticAction { Type = ActionType.ApplyAndBuild },
+                Outcome(new ResponseBlock { Type = BlockType.NeedsInput, Content = "the questions" }));
+
+            Assert.Equal(2, host.Order.Count);
+            Assert.Equal("SetAnswerKind:AskCaller", host.Order[0]);
+            Assert.Equal("AppendAnswer", host.Order[1]);
+        }
+
         // A non-answer block must NOT be upgraded: the scratchpad stays on the
         // plain AppendOutput channel (its [SCRATCHPAD] status line) and never
         // reaches AppendAnswer.
@@ -115,9 +151,13 @@ namespace DevMind.Core.Tests
         {
             public List<string> Outputs { get; } = new();
             public List<string> Answers { get; } = new();
+            // The order the answer-side calls arrived, so a test can pin that SetAnswerKind
+            // precedes AppendAnswer (a skin that reads the kind at AppendAnswer time needs it).
+            public List<string> Order { get; } = new();
 
             public void AppendOutput(string text, OutputColor color = OutputColor.Normal) => Outputs.Add(text);
-            public void AppendAnswer(string text) => Answers.Add(text);
+            public void AppendAnswer(string text) { Answers.Add(text); Order.Add("AppendAnswer"); }
+            public void SetAnswerKind(AnswerKind kind) => Order.Add($"SetAnswerKind:{kind}");
 
             // ── Inert members (unused by answer-only turns) ───────────────────
             public Task<(int, string)> RunShellAsync(string command, int? timeoutSeconds = null, bool detach = false)

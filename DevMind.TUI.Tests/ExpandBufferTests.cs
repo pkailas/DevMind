@@ -134,6 +134,64 @@ namespace DevMind.TUI.Tests
         }
 
         [Fact]
+        public void ParkedAnswer_ComesBackIntactInNormalColour()
+        {
+            var buffer = new ExpandBuffer();
+            buffer.ParkAnswer("Plan mode is active, so file creation was refused.");
+
+            ExpandResult result = buffer.Resolve("answer");
+
+            Assert.Single(result.Lines);
+            Assert.Equal("Plan mode is active, so file creation was refused.", result.Lines[0].Text);
+            Assert.Equal(OutputColor.Normal, result.Lines[0].Color);
+            Assert.False(result.IsError);
+        }
+
+        [Fact]
+        public void BareExpand_TakesAJustCollapsedAnswer()
+        {
+            var buffer = new ExpandBuffer();
+            buffer.ParkOutput(Lines("shell line"));
+            buffer.ParkAnswer("the summary");
+
+            Assert.Equal("the summary", buffer.Resolve("").Lines[0].Text);
+        }
+
+        [Fact]
+        public void ExpandingAnAnswerDoesNotConsumeIt()
+        {
+            var buffer = new ExpandBuffer();
+            buffer.ParkAnswer("the summary");
+
+            Assert.Single(buffer.Resolve("answer").Lines);
+            Assert.Single(buffer.Resolve("answer").Lines);
+        }
+
+        [Fact]
+        public void AskingForAnAnswerWhenNoneIsParked_SaysSo()
+        {
+            var buffer = new ExpandBuffer();
+
+            ExpandResult result = buffer.Resolve("answer");
+
+            Assert.Empty(result.Lines);
+            Assert.Contains("No hidden answer", result.Message);
+            Assert.False(result.IsError);
+        }
+
+        [Fact]
+        public void ParkingAnEmptyAnswer_ClearsTheSlot()
+        {
+            var buffer = new ExpandBuffer();
+            buffer.ParkAnswer("the summary");
+            buffer.ParkAnswer("");
+
+            ExpandResult result = buffer.Resolve("answer");
+            Assert.Empty(result.Lines);
+            Assert.Contains("No hidden answer", result.Message);
+        }
+
+        [Fact]
         public void TheWriterListIsCopied_NotAliased()
         {
             var buffer = new ExpandBuffer();

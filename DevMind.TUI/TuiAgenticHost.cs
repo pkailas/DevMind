@@ -468,6 +468,21 @@ namespace DevMind
         // What AppendAnswer drew this turn: task_done's summary, ask_caller's questions.
         private readonly AnswerCapture _answers = new AnswerCapture();
 
+        // Non-whitespace characters of visible prose drawn in the CURRENT iteration. The
+        // turn loop resets it at each iteration boundary (BeginProseIteration), and
+        // AppendProse adds to it, so at the moment the executor draws the terminal
+        // iteration's task_done summary this holds exactly what the user SAW as prose in
+        // that iteration — the measure AnswerDedup.ShouldCollapse compares against its
+        // threshold. It is the terminal iteration's count, not a running total, which is
+        // what keeps prose from an earlier "let me read…" iteration from suppressing the
+        // summary.
+        private int _proseCharsThisIteration;
+
+        // The kind of answer the executor is about to draw, set by SetAnswerKind immediately
+        // before AppendAnswer. Both task_done and ask_caller arrive with identical signatures;
+        // only the kind tells them apart, and only a task_done summary is ever collapsed.
+        private AnswerKind _pendingAnswerKind = AnswerKind.TaskDone;
+
         /// <summary>The answers drawn since the last take, or null; clears them.</summary>
         internal string TakeAnswersForHistory() => _answers.Take();
 
@@ -480,6 +495,21 @@ namespace DevMind
             // The turn ends on its worker thread; the rebuild does not run there.
             if (!streaming && _rebuildPending) InvokeOnUi(PerformPendingRebuild);
         }
+
+        /// <summary>
+        /// Begin a new LLM iteration: reset the per-iteration prose counter so the terminal
+        /// iteration's task_done summary is judged against THIS iteration's prose, not a
+        /// running total across the turn. The turn loop calls this once per iteration, before
+        /// its stream starts.
+        /// </summary>
+        public void BeginProseIteration() => _proseCharsThisIteration = 0;
+
+        /// <summary>
+        /// Record the kind of answer the executor is about to draw, immediately before
+        /// <see cref="AppendAnswer"/>. Both task_done and ask_caller reach AppendAnswer with
+        /// identical signatures; the kind is the only thing that lets a skin tell them apart.
+        /// </summary>
+        public void SetAnswerKind(AnswerKind kind) => _pendingAnswerKind = kind;
 
         /// <summary>
         /// Draw the whole retained transcript again at the current width.
@@ -1270,7 +1300,22 @@ namespace DevMind
 
             // Held for history. The turn's row is written before the executor draws this,
             // so without the capture a tool-driven turn is saved with an empty answer.
+            // UNCHANGED by the display collapse below: the history row is always the summary.
             _answers.Append(text);
+
+            // The terminal iteration streamed the report as prose and the executor now draws
+            // the same report as the task_done summary. When the prose was real (>= the
+            // threshold) the summary is a repeat, so it is drawn as one dim line and parked
+            // for /expand instead of duplicated. ask_caller questions are never collapsed,
+            // and a summary with no prose above it is drawn in full exactly as before.
+            AnswerKind kind = _pendingAnswerKind;
+            _pendingAnswerKind = AnswerKind.TaskDone; // reset for the next answer
+            if (AnswerDedup.ShouldCollapse(_proseCharsThisIteration, text, kind))
+            {
+                Expansions.ParkAnswer(text);
+                Record(TranscriptEntry.AnswerCollapsed(text));
+                return;
+            }
 
             var streamer = new CodeBlockStreamer(
                 prose: AppendProse,
@@ -1278,6 +1323,20 @@ namespace DevMind
             streamer.Feed(text);
             streamer.Flush();
             FlushProse();
+        }
+
+        /// <summary>
+        /// Draw a task_done summary that was already streamed as prose as one dim stand-in
+        /// line, parking the summary for /expand. Used by the resume-replay path, which has
+        /// already decided (from the two consecutive assistant rows in history) that this
+        /// answer is a repeat — so the prose count is not consulted here. The live path makes
+        /// that decision inside <see cref="AppendAnswer"/> and takes this same two-step shape.
+        /// </summary>
+        public void AppendCollapsedAnswer(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return;
+            Expansions.ParkAnswer(text);
+            Record(TranscriptEntry.AnswerCollapsed(text));
         }
 
         // ── Styled prose append (inline markdown) ─────────────────────────────────────
@@ -1295,6 +1354,7 @@ namespace DevMind
         internal void AppendProse(string line)
         {
             if (string.IsNullOrEmpty(line)) return;
+            _proseCharsThisIteration += AnswerDedup.CountVisibleProse(line);
             Record(TranscriptEntry.Prose(line));
         }
 

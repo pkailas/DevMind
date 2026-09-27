@@ -101,6 +101,13 @@ namespace DevMind
         public const string ProseLead = "◆ ";
         public const string ProseHangingIndent = "  ";
 
+        /// <summary>
+        /// The one dim line that stands in for a task_done summary the model already streamed
+        /// as prose: drawing both would say the same thing twice. The summary itself is parked
+        /// for /expand, so the line only has to say what happened and how to get it back.
+        /// </summary>
+        public const string AnswerCollapsedLine = "↳ task_done summary — ctrl+o or /expand to show";
+
         /// <summary>Back to the state of a transcript that has drawn nothing.</summary>
         public void Reset()
         {
@@ -143,6 +150,7 @@ namespace DevMind
                 case TranscriptEntryKind.Code:      RenderCode(entry.Text, entry.Language, entry.NestUnderCall, entry.BlockStart); break;
                 case TranscriptEntryKind.Listing:   RenderListing(entry.Text, entry.Path, entry.Count); break;
                 case TranscriptEntryKind.Diff:      RenderDiff(entry.Text, entry.Second, entry.Path); break;
+                case TranscriptEntryKind.AnswerCollapsed: RenderAnswerCollapsed(); break;
             }
         }
 
@@ -176,6 +184,26 @@ namespace DevMind
         {
             if (string.IsNullOrEmpty(line)) return;
             RenderTableResult(_tables.Feed(line));
+        }
+
+        /// <summary>
+        /// The stand-in for a summary that merely repeats streamed prose. It is its own block:
+        /// the prose above it is the model's words, this line is the transcript's note, and the
+        /// two are not one block. The parked summary text is carried on the ENTRY (for a rebuild
+        /// to re-draw this line), not emitted here — /expand is what appends it.
+        /// </summary>
+        private void RenderAnswerCollapsed()
+        {
+            _block.CloseBlock();
+
+            if (_lastWriteWasToolLine)
+            {
+                _lastWriteWasToolLine = false;
+                Emit("\n", OutputColor.Normal);
+            }
+
+            _inProseBlock = false;
+            Emit(AnswerCollapsedLine + "\n", OutputColor.Dim);
         }
 
         private void RenderTableResult(TableBufferResult result)

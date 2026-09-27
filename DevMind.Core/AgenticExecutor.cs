@@ -143,13 +143,22 @@ namespace DevMind
                         // Render task_done.summary so the user sees the answer when the model
                         // packs its response into the summary parameter instead of prose tokens.
                         if (!string.IsNullOrWhiteSpace(block.Content))
+                        {
+                            // A skin may collapse a summary that repeats streamed prose, but
+                            // only once it KNOWS this is a task_done — so the kind is set first.
+                            _host.SetAnswerKind(AnswerKind.TaskDone);
                             _host.AppendAnswer(block.Content.TrimEnd('\r', '\n') + "\n");
+                        }
                         break;
 
                     case BlockType.NeedsInput:
                         // Render ask_caller's questions so they land in the transcript/UI.
                         if (!string.IsNullOrWhiteSpace(block.Content))
+                        {
+                            // Questions are NEVER collapsed — a person is waiting to answer them.
+                            _host.SetAnswerKind(AnswerKind.AskCaller);
                             _host.AppendAnswer(block.Content.TrimEnd('\r', '\n') + "\n");
+                        }
                         break;
 
                     case BlockType.Scratchpad:

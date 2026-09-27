@@ -51,12 +51,14 @@ namespace DevMind
 
         private string _thought;
         private IReadOnlyList<TranscriptLine> _output = None;
+        private string _answer;
 
         // Which kind was parked last, so a bare /expand can mean "the thing that just
         // happened" rather than picking a fixed winner.
         private int _seq;
         private int _thoughtSeq;
         private int _outputSeq;
+        private int _answerSeq;
 
         /// <summary>Park the reasoning text of the response that just finished.</summary>
         public void ParkThought(string text)
@@ -79,6 +81,19 @@ namespace DevMind
             }
         }
 
+        /// <summary>
+        /// Park the task_done summary a collapsed answer line stood in for. The summary was
+        /// already streamed as prose, so it was not drawn in full — /expand is what shows it.
+        /// </summary>
+        public void ParkAnswer(string text)
+        {
+            lock (_gate)
+            {
+                _answer    = string.IsNullOrEmpty(text) ? null : text;
+                _answerSeq = _answer == null ? 0 : ++_seq;
+            }
+        }
+
         /// <summary>Forget everything parked — a new session starts with nothing to expand.</summary>
         public void Clear()
         {
@@ -86,8 +101,10 @@ namespace DevMind
             {
                 _thought    = null;
                 _output     = None;
+                _answer     = null;
                 _thoughtSeq = 0;
                 _outputSeq  = 0;
+                _answerSeq  = 0;
             }
         }
 
@@ -104,9 +121,14 @@ namespace DevMind
             {
                 if (arg.Length == 0)
                 {
-                    if (_thoughtSeq == 0 && _outputSeq == 0)
-                        return new ExpandResult(None, "Nothing to expand — no hidden thought or tool output yet.", false);
-                    return _thoughtSeq > _outputSeq ? Thought() : Output();
+                    if (_thoughtSeq == 0 && _outputSeq == 0 && _answerSeq == 0)
+                        return new ExpandResult(None, "Nothing to expand — no hidden thought, tool output, or answer yet.", false);
+
+                    // Whichever of the three was parked most recently — the one that just
+                    // happened, not a fixed winner.
+                    if (_answerSeq >= _thoughtSeq && _answerSeq >= _outputSeq) return Answer();
+                    if (_thoughtSeq >= _outputSeq) return Thought();
+                    return Output();
                 }
 
                 if (arg.Equals("thought", StringComparison.OrdinalIgnoreCase) ||
@@ -116,7 +138,10 @@ namespace DevMind
                 if (arg.Equals("output", StringComparison.OrdinalIgnoreCase))
                     return Output();
 
-                return new ExpandResult(None, "Usage: /expand [thought|output]", true);
+                if (arg.Equals("answer", StringComparison.OrdinalIgnoreCase))
+                    return Answer();
+
+                return new ExpandResult(None, "Usage: /expand [thought|output|answer]", true);
             }
         }
 
@@ -136,7 +161,19 @@ namespace DevMind
             if (_output.Count == 0)
                 return new ExpandResult(None, "No hidden output — the last tool call fit inside the line cap.", false);
 
-            return new ExpandResult(_output, $"Expanded {_output.Count:N0} hidden output line(s).", false);
+            return new ExpandResult(_output, $"Expanded {_output.Count:N0} hidden output line(s).",
+                false);
+        }
+
+        private ExpandResult Answer()
+        {
+            if (_answer == null)
+                return new ExpandResult(None, "No hidden answer — the last task_done summary was not collapsed.", false);
+
+            return new ExpandResult(
+                new[] { new TranscriptLine(_answer, OutputColor.Normal) },
+                "Expanded the last hidden task_done summary.",
+                false);
         }
     }
 }

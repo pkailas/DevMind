@@ -172,6 +172,14 @@ namespace DevMind
                         host.AppendAnswer(step.Text);
                         break;
 
+                    case ReplayKind.AnswerCollapsed:
+                        // The live session collapsed this summary into one dim line because the
+                        // model had already streamed it as prose. The replay draws the same thing:
+                        // park the summary for /expand and record the collapsed stand-in entry.
+                        host.Expansions.ParkAnswer(step.Text);
+                        host.AppendCollapsedAnswer(step.Text);
+                        break;
+
                     default:
                         // Everything above is drawn by the same code a live turn uses, so
                         // without this the operator cannot tell what they are adding to from
@@ -1913,6 +1921,10 @@ namespace DevMind
 
                 if (!firstIteration) thinkFilter.Reset();
                 firstIteration = false;
+
+                // Reset the per-iteration prose counter so the terminal iteration's task_done
+                // summary is judged against THIS iteration's prose, not a running total.
+                ((TuiAgenticHost)host).BeginProseIteration();
 
                 var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
                 var responseBuffer = new StringBuilder();

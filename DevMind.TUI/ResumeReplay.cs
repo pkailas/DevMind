@@ -29,6 +29,12 @@ namespace DevMind
         User,
         /// <summary>An answer, drawn through the answer path so markdown and tables apply.</summary>
         Answer,
+        /// <summary>
+        /// A task_done summary that follows a prose assistant row — drawn as one dim line,
+        /// not in full, so the replay shows the same thing the live session did. The summary
+        /// text is parked on the step for /expand.
+        /// </summary>
+        AnswerCollapsed,
         /// <summary>The boundary between what was restored and what happens next.</summary>
         Rule,
     }
@@ -81,14 +87,35 @@ namespace DevMind
 
             for (int i = 0; i < roles.Length; i++)
             {
-                // Anything that is not a user row is drawn as an answer. The pairing only ever
-                // produces the two, and a third would be new information the transcript should
-                // show rather than drop.
-                ReplayKind kind = string.Equals(roles[i], "user", StringComparison.Ordinal)
-                    ? ReplayKind.User
-                    : ReplayKind.Answer;
+                bool isUser = string.Equals(roles[i], "user", StringComparison.Ordinal);
 
-                plan.Add(new ReplayStep(kind, contents[i]));
+                if (isUser)
+                {
+                    plan.Add(new ReplayStep(ReplayKind.User, contents[i]));
+                    continue;
+                }
+
+                // Two consecutive assistant rows: the first is the terminal iteration's prose
+                // (saved as the turn's assistant message), the second is the task_done summary
+                // (saved by SaveDrawnAnswerAsync). In the live session the second was collapsed
+                // when the prose was real — the replay must show the same thing. The prose
+                // count is the first row's visible-prose characters, the same measure the live
+                // path uses.
+                bool precededByAssistant = i > 0 &&
+                    !string.Equals(roles[i - 1], "user", StringComparison.Ordinal);
+
+                if (precededByAssistant &&
+                    AnswerDedup.ShouldCollapse(
+                        AnswerDedup.CountVisibleProse(contents[i - 1]),
+                        contents[i],
+                        AnswerKind.TaskDone))
+                {
+                    plan.Add(new ReplayStep(ReplayKind.AnswerCollapsed, contents[i]));
+                }
+                else
+                {
+                    plan.Add(new ReplayStep(ReplayKind.Answer, contents[i]));
+                }
             }
 
             plan.Add(new ReplayStep(ReplayKind.Rule, RuleText));

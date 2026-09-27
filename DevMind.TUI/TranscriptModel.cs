@@ -36,6 +36,12 @@ namespace DevMind
         Listing,
         /// <summary>A patch, retained as both versions so the diff re-lays out.</summary>
         Diff,
+        /// <summary>
+        /// A task_done summary the model ALSO streamed as prose, so drawing it in full would
+        /// say the same thing twice. Rendered as one dim stand-in line; the summary text is
+        /// parked for /expand. Retained as its input so a rebuild draws the SAME line live.
+        /// </summary>
+        AnswerCollapsed,
     }
 
     /// <summary>One retained call. Immutable; the payload is whatever that emitter takes.</summary>
@@ -103,6 +109,14 @@ namespace DevMind
 
         public static TranscriptEntry Diff(string oldContent, string newContent, string path)
             => new TranscriptEntry(TranscriptEntryKind.Diff, oldContent, OutputColor.Normal, null, false, false, path, newContent, 0);
+
+        /// <summary>
+        /// A redundant task_done summary, retained so the dim stand-in line re-draws on a
+        /// rebuild exactly as it drew live. <paramref name="summary"/> is the parked text
+        /// (what /expand shows), not what the line itself says.
+        /// </summary>
+        public static TranscriptEntry AnswerCollapsed(string summary)
+            => new TranscriptEntry(TranscriptEntryKind.AnswerCollapsed, summary, OutputColor.Dim, null, false, false, null, null, 0);
 
         /// <summary>Roughly what this entry costs to keep. Used only by the cap.</summary>
         public int Weight => Text.Length + (Second?.Length ?? 0) + 64;

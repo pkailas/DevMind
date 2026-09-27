@@ -124,5 +124,67 @@ namespace DevMind.TUI.Tests
 
             Assert.Equal(Roles.Length, plan.Count(s => s.Kind != ReplayKind.Rule));
         }
+
+        // ── Collapsed answers in a replay ────────────────────────────────────────
+        //
+        // A turn that ends with a redundant task_done saves TWO assistant rows: the terminal
+        // iteration's prose, then the summary. In the live session the summary was collapsed
+        // into one dim line; the replay must show the same thing, or a resumed session would
+        // re-draw the doubled answer the fix exists to remove.
+
+        // Two consecutive assistant rows, the first with real prose → the second is collapsed.
+        [Fact]
+        public void ConsecutiveAssistantRows_WithRealProse_CollapsesTheSummary()
+        {
+            // 60+ non-whitespace characters — comfortably over the 40 threshold.
+            const string prose =
+                "Plan mode is active, so file creation was refused. Plan: " +
+                "1) create hello.txt; 2) read it back to verify.";
+            const string summary =
+                "Plan mode is active, so file creation was refused. Plan: " +
+                "1) create hello.txt; 2) read it back to verify.";
+
+            var roles    = new[] { "user", "assistant", "assistant" };
+            var contents = new[] { "Make a file", prose, summary };
+
+            var plan = ResumeReplay.Plan(roles, contents);
+
+            Assert.Equal(
+                new[] { ReplayKind.User, ReplayKind.Answer, ReplayKind.AnswerCollapsed, ReplayKind.Rule },
+                plan.Select(s => s.Kind));
+
+            // The prose row is drawn in full; the summary row is the collapsed stand-in
+            // (its text is carried on the step for /expand, not drawn as prose).
+            Assert.Equal(prose, plan[1].Text);
+            Assert.Equal(summary, plan[2].Text);
+        }
+
+        // Two consecutive assistant rows, the first a trivial fragment → the second is drawn
+        // in full (the summary still carries the real answer).
+        [Fact]
+        public void ConsecutiveAssistantRows_WithTrivialProse_DrawsTheSummaryInFull()
+        {
+            var roles    = new[] { "user", "assistant", "assistant" };
+            var contents = new[] { "Make a file", "Let me check.", "The full answer is here." };
+
+            var plan = ResumeReplay.Plan(roles, contents);
+
+            Assert.Equal(
+                new[] { ReplayKind.User, ReplayKind.Answer, ReplayKind.Answer, ReplayKind.Rule },
+                plan.Select(s => s.Kind));
+        }
+
+        // A single assistant row (no preceding assistant) is always drawn in full — there is
+        // no prose above it to make it a repeat.
+        [Fact]
+        public void ASingleAssistantRow_IsNeverCollapsed()
+        {
+            var roles    = new[] { "user", "assistant" };
+            var contents = new[] { "Make a file", "The full answer is here, and it is long enough to matter." };
+
+            var plan = ResumeReplay.Plan(roles, contents);
+
+            Assert.Equal(ReplayKind.Answer, plan[1].Kind);
+        }
     }
 }

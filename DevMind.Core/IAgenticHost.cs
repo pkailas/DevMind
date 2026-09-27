@@ -8,6 +8,22 @@ using System.Threading.Tasks;
 namespace DevMind
 {
     /// <summary>
+    /// The kind of model-authored answer the executor is about to draw, so a skin can
+    /// tell a <c>task_done</c> summary from an <c>ask_caller</c> question. Both arrive
+    /// through <see cref="IAgenticHost.AppendAnswer"/> with identical signatures; only the
+    /// executor knows which is which. The TUI uses this to collapse a summary that merely
+    /// repeats the prose the model already streamed, and to NEVER collapse the questions a
+    /// person is waiting to answer.
+    /// </summary>
+    public enum AnswerKind
+    {
+        /// <summary>A <c>task_done</c> summary — the final answer of the turn.</summary>
+        TaskDone,
+        /// <summary>An <c>ask_caller</c> question — the run is blocked and needs the caller.</summary>
+        AskCaller,
+    }
+
+    /// <summary>
     /// Abstracts all side effects away from the agentic decision logic.
     /// <see cref="AgenticExecutor"/> calls these methods;
     /// <see cref="DevMindToolWindowControl"/> implements them by delegating
@@ -60,6 +76,15 @@ namespace DevMind
         /// content a skin may render as markdown. Default: plain AppendOutput.
         /// </summary>
         void AppendAnswer(string text) => AppendOutput(text, OutputColor.Normal);
+
+        /// <summary>
+        /// Tell the skin what KIND of answer the next <see cref="AppendAnswer"/> call carries.
+        /// The executor calls this immediately before <see cref="AppendAnswer"/> so a skin that
+        /// wants to treat the two kinds differently (the TUI collapses a redundant task_done
+        /// summary but never an ask_caller question) can. Default: no-op — the CLI/headless
+        /// hosts render both identically and do not need the distinction.
+        /// </summary>
+        void SetAnswerKind(AnswerKind kind) { }
 
        /// <summary>
         /// Update the scratchpad content.
