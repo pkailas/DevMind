@@ -119,28 +119,30 @@ namespace DevMind.McpServer
         private SelfReportedIncomplete? _selfReported;
 
         /// <summary>
-        /// H-31: the harness itself verified the work — its build succeeded, and its test run
-        /// succeeded too if one was requested. A requested test run that did not happen (null)
-        /// does not count as passing.
+        /// H-31: the harness itself ran the test suite green — tests were requested
+        /// (verify_tests), the harness build succeeded, and the harness test run succeeded. A
+        /// green build alone does not count: compiling proves nothing was fixed. A requested
+        /// test run that did not happen (null) does not count either.
         /// </summary>
-        public bool HarnessVerifiedSuccess =>
-            Build is { Succeeded: true } && (!VerifyTests || Tests is { Succeeded: true });
+        public bool HarnessTestVerified =>
+            Build is { Succeeded: true } && VerifyTests && Tests is { Succeeded: true };
 
         /// <summary>
         /// Whether the self-report makes the job incomplete. An INCOMPLETE: marker always does.
-        /// A phrase-list hit only does when the harness did not positively verify the work:
-        /// wording is weak evidence, and a green harness build + test run outweighs it
-        /// (job-1714 "was not run by me — the harness verifies it", job-1715 "Did not run the
-        /// TUI" — both forbidden by the brief, both green). With nothing verified — the H-01
-        /// jobs ran with verify_build off — the phrase list still protects.
+        /// A phrase-list hit does unless the harness TEST run was green: wording is weak
+        /// evidence, and a green harness test run outweighs it (job-1714 "was not run by me —
+        /// the harness verifies it", job-1715 "Did not run the TUI" — both forbidden by the
+        /// brief, both with green test verification). A green build alone does not: "The core
+        /// defect is NOT fixed" still compiles. With nothing verified — the H-01 jobs ran with
+        /// verify_build off — the phrase list protects as it always did.
         /// </summary>
         public bool SelfReportMakesIncomplete =>
             SelfReportedIncomplete.Strength == SelfReportStrength.Strong
-            || (SelfReportedIncomplete.Strength == SelfReportStrength.Weak && !HarnessVerifiedSuccess);
+            || (SelfReportedIncomplete.Strength == SelfReportStrength.Weak && !HarnessTestVerified);
 
         /// <summary>
-        /// A phrase-list line that did NOT make the job incomplete because the harness verified
-        /// the work — surfaced as self_report_note in devmind_task_status / devmind_task_result so a
+        /// A phrase-list line that did NOT make the job incomplete because the harness test run
+        /// was green — surfaced as self_report_note in devmind_task_status / devmind_task_result so a
         /// driver still reads the line. Null otherwise (including when the line did count: it
         /// is then in incomplete_reasons).
         /// </summary>

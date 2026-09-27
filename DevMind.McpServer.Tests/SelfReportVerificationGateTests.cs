@@ -8,10 +8,11 @@
 //
 // The rule, as a table:
 //   STRONG (INCOMPLETE: marker)   → stopped_incomplete, whatever the harness measured
-//   WEAK   (phrase hit only)      → done + self_report_note when the harness build passed AND
-//                                   (tests not requested OR test verification passed);
-//                                   stopped_incomplete otherwise — including verify_build off,
-//                                   the H-01 shape the phrase list exists for
+//   WEAK   (phrase hit only)      → done + self_report_note ONLY when the harness TEST run was
+//                                   green (verify_tests on, build and test verification both
+//                                   passed); stopped_incomplete otherwise — a green build alone
+//                                   proves nothing was fixed, and verify_build off is the H-01
+//                                   shape the phrase list exists for
 //   NONE                          → unaffected
 
 using System.Diagnostics;
@@ -89,7 +90,7 @@ namespace DevMind.McpServer.Tests
         [InlineData("strong", "tests-failed", true)]
         // weak: incomplete only when the harness did not positively verify
         [InlineData("weak", "build-ok+tests-ok", false)]
-        [InlineData("weak", "build-ok+tests-not-requested", false)]
+        [InlineData("weak", "build-ok+tests-not-requested", true)]   // a green build alone is not enough
         [InlineData("weak", "build-failed", true)]
         [InlineData("weak", "build-not-run", true)]
         [InlineData("weak", "tests-failed", true)]
@@ -137,6 +138,18 @@ namespace DevMind.McpServer.Tests
             Assert.False(job.IsIncomplete);
             Assert.Empty(job.IncompleteReasons());
             Assert.Equal("- Did not run the TUI; did not commit.", job.SelfReportNote);
+        }
+
+        [Fact]
+        public void NotFixed_WithAGreenBuild_AndNoTestRun_EndsStoppedIncomplete()
+        {
+            // Compiling proves nothing was fixed: without a harness test run the phrase stands.
+            var job = Job("The core defect is NOT fixed", "build-ok+tests-not-requested");
+
+            Assert.True(job.IsIncomplete);
+            Assert.Contains(SelfReportedIncompleteDetector.Reason, job.IncompleteReasons());
+            Assert.Contains("The core defect is NOT fixed", job.IncompleteReasons());
+            Assert.Null(job.SelfReportNote);
         }
 
         [Fact]
@@ -199,12 +212,15 @@ namespace DevMind.McpServer.Tests
 
             using var mgr = new AgentJobManager();
             mgr.BuildRunnerOverride = (_, _) => Task.FromResult<BuildVerification?>(Run(true));
+            mgr.TestRunnerOverride = (_, _) => Task.FromResult(Tests(true));
 
-            var job = mgr.Start("p", _dir, 5, 30, allowCommit: false, verifyBuild: true, verifyTests: false);
+            var job = mgr.Start("p", _dir, 5, 30, allowCommit: false, verifyBuild: true, verifyTests: true,
+                runTestBaseline: false);
             var sw = Stopwatch.StartNew();
             while (sw.ElapsedMilliseconds < 30_000 && job.State is AgentJobState.Queued or AgentJobState.Running)
                 await Task.Delay(20);
             Assert.Equal(AgentJobState.Done, job.State);
+            Assert.True(job.Tests is { Succeeded: true }, "the harness test run did not happen");
             Assert.Contains("Did not run the TUI", job.Result!.Answer);
 
             var tools = new AgentTaskTools(mgr);

@@ -254,7 +254,7 @@ namespace DevMind.McpServer
             "the iteration cap mid-task, thrashed on a repeating failure, or build/test verification " +
             "failed) — check incomplete_reasons and usually devmind_task_continue it. self_report_note " +
             "(null unless set) quotes a line of the answer that reads like unfinished work but did not " +
-            "stop the job because the harness's build (and tests, if requested) passed — read it. " +
+            "stop the job because the harness's own test run (verify_tests) passed — read it. " +
             "needs_input means " +
             "the agent paused with specific questions (in the result answer) — answer them via " +
             "devmind_task_continue. Optional wait_seconds: when > 0, blocks until the job's state " +

@@ -352,11 +352,12 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   commit." Harness build + tests green (1849/1849).
 - **Proposed fix:** don't flag when harness verification ran and passed for the same claim, or narrow the phrase list so "not run by
   me" followed by "harness verifies" doesn't count.
-- **Status:** fixed, pending deploy - commit "H-31: a phrase-only self-report yields to green harness verification". Rule: an
-  INCOMPLETE: marker always makes the job stopped_incomplete; a phrase-list hit does so only when the harness did not verify the work
-  (build absent/failed, or tests requested and not green) - otherwise the job is `done` and the line is returned as `self_report_note`.
-  The phrase list is unchanged, so H-01's unverified jobs are still caught; delegated agents are now told that brief-forbidden steps are
-  not INCOMPLETE items.
+- **Status:** fixed, pending deploy - commit 3f4af9b, tightened by "H-31: only a green harness TEST run outweighs a phrase-only
+  self-report". Rule: an INCOMPLETE: marker always makes the job stopped_incomplete; a phrase-only hit is outweighed only by a green
+  harness TEST run (verify_tests on, harness build and test verification both green) - then the job is `done` and the line is returned
+  as `self_report_note`. A green build alone does not outweigh it ("The core defect is NOT fixed" still compiles). The phrase list is
+  unchanged, so H-01's unverified jobs are still caught; delegated agents are now told that brief-forbidden steps are not INCOMPLETE
+  items.
 
 ### H-32 - Agent runs an incremental build when the brief says `-t:Rebuild` (H-13 recurrence)
 - **First seen:** 2026-09-27 - job-1712 and job-1714 both ran plain `dotnet build DevMind.slnx` despite an explicit `-t:Rebuild`
