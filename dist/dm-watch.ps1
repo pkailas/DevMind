@@ -1,4 +1,4 @@
-# ── dm-watch: live terminal view of DevMind delegated tasks ──────────────────
+﻿# ── dm-watch: live terminal view of DevMind delegated tasks ──────────────────
 # Tails the newest task transcript in %TEMP%\devmind\tasks and automatically
 # switches when a new job starts. Works because HeadlessSession streams the
 # transcript to disk live (FileShare.Read) as of 1.0.303 — on older builds the
@@ -24,6 +24,30 @@ function Get-ActiveState {
         }
         return 'idle (stale marker — server crashed?)'
     } catch { return 'unknown' }
+}
+
+# Print a completion line for a finished job: local time, final state, iterations, elapsed.
+# The result file is written as the job ends; give it a few seconds to appear.
+function Write-JobFinished([string]$jobId) {
+    $stamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $resultPath = Join-Path $dir "$jobId.result.json"
+    $r = $null
+    for ($i = 0; $i -lt 10 -and -not $r; $i++) {
+        if (Test-Path $resultPath) {
+            try { $r = Get-Content $resultPath -Raw | ConvertFrom-Json } catch { }
+        }
+        if (-not $r) { Start-Sleep -Milliseconds 500 }
+    }
+    if ($r) {
+        $color = if ($r.state -eq 'done') { 'Green' } else { 'Red' }
+        $mins  = [math]::Round([double]$r.elapsed_seconds / 60, 1)
+        Write-Host "── $stamp  $jobId COMPLETE — state: $($r.state), $($r.iterations) iterations, $mins min ──" -ForegroundColor $color
+        if ($r.incomplete_reasons) {
+            Write-Host "   reasons: $(($r.incomplete_reasons | Select-Object -First 2) -join ' | ')" -ForegroundColor Red
+        }
+    } else {
+        Write-Host "── $stamp  $jobId COMPLETE (no result file found) ──" -ForegroundColor Yellow
+    }
 }
 
 while ($true) {
@@ -60,6 +84,10 @@ while ($true) {
         $state = Get-ActiveState
         if ($state -ne $lastState) {
             Write-Host "`n── DM state: $state ──" -ForegroundColor $(if ($state -eq 'idle') { 'Green' } else { 'Yellow' })
+            # A job just finished: say so with a local timestamp and its final state.
+            if ($lastState -like 'BUSY: *' -and $state -notlike 'BUSY: *') {
+                Write-JobFinished (($lastState -replace '^BUSY: (\S+).*$', '$1'))
+            }
             $lastState = $state
         }
 
