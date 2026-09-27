@@ -613,9 +613,8 @@ namespace DevMind
             // cancel the in-flight shell call (the call only — the turn and the job keep
             // running) so the loop reaches the boundary and folds the steer now. A suggest
             // never interrupts, and neither does an override the boundary would refuse.
-            if (result.Accepted && mode == SteerMode.Override
-                && !Steer.OverrideRefusedAtNextBoundary(_options.AgenticLoopMaxDepth, _state.AgenticDepth)
-                && _host.CancelInFlightShell(message))
+            if (Steer.InterruptForOverride(result, mode, message,
+                    _options.AgenticLoopMaxDepth, _state.AgenticDepth, _host.CancelInFlightShell))
             {
                 EmitToTurn("[STEER] override cancelled the in-flight shell call.\n");
             }

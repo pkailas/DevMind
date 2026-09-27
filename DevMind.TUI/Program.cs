@@ -989,6 +989,21 @@ namespace DevMind
                             $"[STEER] {queuedTag} queued — folds in at the next iteration boundary.\n",
                             OutputColor.Dim);
                         callbacks.ShowSteerQueued(route.Mode);
+
+                        // An override must not wait out a running shell/build/test call: cancel
+                        // that call (never the turn — Esc and Ctrl+C are untouched) so the turn
+                        // reaches the boundary and folds the steer now. Skipped for a suggest and
+                        // for an override the next boundary would refuse. The depth is read here
+                        // (the turn's worker thread writes it; an int read is atomic, and a stale
+                        // value only shifts the refusal check by one boundary). Off the UI
+                        // thread: the cancel runs the runner's taskkill synchronously. The host
+                        // prints the "↳ override steer cancelled" line when the call ends.
+                        int depthNow = state.AgenticDepth;
+                        int maxDepthNow = options.AgenticLoopMaxDepth;
+                        string steerMessage = route.Message;
+                        SteerMode steerMode = route.Mode;
+                        _ = Task.Run(() => Steer.InterruptForOverride(
+                            steerResult, steerMode, steerMessage, maxDepthNow, depthNow, host.CancelInFlightShell));
                         return;
                     }
 

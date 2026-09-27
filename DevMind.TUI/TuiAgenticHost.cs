@@ -159,6 +159,23 @@ namespace DevMind
         // Set by the REPL loop before each agentic turn.
         public CancellationToken CancellationToken { get; set; } = CancellationToken.None;
 
+        // The in-flight run_shell / run_build / run_tests call's interrupt window (shared with
+        // BufferedAgenticHost). CancelInFlightShell runs on the UI thread when the operator
+        // submits /override; the call runs on the turn's worker thread.
+        private readonly ShellCallInterrupt _shellInterrupt =
+            new ShellCallInterrupt(ShellCallInterrupt.OperatorSteerMessage);
+
+        /// <summary>Transcript line after a call an override steer cancelled.</summary>
+        internal const string OverrideSteerCancelledLine = "↳ override steer cancelled the running command";
+
+        /// <summary>
+        /// Cancels the in-flight run_shell / run_build / run_tests call, if there is one, so
+        /// the turn reaches its next iteration boundary now and folds the operator's override
+        /// instead of waiting out the command. Only the call — never the turn token, so Esc and
+        /// Ctrl+C are unaffected. Returns whether a call was cancelled. Thread-safe.
+        /// </summary>
+        public bool CancelInFlightShell(string reason) => _shellInterrupt.Cancel(reason);
+
         // ── Construction ─────────────────────────────────────────────────────────
 
         public TuiAgenticHost(string workingDirectory, GuiEditor outputView, Action cancelTurn = null)
@@ -1416,11 +1433,17 @@ namespace DevMind
 
             var clock = System.Diagnostics.Stopwatch.StartNew();
             int exit = -1;
+            string steerCancel = null;
             try
             {
-                var (output, exitCode) = await _shellRunner.ExecuteAsync(command, CancellationToken, timeoutSeconds, progress, detach);
+                // The turn token still reaps the whole tree on Esc/Ctrl+C; the call's own
+                // token is the override-steer interrupt, which spares a detach call's children.
+                using var call = _shellInterrupt.Begin(CancellationToken);
+                var (output, exitCode) = await _shellRunner.ExecuteAsync(
+                    command, CancellationToken, timeoutSeconds, progress, detach, interruptToken: call.Token);
                 exit = exitCode;
-                return (exitCode, output);
+                steerCancel = call.End();
+                return (exitCode, steerCancel != null ? _shellInterrupt.ResultFor(output) : output);
             }
             finally
             {
@@ -1438,6 +1461,8 @@ namespace DevMind
                 clock.Stop();
                 var (line, color) = ShellOutcome.Line(exit, clock.Elapsed);
                 AppendOutputLocal(line + "\n", color);
+                if (steerCancel != null)
+                    AppendOutputLocal(OverrideSteerCancelledLine + "\n", OutputColor.Warning);
             }
         }
 
@@ -2316,7 +2341,14 @@ namespace DevMind
 
             try
             {
-                var (output, exitCode) = await _shellRunner.ExecuteAsync(cmd, CancellationToken, timeoutSeconds);
+                using var call = _shellInterrupt.Begin(CancellationToken);
+                var (output, exitCode) = await _shellRunner.ExecuteAsync(
+                    cmd, CancellationToken, timeoutSeconds, interruptToken: call.Token);
+                if (call.End() != null)
+                {
+                    AppendOutputLocal(OverrideSteerCancelledLine + "\n", OutputColor.Warning);
+                    return _shellInterrupt.ResultFor(output);
+                }
                 return string.IsNullOrWhiteSpace(output)
                     ? $"TEST: no output (exit code {exitCode})"
                     : output;

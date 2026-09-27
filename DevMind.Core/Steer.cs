@@ -71,6 +71,21 @@ namespace DevMind
             => IsLastIteration(maxDepth, agenticDepth + 1);
 
         /// <summary>
+        /// The step after an enqueue, shared by the headless session and the TUI: an ACCEPTED
+        /// override the next boundary would honour cancels the in-flight shell call via
+        /// <paramref name="cancelInFlightShell"/> (the host's CancelInFlightShell), so the loop
+        /// reaches the boundary now instead of waiting out a runaway command. A suggest never
+        /// interrupts. Returns whether a call was cancelled.
+        /// </summary>
+        public static bool InterruptForOverride(
+            SteerEnqueueResult enqueued, SteerMode mode, string message,
+            int maxDepth, int agenticDepth, System.Func<string, bool> cancelInFlightShell)
+            => enqueued != null && enqueued.Accepted
+               && mode == SteerMode.Override
+               && !OverrideRefusedAtNextBoundary(maxDepth, agenticDepth)
+               && cancelInFlightShell(message);
+
+        /// <summary>
         /// Frames a steer as a block to append to the prompt. It is deliberately a
         /// bracketed, caller-attributed instruction so it reads as a human steer and is
         /// visibly distinct from a harness re-trigger (the loop's own synthetic prompts —
