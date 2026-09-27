@@ -18,9 +18,10 @@ namespace DevMind
     public static class DevEnvironment
     {
         /// <summary>Default DEVMIND_SHELL_TIMEOUT (seconds) applied when unset: solution
-        /// builds routinely exceed ShellRunner's 120 s baseline (a live Parsely build
-        /// timed out mid-delegation).</summary>
-        public const int DefaultShellTimeoutSeconds = 300;
+        /// builds routinely exceeded the old 120 s baseline (a live Parsely build timed out
+        /// mid-delegation). It is the budget for build/test/install commands only — every
+        /// other command gets DEVMIND_SHELL_TIMEOUT_SHORT (ShellRunner.ResolveTimeout).</summary>
+        public const int DefaultShellTimeoutSeconds = ShellRunner.DefaultLongTimeoutSeconds;
 
         /// <summary>
         /// Ensures common developer tool directories are on PATH and a build-friendly

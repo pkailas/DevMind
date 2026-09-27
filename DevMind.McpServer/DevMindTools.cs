@@ -1394,15 +1394,17 @@ internal sealed class DevMindTools
         "Child processes started by the command are terminated when the call returns unless " +
         "detach=true (e.g. Start-Process a GUI to inspect in a later call); a timeout or cancel " +
         "still kills the whole tree. " +
-        "Default timeout 120s — override with " +
-        "timeout_seconds. For anything expected to run longer than ~45s (installs, deploys, " +
+        "Default timeout 300s for builds, tests, restores and package installs (dotnet " +
+        "build/test/restore/publish/pack/run/ef, msbuild, npm/pnpm/yarn install/ci/run/test/build, " +
+        "nuget restore, vstest.console; DEVMIND_SHELL_TIMEOUT) and 60s for everything else " +
+        "(DEVMIND_SHELL_TIMEOUT_SHORT) — override with timeout_seconds. For anything expected to run longer than ~45s (installs, deploys, " +
         "long test runs), pass background=true: the call returns a shell_job_id immediately " +
         "and the command runs detached — poll shell_job_status. This avoids the MCP " +
         "client-timeout trap where the call dies but the command keeps running and blocks " +
         "every subsequent tool call.")]
     public async Task<string> RunShell(
         [Description("The shell command to execute. Newlines are preserved, so a command that genuinely spans lines runs as written. Do NOT assemble file content here — no here-strings, no echo/Out-File redirects: use create_file or write_file for new content and patch_file for edits.")] string command,
-        [Description("Timeout in seconds (default 120, max 3600). Ignored when background=true (background default 1800).")] int? timeout_seconds = null,
+        [Description("Timeout in seconds (default 300 for build/test/restore/install commands, 60 otherwise; max 3600). Ignored when background=true (background default 1800).")] int? timeout_seconds = null,
         [Description("Run detached and return a shell_job_id to poll with shell_job_status (default false).")] bool? background = null,
         [Description("Let child processes the command starts keep running after the call returns (default false: they are terminated on return). Use for Start-Process of an app you check in a later call; kill it yourself when done.")] bool? detach = null,
         IProgress<ProgressNotificationValue>? progress = null,
@@ -1675,7 +1677,8 @@ internal sealed class DevMindTools
                     : null;
 
                 var (output, exitCode) = await _svc.Shell.ExecuteAsync(
-                    buildCommand, cancellationToken, onLine: bridgedProgress);
+                    buildCommand, cancellationToken, timeoutSeconds: ShellRunner.ResolveLongTimeout(),
+                    onLine: bridgedProgress);
 
                 return CapShellOutput(output, exitCode);
             }

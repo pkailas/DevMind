@@ -85,7 +85,9 @@ namespace DevMind
            // ── run_shell ────────────────────────────────────────────────────
             tools.Add(MakeTool("run_shell",
                 "Execute a shell command and return its output. " +
-                "Commands run via powershell.exe with a default 120-second timeout (overridable via timeout_seconds or DEVMIND_SHELL_TIMEOUT env var). " +
+                "Commands run via powershell.exe. Default timeout: 300s for builds, tests, restores and package installs " +
+                "(dotnet build/test/restore/publish/pack/run/ef, msbuild, npm/pnpm/yarn install/ci/run/test/build, nuget restore, vstest.console), " +
+                "60s for everything else; pass timeout_seconds when a command legitimately needs longer. " +
                 "Use this for git commands, one-off scripts, and operations no other tool covers. " +
                 "Child processes started by the command are terminated when the call returns unless detach=true " +
                 "(e.g. Start-Process an app you check in a later call; stop it yourself when done). " +
@@ -93,7 +95,7 @@ namespace DevMind
                 "find_in_files for content search across files, or grep_file for content search in a known file. " +
                 "Use run_build for build commands and run_tests for tests.",
                 Required("command", "string", "The shell command to execute"),
-                Optional("timeout_seconds", "integer", "Override the default command timeout in seconds. Use for long builds or test runs. Omit or pass 0/negative to use the default (from DEVMIND_SHELL_TIMEOUT env var or 120s fallback)."),
+                Optional("timeout_seconds", "integer", "Override the default command timeout in seconds. Use when a command legitimately needs longer than its default. Omit or pass 0/negative to use the default (300s for build/test/restore/install commands via DEVMIND_SHELL_TIMEOUT, 60s otherwise via DEVMIND_SHELL_TIMEOUT_SHORT)."),
                 Optional("detach", "boolean", "When true, processes the command starts keep running after the call returns (default false: they are terminated on return). A timeout still kills them.")));
 
             // ── grep_file ────────────────────────────────────────────────────
@@ -149,11 +151,11 @@ namespace DevMind
                 "Use run_tests after making changes to verify correctness. " +
                 "It builds the test project and its references first, so it always tests your latest edits; " +
                 "a build failure is returned instead of test results. A test that hangs for 45s is killed and named. " +
-                "Default timeout is 120s (overridable via timeout_seconds or DEVMIND_SHELL_TIMEOUT env var). " +
+                "Default timeout is 300s (overridable via timeout_seconds or DEVMIND_SHELL_TIMEOUT env var). " +
                 "If tests fail, fix the code with patch_file and run_tests again.",
                 Optional("project", "string", "Project file name (e.g., 'MyProject.csproj') or its path (relative to the working directory or absolute). If omitted, the FIRST top-level .csproj file in the working directory is used — omitting does NOT run the whole suite, and the call fails if the working directory has no top-level .csproj files. To run a specific project, pass its name or path."),
                 Optional("filter", "string", "Test filter expression (e.g., 'FullyQualifiedName~SomeTest' or 'ClassName.MethodName')"),
-                Optional("timeout_seconds", "integer", "Override the default timeout in seconds. Use for large test suites. Omit or pass 0/negative to use the default (from DEVMIND_SHELL_TIMEOUT env var or 120s fallback).")));
+                Optional("timeout_seconds", "integer", "Override the default timeout in seconds. Use for large test suites. Omit or pass 0/negative to use the default (from DEVMIND_SHELL_TIMEOUT env var or 300s fallback).")));
 
             // ── scratchpad ───────────────────────────────────────────────────
             tools.Add(MakeTool("scratchpad",

@@ -207,7 +207,10 @@ namespace DevMind
                     return new ResponseBlock
                     {
                         Type = BlockType.Shell,
-                        Command = buildCommand
+                        Command = buildCommand,
+                        // The build command is configurable (DEVMIND_BUILD_COMMAND may be a
+                        // script ResolveTimeout cannot recognise as a build) — always the long budget.
+                        ShellTimeoutSeconds = ShellRunner.ResolveLongTimeout()
                     };
 
                 case "recall_memory":

@@ -19,7 +19,7 @@ namespace DevMind
         /// Run a shell command and capture its output.
         /// Returns the exit code and combined stdout+stderr output.
         /// Uses the current terminal working directory.
-        /// <paramref name="timeoutSeconds"/> overrides the default timeout (null = use default from DEVMIND_SHELL_TIMEOUT or 120s).
+        /// <paramref name="timeoutSeconds"/> overrides the default timeout (null = ShellRunner.ResolveTimeout: 300s for build/test commands, 60s otherwise).
         /// <paramref name="detach"/> lets processes the command starts outlive the call
         /// (<see cref="ShellRunner.ExecuteAsync"/>); by default they are terminated on return.
         /// </summary>
@@ -119,7 +119,7 @@ namespace DevMind
         /// Parses TRX output into a compact summary: total/pass/fail/skip counts,
         /// plus details for each failed test (name, duration, error message).
         /// Falls back to raw console output if TRX parsing fails.
-        /// <paramref name="timeoutSeconds"/> overrides the default timeout (null = use default from DEVMIND_SHELL_TIMEOUT or 120s).
+        /// <paramref name="timeoutSeconds"/> overrides the default timeout (null = ShellRunner.ResolveTimeout: 300s for build/test commands, 60s otherwise).
         /// </summary>
         Task<string> RunTestsAsync(string project, string filter, int? timeoutSeconds = null);
 

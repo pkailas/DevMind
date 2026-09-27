@@ -84,8 +84,8 @@ namespace DevMind
        /// Execute a shell command (arbitrary PowerShell / cmd.exe) and return buffered
         /// output and exit code. This is the general-purpose run-arbitrary-shell path used
         /// by run_shell, run_build, and the CLI agentic host. Cancellation kills the process
-        /// tree immediately; timeout defaults to 120s, overridable via <paramref name="timeoutSeconds"/>
-        /// or the DEVMIND_SHELL_TIMEOUT environment variable.
+        /// tree immediately; the timeout defaults per <see cref="ResolveTimeout"/> (300s for builds,
+        /// tests and installs, 60s otherwise), overridable via <paramref name="timeoutSeconds"/>.
         /// <para>
         /// Data-driven callers (git_commit, run_tests, clip_read/clip_write, git log/diff)
         /// must NOT build command strings for this method. They use <see cref="ExecuteArgvAsync"/>,
@@ -116,7 +116,7 @@ namespace DevMind
             bool detach = false,
             CancellationToken interruptToken = default)
         {
-            int effectiveTimeout = ResolveTimeout(timeoutSeconds);
+            int effectiveTimeout = ResolveTimeout(command, timeoutSeconds);
             // npm/npx/yarn/pnpm/bun are .cmd shims on Windows. When PowerShell spawns them it
             // creates a child cmd.exe WITHOUT CreateNoWindow, which causes a visible console window
             // and routes stdio to that window instead of our redirected pipes. Invoking cmd.exe
@@ -186,7 +186,10 @@ namespace DevMind
             IProgress<ShellOutputLine> onLine = null,
             IReadOnlyDictionary<string, string> extraEnv = null)
         {
-            int effectiveTimeout = ResolveTimeout(timeoutSeconds);
+            // Classified as the command line it amounts to ("dotnet test ..." gets the long budget).
+            string asCommandLine = (fileName != null && fileName.Contains(' ') ? $"\"{fileName}\"" : fileName)
+                + (arguments != null && arguments.Count > 0 ? " " + string.Join(" ", arguments) : "");
+            int effectiveTimeout = ResolveTimeout(asCommandLine, timeoutSeconds);
 
             var psi = new ProcessStartInfo(fileName);
             if (arguments != null)
@@ -470,7 +473,11 @@ namespace DevMind
                 else if (cancelled)  onLine?.Report(new ShellOutputLine("[SHELL] Command cancelled.", isError: true));
 
                 var sb = new StringBuilder();
-                if (timedOut)        sb.AppendLine($"[SHELL] Command timed out after {timeoutSeconds} seconds.");
+                if (timedOut)
+                {
+                    sb.AppendLine($"[SHELL] Command timed out after {timeoutSeconds} seconds.");
+                    sb.AppendLine(TimeoutHint);
+                }
                 else if (cancelled)  sb.AppendLine("[SHELL] Command cancelled.");
                 if (reapMessage != null) sb.AppendLine(reapMessage);
                 string buffered = outputBuffer.ToString().TrimEnd();
@@ -566,24 +573,152 @@ namespace DevMind
             }
         }
 
+        /// <summary>Long-command budget when DEVMIND_SHELL_TIMEOUT is unset: solution builds need it.</summary>
+        public const int DefaultLongTimeoutSeconds = 300;
+
+        /// <summary>Everything-else budget when DEVMIND_SHELL_TIMEOUT_SHORT is unset.</summary>
+        public const int DefaultShortTimeoutSeconds = 60;
+
+        /// <summary>Appended to a timed-out command's output so the model knows the way out.</summary>
+        public const string TimeoutHint =
+            "If this command legitimately needs longer, re-run it with timeout_seconds set.";
+
         /// <summary>
         /// Resolves the effective timeout in seconds for a shell command.
-        /// Precedence: explicit value (if > 0) > DEVMIND_SHELL_TIMEOUT env var > 120s fallback.
-        /// A value of 0 or negative from <paramref name="explicit"/> means "use the default."
+        /// Precedence: explicit value (if &gt; 0) &gt; for a build/test/restore/install command
+        /// (<see cref="IsLongRunningCommand"/>) DEVMIND_SHELL_TIMEOUT (default 300s) &gt; for
+        /// anything else DEVMIND_SHELL_TIMEOUT_SHORT (default 60s). A hung non-build command
+        /// used to burn the whole 300s build budget. 0 or negative means "use the default."
         /// </summary>
-        public static int ResolveTimeout(int? explicitSeconds = null)
+        public static int ResolveTimeout(string command, int? explicitSeconds = null)
         {
-            // Layer 1: explicit per-call value (must be positive)
             if (explicitSeconds.HasValue && explicitSeconds.Value > 0)
                 return explicitSeconds.Value;
 
-            // Layer 2: DEVMIND_SHELL_TIMEOUT environment variable
-            string envVal = Environment.GetEnvironmentVariable("DEVMIND_SHELL_TIMEOUT");
-            if (envVal != null && int.TryParse(envVal, out int envTimeout) && envTimeout > 0)
-                return envTimeout;
+            return IsLongRunningCommand(command)
+                ? ResolveLongTimeout()
+                : EnvSeconds("DEVMIND_SHELL_TIMEOUT_SHORT", DefaultShortTimeoutSeconds);
+        }
 
-            // Layer 3: hardcoded fallback
-            return 120;
+        /// <summary>
+        /// The long-command budget: DEVMIND_SHELL_TIMEOUT, else 300s. For callers that know a
+        /// command is a build without it being recognisable as one (run_build runs a
+        /// configurable DEVMIND_BUILD_COMMAND, e.g. <c>.\build.ps1</c>).
+        /// </summary>
+        public static int ResolveLongTimeout() => EnvSeconds("DEVMIND_SHELL_TIMEOUT", DefaultLongTimeoutSeconds);
+
+        private static int EnvSeconds(string name, int fallback)
+        {
+            string envVal = Environment.GetEnvironmentVariable(name);
+            return envVal != null && int.TryParse(envVal, out int seconds) && seconds > 0 ? seconds : fallback;
+        }
+
+        private static readonly HashSet<string> _longDotnetVerbs = new(StringComparer.OrdinalIgnoreCase)
+            { "build", "test", "restore", "publish", "pack", "run", "ef" };
+
+        private static readonly HashSet<string> _longPackageManagerVerbs = new(StringComparer.OrdinalIgnoreCase)
+            { "install", "i", "ci", "run", "test", "build" };
+
+        /// <summary>
+        /// Whether any statement of <paramref name="command"/> is a build, test, restore or
+        /// package install — the commands that get the long timeout budget. A statement starts
+        /// with <c>dotnet build|test|restore|publish|pack|run|ef</c>, <c>msbuild</c> (any path),
+        /// <c>npm|pnpm|yarn install|ci|run|test|build</c>, <c>nuget restore</c> or
+        /// <c>vstest.console</c>; case-insensitive, and a leading <c>&amp;</c> call operator and
+        /// quotes around the executable are ignored. Statements split on <c>;</c>, newlines,
+        /// <c>&amp;&amp;</c>, <c>|</c> and braces at statement level only
+        /// (<see cref="TokenizeShellSpans"/>), so <c>echo "dotnet build"</c> is not a build.
+        /// </summary>
+        public static bool IsLongRunningCommand(string command)
+        {
+            if (string.IsNullOrWhiteSpace(command)) return false;
+            foreach (List<string> words in StatementWords(command))
+                if (IsLongRunningStatement(words)) return true;
+            return false;
+        }
+
+        private static bool IsLongRunningStatement(List<string> words)
+        {
+            int i = 0;
+            if (words[i] == "&") i++;                            // call operator as its own word
+            if (i >= words.Count) return false;
+
+            string exe = words[i].TrimStart('&');                // or glued on: &"C:\...\MSBuild.exe"
+            int slash = exe.LastIndexOfAny(new[] { '\\', '/' });
+            if (slash >= 0) exe = exe.Substring(slash + 1);
+            foreach (string ext in new[] { ".exe", ".cmd", ".bat" })
+            {
+                if (exe.EndsWith(ext, StringComparison.OrdinalIgnoreCase))
+                {
+                    exe = exe.Substring(0, exe.Length - ext.Length);
+                    break;
+                }
+            }
+            string verb = i + 1 < words.Count ? words[i + 1] : "";
+
+            switch (exe.ToLowerInvariant())
+            {
+                case "dotnet":         return _longDotnetVerbs.Contains(verb);
+                case "msbuild":        return true;
+                case "vstest.console": return true;
+                case "npm":
+                case "pnpm":
+                case "yarn":           return _longPackageManagerVerbs.Contains(verb);
+                case "nuget":          return string.Equals(verb, "restore", StringComparison.OrdinalIgnoreCase);
+                default:               return false;
+            }
+        }
+
+        // The words of each statement. A quoted string contributes its content to the current
+        // word (quotes removed); here-strings and comments contribute nothing.
+        private static IEnumerable<List<string>> StatementWords(string command)
+        {
+            var words = new List<string>();
+            var word = new StringBuilder();
+
+            foreach (var (start, length, kind) in TokenizeShellSpans(command))
+            {
+                if (kind == ShellSpanKind.SingleQuoted || kind == ShellSpanKind.DoubleQuoted)
+                {
+                    word.Append(command, start + 1, Math.Max(0, length - 2));
+                    continue;
+                }
+                if (kind != ShellSpanKind.Code)
+                {
+                    FlushWord(words, word);
+                    continue;
+                }
+
+                int end = start + length;
+                for (int j = start; j < end; j++)
+                {
+                    char c = command[j];
+                    bool andAnd = c == '&' && j + 1 < end && command[j + 1] == '&';
+                    if (c == ';' || c == '\n' || c == '\r' || c == '|' || c == '{' || c == '}' || andAnd)
+                    {
+                        FlushWord(words, word);
+                        if (words.Count > 0) { yield return words; words = new List<string>(); }
+                        if (andAnd) j++;
+                    }
+                    else if (char.IsWhiteSpace(c))
+                    {
+                        FlushWord(words, word);
+                    }
+                    else
+                    {
+                        word.Append(c);
+                    }
+                }
+            }
+            FlushWord(words, word);
+            if (words.Count > 0) yield return words;
+        }
+
+        private static void FlushWord(List<string> words, StringBuilder word)
+        {
+            if (word.Length == 0) return;
+            words.Add(word.ToString());
+            word.Clear();
         }
 
         public static bool IsPowerShellAvailable()

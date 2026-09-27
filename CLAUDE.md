@@ -58,7 +58,8 @@ dotnet run --project DevMind.Cli -- --dir <repo> --endpoint <llm-endpoint>
 
 Selected, not exhaustive — the full set is whatever `Environment.GetEnvironmentVariable`
 is called with (`DEVMIND_LSP_*`, `DEVMIND_TRACE_*`, `DEVMIND_GLOBAL_DIR`, `DEVMIND_TASKS_DIR`,
-`DEVMIND_ALLOWED_WRITE_ROOTS`, `DEVMIND_SHELL_TIMEOUT`, and others).
+`DEVMIND_ALLOWED_WRITE_ROOTS`, `DEVMIND_SHELL_TIMEOUT` / `DEVMIND_SHELL_TIMEOUT_SHORT`
+(build/test/install vs. every other shell command, default 300 s / 60 s), and others).
 
 | Variable | Purpose |
 |----------|---------|
