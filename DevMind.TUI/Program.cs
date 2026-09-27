@@ -101,7 +101,7 @@ namespace DevMind
 
             host.AppendOutputLocal(
                 ApprovalModeControl.TranscriptLine(mode),
-                mode == ApprovalMode.Manual ? OutputColor.Warning : OutputColor.Dim);
+                mode == ApprovalMode.Auto ? OutputColor.Dim : OutputColor.Warning);
 
             statusBar.SetApprovalMode(mode);
             FlashStatus(app, statusBar, ApprovalModeControl.StatusFlash(mode));
@@ -2336,7 +2336,25 @@ static string LoadContextFile(string workingDirectory)
             ? options.BuildCommand
             : BuildCommandResolver.Resolve(options.WorkingDirectory);
 
-   static string BuildCombinedSystemPrompt(TuiOptions options, string devMindContext, string behavioralRules, string scratchpad = "")
+    /// <summary>
+    /// The plan-mode note appended to the TUI's system prompt while the mode is Plan —
+    /// short on purpose: the per-mutation [PLAN MODE] refusal is the enforcement, this is
+    /// the heads-up so the model plans instead of discovering the wall tool by tool.
+    /// <para>
+    /// Assembled per turn (the prompt is rebuilt on every turn), so a /mode or Shift+Tab
+    /// out of Plan removes it on the very next turn without any extra plumbing: the note
+    /// exists only while <paramref name="mode"/> is Plan.
+    /// </para>
+    /// </summary>
+    internal static string PlanModePromptNote(ApprovalMode mode)
+        => mode == ApprovalMode.Plan
+            ? "\n\n--- PLAN MODE ---\n" +
+              "The user has DevMind in plan mode: analyze and propose changes, don't make them. " +
+              "Every mutating tool is refused. End with a concrete plan: files, changes, order, " +
+              "and how you'll verify.\n---\n"
+            : "";
+
+    static string BuildCombinedSystemPrompt(TuiOptions options, string devMindContext, string behavioralRules, string scratchpad = "")
     {
         // The directive is reassembled per turn, so a /dir mid-session is reflected in the
         // very next one — the model is told where it is now, not where it started.
@@ -2344,6 +2362,11 @@ static string LoadContextFile(string workingDirectory)
             buildCommand: ResolveBuildCommand(options),
             projectNamespace: null,
             workingDirectory: options.WorkingDirectory);
+
+        // Plan mode: the prompt is rebuilt per turn, so reading options.ApprovalMode here is
+        // the same freshness guarantee the /mode and Shift+Tab flips rely on — the note is
+        // present exactly while the mode is Plan, and gone the turn after it changes.
+        string planNote = PlanModePromptNote(options.ApprovalMode);
 
         // Precedence: an explicit --system-prompt beats the authored global file
         // (%APPDATA%\devmind\system-prompt.md), which beats options.SystemPrompt (the
@@ -2358,6 +2381,7 @@ static string LoadContextFile(string workingDirectory)
         sb.Append(basePrompt);
         sb.Append("\n\n");
         sb.Append(llmDirective);
+        sb.Append(planNote);
 
         // Behavioral rules — after base prompt, before project context.
         if (!string.IsNullOrEmpty(behavioralRules))

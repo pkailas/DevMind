@@ -663,7 +663,8 @@ namespace DevMind
                     Message = $"Approval mode: {ApprovalModeText.Format(ctx.ApprovalMode)}. " +
                               "auto applies mutations without asking; manual asks before every " +
                               "file write, delete, rename and shell command, and routes every patch " +
-                              "through the diff card. Use /mode auto|manual, or press Shift+Tab to toggle.",
+                              "through the diff card; plan refuses every mutation (analyze only). " +
+                              "Use /mode auto|manual|plan, or press Shift+Tab to cycle.",
                 });
             }
 
@@ -671,7 +672,7 @@ namespace DevMind
             {
                 return Task.FromResult(new CommandResult
                 {
-                    Message = $"Unknown mode \"{requested}\". Use /mode auto or /mode manual.",
+                    Message = $"Unknown mode \"{requested}\". Use /mode auto, /mode manual or /mode plan.",
                 });
             }
 

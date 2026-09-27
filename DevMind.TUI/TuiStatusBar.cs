@@ -276,20 +276,35 @@ namespace DevMind
         /// </para>
         /// </summary>
         /// <summary>
-        /// Show the approval mode when it is Manual, and nothing when it is Auto.
+        /// Show the approval mode when it is Manual or Plan, and nothing when it is Auto.
         /// <para>
         /// Only the exceptional state gets a chip. Auto is the long-standing behaviour and
         /// the overwhelming default, so a permanent "auto" label would be noise that trains
         /// the eye to skip the very spot where "manual" needs to be noticed.
         /// </para>
+        /// <para>
+        /// Plan is a distinct colour from Manual's amber: manual is "it will ask you",
+        /// plan is "it will do nothing" — an operator misreading the chip should at worst
+        /// get an extra prompt, never a silent refusal they do not know about.
+        /// </para>
         /// </summary>
         public void SetApprovalMode(ApprovalMode mode)
         {
-            string text = mode == ApprovalMode.Manual ? " \u00b7 approval manual" : "";
+            string text = mode switch
+            {
+                ApprovalMode.Manual => " \u00b7 approval manual",
+                ApprovalMode.Plan   => " \u00b7 PLAN",
+                _                   => "",
+            };
             OnUi(() =>
             {
                 _modeLabel.Text = text;
-                Pin(_modeLabel, mode == ApprovalMode.Manual ? FgAmber : FgDim);
+                Pin(_modeLabel, mode switch
+                {
+                    ApprovalMode.Manual => FgAmber,
+                    ApprovalMode.Plan   => FgError,
+                    _                   => FgDim,
+                });
             });
         }
 

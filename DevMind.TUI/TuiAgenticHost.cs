@@ -2711,6 +2711,18 @@ namespace DevMind
             var approved = new List<int>();
             ApprovalMode mode = CurrentApprovalMode;
 
+            // Plan mode: no card at all. The executor normally refuses patches before the
+            // card is reached (and tests pin that); this is the second line, so a host that
+            // is ever driven by a path that skips the executor's gate still cannot apply a
+            // patch in plan mode. Nothing is approved, and no question is asked.
+            if (mode == ApprovalMode.Plan)
+            {
+                foreach (var r in resolvedPatches)
+                    AppendOutputLocal(
+                        $"[PLAN MODE] Refused: patch {r.FileName}\n", OutputColor.Dim);
+                return approved;
+            }
+
             for (int i = 0; i < resolvedPatches.Count; i++)
             {
                 cancellationToken.ThrowIfCancellationRequested();

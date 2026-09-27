@@ -25,7 +25,9 @@ namespace DevMind.TUI.Tests
         [Theory]
         [InlineData("manual", ApprovalMode.Manual)]
         [InlineData("auto", ApprovalMode.Auto)]
+        [InlineData("plan", ApprovalMode.Plan)]
         [InlineData("MANUAL", ApprovalMode.Manual)]
+        [InlineData("PLAN", ApprovalMode.Plan)]
         public void TheArgumentSetsTheMode(string text, ApprovalMode expected)
         {
             Assert.Equal(expected, TuiOptions.FromArgs(new[] { "--mode", text }).ApprovalMode);

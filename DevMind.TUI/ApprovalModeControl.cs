@@ -15,6 +15,10 @@
 // seconds and an accidental Shift+Tab is silent after that — leaving someone wondering why
 // the agent started asking about every write. A line in the transcript is the record that
 // survives, and it is timestamped by its position in the conversation.
+//
+// Three modes: auto applies, manual asks, plan refuses. The cycle is auto → manual → plan
+// → auto — plan is last, because it is the most restrictive, and an accidental press from
+// manual lands in a mode that ASKS rather than one that silently stops all writes.
 
 using System;
 
@@ -26,9 +30,18 @@ namespace DevMind
     /// </summary>
     public static class ApprovalModeControl
     {
-        /// <summary>The other mode. Two modes, so a toggle is an alternation.</summary>
-        public static ApprovalMode Next(ApprovalMode current)
-            => current == ApprovalMode.Manual ? ApprovalMode.Auto : ApprovalMode.Manual;
+        /// <summary>
+        /// The next mode in the Shift+Tab/F2 cycle: auto → manual → plan → auto. Plan is
+        /// last — it is the most restrictive, so an accidental press from manual lands in a
+        /// mode that asks, not one that silently stops every write.
+        /// </summary>
+        public static ApprovalMode Next(ApprovalMode current) => current switch
+        {
+            ApprovalMode.Auto   => ApprovalMode.Manual,
+            ApprovalMode.Manual => ApprovalMode.Plan,
+            ApprovalMode.Plan   => ApprovalMode.Auto,
+            _                   => ApprovalMode.Manual,
+        };
 
         /// <summary>
         /// Writes the mode to the live options the executor reads at its next dispatch, and
@@ -61,15 +74,19 @@ namespace DevMind
         /// Says what the mode DOES, not just its name: "manual" alone does not tell you that
         /// the next create_file will stop and wait.
         /// </summary>
-        public static string TranscriptLine(ApprovalMode mode)
-            => mode == ApprovalMode.Manual
-                ? "[MODE] manual — every mutation will ask before it happens\n"
-                : "[MODE] auto — mutations apply without asking\n";
+        public static string TranscriptLine(ApprovalMode mode) => mode switch
+        {
+            ApprovalMode.Manual => "[MODE] manual — every mutation will ask before it happens\n",
+            ApprovalMode.Plan   => "[MODE] plan — analyze only: every mutation is refused until you leave plan mode\n",
+            _                   => "[MODE] auto — mutations apply without asking\n",
+        };
 
         /// <summary>The short status-bar flash. Same fact, in the width a chip has.</summary>
-        public static string StatusFlash(ApprovalMode mode)
-            => mode == ApprovalMode.Manual
-                ? "Approval: manual — mutations will ask"
-                : "Approval: auto — mutations apply";
+        public static string StatusFlash(ApprovalMode mode) => mode switch
+        {
+            ApprovalMode.Manual => "Approval: manual — mutations will ask",
+            ApprovalMode.Plan   => "Approval: plan — analyze only, no changes",
+            _                   => "Approval: auto — mutations apply",
+        };
     }
 }

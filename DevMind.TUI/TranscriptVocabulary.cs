@@ -154,6 +154,11 @@ namespace DevMind
                 ["BLOCKED"]     = "Blocked",
                 ["STALE"]       = "Stale",
                 ["ERROR"]       = "Error",
+
+                // Plan mode: a refusal of a mutation the user's mode will not perform. The
+                // line arrives dim, like the Manual [SKIPPED] decline, so it takes the same
+                // running glyph — a state the operator can act on, not a completed outcome.
+                ["PLAN MODE"]   = "Plan",
             };
 
         // Tags whose line is an event, not a call: they close an open block instead of

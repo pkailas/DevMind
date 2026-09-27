@@ -43,24 +43,50 @@ namespace DevMind.TUI.Tests
 
         private string ConfigPath => Path.Combine(_dir, "devmind.json");
 
-        // ── The alternation ────────────────────────────────────────────────────
+        // ── The cycle ─────────────────────────────────────────────────────────
 
+        // auto → manual → plan → auto: plan is last, so an accidental press from manual
+        // lands in a mode that asks, not one that silently stops every write.
         [Fact]
-        public void TheToggleAlternates()
+        public void TheCycleGoesAutoToManualToPlanToAuto()
         {
             Assert.Equal(ApprovalMode.Manual, ApprovalModeControl.Next(ApprovalMode.Auto));
-            Assert.Equal(ApprovalMode.Auto, ApprovalModeControl.Next(ApprovalMode.Manual));
+            Assert.Equal(ApprovalMode.Plan, ApprovalModeControl.Next(ApprovalMode.Manual));
+            Assert.Equal(ApprovalMode.Auto, ApprovalModeControl.Next(ApprovalMode.Plan));
         }
 
         [Fact]
-        public void TwoPressesReturnToWhereItStarted()
+        public void ThreePressesReturnToWhereItStarted()
         {
             var mode = ApprovalMode.Auto;
 
             mode = ApprovalModeControl.Next(mode);
             mode = ApprovalModeControl.Next(mode);
+            mode = ApprovalModeControl.Next(mode);
 
             Assert.Equal(ApprovalMode.Auto, mode);
+        }
+
+        // The cycle must be CLOSED: every press from any mode lands in a real mode, and no
+        // press can land outside the three. A hole (Next(Plan) returning Manual, say) would
+        // make the third press skip a mode the operator believes they are in.
+        [Fact]
+        public void EveryPressFromAnyMode_LandsInTheCycle()
+        {
+            foreach (ApprovalMode start in new[] { ApprovalMode.Auto, ApprovalMode.Manual, ApprovalMode.Plan })
+            {
+                var seen = new List<ApprovalMode> { start };
+                var mode = start;
+
+                for (int i = 0; i < 3; i++)
+                {
+                    mode = ApprovalModeControl.Next(mode);
+                    seen.Add(mode);
+                }
+
+                Assert.True(seen.Distinct().Count() == 3,
+                    $"cycle from {start} visited only {string.Join(", ", seen.Distinct())} — the three presses must cover all three modes");
+            }
         }
 
         // ── Apply: the live value AND the persisted one ───────────────────────
@@ -92,6 +118,9 @@ namespace DevMind.TUI.Tests
             ApprovalModeControl.Apply(ApprovalMode.Manual, options, config);
             Assert.Equal(ApprovalMode.Manual, TuiConfig.LoadFrom(ConfigPath).ApprovalMode);
 
+            ApprovalModeControl.Apply(ApprovalMode.Plan, options, config);
+            Assert.Equal(ApprovalMode.Plan, TuiConfig.LoadFrom(ConfigPath).ApprovalMode);
+
             ApprovalModeControl.Apply(ApprovalMode.Auto, options, config);
             Assert.Equal(ApprovalMode.Auto, TuiConfig.LoadFrom(ConfigPath).ApprovalMode);
             Assert.Equal(ApprovalMode.Auto, options.ApprovalMode);
@@ -106,6 +135,9 @@ namespace DevMind.TUI.Tests
 
             ApprovalModeControl.Apply(ApprovalModeControl.Next(options.ApprovalMode), options, config);
             Assert.Equal(ApprovalMode.Manual, options.ApprovalMode);
+
+            ApprovalModeControl.Apply(ApprovalModeControl.Next(options.ApprovalMode), options, config);
+            Assert.Equal(ApprovalMode.Plan, options.ApprovalMode);
 
             ApprovalModeControl.Apply(ApprovalModeControl.Next(options.ApprovalMode), options, config);
             Assert.Equal(ApprovalMode.Auto, options.ApprovalMode);
@@ -132,6 +164,7 @@ namespace DevMind.TUI.Tests
         // has to name which mode, or the record is useless the moment you scroll back to it.
         [Theory]
         [InlineData(ApprovalMode.Manual, "manual")]
+        [InlineData(ApprovalMode.Plan, "plan")]
         [InlineData(ApprovalMode.Auto, "auto")]
         public void TheTranscriptLineNamesTheMode(ApprovalMode mode, string expected)
         {
@@ -144,6 +177,7 @@ namespace DevMind.TUI.Tests
 
         [Theory]
         [InlineData(ApprovalMode.Manual, "manual")]
+        [InlineData(ApprovalMode.Plan, "plan")]
         [InlineData(ApprovalMode.Auto, "auto")]
         public void TheStatusFlashNamesTheMode(ApprovalMode mode, string expected)
         {
@@ -153,19 +187,29 @@ namespace DevMind.TUI.Tests
             Assert.DoesNotContain("\n", flash, StringComparison.Ordinal);   // one status line
         }
 
-        // The two texts must not merely contain the word — they must distinguish the modes
-        // from each other, which a template bug ("[MODE] {0}" with the wrong argument) would
-        // break while still passing a "contains the word" check on one of them.
+        // The texts must not merely contain the word — they must distinguish the modes from
+        // each other, which a template bug ("[MODE] {0}" with the wrong argument) would break
+        // while still passing a "contains the word" check on one of them.
         [Fact]
-        public void TheTwoModesReadDifferently()
+        public void TheThreeModesReadDifferently()
         {
-            Assert.NotEqual(
-                ApprovalModeControl.TranscriptLine(ApprovalMode.Auto),
-                ApprovalModeControl.TranscriptLine(ApprovalMode.Manual));
+            string autoLine = ApprovalModeControl.TranscriptLine(ApprovalMode.Auto);
+            string manualLine = ApprovalModeControl.TranscriptLine(ApprovalMode.Manual);
+            string planLine = ApprovalModeControl.TranscriptLine(ApprovalMode.Plan);
+
+            Assert.NotEqual(autoLine, manualLine);
+            Assert.NotEqual(autoLine, planLine);
+            Assert.NotEqual(manualLine, planLine);
 
             Assert.NotEqual(
                 ApprovalModeControl.StatusFlash(ApprovalMode.Auto),
                 ApprovalModeControl.StatusFlash(ApprovalMode.Manual));
+            Assert.NotEqual(
+                ApprovalModeControl.StatusFlash(ApprovalMode.Auto),
+                ApprovalModeControl.StatusFlash(ApprovalMode.Plan));
+            Assert.NotEqual(
+                ApprovalModeControl.StatusFlash(ApprovalMode.Manual),
+                ApprovalModeControl.StatusFlash(ApprovalMode.Plan));
         }
 
         // Manual's line says what it DOES, because the consequence is the point: someone who
@@ -174,6 +218,16 @@ namespace DevMind.TUI.Tests
         public void ManualSaysThatMutationsWillAsk()
         {
             Assert.Contains("ask", ApprovalModeControl.TranscriptLine(ApprovalMode.Manual),
+                StringComparison.OrdinalIgnoreCase);
+        }
+
+        // Plan's line says it REFUSES, because that is the consequence: an accidental press
+        // that lands in plan mode and prints "mode changed" would leave the operator
+        // watching the next create_file apply normally... or not, with no record of why.
+        [Fact]
+        public void PlanSaysThatMutationsAreRefused()
+        {
+            Assert.Contains("refus", ApprovalModeControl.TranscriptLine(ApprovalMode.Plan),
                 StringComparison.OrdinalIgnoreCase);
         }
     }

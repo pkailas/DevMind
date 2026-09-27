@@ -151,7 +151,16 @@ namespace DevMind.Core.Tests
             return Task.FromResult(DiffPreviewAnswer(resolvedPatches ?? new List<PatchResolveResult>()));
         }
         public Task<string> RecallMemoryAsync(string topic) => Task.FromResult("");
-        public Task<string> SaveMemoryAsync(string topic, string content, string description) => Task.FromResult("ok");
+        /// <summary>
+        /// How many times the executor reached the host for save_memory. Plan mode must
+        /// refuse before this is ever called; Manual must call it exactly once.
+        /// </summary>
+        public int SaveMemoryCalls { get; set; }
+        public Task<string> SaveMemoryAsync(string topic, string content, string description)
+        {
+            SaveMemoryCalls++;
+            return Task.FromResult("ok");
+        }
         public Task<string> ListMemoryTopicsAsync() => Task.FromResult("");
         public Task<string> SearchMemoryAsync(string pattern) => Task.FromResult("");
         public Task<string> QueryLibraryAsync(string question, int topK, CancellationToken cancellationToken = default) => Task.FromResult("");
@@ -180,8 +189,20 @@ namespace DevMind.Core.Tests
             ConfirmPrompts.Add(message);
             return Task.FromResult(ConfirmAnswer);
         }
+        /// <summary>
+        /// How many times the executor reached the host for run_sql, and whether the last
+        /// call asked for writes. Plan mode must refuse an allow_write call before this is
+        /// ever made; a read-only call must reach it in every mode.
+        /// </summary>
+        public int RunSqlCalls { get; set; }
+        public bool? LastRunSqlAllowWrite { get; set; }
+
         public Task<string> RunSqlAsync(string query, string connectionString, string connectionName, bool allowWrite, int maxRows, int commandTimeout)
-            => Task.FromResult("");
+        {
+            RunSqlCalls++;
+            LastRunSqlAllowWrite = allowWrite;
+            return Task.FromResult("");
+        }
         public Task<string> RunDebugAsync(string command, IReadOnlyDictionary<string, string> args) => Task.FromResult("");
         public Task<string> RecallCacheAsync(string handle) => Task.FromResult("");
         public Task<string> ListCacheAsync() => Task.FromResult("");

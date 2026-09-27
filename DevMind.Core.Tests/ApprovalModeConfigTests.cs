@@ -83,6 +83,7 @@ namespace DevMind.Core.Tests
         [InlineData("{\"approvalMode\": \"\"}")]
         [InlineData("{\"approvalMode\": \"yolo\"}")]
         [InlineData("{\"approvalMode\": \"MANUAL-ish\"}")]
+        [InlineData("{\"approvalMode\": \"planning\"}")]
         public void AnAbsentOrUnrecognisedValue_ReadsAsAuto(string json)
         {
             File.WriteAllText(_path, json);

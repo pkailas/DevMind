@@ -73,7 +73,7 @@ namespace DevMind
                                 $"Run shell: {DescribeCommand(action.ShellCommand)}", result))
                         {
                             result.ShellExitCode     = 1;
-                            result.ShellOutput       = "The user declined to run this command in manual approval mode. It was NOT executed \u2014 do not assume any of its effects happened.";
+                            result.ShellOutput       = ShellRefusalOutput(result);
                             result.LastShellCommand  = action.ShellCommand;
                             return result;
                         }
@@ -247,7 +247,7 @@ namespace DevMind
                             // as success. A non-zero code keeps every "did it work?" check
                             // on the failure branch.
                             result.ShellExitCode    = 1;
-                            result.ShellOutput      = "The user declined to run this command in manual approval mode. It was NOT executed \u2014 do not assume any of its effects happened.";
+                            result.ShellOutput      = ShellRefusalOutput(result);
                             result.LastShellCommand = block.Command;
                             break;
                         }
@@ -501,6 +501,18 @@ namespace DevMind
                         break;
 
                     case BlockType.SaveMemory:
+                        // save_memory writes .devmind/memory into the repo: a mutation. In Plan
+                        // the refusal goes into the tool result the model reads (MemoryContent),
+                        // the same path every other refusal uses.
+                        if (ApprovalPolicy.Decide(_options.ApprovalMode, MutationKind.Memory)
+                            == ApprovalDecision.Refuse)
+                        {
+                            string refusal = ApprovalPolicy.PlanRefusalMessage("save_memory");
+                            block.MemoryDescription = refusal;
+                            result.Errors.Add(refusal);
+                            _host.AppendOutput($"[PLAN MODE] Refused save_memory [{block.MemoryTopic}]\n", OutputColor.Dim);
+                            break;
+                        }
                         try
                         {
                             string saveResult = await _host.SaveMemoryAsync(
@@ -705,6 +717,21 @@ namespace DevMind
                         break;
 
                     case BlockType.RunSql:
+                        // run_sql with allow_write can change a database: a mutation. In Plan
+                        // the refusal goes into the tool result the model reads, the same path
+                        // every other refusal uses. The read-only default of the same tool is
+                        // not a mutation — it looks at data the way read_file looks at files —
+                        // and stays free in Plan.
+                        if (block.SqlAllowWrite
+                            && ApprovalPolicy.Decide(_options.ApprovalMode, MutationKind.SqlWrite)
+                                == ApprovalDecision.Refuse)
+                        {
+                            string sqlRefusal = ApprovalPolicy.PlanRefusalMessage("run_sql (allow_write)");
+                            result.ToolResultContents["run_sql"] = sqlRefusal;
+                            result.Errors.Add(sqlRefusal);
+                            _host.AppendOutput("[PLAN MODE] Refused: run_sql (allow_write)\n", OutputColor.Dim);
+                            break;
+                        }
                         try
                         {
                             // Connection is resolved in the host/SqlExecutor by precedence:
@@ -794,7 +821,7 @@ namespace DevMind
         /// </summary>
 
         /// <summary>
-        /// Asks the host before a mutation when the mode requires it. True means go ahead.
+        /// Gates one mutation on the current mode's decision. True means go ahead.
         /// </summary>
         /// <remarks>
         /// <para>
@@ -803,20 +830,37 @@ namespace DevMind
         /// already running.
         /// </para>
         /// <para>
-        /// On a decline the cause goes into <c>result.Errors</c> and the caller simply does
-        /// not perform the operation. That is deliberate reuse: an empty FilesCreated /
-        /// FilesAppended / FilesDeleted / FilesRenamed list already makes LoopHelpers build a
-        /// BuildWriteFailure tool_result, and it relays result.Errors as the cause. So a
-        /// declined write reports to the model as a failure with the reason attached, through
-        /// the same path a sandbox refusal takes — rather than a second success-shaped
-        /// message that would have to be kept honest separately.
+        /// <see cref="ApprovalPolicy.Decide"/> is the decision: Auto allows, Manual asks, Plan
+        /// refuses. The refusal message the model receives depends on WHICH one fired — a
+        /// manual decline says "the user declined"; a Plan refusal says "plan mode", because
+        /// telling the model it was simply declined would have it retry the same tool, and
+        /// plan mode is a state, not a mood.
+        /// </para>
+        /// <para>
+        /// On a decline or refusal the cause goes into <c>result.Errors</c> and the caller
+        /// simply does not perform the operation. That is deliberate reuse: an empty
+        /// FilesCreated / FilesAppended / FilesDeleted / FilesRenamed list already makes
+        /// LoopHelpers build a BuildWriteFailure tool_result, and it relays result.Errors as
+        /// the cause. So a declined write reports to the model as a failure with the reason
+        /// attached, through the same path a sandbox refusal takes — rather than a second
+        /// success-shaped message that would have to be kept honest separately.
         /// </para>
         /// </remarks>
         private async Task<bool> ApproveMutationAsync(MutationKind kind, string prompt, ExecutionResult result)
         {
-            if (!ApprovalPolicy.Requires(_options.ApprovalMode, kind))
+            ApprovalDecision decision = ApprovalPolicy.Decide(_options.ApprovalMode, kind);
+            if (decision == ApprovalDecision.Allow)
                 return true;
 
+            if (decision == ApprovalDecision.Refuse)
+            {
+                string refusal = ApprovalPolicy.PlanRefusalMessage(prompt);
+                result.Errors.Add(refusal);
+                _host.AppendOutput($"[PLAN MODE] Refused: {prompt}\n", OutputColor.Dim);
+                return false;
+            }
+
+            // Ask
             bool approved = await _host.ConfirmContinueAsync(prompt);
             if (approved)
                 return true;
@@ -825,6 +869,21 @@ namespace DevMind
                 "The user declined this action in manual approval mode. It was NOT performed.");
             _host.AppendOutput($"[SKIPPED] user declined \u2014 {prompt}\n", OutputColor.Warning);
             return false;
+        }
+
+        /// <summary>
+        /// The run_shell output the model reads when the command was refused. Plan mode says
+        /// plan mode (so the model stops trying to act); a manual decline keeps the exact
+        /// wording it always had, because a model that was told "plan mode" about a user's
+        /// _Stop answer would be misinformed about why.
+        /// </summary>
+        private static string ShellRefusalOutput(ExecutionResult result)
+        {
+            bool planRefusal = result.Errors.Count > 0
+                && result.Errors[result.Errors.Count - 1].StartsWith("[PLAN MODE]", StringComparison.Ordinal);
+            return planRefusal
+                ? result.Errors[^1]
+                : "The user declined to run this command in manual approval mode. It was NOT executed \u2014 do not assume any of its effects happened.";
         }
 
         /// <summary>
@@ -900,6 +959,24 @@ namespace DevMind
             List<ResponseBlock> patchBlocks,
             ExecutionResult result)
         {
+            // Plan mode refuses patches outright: no card, no application. The refusal goes
+            // into result.Errors per patch, so the model receives the [PLAN MODE] message —
+            // the same path a declined write uses — and nothing below ever runs.
+            if (ApprovalPolicy.Decide(_options.ApprovalMode, MutationKind.Patch)
+                == ApprovalDecision.Refuse)
+            {
+                foreach (var block in patchBlocks)
+                {
+                    string failedFile = string.IsNullOrEmpty(block.FileName)
+                        ? "unknown" : System.IO.Path.GetFileName(block.FileName);
+                    string refusal = ApprovalPolicy.PlanRefusalMessage($"patch {failedFile}");
+                    result.PatchesFailed++;
+                    result.Errors.Add($"[PATCH-REFUSED:{failedFile}] {refusal}");
+                    _host.AppendOutput($"[PLAN MODE] Refused: patch {failedFile}\n", OutputColor.Dim);
+                }
+                return;
+            }
+
             // Manual mode means every patch is looked at, exact matches included — which
             // is precisely what AlwaysConfirmPatch already does, so it is folded in here
             // rather than given a second mechanism that could disagree with it.
