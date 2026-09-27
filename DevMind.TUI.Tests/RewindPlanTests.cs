@@ -121,11 +121,14 @@ namespace DevMind.TUI.Tests
         {
             string text = RewindPlanner.ListTurnsText(Session());
 
-            Assert.Contains("[1] 10:00  Fix the login bug.", text);
-            Assert.Contains("[2] 10:00  Now add tests.", text);
-            Assert.Contains("[3] 10:00  Why did you skip the edge case?", text);
-            Assert.Contains("[4] 10:00  Because the token can expire mid-flight.", text);
-            Assert.Contains("[5] 10:00  Ship it.", text);
+            // Times are LOCAL (the store's CreatedAt is UTC). The Session() rows are at
+            // 10:00 UTC + createdMs, so compute the expected local time the same way.
+            string t0 = new DateTime(2026, 9, 27, 10, 0, 0, DateTimeKind.Utc).ToLocalTime().ToString("HH:mm");
+            Assert.Contains($"[1] {t0}  Fix the login bug.", text);
+            Assert.Contains($"[2] {t0}  Now add tests.", text);
+            Assert.Contains($"[3] {t0}  Why did you skip the edge case?", text);
+            Assert.Contains($"[4] {t0}  Because the token can expire mid-flight.", text);
+            Assert.Contains($"[5] {t0}  Ship it.", text);
             Assert.DoesNotContain("Continue with the task.", text);
             Assert.Contains("/rewind <n>", text);
         }
@@ -285,6 +288,47 @@ namespace DevMind.TUI.Tests
             var blank = new[] { Row(S, 0, "user", "   "), Row(S, 1, "user", "   ") };
             Assert.Equal("(untitled) (rewound from #2)",
                 RewindPlanner.BuildTitle(null, blank, 2));
+        }
+
+        // ── Local time in the listing ─────────────────────────────────────────
+
+        /// <summary>
+        /// The store's CreatedAt is UTC; the operator reads local wall-clock time. The
+        /// listing must convert, and it must include the date only when the turns span
+        /// more than one local day. Single-day session: HH:mm only. Multi-day: yyyy-MM-dd HH:mm.
+        /// </summary>
+        [Fact]
+        public void ListTurnsText_ShowsLocalTime_AndDateOnlyWhenTurnsSpanDays()
+        {
+            // Single-day session: all turns on the same UTC day. No date in the listing.
+            var singleDay = new[]
+            {
+                Row(S, 0, "user", "First prompt."),
+                Row(S, 1, "user", "Second prompt."),
+            };
+            string text = RewindPlanner.ListTurnsText(singleDay);
+            // No date component (yyyy-MM-dd) — single day.
+            Assert.DoesNotContain("2026-09-27", text);
+            // Has HH:mm times (computed in local time).
+            string localTime = new DateTime(2026, 9, 27, 10, 0, 0, DateTimeKind.Utc)
+                .ToLocalTime().ToString("HH:mm");
+            Assert.Contains(localTime, text);
+
+            // Multi-day session: turns on two different UTC days that don't collapse into
+            // the same local day (24-hour gap). Date IS shown.
+            var multiDay = new[]
+            {
+                new HistoryMessage { SessionId = S, MachineName = "beast", TurnIndex = 0, Role = "user",
+                    Content = "Day one prompt.", CreatedAt = new DateTime(2026, 9, 26, 20, 0, 0, DateTimeKind.Utc) },
+                new HistoryMessage { SessionId = S, MachineName = "beast", TurnIndex = 1, Role = "user",
+                    Content = "Day two prompt.", CreatedAt = new DateTime(2026, 9, 27, 20, 0, 0, DateTimeKind.Utc) },
+            };
+            string multiText = RewindPlanner.ListTurnsText(multiDay);
+            // Both local dates appear (the turns are 24h apart — they cannot be the same local day).
+            string d1 = new DateTime(2026, 9, 26, 20, 0, 0, DateTimeKind.Utc).ToLocalTime().ToString("yyyy-MM-dd");
+            string d2 = new DateTime(2026, 9, 27, 20, 0, 0, DateTimeKind.Utc).ToLocalTime().ToString("yyyy-MM-dd");
+            Assert.Contains(d1, multiText);
+            Assert.Contains(d2, multiText);
         }
 
         // ── The cut, by name ──────────────────────────────────────────────────

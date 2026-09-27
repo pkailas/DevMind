@@ -262,11 +262,18 @@ namespace DevMind
 
             var list = new List<HistoryMessage>();
 
+            // ORDER BY Id (the IDENTITY column) — TRUE insertion order. TurnIndex is the
+            // context-aging clock (one value per user turn, shared by its iterations), and it
+            // is NOT monotonic across a session: ClearHistory (/new) resets it to 0, so a turn
+            // after a /new gets a SMALLER index than the turn before it. Ordering by it listed
+            // the session out of chronological order — and /rewind's cut used that order, so it
+            // cut the wrong row. The identity is assigned at insert time and never moves, so it
+            // is the only column that stands in for "when this row was written".
             using var cmd = new SqlCommand(@"
                 SELECT SessionId, MachineName, TurnIndex, Role, Content, CreatedAt, IsSynthetic
                 FROM dbo.DevMindHistory
                 WHERE SessionId = @sessionId
-                ORDER BY TurnIndex ASC, CreatedAt ASC", _connection);
+                ORDER BY Id ASC", _connection);
             cmd.Parameters.Add("@sessionId", SqlDbType.VarChar, 64).Value = sessionId;
 
             using var reader = await cmd.ExecuteReaderAsync();

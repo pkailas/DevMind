@@ -27,6 +27,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace DevMind
 {
@@ -36,7 +37,7 @@ namespace DevMind
         /// <summary>1-based number, as shown by the listing and taken by /rewind N.</summary>
         public readonly int Number;
 
-        /// <summary>When the user asked.</summary>
+        /// <summary>When the user asked (UTC — the store's column is UTC).</summary>
         public readonly DateTime CreatedAt;
 
         /// <summary>The first line of the prompt, truncated for display.</summary>
@@ -176,10 +177,20 @@ namespace DevMind
             if (turns.Count == 0)
                 return "This session has no user turns to rewind.";
 
+            // The store's CreatedAt is UTC; the operator reads local wall-clock time. Show
+            // HH:mm, and add the date only when the turns actually span more than one local
+            // day — a single-day session gets no date noise, a long one is unambiguous.
+            var local = turns.Select(t => t.CreatedAt.ToLocalTime()).ToList();
+            bool spansDays = local.Count > 1 &&
+                local[local.Count - 1].Date != local[0].Date;
+
             var sb = new System.Text.StringBuilder();
             sb.AppendLine("User turns in this session (oldest first):");
-            foreach (var t in turns)
-                sb.AppendLine($"  [{t.Number}] {t.CreatedAt:HH:mm}  {t.FirstLine}");
+            for (int i = 0; i < turns.Count; i++)
+            {
+                string time = spansDays ? $"{local[i]:yyyy-MM-dd HH:mm}" : $"{local[i]:HH:mm}";
+                sb.AppendLine($"  [{turns[i].Number}] {time}  {turns[i].FirstLine}");
+            }
             sb.Append($"  /rewind <n> forks the session to BEFORE turn n; " +
                       $"the original stays (recover with /history + /resume).");
             return sb.ToString().TrimEnd();

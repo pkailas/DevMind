@@ -117,6 +117,15 @@ namespace DevMind
         /// </summary>
         public Action<string> AdoptSessionId { get; set; }
 
+        /// <summary>
+        /// Run an action on the UI thread. Handlers that touch terminal views (the input box,
+        /// the transcript) MUST route through this — the dispatcher awaits on a pool thread,
+        /// and Terminal.Gui throws "Call from invalid thread" for off-thread view access.
+        /// Program.cs wraps it in app.Invoke. Null in a host with no UI thread (tests run the
+        /// action inline instead, and assert the effect only happens through this seam).
+        /// </summary>
+        public Action<Action> RunOnUiThread { get; set; }
+
        /// <summary>Prepend messages into the conversation history (for /resume).</summary>
         public Action<string[], string[]> PrependMessages { get; set; }
 
@@ -1670,13 +1679,20 @@ namespace DevMind
                 var (roles, contents, skipped) = SessionResume.PairMessages(plan.MessagesToCopy);
                 if (roles.Length > 0)
                 {
+                    // PrependMessages is the LlmClient (thread-safe); the transcript is a
+                    // terminal view, so it goes through the UI-thread seam — the dispatcher
+                    // awaits on a pool thread and Terminal.Gui throws "Call from invalid
+                    // thread" for off-thread view access (the live crash this seam exists for).
                     ctx.PrependMessages(roles, contents);
-                    ctx.ReplayTranscript?.Invoke(roles, contents);
+                    if (ctx.ReplayTranscript != null)
+                        RunOnUi(ctx, () => ctx.ReplayTranscript(roles, contents));
                 }
 
                 // Turn N's prompt goes BACK into the input box — not sent — so it can be
-                // edited and re-sent as the fork's first new turn.
-                ctx.SetInputBoxText?.Invoke(plan.RestoredPrompt);
+                // edited and re-sent as the fork's first new turn. The input box is a view:
+                // same seam, same reason.
+                if (ctx.SetInputBoxText != null)
+                    RunOnUi(ctx, () => ctx.SetInputBoxText(plan.RestoredPrompt));
 
                 return new CommandResult
                 {
@@ -1689,6 +1705,18 @@ namespace DevMind
             {
                 return new CommandResult { Message = $"Failed to rewind: {ex.Message}", IsError = true };
             }
+        }
+
+        /// <summary>
+        /// Route a UI effect through the host's UI-thread seam. When the seam is absent (a
+        /// test fake with no terminal) the effect runs inline — the seam, not the handler,
+        /// is what makes the TUI crash-free, so a fake that skips it is the bug the
+        /// threading-seam test is written to catch.
+        /// </summary>
+        static void RunOnUi(CommandContext ctx, Action action)
+        {
+            if (ctx.RunOnUiThread != null) ctx.RunOnUiThread(action);
+            else action();
         }
 
         /// <summary>

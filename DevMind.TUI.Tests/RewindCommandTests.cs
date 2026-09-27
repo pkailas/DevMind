@@ -139,9 +139,14 @@ namespace DevMind.TUI.Tests
             var result = await SlashCommand.Dispatch("/rewind", ctx);
 
             Assert.False(result.IsError, result.Message);
-            Assert.Contains("[1] 10:00  Fix the login bug.", result.Message);
-            Assert.Contains("[2] 10:00  Now add tests.", result.Message);
-            Assert.Contains("[3] 10:00  Ship it.", result.Message);
+            // Times are LOCAL (the store's CreatedAt is UTC). The Session() rows are at
+            // 10:00 UTC + turn*MILLISECONDS (the Row helper's createdMs param is milliseconds,
+            // not minutes), so all three turns share the same HH:mm. Compute the expected
+            // local time the same way the listing does.
+            string t0 = new DateTime(2026, 9, 27, 10, 0, 0, DateTimeKind.Utc).ToLocalTime().ToString("HH:mm");
+            Assert.Contains($"[1] {t0}  Fix the login bug.", result.Message);
+            Assert.Contains($"[2] {t0}  Now add tests.", result.Message);
+            Assert.Contains($"[3] {t0}  Ship it.", result.Message);
             Assert.DoesNotContain("Continue with the task.", result.Message);
         }
 
@@ -212,6 +217,82 @@ namespace DevMind.TUI.Tests
             Assert.Contains("Original kept", result.Message);
             Assert.Contains("/resume", result.Message);
             Assert.Contains("Files on disk were NOT changed", result.Message);
+        }
+
+        /// <summary>
+        /// The threading seam: /rewind's UI effects (transcript replay, input-box text)
+        /// MUST go through ctx.RunOnUiThread — the dispatcher awaits on a pool thread, and
+        /// Terminal.Gui throws "Call from invalid thread" for off-thread view access. This
+        /// test wires a RunOnUiThread that records every effect it is asked to marshal, and a
+        /// SetInputBoxText / ReplayTranscript that THROW if called directly (simulating what
+        /// Terminal.Gui does off-thread). On the old wiring (no seam) both callbacks fire
+        /// directly and the test fails; on the new wiring they fire only through the seam.
+        /// </summary>
+        [Fact]
+        public async Task Rewind_UiEffects_GoThroughTheUiThreadSeam_NotDirectly()
+        {
+            var (ctx, _, host) = Context(Session());
+
+            var uiThreadEffects = new System.Collections.Generic.List<string>();
+
+            // The seam: record that it was asked to marshal. Do NOT run the action — the
+            // callbacks throw to prove they would crash if hit off-thread. The point of this
+            // test is that the handler routes through the seam, not that the seam executes.
+            ctx.RunOnUiThread = action =>
+            {
+                uiThreadEffects.Add("marshalled");
+                // action() intentionally NOT called — the callbacks throw by design.
+            };
+
+            // The view callbacks THROW if hit off-thread (simulating Terminal.Gui's
+            // "Call from invalid thread"). The handler's catch block turns the throw into an
+            // error CommandResult — the test asserts the error message names the off-thread
+            // call, proving the effect did NOT go through the seam. On the new wiring the
+            // seam intercepts first, the callbacks never throw, and the rewind succeeds.
+            ctx.ReplayTranscript = (roles, contents) =>
+            {
+                throw new InvalidOperationException("ReplayTranscript called off the UI thread");
+            };
+            ctx.SetInputBoxText = text =>
+            {
+                throw new InvalidOperationException("SetInputBoxText called off the UI thread");
+            };
+
+            var result = await SlashCommand.Dispatch("/rewind 3", ctx);
+
+            // The rewind succeeded — the effects went through the seam, not directly.
+            Assert.False(result.IsError, result.Message);
+            // Both UI effects were marshalled through the seam (ReplayTranscript + SetInputBoxText).
+            Assert.Equal(2, uiThreadEffects.Count);
+        }
+
+        /// <summary>
+        /// Without the seam, the UI effects fire directly on the pool thread and Terminal.Gui
+        /// throws. The handler's catch block turns that into an error result naming the
+        /// off-thread call. This test proves the OLD wiring (no RunOnUiThread) fails: the
+        /// rewind is an error, and the error message names the off-thread ReplayTranscript.
+        /// </summary>
+        [Fact]
+        public async Task Rewind_WithoutUiThreadSeam_FailsWithOffThreadError()
+        {
+            var (ctx, _, host) = Context(Session());
+            // No RunOnUiThread — the OLD wiring. The effects fire directly.
+            ctx.RunOnUiThread = null;
+
+            ctx.ReplayTranscript = (roles, contents) =>
+            {
+                throw new InvalidOperationException("Call from invalid thread.");
+            };
+            ctx.SetInputBoxText = text =>
+            {
+                throw new InvalidOperationException("Call from invalid thread.");
+            };
+
+            var result = await SlashCommand.Dispatch("/rewind 3", ctx);
+
+            // The rewind FAILED — the off-thread call threw and the catch block reported it.
+            Assert.True(result.IsError, "Expected an error when UI effects fire off-thread");
+            Assert.Contains("Call from invalid thread", result.Message);
         }
 
         [Fact]
@@ -366,6 +447,116 @@ namespace DevMind.TUI.Tests
 
             // One session appeared — the fork.
             Assert.Equal(sessionCountBefore + 1, (await store.ListSessionsAsync(machine)).Length);
+
+            await store.CloseAsync();
+        }
+
+        // ── Non-monotonic TurnIndex: the store's insertion order wins ───────────
+
+        /// <summary>
+        /// TurnIndex is the context-aging clock (llmClient.CurrentTurn), and it is NOT
+        /// monotonic across a session: ClearHistory (/new) resets it to 0, so a turn after
+        /// a /new gets a SMALLER index than the turn before it. The live session that
+        /// motivated this fix had turns at 19:47 (ti=1), 19:48 (ti=2), 21:53 (ti=1), 21:53
+        /// (ti=2), 21:53 (ti=3) — ordering by TurnIndex ASC listed them 19:47, 21:53, 21:53,
+        /// 19:48, 21:53, and /rewind 2 cut the 21:53 turn instead of the 19:48 one.
+        ///
+        /// The store's Id column (AUTOINCREMENT rowid / SQL IDENTITY) IS insertion order.
+        /// This test inserts rows with deliberately out-of-order TurnIndex and proves
+        /// LoadSessionMessagesAsync returns them in insertion order, and that /rewind's cut
+        /// follows that order — the listing and the cut agree.
+        /// </summary>
+        [Fact]
+        public async Task Rewind_NonMonotonicTurnIndex_ListAndCutFollowInsertionOrder()
+        {
+            var store = new SqliteHistoryStore(_dbPath);
+            await store.InitAsync();
+
+            string machine = "nonmono-" + Guid.NewGuid().ToString("N").Substring(0, 8);
+            await store.UpsertSessionAsync(S, machine);
+
+            // Insert in chronological order, but TurnIndex goes 1, 2, 1, 2, 3 — the
+            // post-/new reset makes later turns reuse smaller indices. The OLD ordering
+            // (TurnIndex ASC, CreatedAt ASC) would list: ti1-19:47, ti1-21:53, ti2-19:48,
+            // ti2-21:53, ti3-21:53. The CORRECT order is insertion order.
+            var rows = new[]
+            {
+                // 19:47 UTC — turn 1 (ti=1)
+                new HistoryMessage { SessionId = S, MachineName = machine, TurnIndex = 1, Role = "user",
+                    Content = "Create a file hello.txt containing hi", CreatedAt = new DateTime(2026, 9, 27, 19, 47, 0, DateTimeKind.Utc) },
+                new HistoryMessage { SessionId = S, MachineName = machine, TurnIndex = 1, Role = "assistant",
+                    Content = "Created hello.txt.", CreatedAt = new DateTime(2026, 9, 27, 19, 47, 1, DateTimeKind.Utc) },
+                // 19:48 UTC — turn 2 (ti=2)
+                new HistoryMessage { SessionId = S, MachineName = machine, TurnIndex = 2, Role = "user",
+                    Content = "go ahead", CreatedAt = new DateTime(2026, 9, 27, 19, 48, 0, DateTimeKind.Utc) },
+                new HistoryMessage { SessionId = S, MachineName = machine, TurnIndex = 2, Role = "assistant",
+                    Content = "Done.", CreatedAt = new DateTime(2026, 9, 27, 19, 48, 1, DateTimeKind.Utc) },
+                // 21:53 UTC — turn 3 (ti=1, post-/new reset)
+                new HistoryMessage { SessionId = S, MachineName = machine, TurnIndex = 1, Role = "user",
+                    Content = "Remember the word APPLE. Just reply OK.", CreatedAt = new DateTime(2026, 9, 27, 21, 53, 0, DateTimeKind.Utc) },
+                new HistoryMessage { SessionId = S, MachineName = machine, TurnIndex = 1, Role = "assistant",
+                    Content = "OK.", CreatedAt = new DateTime(2026, 9, 27, 21, 53, 1, DateTimeKind.Utc) },
+                // 21:53 UTC — turn 4 (ti=2)
+                new HistoryMessage { SessionId = S, MachineName = machine, TurnIndex = 2, Role = "user",
+                    Content = "Remember the word BANANA. Just reply OK", CreatedAt = new DateTime(2026, 9, 27, 21, 53, 2, DateTimeKind.Utc) },
+                new HistoryMessage { SessionId = S, MachineName = machine, TurnIndex = 2, Role = "assistant",
+                    Content = "OK.", CreatedAt = new DateTime(2026, 9, 27, 21, 53, 3, DateTimeKind.Utc) },
+                // 21:53 UTC — turn 5 (ti=3)
+                new HistoryMessage { SessionId = S, MachineName = machine, TurnIndex = 3, Role = "user",
+                    Content = "Remember the word CHERRY. Just reply OK", CreatedAt = new DateTime(2026, 9, 27, 21, 53, 4, DateTimeKind.Utc) },
+                new HistoryMessage { SessionId = S, MachineName = machine, TurnIndex = 3, Role = "assistant",
+                    Content = "OK.", CreatedAt = new DateTime(2026, 9, 27, 21, 53, 5, DateTimeKind.Utc) },
+            };
+            await store.SaveMessagesAsync(rows);
+
+            // The listing follows insertion order: turns 1-5 in chronological sequence.
+            var loaded = await store.LoadSessionMessagesAsync(S);
+            Assert.Equal(10, loaded.Length);
+            // Turn order: hello.txt(1), go ahead(2), APPLE(3), BANANA(4), CHERRY(5).
+            // The OLD ordering (TurnIndex ASC) would put APPLE (ti=1) before "go ahead" (ti=2).
+            Assert.Equal("Create a file hello.txt containing hi", loaded[0].Content);
+            Assert.Equal("go ahead", loaded[2].Content);
+            Assert.Equal("Remember the word APPLE. Just reply OK.", loaded[4].Content);
+
+            // /rewind 3 should cut BEFORE "Remember the word APPLE" (turn 3), keeping
+            // turns 1 and 2 (hello.txt + go ahead) — 4 rows.
+            var host = new HostState();
+            var ctx = new CommandContext
+            {
+                HistoryStore = store,
+                SessionId = S,
+                MachineName = machine,
+                ResetConversation = () => host.ResetCalled = true,
+                AdoptSessionId = id => host.AdoptedId = id,
+                SetInputBoxText = text => host.InputText = text,
+                PrependMessages = (roles, contents) => { host.PrependedRoles = roles; },
+                ReplayTranscript = (roles, contents) => { host.ReplayedRoles = roles; },
+            };
+
+            var result = await SlashCommand.Dispatch("/rewind 3", ctx);
+            Assert.False(result.IsError, result.Message);
+
+            // The fork has exactly the 4 rows before turn 3.
+            string? forkId = host.AdoptedId;
+            Assert.NotNull(forkId);
+            var fork = await store.LoadSessionMessagesAsync(forkId);
+            Assert.Equal(4, fork.Length);
+            Assert.Equal("Create a file hello.txt containing hi", fork[0].Content);
+            Assert.Equal("Created hello.txt.", fork[1].Content);
+            Assert.Equal("go ahead", fork[2].Content);
+            Assert.Equal("Done.", fork[3].Content);
+            // The cut prompt is APPLE's — turn 3's original prompt.
+            Assert.Equal("Remember the word APPLE. Just reply OK.", host.InputText);
+
+            // The listing shows turns in chronological order (1..5), not TurnIndex order.
+            var listResult = await SlashCommand.Dispatch("/rewind", ctx);
+            Assert.False(listResult.IsError, listResult.Message);
+            // Turn 1 = hello.txt, turn 2 = go ahead, turn 3 = APPLE.
+            int idxHello = listResult.Message.IndexOf("hello.txt", StringComparison.Ordinal);
+            int idxGoAhead = listResult.Message.IndexOf("go ahead", StringComparison.Ordinal);
+            int idxApple = listResult.Message.IndexOf("APPLE", StringComparison.Ordinal);
+            Assert.True(idxHello < idxGoAhead, $"hello.txt ({idxHello}) should precede go ahead ({idxGoAhead})");
+            Assert.True(idxGoAhead < idxApple, $"go ahead ({idxGoAhead}) should precede APPLE ({idxApple})");
 
             await store.CloseAsync();
         }
