@@ -318,6 +318,54 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Status:** fixed, pending deploy - commit "fix(shell): expand %VAR% only outside quoted content; share the shell tokenizer" (the
   fix and this line are the same commit, so it cannot name its own hash)
 
+### H-28 - Runaway shell call can't be interrupted by an override steer; one long timeout for every command
+- **First seen:** 2026-09-27 - job-1713 (DevMind.TUI prompt history). The agent wrote a PowerShell loop to scan a NuGet XML doc and sat
+  in that single run_shell call for ~4.5 min. An override steer was queued but could not land until the call ended; the driver
+  cancelled the job at 304 s. Every agent shell call had the 300 s DEVMIND_SHELL_TIMEOUT that exists for solution builds.
+- **Fix:** 7cd9be9 (headless: an accepted override that the next boundary would honour cancels the in-flight shell/build/test call,
+  never the job), e00246d (300 s only for build/test/restore/install commands, 60 s DEVMIND_SHELL_TIMEOUT_SHORT otherwise; run_build
+  always long; timeout output tells the model to re-run with timeout_seconds), 6c45b7c (same override cancel for the TUI, via the
+  shared Core helper ShellCallInterrupt).
+- **Status:** fixed, deployed 2026-09-27 - Paul ran the TUI manual check (override cancels, suggest does not, Esc unchanged).
+
+### H-29 - Cancelling a shell call logs "Failed to reap process tree ... taskkill exited with code 255"
+- **First seen:** 2026-09-27 - job-1713 cancel: `[SHELL] Failed to reap process tree (PID 103952): taskkill exited with code 255`.
+  PID 103952 was already gone when checked a minute later, so nothing leaked this time.
+- **Question:** why does taskkill report failure (process already exited? access? job object already closed it?) when ShellRunner is
+  supposed to kill via a job object. A false "failed to reap" is noise; a real one leaks runaway processes.
+- **Status:** open
+
+### H-30 - New files created by DM tools are LF in a CRLF repo
+- **First seen:** 2026-09-27 - job-1714 created DevMind.TUI/PromptHistory.cs and DevMind.TUI.Tests/PromptHistoryTests.cs; `git add`
+  warned "LF will be replaced by CRLF". Existing files keep their line endings (H-22 / TextFileFormat); only the new-file branch is
+  affected.
+- **Proposed fix:** for a new file, pick the dominant line ending of sibling files in the same folder (or .gitattributes /
+  core.autocrlf), falling back to CRLF on Windows.
+- **Status:** open
+
+### H-31 - self_reported_incomplete fires on a finished job ("not run by me - the harness verifies it")
+- **First seen:** 2026-09-27 - job-1714 ended `stopped_incomplete`, reason `self_reported_incomplete`, quoting the line "The full
+  solution suite was not run by me - the harness verifies it." The work was complete; the harness's own test verification then ran
+  1763/1763 green. Same detector as H-01, the opposite failure: a phrase match on a sentence that delegates verification rather than
+  admitting a gap.
+- **Proposed fix:** don't flag when harness verification ran and passed for the same claim, or narrow the phrase list so "not run by
+  me" followed by "harness verifies" doesn't count.
+- **Status:** open
+
+### H-32 - Agent runs an incremental build when the brief says `-t:Rebuild` (H-13 recurrence)
+- **First seen:** 2026-09-27 - job-1712 and job-1714 both ran plain `dotnet build DevMind.slnx` despite an explicit `-t:Rebuild`
+  instruction, then reported "0 warnings". The driver re-ran with -t:Rebuild both times (0/0, so no harm this time).
+- **Proposed fix:** have build_verification itself run -t:Rebuild (or a clean build) when warning counts matter, so the agent's
+  choice doesn't decide whether warnings are visible. See H-13.
+- **Status:** open
+
+### H-33 - TUI override-steer hook in Program.cs has no test
+- **First seen:** 2026-09-27 - 6c45b7c. With the Program.cs call to Steer.InterruptForOverride disabled, all 471 TUI tests still
+  pass; only the shared helper and decision function are tested. TuiAgenticHost can't be constructed without a live Terminal.Gui view.
+- **Proposed fix:** move the steer-handler wiring behind a small testable seam (a function taking the mailbox result, depth and a
+  cancel delegate), or accept the manual check as the coverage and say so here.
+- **Status:** open (manual check passed 2026-09-27)
+
 ## Parked
 
 ### P-01 - No-write-streak nudge
