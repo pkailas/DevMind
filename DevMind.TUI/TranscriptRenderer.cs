@@ -53,6 +53,12 @@ namespace DevMind
         private bool _inProseBlock;
         private bool _lastWriteWasToolLine;
 
+        // The gutter number of the last line drawn in the CURRENT fenced code block. Block state,
+        // not entry state: a streamed block arrives as many per-line Code entries, and the number
+        // must run 1..N across them, so it lives here and is reset on a block start and on any
+        // non-code entry — which is what ends a block (prose, output, listing, diff, flush).
+        private int _codeLineNo;
+
         // Where each rendered entry started, in characters emitted so far. The scroll anchor
         // needs it to keep the reader's place across a rebuild.
         private readonly List<int> _entryOffsets = new List<int>();
@@ -102,6 +108,7 @@ namespace DevMind
             _tables = new TableBuffer();
             _inProseBlock = false;
             _lastWriteWasToolLine = false;
+            _codeLineNo = 0;
             _entryOffsets.Clear();
             _emitted = 0;
         }
@@ -121,12 +128,19 @@ namespace DevMind
 
             _entryOffsets.Add(_emitted);
 
+            // Everything except a per-line continuation of the CURRENT block ends the block:
+            // the gutter count starts again at 1 when the next code entry comes. (Placed
+            // before the switch — a per-line Code entry with BlockStart set resets here too,
+            // and RenderCode would see a fresh count either way.)
+            if (entry.Kind != TranscriptEntryKind.Code || entry.BlockStart)
+                _codeLineNo = 0;
+
             switch (entry.Kind)
             {
                 case TranscriptEntryKind.Output:    RenderOutput(entry.Text, entry.Color); break;
                 case TranscriptEntryKind.Prose:     RenderProse(entry.Text); break;
                 case TranscriptEntryKind.ProseFlush: RenderTableResult(_tables.Flush()); break;
-                case TranscriptEntryKind.Code:      RenderCode(entry.Text, entry.Language, entry.NestUnderCall); break;
+                case TranscriptEntryKind.Code:      RenderCode(entry.Text, entry.Language, entry.NestUnderCall, entry.BlockStart); break;
                 case TranscriptEntryKind.Listing:   RenderListing(entry.Text, entry.Path, entry.Count); break;
                 case TranscriptEntryKind.Diff:      RenderDiff(entry.Text, entry.Second, entry.Path); break;
             }
@@ -283,9 +297,16 @@ namespace DevMind
 
         // ── Code, listings, diffs ────────────────────────────────────────────────
 
-        private void RenderCode(string code, string language, bool nestUnderCall)
+        private void RenderCode(string code, string language, bool nestUnderCall, bool blockStart)
         {
             if (string.IsNullOrEmpty(code)) return;
+
+            // A block start — the first per-line entry of a fenced block, or a whole-block entry
+            // (which carries many lines in one) — restarts the numbering. A continuation line
+            // picks the count back up where the previous entry left it. RenderListing passes
+            // blockStart: false and nests the call: listings show a FILE, and its numbers are the
+            // file's, so the state reset is a formality there (no gutter is drawn).
+            if (blockStart) _codeLineNo = 0;
 
             _lastWriteWasToolLine = false;
             _inProseBlock = false;
@@ -311,7 +332,7 @@ namespace DevMind
             // is NOT counted per emitted piece; it is counted from the document itself: each
             // '\n' is a line boundary, and the line that follows it is the next number. A blank
             // line is just a boundary with no content, so it is numbered exactly like the rest.
-            int lineNo = 0;
+            int lineNo = _codeLineNo;
             bool atLineStart = true;   // true at the very start, and after every break
 
             foreach (var t in tokens)
@@ -346,6 +367,8 @@ namespace DevMind
                     }
                 }
             }
+
+            _codeLineNo = lineNo;
         }
 
         /// <summary>"a\nb" → "a", "\n", "b", so a line start can be recognised between them.</summary>
@@ -374,7 +397,7 @@ namespace DevMind
                 string[] lines = content.Replace("\r\n", "\n").Split('\n');
                 string head = string.Join("\n", lines, 0, Math.Min(MaxListingLines, lines.Length));
 
-                RenderCode(head + "\n", lang, nestUnderCall: true);
+                RenderCode(head + "\n", lang, nestUnderCall: true, blockStart: false);
 
                 // Indented explicitly: painting the listing closed the call block, so the
                 // door will not nest this one, and a truncation notice hanging left of the
@@ -386,7 +409,7 @@ namespace DevMind
             else
             {
                 RenderCode(content.EndsWith("\n", StringComparison.Ordinal) ? content : content + "\n",
-                           lang, nestUnderCall: true);
+                           lang, nestUnderCall: true, blockStart: false);
             }
         }
 

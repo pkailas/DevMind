@@ -30,10 +30,14 @@ namespace DevMind
         private static readonly Regex FenceLine = new Regex(@"^`{3,}\s*$", RegexOptions.Compiled);
 
         private readonly Action<string> _prose;        // emit prose (rendered Normal/live)
-        private readonly Action<string, string> _code; // emit a finished code block (text, language)
+        // emit one finished code LINE (text, language, is it the block's first line). The
+        // first-line flag is what lets the renderer number the FENCED BLOCK, not the entry:
+        // a per-line block is many entries, and the number must run 1..N across them.
+        private readonly Action<string, string, bool> _code;
 
         // Code-block state.
         private bool _inCode;
+        private bool _firstCodeLine = true;                        // next emitted code line starts a block
         private bool _collectingLang;                              // reading the language tag after ```
         private string _lang = string.Empty;
         private readonly StringBuilder _codeLine = new StringBuilder(); // current (incomplete) code line
@@ -43,7 +47,7 @@ namespace DevMind
         private readonly StringBuilder _prefix = new StringBuilder(); // held line-start while still ambiguous
         private readonly StringBuilder _proseLine = new StringBuilder(); // the current prose line, incl. its newline
 
-        public CodeBlockStreamer(Action<string> prose, Action<string, string> code)
+        public CodeBlockStreamer(Action<string> prose, Action<string, string, bool> code)
         {
             _prose = prose;
             _code  = code;
@@ -75,6 +79,7 @@ namespace DevMind
                     {
                         // Closing fence — hide the marker and leave code mode.
                         _inCode = false;
+                        _firstCodeLine = true;
                         _lang = string.Empty;
                         _lineClassified = false;
                         _prefix.Clear();
@@ -82,7 +87,10 @@ namespace DevMind
                     else
                     {
                         // Emit this code line highlighted immediately — live, no block buffering.
-                        _code(line + "\n", _lang.Trim());
+                        // The first line after the opening fence carries the flag that tells
+                        // the renderer to start (or restart) the block's numbering.
+                        _code(line + "\n", _lang.Trim(), _firstCodeLine);
+                        _firstCodeLine = false;
                     }
                 }
                 else _codeLine.Append(c);
@@ -162,6 +170,7 @@ namespace DevMind
         {
             // Any prose is already complete-line at this point; nothing is buffered un-emitted.
             _inCode = true;
+            _firstCodeLine = true;   // the first body line completes the block start
             _codeLine.Clear();
 
             string after = ts.Substring(3);
@@ -184,10 +193,12 @@ namespace DevMind
         {
             if (_inCode)
             {
-                // Unterminated block — emit the partial last line so nothing is lost.
-                if (_codeLine.Length > 0) _code(_codeLine.ToString(), _lang.Trim());
+                // Unterminated block — emit the partial last line so nothing is lost. It is
+                // the block's first line only if the stream never completed a line in it.
+                if (_codeLine.Length > 0) _code(_codeLine.ToString(), _lang.Trim(), _firstCodeLine);
                 _codeLine.Clear();
                 _inCode = false;
+                _firstCodeLine = true;
                 _collectingLang = false;
                 _lang = string.Empty;
             }

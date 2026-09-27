@@ -1951,7 +1951,7 @@ namespace DevMind
                 // NOT pass through this streamer — it is appended directly below.
                 var codeStreamer = new CodeBlockStreamer(
                     prose: text => ((TuiAgenticHost)host).AppendProse(text),
-                    code:  (code, lang) => ((TuiAgenticHost)host).AppendCode(code, lang));
+                    code:  (code, lang, blockStart) => ((TuiAgenticHost)host).AppendCodeLine(code, lang, blockStart));
 
                 // Fold any queued steer into the prompt for THIS iteration, before the
                 // request goes out. Same decision logic as the headless drain (Steer.Apply

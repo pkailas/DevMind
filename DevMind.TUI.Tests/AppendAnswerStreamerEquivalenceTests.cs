@@ -32,13 +32,14 @@ namespace DevMind.TUI.Tests
         {
             private readonly CodeBlockStreamer _streamer;
             public readonly List<string> Prose = new List<string>();
-            public readonly List<(string text, string lang)> Code = new List<(string, string)>();
+            public readonly List<(string text, string lang, bool blockStart)> Code =
+                new List<(string, string, bool)>();
 
             public Recorder()
             {
                 _streamer = new CodeBlockStreamer(
                     prose: t => Prose.Add(t),
-                    code: (text, lang) => Code.Add((text, lang)));
+                    code: (text, lang, blockStart) => Code.Add((text, lang, blockStart)));
             }
 
             public void Feed(string text) => _streamer.Feed(text);
@@ -78,7 +79,7 @@ namespace DevMind.TUI.Tests
             // per-line emissions and the code was routed out of the prose stream.
             Assert.Equal(new[] { "## Summary\n", "Fixed **four** files via `patch`.\n", "All **green** now.\n" },
                 oneShot.Prose);
-            Assert.Equal(new[] { ("dotnet build\n", "") }, oneShot.Code);
+            Assert.Equal(new[] { ("dotnet build\n", "", true) }, oneShot.Code);
         }
 
         // An answer block containing a fenced code section: fenced lines go to
@@ -95,9 +96,10 @@ namespace DevMind.TUI.Tests
             Assert.Equal("Intro line.\n", rec.Prose[0]);
             Assert.Equal("Closing line.\n", rec.Prose[1]);
 
-            // Code: the single fenced line, with its language tag.
+            // Code: the single fenced line, with its language tag — and it IS the block
+            // start (a one-line block: the flag the renderer resets its count on).
             Assert.Single(rec.Code);
-            Assert.Equal(("int x = 1;\n", "csharp"), rec.Code[0]);
+            Assert.Equal(("int x = 1;\n", "csharp", true), rec.Code[0]);
 
             // The fence markers reach neither callback — not as prose text,
             // not as code text, not as a language tag.

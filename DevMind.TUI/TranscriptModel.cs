@@ -47,40 +47,62 @@ namespace DevMind
         public OutputColor Color { get; }
         public string Language { get; }
         public bool NestUnderCall { get; }
+        /// <summary>
+        /// True for the first line of a fenced block the streamer emitted per line. The
+        /// renderer's gutter count is BLOCK state, not entry state: it resets on a BlockStart
+        /// and continues across the block's later per-line entries. A whole-block entry (one
+        /// entry carrying many lines) is its own block — it starts its count regardless.
+        /// </summary>
+        public bool BlockStart { get; }
         public string Path { get; }
         public string Second { get; }
         public int Count { get; }
 
         private TranscriptEntry(TranscriptEntryKind kind, string text, OutputColor color,
-                                string language, bool nestUnderCall, string path, string second, int count)
+                                string language, bool nestUnderCall, bool blockStart,
+                                string path, string second, int count)
         {
             Kind          = kind;
             Text          = text ?? string.Empty;
             Color         = color;
             Language      = language;
             NestUnderCall = nestUnderCall;
+            BlockStart    = blockStart;
             Path          = path;
             Second        = second;
             Count         = count;
         }
 
         public static TranscriptEntry Output(string text, OutputColor color)
-            => new TranscriptEntry(TranscriptEntryKind.Output, text, color, null, false, null, null, 0);
+            => new TranscriptEntry(TranscriptEntryKind.Output, text, color, null, false, false, null, null, 0);
 
         public static TranscriptEntry Prose(string line)
-            => new TranscriptEntry(TranscriptEntryKind.Prose, line, OutputColor.Normal, null, false, null, null, 0);
+            => new TranscriptEntry(TranscriptEntryKind.Prose, line, OutputColor.Normal, null, false, false, null, null, 0);
 
         public static TranscriptEntry ProseFlush()
-            => new TranscriptEntry(TranscriptEntryKind.ProseFlush, "", OutputColor.Normal, null, false, null, null, 0);
+            => new TranscriptEntry(TranscriptEntryKind.ProseFlush, "", OutputColor.Normal, null, false, false, null, null, 0);
 
+        /// <summary>
+        /// A whole-block entry: one entry carrying a block's lines (or all of them). It is a
+        /// block boundary by construction, so <c>BlockStart</c> is fixed true — the renderer
+        /// resets its gutter count on it.
+        /// </summary>
         public static TranscriptEntry Code(string code, string language, bool nestUnderCall)
-            => new TranscriptEntry(TranscriptEntryKind.Code, code, OutputColor.Normal, language, nestUnderCall, null, null, 0);
+            => new TranscriptEntry(TranscriptEntryKind.Code, code, OutputColor.Normal, language, nestUnderCall, true, null, null, 0);
+
+        /// <summary>
+        /// One line of a fenced block the streamer emitted per line. <paramref name="blockStart"/>
+        /// is true only for the block's first line; the later lines continue the renderer's
+        /// running count from the previous entry.
+        /// </summary>
+        public static TranscriptEntry CodeLine(string code, string language, bool blockStart)
+            => new TranscriptEntry(TranscriptEntryKind.Code, code, OutputColor.Normal, language, false, blockStart, null, null, 0);
 
         public static TranscriptEntry Listing(string content, string fullPath, int lineCount)
-            => new TranscriptEntry(TranscriptEntryKind.Listing, content, OutputColor.Normal, null, false, fullPath, null, lineCount);
+            => new TranscriptEntry(TranscriptEntryKind.Listing, content, OutputColor.Normal, null, false, false, fullPath, null, lineCount);
 
         public static TranscriptEntry Diff(string oldContent, string newContent, string path)
-            => new TranscriptEntry(TranscriptEntryKind.Diff, oldContent, OutputColor.Normal, null, false, path, newContent, 0);
+            => new TranscriptEntry(TranscriptEntryKind.Diff, oldContent, OutputColor.Normal, null, false, false, path, newContent, 0);
 
         /// <summary>Roughly what this entry costs to keep. Used only by the cap.</summary>
         public int Weight => Text.Length + (Second?.Length ?? 0) + 64;

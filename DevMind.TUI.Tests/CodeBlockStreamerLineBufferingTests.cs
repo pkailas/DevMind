@@ -24,12 +24,12 @@ namespace DevMind.TUI.Tests
         private sealed class Recorder
         {
             public readonly List<string> Prose = new List<string>();
-            public readonly List<(string text, string lang)> Code = new List<(string, string)>();
+            public readonly List<(string text, string lang, bool blockStart)> Code = new List<(string, string, bool)>();
 
             public CodeBlockStreamer Streamer() =>
                 new CodeBlockStreamer(
                     prose: t => Prose.Add(t),
-                    code: (text, lang) => Code.Add((text, lang)));
+                    code: (text, lang, blockStart) => Code.Add((text, lang, blockStart)));
         }
 
         // THE regression that motivates the job: a **bold** pair split across two
@@ -125,10 +125,11 @@ namespace DevMind.TUI.Tests
             streamer.Feed("before\n```csharp\nint x = 1;\nafter\n```\nafter prose\n");
             streamer.Flush();
 
-            // Code lines go to the code callback, with the language tag preserved.
+            // Code lines go to the code callback, with the language tag preserved. The
+            // first line is the block start; the second continues the same block.
             Assert.Equal(2, rec.Code.Count);
-            Assert.Equal(("int x = 1;\n", "csharp"), rec.Code[0]);
-            Assert.Equal(("after\n", "csharp"), rec.Code[1]);
+            Assert.Equal(("int x = 1;\n", "csharp", true), rec.Code[0]);
+            Assert.Equal(("after\n", "csharp", false), rec.Code[1]);
 
             // No code content leaks into prose.
             foreach (var p in rec.Prose)

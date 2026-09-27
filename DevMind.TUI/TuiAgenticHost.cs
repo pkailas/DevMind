@@ -811,24 +811,12 @@ namespace DevMind
             // span list pointing past the document end.
             int start = doc.TextLength;
             var combined = new StringBuilder();
-            var pendingSpans = new List<ColorSpan>();
-            int i = 0;
-            while (i < batch.Length)
-            {
-                Terminal.Gui.Drawing.Attribute attr = batch[i].attr;
-                int runStart = start + combined.Length;
-                int runLen = 0;
-                int j = i;
-                while (j < batch.Length && batch[j].attr.Equals(attr))
-                {
-                    string piece = NormalizeNewlines(batch[j].text);
-                    combined.Append(piece);
-                    runLen += piece.Length;
-                    j++;
-                }
-                if (runLen > 0) pendingSpans.Add(new ColorSpan(runStart, runLen, attr));
-                i = j;
-            }
+            var runs = new List<(string Text, bool NonCopyable, Terminal.Gui.Drawing.Attribute Attr)>();
+            for (int k = 0; k < batch.Length; k++)
+                runs.Add((NormalizeNewlines(batch[k].text), batch[k].nonCopyable, batch[k].attr));
+
+            var pendingSpans = CoalesceFlushRuns(runs, start);
+            foreach (var (text, _, _) in runs) combined.Append(text);
 
             if (combined.Length == 0)
             {
@@ -871,7 +859,42 @@ namespace DevMind
             Diag($"[FLUSH] spans={batch.Length} runs={pendingSpans.Count} insert=1 total={doc.TextLength}");
         }
 
-        // ── Live tail: the one line the transcript rewrites ──────────────────────
+        /// <summary>
+        /// Fold the drained append batch into the one insert's color spans: consecutive runs
+        /// with the same attribute AND the same non-copyable flag coalesce into one
+        /// <see cref="ColorSpan"/>. Pure — no document, no list — because the flag a COPY
+        /// skips (NonCopyable) rides each run and this is where it is carried into the span.
+        /// <para>
+        /// The flag is part of the coalescing key, not an afterthought: a gutter run (dim,
+        /// non-copyable) and a prose run (dim, copyable) paint identically but copy
+        /// differently, so they must be separate spans. Merging on attribute alone — what
+        /// this used to do — dropped the flag (the 3-arg ColorSpan ctor defaults it false),
+        /// and a copy of a live block kept its gutters.
+        /// </para>
+        /// </summary>
+        internal static List<ColorSpan> CoalesceFlushRuns(
+            List<(string Text, bool NonCopyable, Terminal.Gui.Drawing.Attribute Attr)> runs, int start)
+        {
+            var spans = new List<ColorSpan>();
+            int offset = start;
+            int i = 0;
+            while (i < runs.Count)
+            {
+                Terminal.Gui.Drawing.Attribute attr = runs[i].Attr;
+                bool nonCopyable = runs[i].NonCopyable;
+                int runLen = 0;
+                int j = i;
+                while (j < runs.Count && runs[j].Attr.Equals(attr) && runs[j].NonCopyable == nonCopyable)
+                {
+                    runLen += runs[j].Text.Length;
+                    j++;
+                }
+                if (runLen > 0) spans.Add(new ColorSpan(offset, runLen, attr, nonCopyable));
+                offset += runLen;
+                i = j;
+            }
+            return spans;
+        }
 
         /// <summary>
         /// Set (or replace) the live tail line — a single line, always the last thing in the
@@ -1251,7 +1274,7 @@ namespace DevMind
 
             var streamer = new CodeBlockStreamer(
                 prose: AppendProse,
-                code:  AppendCode);
+                code:  AppendCodeLine);
             streamer.Feed(text);
             streamer.Flush();
             FlushProse();
@@ -1360,6 +1383,19 @@ namespace DevMind
         {
             if (string.IsNullOrEmpty(code)) return;
             Record(TranscriptEntry.Code(code, language, nestUnderCall));
+        }
+
+        /// <summary>
+        /// One line of the model's own fenced block, as the streamer emits them per line.
+        /// <paramref name="blockStart"/> is true for the block's first line only: it is what
+        /// makes the renderer's gutter count follow the FENCED BLOCK (1..N across entries) rather
+        /// than restart on every entry. A per-line entry is always the model's fence, never a
+        /// nested tool listing.
+        /// </summary>
+        internal void AppendCodeLine(string code, string language, bool blockStart)
+        {
+            if (string.IsNullOrEmpty(code)) return;
+            Record(TranscriptEntry.CodeLine(code, language, blockStart));
         }
 
         private void AppendHighlightedListing(string content, string fullPath, int lineCount)
@@ -2755,7 +2791,9 @@ namespace DevMind
         // One recorded append: the document offset range it occupies and the Attribute to
         // paint it with. Spans are append-only and strictly increasing in Start (every insert
         // lands at the document end), so they form a sorted, contiguous cover of [0, TextLength).
-        private readonly struct ColorSpan
+        // Internal (not private) so the test seam CoalesceFlushRuns can return the list:
+        // the test reads Start/Length/NonCopyable off the spans the live flush records.
+        internal readonly struct ColorSpan
         {
             public readonly int Start;
             public readonly int Length;
