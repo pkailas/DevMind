@@ -252,7 +252,10 @@ namespace DevMind.McpServer
             "failed/cancelled), elapsed time, queue position, and the live tail of the agent's transcript. " +
             "stopped_incomplete means the job finished but its work is NOT trustworthy as-is (hit " +
             "the iteration cap mid-task, thrashed on a repeating failure, or build/test verification " +
-            "failed) — check incomplete_reasons and usually devmind_task_continue it. needs_input means " +
+            "failed) — check incomplete_reasons and usually devmind_task_continue it. self_report_note " +
+            "(null unless set) quotes a line of the answer that reads like unfinished work but did not " +
+            "stop the job because the harness's build (and tests, if requested) passed — read it. " +
+            "needs_input means " +
             "the agent paused with specific questions (in the result answer) — answer them via " +
             "devmind_task_continue. Optional wait_seconds: when > 0, blocks until the job's state " +
             "CHANGES (e.g. running -> done/needs_input/failed) or that many seconds elapse, then " +
@@ -300,6 +303,7 @@ namespace DevMind.McpServer
                 job_id = job.Id,
                 state = DisplayState(job),
                 incomplete_reasons = job.IsIncomplete ? job.IncompleteReasons() : null,
+                self_report_note = job.SelfReportNote,
                 queue_position = job.State == AgentJobState.Queued ? _jobs.QueuePosition(job) : (int?)null,
                 elapsed_seconds = elapsed,
                 working_dir = job.WorkingDirectory,
@@ -392,6 +396,7 @@ namespace DevMind.McpServer
                 job_id = job.Id,
                 state = DisplayState(job),
                 incomplete_reasons = job.IsIncomplete ? job.IncompleteReasons() : null,
+                self_report_note = job.SelfReportNote,
                 answer = r?.Answer ?? "",
                 actions = (r?.Actions ?? Array.Empty<HostAction>())
                     .Select(a => new { kind = a.Kind, detail = a.Detail, success = a.Success }),

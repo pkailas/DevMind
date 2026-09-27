@@ -90,7 +90,7 @@ namespace DevMind.McpServer
                 || Build is { Succeeded: false }
                 || Tests is { Succeeded: false }
                 || NoFinalAnswer
-                || SelfReportedIncomplete.Detected);
+                || SelfReportMakesIncomplete);
 
         /// <summary>
         /// H-20: the run ended but left no answer — nothing but harness status lines
@@ -118,6 +118,39 @@ namespace DevMind.McpServer
 
         private SelfReportedIncomplete? _selfReported;
 
+        /// <summary>
+        /// H-31: the harness itself verified the work — its build succeeded, and its test run
+        /// succeeded too if one was requested. A requested test run that did not happen (null)
+        /// does not count as passing.
+        /// </summary>
+        public bool HarnessVerifiedSuccess =>
+            Build is { Succeeded: true } && (!VerifyTests || Tests is { Succeeded: true });
+
+        /// <summary>
+        /// Whether the self-report makes the job incomplete. An INCOMPLETE: marker always does.
+        /// A phrase-list hit only does when the harness did not positively verify the work:
+        /// wording is weak evidence, and a green harness build + test run outweighs it
+        /// (job-1714 "was not run by me — the harness verifies it", job-1715 "Did not run the
+        /// TUI" — both forbidden by the brief, both green). With nothing verified — the H-01
+        /// jobs ran with verify_build off — the phrase list still protects.
+        /// </summary>
+        public bool SelfReportMakesIncomplete =>
+            SelfReportedIncomplete.Strength == SelfReportStrength.Strong
+            || (SelfReportedIncomplete.Strength == SelfReportStrength.Weak && !HarnessVerifiedSuccess);
+
+        /// <summary>
+        /// A phrase-list line that did NOT make the job incomplete because the harness verified
+        /// the work — surfaced as self_report_note in devmind_task_status / devmind_task_result so a
+        /// driver still reads the line. Null otherwise (including when the line did count: it
+        /// is then in incomplete_reasons).
+        /// </summary>
+        public string? SelfReportNote =>
+            State == AgentJobState.Done
+            && SelfReportedIncomplete.Strength == SelfReportStrength.Weak
+            && !SelfReportMakesIncomplete
+                ? SelfReportedIncomplete.Line
+                : null;
+
         /// <summary>Why the job is incomplete (empty when it isn't).</summary>
         public string[] IncompleteReasons()
         {
@@ -134,7 +167,7 @@ namespace DevMind.McpServer
             // incomplete_reasons should not have to go back to the answer to find out which
             // sentence tripped it.
             SelfReportedIncomplete self = SelfReportedIncomplete;
-            if (self.Detected)
+            if (SelfReportMakesIncomplete)
             {
                 reasons.Add(SelfReportedIncompleteDetector.Reason);
                 if (self.Line.Length > 0) reasons.Add(self.Line);
@@ -884,6 +917,7 @@ namespace DevMind.McpServer
                     job_id = job.Id,
                     state = job.IsIncomplete ? "stopped_incomplete" : job.State.ToString().ToLowerInvariant(),
                     incomplete_reasons = job.IncompleteReasons(),
+                    self_report_note = job.SelfReportNote,
                     answer = r?.Answer ?? "",
                     actions = (r?.Actions ?? Array.Empty<HostAction>())
                         .Select(a => new { kind = a.Kind, detail = a.Detail, success = a.Success }),

@@ -348,9 +348,15 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   solution suite was not run by me - the harness verifies it." The work was complete; the harness's own test verification then ran
   1763/1763 green. Same detector as H-01, the opposite failure: a phrase match on a sentence that delegates verification rather than
   admitting a gap.
+- **Second hit:** job-1715 - "- Did not run the TUI; did not commit." ("did not run"); the brief said "Don't run the TUI. Don't
+  commit." Harness build + tests green (1849/1849).
 - **Proposed fix:** don't flag when harness verification ran and passed for the same claim, or narrow the phrase list so "not run by
   me" followed by "harness verifies" doesn't count.
-- **Status:** open
+- **Status:** fixed, pending deploy - commit "H-31: a phrase-only self-report yields to green harness verification". Rule: an
+  INCOMPLETE: marker always makes the job stopped_incomplete; a phrase-list hit does so only when the harness did not verify the work
+  (build absent/failed, or tests requested and not green) - otherwise the job is `done` and the line is returned as `self_report_note`.
+  The phrase list is unchanged, so H-01's unverified jobs are still caught; delegated agents are now told that brief-forbidden steps are
+  not INCOMPLETE items.
 
 ### H-32 - Agent runs an incremental build when the brief says `-t:Rebuild` (H-13 recurrence)
 - **First seen:** 2026-09-27 - job-1712 and job-1714 both ran plain `dotnet build DevMind.slnx` despite an explicit `-t:Rebuild`

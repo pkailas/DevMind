@@ -880,6 +880,8 @@ namespace DevMind
             "\n" +
             NoToolchainQuirkRule +
             "\n" +
+            CompletionReportRule +
+            "\n" +
             "TypeScript discipline: after EVERY write to a .ts or .tsx file (create_file,\n" +
             "patch_file, or append_file), immediately call get_diagnostics on that file and\n" +
             "fix all reported errors before doing anything else. A type error caught at\n" +
@@ -946,6 +948,15 @@ namespace DevMind
             "minimal reproduction that excludes your own code. If you cannot produce one within\n" +
             "two attempts, state that the cause is unknown and report it — do not build on the\n" +
             "assumption.\n";
+
+        /// <summary>H-31: the harness reads the final answer for unfinished work. job-1715 wrote
+        /// "Did not run the TUI; did not commit." — both forbidden by its brief — and was marked
+        /// stopped_incomplete on the phrase alone. The marker is the declaration the harness
+        /// trusts; what the brief ruled out is not a gap.</summary>
+        internal const string CompletionReportRule =
+            "If any part of the task is unfinished, list each item on its own line starting with\n" +
+            "INCOMPLETE:. Things the brief told you NOT to do are not unfinished work; don't\n" +
+            "report them as not done.\n";
 
         internal const string NoCommitRule =
             "Do NOT run git commit, git push, or any other git command that rewrites history\n" +

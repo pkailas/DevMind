@@ -513,14 +513,16 @@ namespace DevMind.McpServer.Tests
         private readonly TcpListener _listener;
         private readonly CancellationTokenSource _cts = new();
         private readonly string _filePath;
+        private readonly string _summary;
         private int _postCount;
         // (TcpListener resolved via using System.Net — no qualification needed.)
 
         public string BaseUrl { get; }
 
-        public EditThenDoneLlmServer(string filePath)
+        public EditThenDoneLlmServer(string filePath, string summary = "done")
         {
             _filePath = filePath;
+            _summary = summary;
             var port = GetFreePort();
             BaseUrl = $"http://127.0.0.1:{port}/v1";
             _listener = new TcpListener(IPAddress.Loopback, port);
@@ -588,7 +590,7 @@ namespace DevMind.McpServer.Tests
                                 }),
                                 "call_1")
                             : ToolCallSse("task_done",
-                                JsonSerializer.Serialize(new { summary = "done" }),
+                                JsonSerializer.Serialize(new { summary = _summary }),
                                 $"call_{post}");
                         payload = Encoding.UTF8.GetBytes(sse);
                         contentType = "text/event-stream";

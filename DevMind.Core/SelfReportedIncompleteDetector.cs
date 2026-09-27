@@ -1,4 +1,4 @@
-// File: SelfReportedIncompleteDetector.cs  v1.3
+// File: SelfReportedIncompleteDetector.cs  v1.4
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // When the agent's own final answer says the work is not finished.
@@ -38,28 +38,50 @@
 // ever the weakest of the backups ("the caller must not report X as fixed" is still caught by
 // "must not report" and "not fixed").
 
+//
+// v1.4 (H-31): the result says HOW it knows. An INCOMPLETE: marker is the agent's explicit
+// declaration (Strong); a phrase-list hit is a guess from wording (Weak). job-1714 ("The full
+// solution suite was not run by me — the harness verifies it.") and job-1715 ("Did not run
+// the TUI; did not commit." — both things the brief forbade) ended stopped_incomplete on a
+// phrase hit while the harness's own build and tests were green. The detector does not decide
+// what a weak hit means; AgentJob does, by weighing it against harness verification.
+
 using System;
 using System.Collections.Generic;
 using System.Text.RegularExpressions;
 
 namespace DevMind
 {
+    /// <summary>How a final answer said the work is unfinished.</summary>
+    public enum SelfReportStrength
+    {
+        /// <summary>It did not.</summary>
+        None,
+        /// <summary>A phrase-list hit only ("not fixed", "did not run") — wording, not a declaration.</summary>
+        Weak,
+        /// <summary>An explicit INCOMPLETE: marker line.</summary>
+        Strong,
+    }
+
     /// <summary>What a final answer admitted, if anything.</summary>
     public readonly struct SelfReportedIncomplete
     {
-        /// <summary>True when the answer says the work is unfinished.</summary>
-        public readonly bool Detected;
+        /// <summary>How the answer said it — an explicit marker or a phrase hit.</summary>
+        public readonly SelfReportStrength Strength;
 
         /// <summary>The first line that said so, trimmed for a reason field.</summary>
         public readonly string Line;
 
-        public SelfReportedIncomplete(bool detected, string line)
+        /// <summary>True when the answer says the work is unfinished, by either route.</summary>
+        public bool Detected => Strength != SelfReportStrength.None;
+
+        public SelfReportedIncomplete(SelfReportStrength strength, string line)
         {
-            Detected = detected;
+            Strength = strength;
             Line = line ?? string.Empty;
         }
 
-        public static readonly SelfReportedIncomplete None = new SelfReportedIncomplete(false, string.Empty);
+        public static readonly SelfReportedIncomplete None = new SelfReportedIncomplete(SelfReportStrength.None, string.Empty);
     }
 
     /// <summary>
@@ -134,9 +156,10 @@ namespace DevMind
         /// Examine a final answer.
         /// </summary>
         /// <returns>
-        /// The first line that reports unfinished work, or <see cref="SelfReportedIncomplete.None"/>.
-        /// Lines inside a fenced code block are skipped: a phrase in a diff or a pasted log is
-        /// being quoted, not claimed.
+        /// The first INCOMPLETE: declaration (<see cref="SelfReportStrength.Strong"/>) anywhere in
+        /// the answer; failing that, the first phrase-list line (<see cref="SelfReportStrength.Weak"/>);
+        /// otherwise <see cref="SelfReportedIncomplete.None"/>. Lines inside a fenced code block
+        /// are skipped: a phrase in a diff or a pasted log is being quoted, not claimed.
         /// </returns>
         public static SelfReportedIncomplete Detect(string answer)
         {
@@ -144,6 +167,7 @@ namespace DevMind
 
             bool inFence = false;
             string bareMarker = null;     // a marker line with nothing after it, e.g. "**INCOMPLETE:**"
+            string firstWeak = null;      // the first phrase-list hit — kept while a marker may still follow
 
             foreach (string raw in answer.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
             {
@@ -171,7 +195,7 @@ namespace DevMind
                         Match inner = Marker.Match(itemText);
                         if (inner.Success) itemText = itemText.Substring(inner.Length).Trim();
                         if (itemText.Length == 0 || NothingUnfinished.IsMatch(itemText)) continue;
-                        return new SelfReportedIncomplete(true, Trim(line));
+                        return new SelfReportedIncomplete(SelfReportStrength.Strong, Trim(line));
                     }
                 }
 
@@ -183,21 +207,31 @@ namespace DevMind
                 {
                     string rest = line.Substring(marker.Length).Trim();
                     if (rest.Length == 0) bareMarker = line;
-                    else if (!NothingUnfinished.IsMatch(rest)) return new SelfReportedIncomplete(true, Trim(line));
+                    else if (!NothingUnfinished.IsMatch(rest)) return new SelfReportedIncomplete(SelfReportStrength.Strong, Trim(line));
                     continue;
                 }
 
                 // A header titles a section; it does not report on the work ("## Caller must know").
                 if (Header.IsMatch(line)) continue;
 
+                // A phrase hit is weak evidence, and a later INCOMPLETE: line outranks it: keep
+                // reading, or an answer with "Did not run the TUI." above an "INCOMPLETE: X" line
+                // would report only the weak line, and a green harness build would excuse a
+                // declared gap.
+                if (firstWeak != null) continue;
                 foreach (string phrase in Phrases)
                 {
                     if (line.IndexOf(phrase, StringComparison.OrdinalIgnoreCase) >= 0)
-                        return new SelfReportedIncomplete(true, Trim(line));
+                    {
+                        firstWeak = Trim(line);
+                        break;
+                    }
                 }
             }
 
-            return SelfReportedIncomplete.None;
+            return firstWeak != null
+                ? new SelfReportedIncomplete(SelfReportStrength.Weak, firstWeak)
+                : SelfReportedIncomplete.None;
         }
 
         private static string Trim(string line)
