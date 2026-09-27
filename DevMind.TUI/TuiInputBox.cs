@@ -51,6 +51,13 @@ namespace DevMind
 
         private readonly GuiEditor _editor;
 
+        /// <summary>
+        /// Shell-style prompt history for Up/Down recall. Settable after
+        /// construction; null = feature off (Up/Down behave as stock caret
+        /// movement). Assigned by Program.cs.
+        /// </summary>
+        public PromptHistory History { get; set; }
+
         public TuiInputBox()
         {
             _editor = new GuiEditor
@@ -147,6 +154,38 @@ namespace DevMind
                 // Diag (inert unless DEVMIND_TUI_DIAG is set): trace raw keys reaching
                 // the input editor — used to verify binding paths.
                 TuiAgenticHost.Diag($"[INPUT] KeyDown 0x{(uint)key.KeyCode:X8} \"{key}\"");
+
+                // ── Prompt history recall (plain Up/Down only — Shift/Ctrl
+                //     variants must fall through to their stock handling) ──
+                // Up: only when the caret is on the FIRST document line, so a
+                //     recalled multi-line entry can be walked (caret up) before
+                //     older entries are recalled. Down: only when browsing AND
+                //     the caret is on the LAST line. On success the entry text
+                //     replaces the box content and the caret sits at its end.
+                if (History != null &&
+                    (key.KeyCode == Key.CursorUp.KeyCode || key.KeyCode == Key.CursorDown.KeyCode))
+                {
+                    TextDocument histDoc = _editor.Document;
+                    if (histDoc != null && histDoc.LineCount > 0)
+                    {
+                        int caretLine = histDoc.GetLineByOffset(_editor.CaretOffset).LineNumber; // 1-based
+                        bool isUp = key.KeyCode == Key.CursorUp.KeyCode;
+                        if ((isUp && caretLine == 1) || (!isUp && caretLine == histDoc.LineCount && History.IsBrowsing))
+                        {
+                            string histText;
+                            bool ok = isUp
+                                ? History.TryPrevious(Text, out histText)
+                                : History.TryNext(out histText);
+                            if (ok)
+                            {
+                                _editor.Text = histText;
+                                _editor.CaretOffset = histText.Length; // end of (multi-line) entry
+                                key.Handled = true;
+                            }
+                        }
+                    }
+                    if (key.Handled) return;
+                }
 
                 if (key.KeyCode != Key.V.WithCtrl.KeyCode) return;
                 key.Handled = true;

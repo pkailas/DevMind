@@ -483,6 +483,12 @@ namespace DevMind
             // grows 1..6 content rows. Border blue when active.
             var inputBox = new TuiInputBox();
 
+            // Shell-style prompt history: Up recalls submitted prompts, Down walks
+            // forward. Persists as JSON Lines in the global dir (next to devmind.json);
+            // the caller passes the resolved path so the class stays testable.
+            inputBox.History = new PromptHistory(
+                Path.Combine(DevMindPaths.GlobalDir, "prompt-history.jsonl"));
+
             // Output pane fills everything above the input box + status row.
             // The Dim.Height reference keeps the layout correct as the input box grows.
             outputView.Height = Dim.Fill(Dim.Height(inputBox.View) + 1);
@@ -886,6 +892,7 @@ namespace DevMind
                     else if (!string.IsNullOrEmpty(inputBox.Text?.Trim()))
                     {
                         inputBox.Clear();
+                        inputBox.History?.ResetBrowsing();
                     }
                 }
             };
@@ -914,6 +921,10 @@ namespace DevMind
 
                 string input = inputBox.Text?.Trim() ?? "";
                 if (string.IsNullOrEmpty(input)) return;
+
+                // Record every non-empty submission — slash commands and steers
+                // included — BEFORE the /quit check and steer routing.
+                inputBox.History?.Add(input);
 
                 // Clear input.
                 inputBox.Clear();
