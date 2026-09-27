@@ -27,15 +27,15 @@ namespace DevMind.TUI.Tests
     {
         private sealed class Sink
         {
-            public readonly List<(string Text, TgAttribute Attr)> Spans = new();
-            public void Write(string t, TgAttribute a) => Spans.Add((t, a));
+            public readonly List<(string Text, TgAttribute Attr, bool NonCopyable)> Spans = new();
+            public void Write(string t, TgAttribute a, bool nonCopyable = false) => Spans.Add((t, a, nonCopyable));
 
             public string Text
             {
                 get
                 {
                     var sb = new StringBuilder();
-                    foreach (var (t, _) in Spans) sb.Append(t);
+                    foreach (var (t, _, _) in Spans) sb.Append(t);
                     return sb.ToString();
                 }
             }
@@ -59,7 +59,8 @@ namespace DevMind.TUI.Tests
                     RemovedBg  = new TgColor(0x4B, 0x1F, 0x1F),
                     AddedBg    = new TgColor(0x1F, 0x3A, 0x1F),
                 },
-                verbose: false);
+                verbose: false,
+                resolveColor: c => new TgAttribute(new TgColor(0x88, 0x88, 0x88), Bg));
 
         private static string Render(IEnumerable<TranscriptEntry>? entries, int width, int proseCap = 0)
         {

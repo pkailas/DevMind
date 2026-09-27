@@ -31,7 +31,13 @@ namespace DevMind
     /// </summary>
     internal sealed class TranscriptRenderer
     {
-        private readonly Action<string, TgAttribute> _sink;
+        /// <summary>Widest the code gutter gets before it widens with the number.</summary>
+        public const int MinGutterWidth = 3;
+
+        /// <summary>Spaces between the number and the code, after the gutter column.</summary>
+        public const int GutterTrailingSpaces = 2;
+
+        private readonly Action<string, TgAttribute, bool> _sink;
         private readonly Func<int> _width;
         private readonly int _proseCap;
         private readonly Func<OutputColor, TgAttribute> _resolve;
@@ -39,6 +45,7 @@ namespace DevMind
         private readonly Func<TokenKind, TgAttribute> _syntax;
         private readonly Func<DiffPalette> _diffPalette;
         private readonly bool _verbose;
+        private readonly Func<OutputColor, TgAttribute> _resolveColor;
 
         // Arrival-order state. Every field here must be cleared by Reset.
         private TranscriptBlock _block;
@@ -52,16 +59,18 @@ namespace DevMind
         private int _emitted;
 
         public TranscriptRenderer(
-            Action<string, TgAttribute> sink,
+            Action<string, TgAttribute, bool> sink,
             Func<int> width,
             int proseCap,
             Func<OutputColor, TgAttribute> resolve,
             Func<InlineTextStyle, TgAttribute> prose,
             Func<TokenKind, TgAttribute> syntax,
             Func<DiffPalette> diffPalette,
-            bool verbose)
+            bool verbose,
+            Func<OutputColor, TgAttribute> resolveColor = null)
         {
             _sink        = sink ?? throw new ArgumentNullException(nameof(sink));
+            _resolveColor = resolveColor ?? throw new ArgumentNullException(nameof(resolveColor));
             _width       = width ?? throw new ArgumentNullException(nameof(width));
             _proseCap    = proseCap;
             _resolve     = resolve ?? throw new ArgumentNullException(nameof(resolve));
@@ -125,11 +134,11 @@ namespace DevMind
 
         // ── The sink ─────────────────────────────────────────────────────────────
 
-        private void Emit(string text, TgAttribute attr)
+        private void Emit(string text, TgAttribute attr, bool nonCopyable = false)
         {
             if (string.IsNullOrEmpty(text)) return;
             _emitted += text.Length;
-            _sink(text, attr);
+            _sink(text, attr, nonCopyable);
         }
 
         private void Emit(string text, OutputColor color) => Emit(text, _resolve(color));
@@ -284,17 +293,26 @@ namespace DevMind
 
             var tokens = SyntaxHighlighter.Highlight(code, language);
 
-            if (!nestUnderCall)
-            {
-                foreach (var t in tokens) Emit(t.Text, _syntax(t.Kind));
-                return;
-            }
+            // The line start is prefixed per piece — not applied to the block — because the
+            // highlighter's tokens do not align with lines: a comment or a string can carry its
+            // own newline through the middle of one token.
+            //
+            // The model's own fenced code leads each line with a dim line number, the same
+            // gutter a diff gets. It is marked non-copyable so a copy of the block returns the
+            // code the model wrote; tool listings (nestUnderCall) and shell output do not get
+            // one — they show a FILE, and its numbers are the file's, not the transcript's.
+            bool gutter = !nestUnderCall;
+            string indent = nestUnderCall ? new string(' ', TranscriptBlock.OutputIndent) : null;
+            TgAttribute gutterAttr = gutter ? _resolveColor(OutputColor.Dim) : default;
 
-            // The indent is prefixed at each line start rather than applied to the block,
-            // because the highlighter's tokens do not align with lines: a comment or a string
-            // can carry its own newline through the middle of one token.
-            string indent = new string(' ', TranscriptBlock.OutputIndent);
-            bool atLineStart = true;
+            // The highlighter's token boundaries do not track lines — a comment or string can
+            // carry a newline inside one token, and (as the blank-line case shows) a token can
+            // end on a newline with the next token beginning on a new line. So the line number
+            // is NOT counted per emitted piece; it is counted from the document itself: each
+            // '\n' is a line boundary, and the line that follows it is the next number. A blank
+            // line is just a boundary with no content, so it is numbered exactly like the rest.
+            int lineNo = 0;
+            bool atLineStart = true;   // true at the very start, and after every break
 
             foreach (var t in tokens)
             {
@@ -302,13 +320,30 @@ namespace DevMind
                 foreach (string piece in SplitKeepingNewlines(t.Text))
                 {
                     bool isBreak = piece.Length == 1 && piece[0] == '\n';
-                    if (atLineStart && !isBreak)
+
+                    if (atLineStart)
                     {
-                        Emit(indent, OutputColor.Normal);
-                        atLineStart = false;
+                        // Every line — code or blank — gets the gutter and the nest indent,
+                        // in that order. A blank line is a break at a line start: the gutter
+                        // is emitted for it and then the break follows, so it reads "  N  \n".
+                        if (gutter)
+                        {
+                            lineNo++;
+                            int digits = (int)Math.Floor(Math.Log10(lineNo)) + 1;
+                            int width = Math.Max(MinGutterWidth, digits);
+                            Emit(new string(' ', width - digits) + lineNo.ToString(), gutterAttr, nonCopyable: true);
+                            Emit(new string(' ', GutterTrailingSpaces), gutterAttr, nonCopyable: true);
+                        }
+                        if (indent != null) Emit(indent, OutputColor.Normal);
+
+                        Emit(piece, attr);
+                        atLineStart = isBreak;
                     }
-                    Emit(piece, attr);
-                    if (isBreak) atLineStart = true;
+                    else
+                    {
+                        Emit(piece, attr);
+                        if (isBreak) atLineStart = true;
+                    }
                 }
             }
         }
@@ -366,7 +401,8 @@ namespace DevMind
                 _inProseBlock = false;
                 _block.CloseBlock();
 
-                string notice = DiffPainter.Paint(lines, path, _diffPalette(), Emit);
+                string notice = DiffPainter.Paint(lines, path, _diffPalette(),
+                    (text, attr) => Emit(text, attr, nonCopyable: false));
                 if (notice != null) Emit(notice + "\n", OutputColor.Dim);
             }
             catch

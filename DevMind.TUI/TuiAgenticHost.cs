@@ -93,7 +93,7 @@ namespace DevMind
         // search. Mutated by InsertSpan and read by the transformer — both run on the
         // Terminal.Gui UI thread (the flush timer drains via App.Invoke; Transform runs in Draw),
         // so no locking is required.
-        private readonly List<ColorSpan> _colorSpans = new List<ColorSpan>();
+        private readonly ColorSpanList _colorSpans = new ColorSpanList();
 
         // ── Coalesced append buffer + UI render pump ─────────────────────────────
         // Streamed output (one SSE token per call) used to queue one App.Invoke — and so one
@@ -133,8 +133,8 @@ namespace DevMind
         private int _liveTailRendered;     // chars of it currently in the document; UI thread only
 
         private readonly object _pendingLock = new object();
-        private readonly List<(string text, Terminal.Gui.Drawing.Attribute attr)> _pending =
-            new List<(string, Terminal.Gui.Drawing.Attribute)>();
+        private readonly List<(string text, Terminal.Gui.Drawing.Attribute attr, bool nonCopyable)> _pending =
+            new List<(string, Terminal.Gui.Drawing.Attribute, bool)>();
         private object _renderPumpToken; // AddTimeout handle; non-null once the pump is registered
 
         // ── Diagnostics ──────────────────────────────────────────────────────────
@@ -386,7 +386,8 @@ namespace DevMind
                 prose:       style => ProseAttribute(style, ViewBackground),
                 syntax:      kind => new Terminal.Gui.Drawing.Attribute(SyntaxColor(kind), ViewBackground),
                 diffPalette: BuildDiffPalette,
-                verbose:     TranscriptNoise.Verbose);
+                verbose:     TranscriptNoise.Verbose,
+                resolveColor: ResolveAttribute);
 
         private Terminal.Gui.Drawing.Color ViewBackground
         {
@@ -687,28 +688,30 @@ namespace DevMind
         // pump drains the buffer on the next UI tick. App is null before app.Run() attaches the
         // window (startup banner): at that point we are on the main thread with no running loop and
         // no pump, so insert directly to keep ordering with the banner.
-        private void EnqueueSpan(string text, Terminal.Gui.Drawing.Attribute attr)
+        private void EnqueueSpan(string text, Terminal.Gui.Drawing.Attribute attr, bool nonCopyable = false)
         {
             if (string.IsNullOrEmpty(text)) return;
 
+            // nonCopyable rides the span to the document with the text: the flag a copy skips
+            // lives where the color a draw reads lives, so both survive a rebuild identically.
             // A rebuild is not a stream. It runs on the UI thread inside one update group,
             // so its spans go straight into the document — routing them through the
             // coalescing queue would have the pump redraw the transcript in pieces, which is
             // the flicker the debounce exists to avoid.
             if (_rebuilding)
             {
-                InsertSpan(text, attr, scroll: false);
+                InsertSpan(text, attr, nonCopyable, scroll: false);
                 return;
             }
 
             if (_outputView.App == null)
             {
-                InsertSpan(text, attr, scroll: true);
+                InsertSpan(text, attr, nonCopyable, scroll: true);
                 return;
             }
 
             lock (_pendingLock)
-                _pending.Add((text, attr));
+                _pending.Add((text, attr, nonCopyable));
         }
 
         // Drain the whole pending backlog into the document in ONE UI-thread pass: a single
@@ -768,7 +771,7 @@ namespace DevMind
                 return;
             }
 
-            (string text, Terminal.Gui.Drawing.Attribute attr)[] batch;
+            (string text, Terminal.Gui.Drawing.Attribute attr, bool nonCopyable)[] batch;
             string liveTail;
             lock (_pendingLock)
             {
@@ -1064,25 +1067,36 @@ namespace DevMind
             // Rebase spans: drop those fully before the cut, clamp the one straddling it, shift the
             // rest down by cut. Mutate the list in place — the transformer holds this same instance.
             var rebased = new List<ColorSpan>(_colorSpans.Count);
-            foreach (ColorSpan s in _colorSpans)
+            for (int i = 0; i < _colorSpans.Count; i++)
             {
+                ColorSpan s = _colorSpans[i];
                 int end = s.Start + s.Length;
                 if (end <= cut) continue;                 // fully trimmed away
                 int newStart = s.Start - cut;
                 int newLen   = s.Length;
                 if (newStart < 0) { newLen += newStart; newStart = 0; } // straddles the cut
                 if (newLen <= 0) continue;
-                rebased.Add(new ColorSpan(newStart, newLen, s.Attr));
+                rebased.Add(new ColorSpan(newStart, newLen, s.Attr, s.NonCopyable));
             }
             _colorSpans.Clear();
             _colorSpans.AddRange(rebased);
             Diag($"[TRIM] cut={cut} newTotal={doc.TextLength} spans={_colorSpans.Count}");
         }
 
+        /// <summary>
+        /// True when <paramref name="offset"/> is inside display chrome a copy must skip —
+        /// the line-number gutter on the model's fenced code. The copy path (Program.cs) walks
+        /// the selection through this; the flag is on the same spans the draw path paints from,
+        /// so it survives a resize rebuild and a resume replay without a second store.
+        /// </summary>
+        internal bool IsNonCopyableAt(int offset) => _colorSpans.IsNonCopyable(offset);
+
         // Shared insert: normalize newlines, splice at document end, record the color span. When
         // scroll is true the caret follows the newest line (direct/pre-init path); the batched
         // flush sets the caret once for the whole batch instead. MUST run on the UI thread.
-        private void InsertSpan(string text, Terminal.Gui.Drawing.Attribute attr, bool scroll)
+        // nonCopyable marks display chrome (the code gutter) that a copy must skip; it is
+        // recorded on the span with the text, exactly like the attribute the draw path reads.
+        private void InsertSpan(string text, Terminal.Gui.Drawing.Attribute attr, bool nonCopyable, bool scroll)
         {
             // Normalize line endings — the document is '\n'-based; a stray '\r' would render
             // as a visible glyph and skew offsets.
@@ -1103,7 +1117,7 @@ namespace DevMind
             try
             {
                 doc.Insert(start, text);
-                _colorSpans.Add(new ColorSpan(start, text.Length, attr));
+                _colorSpans.Add(new ColorSpan(start, text.Length, attr, nonCopyable));
                 if (scroll) _outputView.CaretOffset = doc.TextLength; // auto-scroll to newest line
                 // No per-insert Diag here: during fast streaming the per-call File.AppendAllText
                 // (~1 ms each) dominated and skewed timing. FlushPending logs one [FLUSH] line/batch.
@@ -1137,6 +1151,8 @@ namespace DevMind
                     _liveTail = null;                   // and the live line, whose text is about to go
                 }
 
+                // (the pending tuple is now 3-wide; nothing else changes here)
+
                 // /cls clears what is PAINTED and what it was painted from — otherwise the
                 // next resize would bring the cleared transcript back.
                 _model.Clear(); _droppedSinceRender = 0;
@@ -1153,7 +1169,7 @@ namespace DevMind
 
                 // One-line confirmation so the cleared view isn't ambiguous.
                 InsertSpan("[screen cleared — conversation and context preserved]\n",
-                    ResolveAttribute(OutputColor.Dim), scroll: true);
+                    ResolveAttribute(OutputColor.Dim), nonCopyable: false, scroll: true);
 
                 // Reset the document undo history — the one piece of render state the
                 // scrollback cap does not bound (cleared after the re-seed so it stays empty).
@@ -2745,11 +2761,62 @@ namespace DevMind
             public readonly int Length;
             public readonly Terminal.Gui.Drawing.Attribute Attr;
 
-            public ColorSpan(int start, int length, Terminal.Gui.Drawing.Attribute attr)
+            /// <summary>
+            /// True for display chrome the reader should not copy — the line-number gutter on
+            /// the model's fenced code. A copy of a selection skips these offsets, so the
+            /// clipboard gets the code the model wrote, not the gutter it was drawn with.
+            /// </summary>
+            public readonly bool NonCopyable;
+
+            public ColorSpan(int start, int length, Terminal.Gui.Drawing.Attribute attr, bool nonCopyable = false)
             {
-                Start  = start;
-                Length = length;
-                Attr   = attr;
+                Start       = start;
+                Length      = length;
+                Attr        = attr;
+                NonCopyable = nonCopyable;
+            }
+        }
+
+        // The recorded appends, append-only and strictly increasing in Start (every insert
+        // lands at the document end), so a binary search finds the span covering an offset.
+        // One class, because a flag the COPY path needs (NonCopyable) belongs on the data the
+        // DRAW path paints from — the two read the same list and cannot drift.
+        private sealed class ColorSpanList
+        {
+            private readonly List<ColorSpan> _spans = new List<ColorSpan>();
+
+            public void Add(ColorSpan span) => _spans.Add(span);
+
+            public void AddRange(IEnumerable<ColorSpan> spans) => _spans.AddRange(spans);
+
+            public void Clear() => _spans.Clear();
+
+            public int Count => _spans.Count;
+
+            public ColorSpan this[int index] => _spans[index];
+
+        public void RemoveAt(int index) => _spans.RemoveAt(index);
+
+        public IEnumerator<ColorSpan> GetEnumerator() => _spans.GetEnumerator();
+
+            /// <summary>True when <paramref name="offset"/> falls inside a non-copyable span.</summary>
+            public bool IsNonCopyable(int offset)
+            {
+                int idx = FindSpanIndex(offset);
+                return idx < _spans.Count && _spans[idx].NonCopyable;
+            }
+
+            // First span whose end (Start+Length) is strictly greater than offset.
+            private int FindSpanIndex(int offset)
+            {
+                int lo = 0, hi = _spans.Count;
+                while (lo < hi)
+                {
+                    int mid = (lo + hi) >> 1;
+                    if (_spans[mid].Start + _spans[mid].Length <= offset) lo = mid + 1;
+                    else hi = mid;
+                }
+                return lo;
             }
         }
 
@@ -2765,9 +2832,9 @@ namespace DevMind
         // InsertSpan's writes, so reading the shared list needs no lock.
         private sealed class OffsetColorTransformer : IVisualLineTransformer
         {
-            private readonly List<ColorSpan> _spans;
+            private readonly ColorSpanList _spans;
 
-            public OffsetColorTransformer(List<ColorSpan> spans) => _spans = spans;
+            public OffsetColorTransformer(ColorSpanList spans) => _spans = spans;
 
             public void Transform(CellVisualLine line)
             {

@@ -2246,7 +2246,13 @@ namespace DevMind
         // per-variable limit.
         static void CopySelectionToClipboard(GuiEditor outputView, TuiAgenticHost host)
         {
-            string text = outputView.SelectedText;
+            // The selection is read BEFORE the copy, because the copy below clears it.
+            // Both offsets are document offsets on the document's '\n' basis — the same
+            // coordinate the host's color spans (and their non-copyable flag) are on.
+            int start = outputView.SelectionStart;
+            int end = outputView.SelectionEnd;
+            string docText = outputView.Document?.Text ?? string.Empty;
+            string text = CopyText.Build(docText, start, end, host.IsNonCopyableAt);
             if (string.IsNullOrEmpty(text))
             {
                 host.AppendOutputLocal("Nothing selected to copy.\n", OutputColor.Dim);
