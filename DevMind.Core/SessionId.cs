@@ -74,6 +74,25 @@ namespace DevMind
             return _machineName;
         }
 
+        /// <summary>
+        /// Mint a fresh session id WITHOUT touching the current one — for a fork (e.g. /rewind)
+        /// that must not split the live session across two ids.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Deliberately NOT <see cref="ComputeSessionId"/>: that one honors DEVMIND_TRACE_RUN_ID,
+        /// which would pin the fork to the live session's id — an exact-id collision in the
+        /// store, where two sessions' rows would merge. A fork id is stamped with the process
+        /// id (so it groups with this run's artifacts) plus a random suffix, so it cannot equal
+        /// the live id even when both are minted in the same second.
+        /// </para>
+        /// </remarks>
+        public static string NewId()
+        {
+            string stamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHHmmssZ").Replace(":", "");
+            return $"{stamp}-pid{System.Diagnostics.Process.GetCurrentProcess().Id}-fork{Guid.NewGuid():N}";
+        }
+
         static string ComputeSessionId()
         {
             string inherited = Environment.GetEnvironmentVariable("DEVMIND_TRACE_RUN_ID");

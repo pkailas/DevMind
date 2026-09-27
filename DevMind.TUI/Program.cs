@@ -1626,6 +1626,17 @@ namespace DevMind
                         HistoryStore = historyStore,
                         SessionId = SessionId.Get(),
                         MachineName = SessionId.GetMachineName(),
+                        // /rewind: refuses mid-turn, hands the prompt back into the input box
+                        // without sending it, and adopts the fork's id through SessionId's
+                        // single adoption point (Reset cleared the cache, so Adopt is legal).
+                        IsTurnRunning = _isTurnRunning,
+                        SetInputBoxText = (text) =>
+                        {
+                            inputBox.Clear();
+                            inputBox.InsertAtCaret(text);   // inserts at the caret and leaves it at the end
+                            inputBox.View.SetFocus();
+                        },
+                        AdoptSessionId = (id) => SessionId.Adopt(id),
                        PrependMessages = (roles, contents) => llmClient.PrependMessages(roles, contents),
                         ReplayTranscript = (roles, contents) => ReplayResumed(host, roles, contents),
                         // Nearline cache (for the /cache command).

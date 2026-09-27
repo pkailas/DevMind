@@ -96,6 +96,27 @@ namespace DevMind
         /// <summary>Machine name for history queries.</summary>
         public string MachineName { get; set; } = "";
 
+        /// <summary>
+        /// True while an agentic turn (or a long host operation like /digest) is running.
+        /// /rewind refuses mid-turn — forking the session out from under a live loop would
+        /// split its saves across two session ids.
+        /// </summary>
+        public bool IsTurnRunning { get; set; }
+
+        /// <summary>
+        /// Put text into the input box WITHOUT sending it, caret at the end. Used by /rewind
+        /// to hand back the prompt the fork is about to redo. Null in a host with no input box.
+        /// </summary>
+        public Action<string> SetInputBoxText { get; set; }
+
+        /// <summary>
+        /// Make the running host use the given session id for turns from now on. Must be the
+        /// host's single adoption point — the id is cached by consumers, so a late switch
+        /// would fork the live session across two ids (the same hazard SessionId.Adopt guards
+        /// at launch). Null in a host that cannot switch sessions.
+        /// </summary>
+        public Action<string> AdoptSessionId { get; set; }
+
        /// <summary>Prepend messages into the conversation history (for /resume).</summary>
         public Action<string[], string[]> PrependMessages { get; set; }
 
@@ -395,6 +416,11 @@ namespace DevMind
                 "Set the current session's title",
                 "/title <text>",
                 TitleHandler);
+
+            RegisterCommand("/rewind",
+                "Fork this session to before a user turn (the original is kept)",
+                "/rewind [n]",
+                RewindHandler);
 
            RegisterCommand("/compact",
                 "Force a context compaction pass now",
@@ -1559,6 +1585,134 @@ namespace DevMind
             {
                 return new CommandResult { Message = $"Failed to set title: {ex.Message}", IsError = true };
             }
+        }
+
+        // -- /rewind [n] ----------------------------------------------------------
+        // Rewind is a FORK, not a delete: /rewind N copies everything before user turn N
+        // into a NEW session and leaves the original in the store, recoverable with
+        // /resume. The cut and the numbering are RewindPlanner's (pure, table-tested);
+        // this handler does the I/O and reuses the EXACT /resume load path —
+        // ResetConversation (what /new does) then PrependMessages + ReplayTranscript (what
+        // /resume does) — so the forked context and transcript cannot drift from a resume
+        // of the new session.
+
+        static async Task<CommandResult> RewindHandler(string[] args, CommandContext ctx)
+        {
+            if (ctx.HistoryStore == null)
+                return new CommandResult { Message = "History is not enabled.", IsError = true };
+
+            // The listing is read-only, so it is allowed mid-turn; the fork is not.
+            if (args.Length == 0)
+            {
+                try
+                {
+                    var messages = await ctx.HistoryStore.LoadSessionMessagesAsync(ctx.SessionId);
+                    return new CommandResult { Message = RewindPlanner.ListTurnsText(messages) };
+                }
+                catch (Exception ex)
+                {
+                    return new CommandResult { Message = $"Failed to list turns: {ex.Message}", IsError = true };
+                }
+            }
+
+            if (!int.TryParse(args[0], out int n) || n < 1)
+                return new CommandResult
+                {
+                    Message = "Usage: /rewind [n]  (no argument lists this session's user turns; n rewinds to BEFORE turn n)",
+                    IsError = true,
+                };
+
+            if (ctx.IsTurnRunning)
+                return new CommandResult
+                {
+                    Message = "/rewind is not available while a turn is running — Esc to cancel it first.",
+                    IsError = true,
+                };
+
+            if (ctx.AdoptSessionId == null)
+                return new CommandResult
+                {
+                    Message = "Session switching is not available in this host.",
+                    IsError = true,
+                };
+
+            try
+            {
+                var messages = await ctx.HistoryStore.LoadSessionMessagesAsync(ctx.SessionId);
+
+                // The fork gets a fresh id BEFORE the plan is cut. Nothing has read it yet —
+                // ctx.SessionId is a snapshot taken when the command context was built, and
+                // the live writers resolve SessionId.Get() per turn — so adopting it here
+                // splits nothing. The planner stamps the copy with it (and the write time),
+                // so the rows that reach the store are exactly the rows the plan says.
+                string newId = SessionId.NewId();
+                var plan = RewindPlanner.Build(messages, n, newId, DateTime.UtcNow, out string error);
+                if (plan == null)
+                    return new CommandResult { Message = error, IsError = true };
+
+                if (plan.MessagesToCopy.Length > 0)
+                    await ctx.HistoryStore.SaveMessagesAsync(plan.MessagesToCopy);
+                await ctx.HistoryStore.UpsertSessionAsync(newId, ctx.MachineName);
+                await ctx.HistoryStore.SetSessionTitleAsync(
+                    newId, RewindPlanner.BuildTitle(await CurrentSessionTitle(ctx), messages, n));
+
+                // The original is untouched in the store from here on: a fork, recoverable
+                // with /history + /resume. Files on disk are never touched by this command.
+
+                // Reset exactly what /new resets, then adopt the fork's id before anything
+                // loads into the fresh context.
+                ctx.ResetConversation();
+                ctx.AdoptSessionId(newId);
+
+                // Load-into-context + replay-into-transcript through the SAME path /resume
+                // uses, with the planned rows — not a second read, so the transcript cannot
+                // disagree with the context behind it.
+                var (roles, contents, skipped) = SessionResume.PairMessages(plan.MessagesToCopy);
+                if (roles.Length > 0)
+                {
+                    ctx.PrependMessages(roles, contents);
+                    ctx.ReplayTranscript?.Invoke(roles, contents);
+                }
+
+                // Turn N's prompt goes BACK into the input box — not sent — so it can be
+                // edited and re-sent as the fork's first new turn.
+                ctx.SetInputBoxText?.Invoke(plan.RestoredPrompt);
+
+                return new CommandResult
+                {
+                    Message = $"Rewound to before turn {n} (new session {ShortId(newId)}). " +
+                              "Original kept — /resume <n> to go back. Files on disk were NOT changed."
+                              + (skipped > 0 ? $" ({skipped} rows skipped on load)." : ""),
+                };
+            }
+            catch (Exception ex)
+            {
+                return new CommandResult { Message = $"Failed to rewind: {ex.Message}", IsError = true };
+            }
+        }
+
+        /// <summary>
+        /// The current session's title, for the fork's title line. Read fresh when the store
+        /// allows it; "" (→ the first prompt) when it does not — a title lookup must never
+        /// veto a rewind.
+        /// </summary>
+        static async Task<string> CurrentSessionTitle(CommandContext ctx)
+        {
+            try
+            {
+                foreach (var s in await ctx.HistoryStore.ListSessionsAsync(ctx.MachineName))
+                    if (s != null && string.Equals(s.SessionId, ctx.SessionId, StringComparison.OrdinalIgnoreCase))
+                        return s.Title ?? string.Empty;
+            }
+            catch { /* best-effort — fall through to the first-prompt title */ }
+            return string.Empty;
+        }
+
+        /// <summary>The id the way it is read from a listing: the trailing segment after the last dash.</summary>
+        static string ShortId(string id)
+        {
+            int dash = (id ?? string.Empty).LastIndexOf('-');
+            return dash < 0 ? id : id.Substring(dash + 1);
         }
 
         // -- /resolve accept_proposed|accept_current|cancel ------------------------

@@ -165,6 +165,7 @@ same thing. Grouping follows `HelpGroups`.
 | `/history [count\|all\|a-b]` | List past sessions from history (20 most recent by default; a-b lists sessions a through b) |
 | `/resume <n>` | Resume a past session by number (from /history listing) |
 | `/title <text>` | Set the current session's title |
+| `/rewind [n]` | Fork this session to before a user turn (the original is kept) |
 | `/steer <text>` | Fold a suggestion into the RUNNING turn at its next iteration boundary (plain text does the same) |
 | `/override <text>` | Redirect the RUNNING turn at its next iteration boundary - stop the current approach and change course |
 | `/mode [auto\|manual]` | Show or set the approval mode: auto applies mutations, manual asks first (Shift+Tab toggles) |
