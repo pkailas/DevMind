@@ -62,6 +62,12 @@ namespace DevMind
         [JsonPropertyName("outputLineCap")]
         public int OutputLineCap { get; set; } = -1;
 
+        /// <summary>Maximum width in columns the model's prose wraps to. 0 (or negative)
+        /// means no cap — prose uses the full view width. The tables, code and diffs
+        /// that sit inside the prose are never capped.</summary>
+        [JsonPropertyName("proseMaxWidth")]
+        public int ProseMaxWidth { get; set; } = 110;
+
         /// <summary>When true, completed turns are captured as JSONL training data.</summary>
         [JsonPropertyName("trainingLogEnabled")]
         public bool TrainingLogEnabled { get; set; } = false;
@@ -171,6 +177,10 @@ namespace DevMind
                 if (root.TryGetProperty("outputLineCap", out var olc) && olc.ValueKind == JsonValueKind.Number
                     && olc.TryGetInt32(out int olcVal))
                     config.OutputLineCap = olcVal;
+
+                if (root.TryGetProperty("proseMaxWidth", out var pmw) && pmw.ValueKind == JsonValueKind.Number
+                    && pmw.TryGetInt32(out int pmwVal))
+                    config.ProseMaxWidth = pmwVal;
 
                 if (root.TryGetProperty("trainingLogEnabled", out var tle)
                     && (tle.ValueKind == JsonValueKind.True || tle.ValueKind == JsonValueKind.False))

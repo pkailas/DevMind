@@ -43,10 +43,11 @@ namespace DevMind.TUI.Tests
 
         private static readonly TgColor Bg = new TgColor(0, 0, 0);
 
-        private static TranscriptRenderer Make(Sink sink, int width) =>
+        private static TranscriptRenderer Make(Sink sink, int width, int proseCap = 0) =>
             new TranscriptRenderer(
                 sink:        sink.Write,
                 width:       () => width,
+                proseCap:    proseCap,
                 resolve:     c => new TgAttribute(new TgColor(0xCC, 0xCC, 0xCC), Bg),
                 prose:       st => new TgAttribute(new TgColor((byte)st, 0, 0), Bg),
                 syntax:      k => new TgAttribute(new TgColor(0, (byte)k, 0), Bg),
@@ -60,10 +61,10 @@ namespace DevMind.TUI.Tests
                 },
                 verbose: false);
 
-        private static string Render(IEnumerable<TranscriptEntry>? entries, int width)
+        private static string Render(IEnumerable<TranscriptEntry>? entries, int width, int proseCap = 0)
         {
             var sink = new Sink();
-            Make(sink, width).RenderAll(entries);
+            Make(sink, width, proseCap).RenderAll(entries);
             return sink.Text;
         }
 
@@ -258,6 +259,67 @@ namespace DevMind.TUI.Tests
         {
             Assert.Equal("", Render(new List<TranscriptEntry>(), 100));
             Assert.Equal("", Render(null, 100));
+        }
+
+        // ── The prose width cap ─────────────────────────────────────────────────
+
+        [Theory]
+        [InlineData(200, 110, 110)]
+        [InlineData(80, 110, 80)]
+        [InlineData(200, 0, 200)]
+        [InlineData(200, -1, 200)]
+        public void ProseWidthEffectiveNarrowsToTheCap_WhenSet(int viewWidth, int cap, int expected)
+        {
+            Assert.Equal(expected, ProseWidth.Effective(viewWidth, cap));
+        }
+
+        [Fact]
+        public void ProseWrapsToTheCap_OnAWideView_WhileTheTableKeepsTheFullWidth()
+        {
+            // The table here is WIDER than the cap by construction: a ten-column header
+            // row ("| One | Two | ... | Ten |") is 132 characters, so the grid's frame
+            // is 136 columns wide — over 110. If the cap leaked into the table's width
+            // computation, the grid would shrink to fit 108 and a column would wrap,
+            // which the last assertion below catches.
+            var entries = new List<TranscriptEntry>
+            {
+                TranscriptEntry.Prose("A long sentence that goes on and on and on and on and on and on and on and on and on and on and on and on and on and on and on\n"),
+                TranscriptEntry.Prose("| One | Two | Three | Four | Five | Six | Seven | Eight | Nine | Ten |\n"),
+                TranscriptEntry.Prose("|---|---|---|---|---|---|---|---|---|---|\n"),
+                TranscriptEntry.Prose("| a | b | c | d | e | f | g | h | i | j |\n"),
+                TranscriptEntry.ProseFlush(),
+            };
+
+            string capped = Render(entries, 200, proseCap: 110);
+            string uncapped = Render(entries, 200, proseCap: 0);
+
+            // Every line that is not a table row stays within the cap.
+            int widestProse = 0;
+            foreach (string line in capped.Split('\n'))
+            {
+                if (line.Contains(TableGlyphs.Unicode.TopLeft) || line.Contains(TableGlyphs.Unicode.TopRight))
+                    continue;
+                widestProse = Math.Max(widestProse, line.Length);
+            }
+            Assert.True(widestProse <= 110, $"a prose line ran {widestProse} columns, over the cap of 110");
+
+            // The table is laid out against the view's full width, so the capped and
+            // uncapped renders are byte-identical for every grid row: the cap touches
+            // only the prose.
+            string tableFrom(string text) => string.Join("\n",
+                text.Split('\n').Where(l => l.Contains(TableGlyphs.Unicode.TopLeft)));
+            Assert.Equal(tableFrom(uncapped), tableFrom(capped));
+            Assert.True(tableFrom(capped).Length > 0, "the table did not render at all");
+        }
+
+        [Fact]
+        public void AnUncappedProseRunsTheFullWidth()
+        {
+            // The same transcript with cap 0 must render byte-identically to what it did
+            // before the cap existed: no narrowing, no drift.
+            var entries = Conversation();
+
+            Assert.Equal(Render(entries, 200), Render(entries, 200, proseCap: 0));
         }
     }
 }

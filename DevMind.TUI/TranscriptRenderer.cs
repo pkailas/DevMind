@@ -33,6 +33,7 @@ namespace DevMind
     {
         private readonly Action<string, TgAttribute> _sink;
         private readonly Func<int> _width;
+        private readonly int _proseCap;
         private readonly Func<OutputColor, TgAttribute> _resolve;
         private readonly Func<InlineTextStyle, TgAttribute> _prose;
         private readonly Func<TokenKind, TgAttribute> _syntax;
@@ -53,6 +54,7 @@ namespace DevMind
         public TranscriptRenderer(
             Action<string, TgAttribute> sink,
             Func<int> width,
+            int proseCap,
             Func<OutputColor, TgAttribute> resolve,
             Func<InlineTextStyle, TgAttribute> prose,
             Func<TokenKind, TgAttribute> syntax,
@@ -61,6 +63,7 @@ namespace DevMind
         {
             _sink        = sink ?? throw new ArgumentNullException(nameof(sink));
             _width       = width ?? throw new ArgumentNullException(nameof(width));
+            _proseCap    = proseCap;
             _resolve     = resolve ?? throw new ArgumentNullException(nameof(resolve));
             _prose       = prose ?? throw new ArgumentNullException(nameof(prose));
             _syntax      = syntax ?? throw new ArgumentNullException(nameof(syntax));
@@ -248,8 +251,13 @@ namespace DevMind
             // ProseWrap subtracts the block indent itself, so it is handed the width BEFORE
             // the indent is taken off. Subtracting twice — which is what happened while the
             // host owned this — wrapped prose two columns early for no visible reason.
+            //
+            // The width is narrowed to the prose cap here and nowhere else: tables keep
+            // the view's full width, because their columns are a claim the table is
+            // making and a cap would quietly break it.
             IReadOnlyList<ProseLine> planned =
-                ProseWrap.Plan(content.Substring(0, textEnd), ProseHangingIndent, _width());
+                ProseWrap.Plan(content.Substring(0, textEnd), ProseHangingIndent,
+                               ProseWidth.Effective(_width(), _proseCap));
 
             for (int i = 0; i < planned.Count; i++)
             {

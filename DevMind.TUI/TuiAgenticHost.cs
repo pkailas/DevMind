@@ -381,6 +381,7 @@ namespace DevMind
             _renderer ??= new TranscriptRenderer(
                 sink:        EnqueueSpan,
                 width:       AvailableProseWidth,
+                proseCap:    ProseMaxWidth,
                 resolve:     ResolveAttribute,
                 prose:       style => ProseAttribute(style, ViewBackground),
                 syntax:      kind => new Terminal.Gui.Drawing.Attribute(SyntaxColor(kind), ViewBackground),
@@ -1405,6 +1406,14 @@ namespace DevMind
         /// <c>/output-lines</c>; the model's copy of the output is never capped.
         /// </summary>
         public int OutputLineCap { get; set; } = CappedOutputWriter.DefaultCap;
+
+        /// <summary>
+        /// Maximum width in columns the model's prose wraps to. 0 (or negative) means no
+        /// cap — prose uses the full view width. Tables, code and diffs are never capped;
+        /// only the renderer's ProseWrap call narrows to this. Read at render time, so a
+        /// rebuild after a resize sees the same value as the live path did.
+        /// </summary>
+        public int ProseMaxWidth { get; set; } = 110;
 
         /// <summary>
         /// Serve an <c>/expand</c> request: append the parked lines in their original colours

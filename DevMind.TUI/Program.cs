@@ -528,6 +528,10 @@ namespace DevMind
             if (_config.OutputLineCap >= 0)
                 host.OutputLineCap = _config.OutputLineCap;
 
+            // Persisted prose width cap. 0 (or negative) is a deliberate "uncapped" and
+            // must survive a restart like any other setting, so it is applied unconditionally.
+            host.ProseMaxWidth = _config.ProseMaxWidth;
+
             // Status bar: composed-Labels row — state + hints left, LSP chip + context meter right.
             var (lspEnabled, lspLanguages) = host.GetLspStatus();
             var statusBar = new TuiStatusBar(ToolRegistry.ToolCount, lspEnabled, lspLanguages);
