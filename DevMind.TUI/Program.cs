@@ -574,6 +574,28 @@ namespace DevMind
                 window.SetNeedsDraw();
             };
 
+            // ── Slash-command autocomplete popup ────────────────────────────────
+            // Drawn directly above the input box, on top of the transcript and the
+            // toast (added last → highest Z). Driven by the input box's
+            // SlashCompletion state machine; re-evaluated on every text change.
+            var slashPopup = new SlashCompletionPopup();
+            slashPopup.View.X = 0;
+            slashPopup.View.Width = Dim.Fill();
+
+            void UpdateSlashPopup()
+            {
+                // Available rows above the input box: from row 0 (window top border)
+                // to the row just above the input box's top edge.
+                int inputTop = (int)inputBox.View.Frame.Y;
+                int available = Math.Max(0, inputTop - 1); // -1 for the window top border row
+                slashPopup.Update(inputBox.Completion, available);
+                slashPopup.PositionAboveInput(inputTop);
+                window.SetNeedsDraw();
+            }
+
+            inputBox.CompletionChanged += UpdateSlashPopup;
+            window.Add(slashPopup.View);
+
             // Build-version chip, pinned to the FAR RIGHT of the window's top border
             // (the title row). Lets the user confirm which binary is running — the git
             // short-hash in the suffix distinguishes builds. Read from the running .exe's
@@ -877,6 +899,18 @@ namespace DevMind
                 if (key.KeyCode == Key.Esc.KeyCode)
                 {
                     key.Handled = true;
+
+                    // Slash-completion popup open: Esc closes the popup only —
+                    // does NOT clear the input, does NOT cancel a turn.
+                    // (Handled = true stops the key from reaching the input box's
+                    //  own KeyDown, so this is the single point of Esc handling.)
+                    if (inputBox.Completion.IsOpen)
+                    {
+                        inputBox.Completion.Dismiss();
+                        slashPopup.Close();
+                        window.SetNeedsDraw();
+                        return;
+                    }
 
                     if (_isTurnRunning)
                     {

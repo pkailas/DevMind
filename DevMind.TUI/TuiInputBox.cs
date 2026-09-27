@@ -25,6 +25,7 @@
 
 using System;
 using System.Diagnostics;
+using System.Linq;
 using System.Text;
 using Terminal.Gui.App;
 using Terminal.Gui.Drawing;
@@ -50,6 +51,7 @@ namespace DevMind
         private static readonly TgColor BorderIdle   = new TgColor(0x88, 0x88, 0x88); // #888888 (theme.dim)
 
         private readonly GuiEditor _editor;
+        private readonly SlashCompletion _completion;
 
         /// <summary>
         /// Shell-style prompt history for Up/Down recall. Settable after
@@ -58,8 +60,23 @@ namespace DevMind
         /// </summary>
         public PromptHistory History { get; set; }
 
+        /// <summary>
+        /// Slash-command completion state machine. Read by Program.cs to
+        /// drive the popup and the app-level Esc handler.
+        /// </summary>
+        public SlashCompletion Completion => _completion;
+
+        /// <summary>
+        /// Raised after the completion state has been re-evaluated following a
+        /// text change. Program.cs uses this to update the popup view.
+        /// </summary>
+        public event Action CompletionChanged;
+
         public TuiInputBox()
         {
+            _completion = new SlashCompletion(
+                SlashCommand.ListCommands().Select(c => new CompletionMatch(c.Name, c.Description)));
+
             _editor = new GuiEditor
             {
                 X = 0,
@@ -149,11 +166,72 @@ namespace DevMind
                 InsertAtCaret(e.Text);
             };
 
+            // Slash-command completion: re-evaluate on every text change.
+            // TextDocument.TextChanged fires once after a whole update group completes
+            // (verified in Editor 2.5.7 XML: raised from EndUpdate).
+            _editor.Document.TextChanged += (s, e) =>
+            {
+                _completion.Update(Text, History?.IsBrowsing == true);
+                CompletionChanged?.Invoke();
+            };
+
             _editor.KeyDown += (s, key) =>
             {
                 // Diag (inert unless DEVMIND_TUI_DIAG is set): trace raw keys reaching
                 // the input editor — used to verify binding paths.
                 TuiAgenticHost.Diag($"[INPUT] KeyDown 0x{(uint)key.KeyCode:X8} \"{key}\"");
+
+                // ── Slash-command completion (BEFORE prompt history) ──────────
+                // While the popup is open, Up/Down/Tab/Enter are consumed here so
+                // the Editor and prompt history never see them. Esc is handled at
+                // the app level (see Program.cs) because app.Keyboard.KeyDown fires
+                // before view KeyDown.
+                if (_completion.IsOpen)
+                {
+                    if (key.KeyCode == Key.CursorUp.KeyCode)
+                    {
+                        _completion.MoveSelection(-1);
+                        key.Handled = true;
+                        CompletionChanged?.Invoke();
+                        return;
+                    }
+                    if (key.KeyCode == Key.CursorDown.KeyCode)
+                    {
+                        _completion.MoveSelection(+1);
+                        key.Handled = true;
+                        CompletionChanged?.Invoke();
+                        return;
+                    }
+                    if (key.KeyCode == Key.Tab.KeyCode)
+                    {
+                        string accepted = _completion.Accept();
+                        _editor.Text = accepted;
+                        _editor.CaretOffset = accepted.Length;
+                        key.Handled = true;
+                        // TextChanged will fire from the setter and re-evaluate
+                        // (the trailing space closes the popup).
+                        return;
+                    }
+                    if (key.KeyCode == Key.Enter.KeyCode)
+                    {
+                        string text = Text;
+                        if (_completion.IsExactMatch(text))
+                        {
+                            // Exact match: let it submit as today (don't handle).
+                            _completion.Dismiss();
+                            CompletionChanged?.Invoke();
+                            return;
+                        }
+                        // Partial: tab-complete and don't submit. User presses
+                        // Enter again to run it (the trailing space closes the
+                        // popup, so the second Enter submits normally).
+                        string accepted = _completion.Accept();
+                        _editor.Text = accepted;
+                        _editor.CaretOffset = accepted.Length;
+                        key.Handled = true;
+                        return;
+                    }
+                }
 
                 // ── Prompt history recall (plain Up/Down only — Shift/Ctrl
                 //     variants must fall through to their stock handling) ──
