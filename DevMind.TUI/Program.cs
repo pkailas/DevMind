@@ -535,8 +535,23 @@ namespace DevMind
             // message both jump + resume following; the toast hides on the pin-release edge.
             var jumpToast = new Label
             {
-                Text = " ▼ scrolled up — Ctrl+End: jump to bottom ",
+                Text = " ▼ scrolled up — click or Ctrl+End: jump to bottom ",
                 Visible = false,
+            };
+            // Left-click on the toast does exactly what Ctrl+End does. The Label's
+            // default mouse binding forwards clicks to the next view when CanFocus
+            // is false, so we handle the click in the View.MouseEvent event before
+            // it gets there and mark it handled to stop propagation. Only the
+            // LeftButtonClicked flag (a distinct MouseFlags value: press+release
+            // with no repeat) is matched, so a double-click — which arrives as
+            // LeftButtonDoubleClicked — does not re-trigger the jump.
+            jumpToast.MouseEvent += (_, m) =>
+            {
+                if (m.Flags.HasFlag(Terminal.Gui.Input.MouseFlags.LeftButtonClicked))
+                {
+                    host.ScrollOutputToEnd();
+                    m.Handled = true;
+                }
             };
             jumpToast.X = Pos.AnchorEnd(jumpToast.Text.Length + 1);
             jumpToast.Y = Pos.Top(inputBox.View) - 1;
