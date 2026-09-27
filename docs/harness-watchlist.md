@@ -430,6 +430,18 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   line and is parked for Ctrl+O / /expand; ask_caller never collapses; history unchanged.
 - **Status:** fixed, pending deploy check
 
+### H-36 - TUI intermittently drops the first character of a prompt
+- **Seen:** 2026-09-27 twice. ~15:47 local: "create a file hello.txt containing hi" was echoed and SAVED to history as
+  "reate a file..." (SQL Server row 74890). ~18:30: user reported "create nothing, just reply..." lost its 'c' (first prompt after
+  a fresh TUI start + Shift+Tab).
+- **Ruled out (18:33-18:37, DEVMIND_TUI_DIAG on):** the key parser / app-level handler (the 'c' KeyDown reached the input box);
+  Shift+Tab followed by typing (echo "create test" intact); a Windows Terminal paste into the empty box (echo intact); the history
+  save path (no char stripping; stores inputBox.Text.Trim()).
+- **Hunch, unproven:** a timing race right after TUI start or a mode switch (both occurrences were the first prompt in that state).
+- **Next time:** note exactly what preceded it (fresh start, mode switch, paste, fast typing, popup open) and add a send-path trace
+  (input box text at Accepting vs what is echoed/saved).
+- **Status:** open, not reproducible on demand
+
 ## Parked
 
 ### P-01 - No-write-streak nudge
