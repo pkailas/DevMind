@@ -608,6 +608,17 @@ namespace DevMind
                     reason: "superseded by a newer steer before it was consumed");
                 EmitToTurn($"[STEER] superseded (not consumed): {superseded.Message}\n");
             }
+
+            // An override must not wait out a runaway command at the iteration boundary:
+            // cancel the in-flight shell call (the call only — the turn and the job keep
+            // running) so the loop reaches the boundary and folds the steer now. A suggest
+            // never interrupts, and neither does an override the boundary would refuse.
+            if (result.Accepted && mode == SteerMode.Override
+                && !Steer.OverrideRefusedAtNextBoundary(_options.AgenticLoopMaxDepth, _state.AgenticDepth)
+                && _host.CancelInFlightShell(message))
+            {
+                EmitToTurn("[STEER] override cancelled the in-flight shell call.\n");
+            }
             return result;
         }
 

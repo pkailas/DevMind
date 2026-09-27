@@ -126,6 +126,17 @@ namespace DevMind
         // Set by the REPL loop before each agentic turn so RunShellAsync respects Ctrl+C.
         public CancellationToken CancellationToken { get; set; } = CancellationToken.None;
 
+        // The in-flight run_shell / run_build / run_tests call's own cancellation source,
+        // linked to CancellationToken. CancelInFlightShell (MCP request thread) cancels it
+        // while the loop awaits the call (worker thread); _shellCallLock guards the handoff.
+        private readonly object _shellCallLock = new object();
+        private CancellationTokenSource _shellCallCts;
+        private string _shellCallCancelReason;
+
+        /// <summary>Tool result line for a shell call ended by <see cref="CancelInFlightShell"/>.</summary>
+        public const string OverrideSteerCancelMessage =
+            "[SHELL] Cancelled by the driver's override steer — the steer follows at this iteration boundary.";
+
         // Task scratchpad — stores cross-turn state from SCRATCHPAD directives.
         // Injected into the system prompt each turn by Program.cs.
         private string _taskScratchpad = "";
@@ -325,6 +336,71 @@ namespace DevMind
         }
 
         /// <summary>
+        /// Cancels the in-flight run_shell / run_build / run_tests call, if there is one, so
+        /// the loop reaches its next iteration boundary now instead of when the command ends
+        /// or times out (an override steer must not wait out a runaway command). Only the
+        /// call is cancelled — never <see cref="CancellationToken"/>, so the job keeps
+        /// running. Returns whether a call was cancelled. Thread-safe: called from the MCP
+        /// request thread while the loop runs the call on the worker thread.
+        /// </summary>
+        public bool CancelInFlightShell(string reason)
+        {
+            CancellationTokenSource cts;
+            lock (_shellCallLock)
+            {
+                cts = _shellCallCts;
+                if (cts == null || cts.IsCancellationRequested) return false;
+                _shellCallCancelReason = reason ?? "";
+            }
+            // Outside the lock: Cancel runs the runner's kill callback synchronously.
+            try { cts.Cancel(); }
+            catch (ObjectDisposedException) { return false; } // the call ended in between
+            return true;
+        }
+
+        private CancellationTokenSource BeginShellCall()
+        {
+            var cts = CancellationTokenSource.CreateLinkedTokenSource(CancellationToken);
+            lock (_shellCallLock)
+            {
+                _shellCallCts = cts;
+                _shellCallCancelReason = null;
+            }
+            return cts;
+        }
+
+        // Closes the call's cancellation window. Returns the CancelInFlightShell reason when
+        // THAT is what ended the call, or null — a job cancel (which also trips the linked
+        // source) or a timeout keeps its ordinary result.
+        private string EndShellCall(CancellationTokenSource cts)
+        {
+            string reason = null;
+            lock (_shellCallLock)
+            {
+                if (ReferenceEquals(_shellCallCts, cts)) _shellCallCts = null;
+                if (cts.IsCancellationRequested && !CancellationToken.IsCancellationRequested)
+                    reason = _shellCallCancelReason;
+                _shellCallCancelReason = null;
+            }
+            cts.Dispose();
+            return reason;
+        }
+
+        // Rewrites a steer-cancelled call's result so the model reads why it ended, and
+        // journals it like any other ended call.
+        private string ReportSteerCancel(string kind, string command, string reason, string output)
+        {
+            RecordAction(kind, string.IsNullOrEmpty(reason)
+                ? $"{command} (cancelled by override steer)"
+                : $"{command} (cancelled by override steer: {reason})", success: false);
+            AppendOutput(OverrideSteerCancelMessage + "\n", OutputColor.Dim);
+            string rest = (output ?? "").Replace("[SHELL] Command cancelled.", "").Trim();
+            return rest.Length == 0 || rest == "(no output)"
+                ? OverrideSteerCancelMessage
+                : OverrideSteerCancelMessage + "\n" + rest;
+        }
+
+        /// <summary>
         /// Public audit seam for the harness nudges (<see cref="HarnessNudges"/>): records an
         /// injected nudge in the action journal as kind "nudge", so a change of course at
         /// iteration N is explainable from the journal alone, like a steer.
@@ -402,7 +478,23 @@ namespace DevMind
             AppendOutput($"[SHELL] > {command}\n", OutputColor.Dim);
             var progress = new Progress<ShellOutputLine>(line =>
                 AppendOutput(line.Line + "\n", line.IsError ? OutputColor.Error : OutputColor.Normal));
-            var (output, exitCode) = await _shellRunner.ExecuteAsync(command, CancellationToken, timeoutSeconds, progress, detach);
+            var callCts = BeginShellCall();
+            string output;
+            int exitCode;
+            string steerCancel;
+            try
+            {
+                // The job token still reaps the whole tree on a job cancel; the call's own
+                // token is the interrupt, which spares a detach call's detached children.
+                (output, exitCode) = await _shellRunner.ExecuteAsync(
+                    command, CancellationToken, timeoutSeconds, progress, detach, interruptToken: callCts.Token);
+            }
+            finally
+            {
+                steerCancel = EndShellCall(callCts);
+            }
+            if (steerCancel != null)
+                return (exitCode, ReportSteerCancel("shell", command, steerCancel, output));
             RecordAction("shell", $"{command} (exit {exitCode})", exitCode == 0);
             return (exitCode, output);
         }
@@ -1444,9 +1536,15 @@ namespace DevMind
 
             AppendOutput($"[TEST] > {cmd}\n", OutputColor.Dim);
 
+            var callCts = BeginShellCall();
             try
             {
-                var (output, exitCode) = await _shellRunner.ExecuteAsync(cmd, CancellationToken, timeoutSeconds);
+                var (output, exitCode) = await _shellRunner.ExecuteAsync(
+                    cmd, CancellationToken, timeoutSeconds, interruptToken: callCts.Token);
+                string steerCancel = EndShellCall(callCts);
+                callCts = null;
+                if (steerCancel != null)
+                    return ReportSteerCancel("test", cmd, steerCancel, output);
                 RecordAction("test", $"{cmd} (exit {exitCode})", exitCode == 0);
                 return string.IsNullOrWhiteSpace(output)
                     ? $"TEST: no output (exit code {exitCode})"
@@ -1455,6 +1553,10 @@ namespace DevMind
             catch (Exception ex)
             {
                 return $"[TEST] Failed to run tests: {ex.Message}";
+            }
+            finally
+            {
+                if (callCts != null) EndShellCall(callCts);
             }
         }
 

@@ -59,6 +59,18 @@ namespace DevMind
             => maxDepth > 0 && agenticDepth >= maxDepth;
 
         /// <summary>
+        /// Whether an override enqueued NOW — mid-iteration, while a tool call runs — would
+        /// be refused where it lands. The driver increments <c>AgenticDepth</c> only after
+        /// the iteration's tools finish, so the boundary that drains it sees
+        /// <c>agenticDepth + 1</c>; at or past the cap there is either no next boundary at all
+        /// (the depth cap stops the turn) or it is the last iteration, which refuses an
+        /// override. HeadlessAgent uses this to leave an in-flight shell call alone for a
+        /// steer that could not act on its cancellation.
+        /// </summary>
+        public static bool OverrideRefusedAtNextBoundary(int maxDepth, int agenticDepth)
+            => IsLastIteration(maxDepth, agenticDepth + 1);
+
+        /// <summary>
         /// Frames a steer as a block to append to the prompt. It is deliberately a
         /// bracketed, caller-attributed instruction so it reads as a human steer and is
         /// visibly distinct from a harness re-trigger (the loop's own synthetic prompts —

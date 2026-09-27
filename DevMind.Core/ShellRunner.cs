@@ -99,13 +99,22 @@ namespace DevMind
         /// e.g. <c>Start-Process app.exe</c> to inspect in a later call. The shell process itself
         /// stays contained either way, and a timeout/cancel still reaps the whole tree.
         /// </para>
+        /// <para>
+        /// <paramref name="interruptToken"/> abandons THIS call without it being a job cancel
+        /// (the headless driver's override steer). It ends the call exactly like
+        /// <paramref name="cancellationToken"/> — same "[SHELL] Command cancelled." result —
+        /// except that on a <paramref name="detach"/> call only the shell process is killed,
+        /// so the children it deliberately detached survive. A cancel on
+        /// <paramref name="cancellationToken"/> still reaps the whole tree.
+        /// </para>
         /// </summary>
        public async Task<(string output, int exitCode)> ExecuteAsync(
             string command,
             CancellationToken cancellationToken = default,
             int? timeoutSeconds = null,
             IProgress<ShellOutputLine> onLine = null,
-            bool detach = false)
+            bool detach = false,
+            CancellationToken interruptToken = default)
         {
             int effectiveTimeout = ResolveTimeout(timeoutSeconds);
             // npm/npx/yarn/pnpm/bun are .cmd shims on Windows. When PowerShell spawns them it
@@ -158,7 +167,8 @@ namespace DevMind
             var psi = new ProcessStartInfo(shell, args);
            return await RunProcessAsync(
                 psi, shell, args, sanitized, usePowerShell, forceCmdExe,
-                cancellationToken, effectiveTimeout, onLine, allowChildBreakaway: detach);
+                cancellationToken, effectiveTimeout, onLine, allowChildBreakaway: detach,
+                interruptToken: interruptToken);
         }
 
         /// <summary>
@@ -209,7 +219,8 @@ namespace DevMind
             CancellationToken cancellationToken,
             int timeoutSeconds,
             IProgress<ShellOutputLine> onLine,
-            bool allowChildBreakaway = false)
+            bool allowChildBreakaway = false,
+            CancellationToken interruptToken = default)
         {
             // Per-command containment: a Job Object with KILL_ON_JOB_CLOSE, assigned to
             // the child right after Start(). Job membership is inherited by descendants
@@ -221,6 +232,19 @@ namespace DevMind
             // the wait/reap sequence — that close is the authoritative kill for anything
             // still contained. Never throws, by construction (WindowsJobObject.cs).
             IntPtr jobHandle = IntPtr.Zero;
+
+            // Either token ends the call. The linked source is disposed with the call, taking
+            // the kill registration with it (a registration on a long-lived job token would
+            // otherwise outlive every call made under it).
+            using var anyCancel = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, interruptToken);
+            CancellationToken callToken = anyCancel.Token;
+
+            // An interrupt (not a job cancel) of a detach call kills the shell only: its
+            // detached children broke away from the job and are meant to outlive the call,
+            // and taskkill /T would reach them through the still-live parent link.
+            bool SpareDetached() => allowChildBreakaway
+                && interruptToken.IsCancellationRequested
+                && !cancellationToken.IsCancellationRequested;
 
             try
             {
@@ -351,7 +375,7 @@ namespace DevMind
                 // natural completion. taskkill /F /T kills the entire tree atomically.
                 // Windows-specific — cross-platform kill mechanism deferred with rest of
                 // cross-platform shell support (Phase C.10+).
-                cancellationToken.Register(() =>
+                callToken.Register(() =>
                 {
                     // Best-effort early kill on cancel. The authoritative reap — with outcome
                     // reporting — happens below in the timeout/cancel branch (ReapProcessTree).
@@ -360,7 +384,7 @@ namespace DevMind
                         Process.Start(new ProcessStartInfo
                         {
                             FileName        = "taskkill",
-                            Arguments       = $"/F /T /PID {proc.Id}",
+                            Arguments       = SpareDetached() ? $"/F /PID {proc.Id}" : $"/F /T /PID {proc.Id}",
                             CreateNoWindow  = true,
                             UseShellExecute = false
                         })?.WaitForExit(2000);
@@ -369,11 +393,11 @@ namespace DevMind
                 });
 
                 var timeoutTask = Task.Delay(timeoutSeconds * 1_000);
-                var cancelTask  = Task.Delay(Timeout.Infinite, cancellationToken);
+                var cancelTask  = Task.Delay(Timeout.Infinite, callToken);
 
                 var winner     = await Task.WhenAny(exitTcs.Task, timeoutTask, cancelTask);
                 bool timedOut  = winner == timeoutTask;
-                bool cancelled = winner == cancelTask || cancellationToken.IsCancellationRequested;
+                bool cancelled = winner == cancelTask || callToken.IsCancellationRequested;
 
                 // Reap the process tree on timeout/cancel and report the outcome. A failed
                 // reap used to be invisible (bare catch + exit code never checked) — the
@@ -381,7 +405,7 @@ namespace DevMind
                 string reapMessage = null;
                 if (timedOut || cancelled)
                 {
-                    var reap = ReapProcessTree(proc.Id);
+                    var reap = ReapProcessTree(proc.Id, tree: !SpareDetached());
                     reapMessage = reap.Succeeded ? null : $"[SHELL] Failed to reap process tree (PID {proc.Id}): {reap.Reason}";
                     if (reapMessage != null)
                         onLine?.Report(new ShellOutputLine(reapMessage, isError: true));
@@ -519,14 +543,14 @@ namespace DevMind
         /// prevents the common MSBuild-worker-leaves-the-tree case in the first place. Windows
         /// only; on other platforms taskkill is unavailable and the failure is reported honestly.
         /// </summary>
-        private static ReapResult ReapProcessTree(int pid)
+        private static ReapResult ReapProcessTree(int pid, bool tree = true)
         {
             try
             {
                 using var tk = Process.Start(new ProcessStartInfo
                 {
                     FileName        = "taskkill",
-                    Arguments       = $"/F /T /PID {pid}",
+                    Arguments       = tree ? $"/F /T /PID {pid}" : $"/F /PID {pid}",
                     CreateNoWindow  = true,
                     UseShellExecute = false
                 });
