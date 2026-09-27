@@ -941,6 +941,11 @@ namespace DevMind
             catch { /* lint is advisory \u2014 never fail the append over it */ }
         }
 
+        // H-34: after a patch's post-write check fails, PatchEngine restores the file; only if that
+        // restore itself failed (its error says ROLLBACK FAILED) is "not modified" untrue.
+        private static string NotModifiedSuffix(string cause)
+            => cause != null && cause.Contains("ROLLBACK FAILED", StringComparison.Ordinal) ? "" : " File was NOT modified.";
+
         /// <summary>The changed region of a patch: lines of the patched file that were not in the original.</summary>
         private static void RecordPatchLint(ExecutionResult result, string fullPath, string before)
         {
@@ -1060,7 +1065,7 @@ namespace DevMind
                                 ? "unknown" : System.IO.Path.GetFileName(r.FileName);
                             string cause = string.IsNullOrEmpty(failureReason) ? "unknown" : failureReason;
                             result.Errors.Add(
-                                $"[PATCH-FAILED:{failedFile}] Apply failed: {cause} File was NOT modified.");
+                                $"[PATCH-FAILED:{failedFile}] Apply failed: {cause}{NotModifiedSuffix(cause)}");
                         }
                     }
                     catch (Exception ex)
@@ -1123,7 +1128,7 @@ namespace DevMind
                                 result.PatchesFailed++;
                                 string cause = string.IsNullOrEmpty(failureReason) ? "unknown" : failureReason;
                                 result.Errors.Add(
-                                    $"[PATCH-FAILED:{needPreview[i].FileName}] Apply failed: {cause} File was NOT modified.");
+                                    $"[PATCH-FAILED:{needPreview[i].FileName}] Apply failed: {cause}{NotModifiedSuffix(cause)}");
                             }
                         }
                         catch (Exception ex)

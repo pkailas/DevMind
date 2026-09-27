@@ -1080,7 +1080,9 @@ internal sealed class DevMindTools
                 string backupDir = Path.Combine(Path.GetTempPath(), "DevMind", "McpServer");
                 var applyResult  = PatchEngine.ApplyPatch(resolved, backupDir);
                 if (!applyResult.Success)
-                    return $"patch_file: write failed — {applyResult.Error}";
+                    return applyResult.NotLanded
+                        ? $"patch_file: failed — {applyResult.Error}"    // H-34: an edit did not land
+                        : $"patch_file: write failed — {applyResult.Error}";
 
                 // Update cache with post-patch content so subsequent read_file is consistent.
                 _svc.FileCache.Store(cacheKey, applyResult.UpdatedContent);

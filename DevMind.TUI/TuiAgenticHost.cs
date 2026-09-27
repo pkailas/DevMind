@@ -2648,7 +2648,10 @@ namespace DevMind
                 if (!result.Success)
                 {
                     AppendOutputLocal($"[PATCH] Error: {result.Error}\n", OutputColor.Error);
-                    return Task.FromResult<(string, string)>((null, $"Write failed: {result.Error}"));
+                    // H-34: a non-landing edit is reported as what it is ("edit N did not land …"),
+                    // never as a write failure the model might simply retry.
+                    return Task.FromResult<(string, string)>((null,
+                        result.NotLanded ? result.Error : $"Write failed: {result.Error}"));
                 }
 
                 if (result.BackupPath != null)

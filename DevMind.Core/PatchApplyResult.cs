@@ -22,5 +22,14 @@ namespace DevMind
 
         /// <summary>Error message when Success is false.</summary>
         public string Error { get; set; }
+
+        /// <summary>
+        /// H-34: true when the patch failed because an edit did not (or could not) land — the
+        /// file changed after the patch was resolved and its FIND no longer matches, or the
+        /// post-write check did not find an edit in the file. <see cref="Error"/> then starts
+        /// with "edit N did not land" or names the changed file, and is meant for the model as
+        /// is (not prefixed with "Write failed").
+        /// </summary>
+        public bool NotLanded { get; set; }
     }
 }

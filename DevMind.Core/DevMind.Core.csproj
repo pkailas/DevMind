@@ -11,6 +11,7 @@
     <!-- Test access to internal types (ChatMessage, LlmClient internals) for the
          multimodal test suite — see DevMind.Core.Tests/MultimodalTests.cs. -->
     <InternalsVisibleTo Include="DevMind.Core.Tests" />
+    <InternalsVisibleTo Include="DevMind.McpServer.Tests" />
   </ItemGroup>
 
  <ItemGroup>

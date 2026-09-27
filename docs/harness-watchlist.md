@@ -394,9 +394,18 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   constant, a removed line). Same family as the Sep 17 note "a patch_file silently didn't land on the auth-handler ctor line".
 - **Proposed fix:** after applying, verify each edit's replace text is present in the written file (or re-read and diff); if not,
   report `[PATCH-FAILED: edit N not found after write]` instead of Applied. Check the two-way-fallback path specifically.
-- **Status:** open
-
-### H-35 - Task-completion report shown twice in the TUI (prose + task_done summary)
+- **Root cause:** the iteration had TWO patch_file calls to Program.cs (iteration 45's output: one AUTO-READ, two Applied lines).
+  AgenticExecutor resolves all of an iteration's patches before applying any, and PatchEngine.ApplyPatch spliced each edit into the
+  content captured at RESOLVE time and wrote the whole file - so the second patch wrote original+edit2 over original+edit1, erasing
+  edit 1. The first apply had refreshed the cache, so base == current and the merge gate took its two-way fallback: hence
+  `[two-way fallback]` on both lines. Reproduced exactly (PatchLandingTests.TwoPatchesToTheSameFile_InOneIteration_BothLand failed on
+  the old code with the same transcript and applied=2, errors=0). The agent's "find text didn't match" diagnosis was a guess.
+- **Status:** fixed, pending deploy - commit "H-34: patches rebase onto the current file and are verified after the write". In
+  PatchEngine.ApplyPatch (shared by the agent host, the TUI host and MCP patch_file): if the file changed since the patch was resolved,
+  its FIND/REPLACE pairs are re-resolved against the current content (exact only; otherwise PATCH-FAILED, nothing written). After the
+  write the file is re-read and each edit's REPLACE must be at the position it targeted (a pure deletion must lower the deleted text's
+  count); otherwise `[PATCH-FAILED: ...] edit N did not land - <reason>`, the atomic batch is restored, and the edits that had landed
+  are named. - Task-completion report shown twice in the TUI (prose + task_done summary)
 - **First seen:** long-standing (user: "pretty much always"); confirmed 2026-09-27 in a plan-mode run.
 - **Fix:** ac4965f - when the terminal iteration already drew >= 40 visible prose chars, task_done's summary collapses to one dim
   line and is parked for Ctrl+O / /expand; ask_caller never collapses; history unchanged.

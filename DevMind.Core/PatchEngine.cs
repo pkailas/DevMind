@@ -742,6 +742,24 @@ namespace DevMind
         {
             try
             {
+                // H-34 root cause: the edits were resolved (positions computed) against the file
+                // as it was at RESOLVE time. AgenticExecutor resolves a whole iteration's patches
+                // before applying any, so a second patch to the same file used to be spliced into
+                // that stale snapshot and written over the first patch's edit — both reported
+                // "Applied". Re-resolve against the file as it is now when it has changed.
+                var (before, _) = ReadFilePreservingEncoding(resolved.FullPath);
+                if (!string.Equals(before, resolved.OriginalContent, StringComparison.Ordinal))
+                {
+                    string rebaseError = RebaseOnto(resolved, before);
+                    if (rebaseError != null)
+                        return new PatchApplyResult { Success = false, NotLanded = true, Error = rebaseError };
+                }
+
+                // Edit order as resolved (edit N = N-th resolved block), kept for reporting and for
+                // the post-write check; the splice below needs them in reverse position order.
+                var edits = resolved.ResolvedBlocks.OrderBy(b => b.origStart).ToList();
+                var editNumber = edits.Select(b => resolved.ResolvedBlocks.IndexOf(b) + 1).ToList();
+
                 // Apply in reverse order so earlier positions aren't shifted by later edits
                 resolved.ResolvedBlocks.Sort((a, b) => b.origStart.CompareTo(a.origStart));
                 var updated = resolved.OriginalContent;
@@ -760,7 +778,13 @@ namespace DevMind
                 }
                 catch { backupPath = null; }
 
-                File.WriteAllText(resolved.FullPath, updated, resolved.FileEncoding);
+                string toWrite = WriteHookForTest?.Invoke(resolved.FullPath, updated) ?? updated;
+                File.WriteAllText(resolved.FullPath, toWrite, resolved.FileEncoding);
+
+                // H-34 guard: never report an edit as applied without seeing it in the file.
+                string landingError = VerifyLanded(resolved.FullPath, before, edits, editNumber, resolved.FileEncoding);
+                if (landingError != null)
+                    return new PatchApplyResult { Success = false, NotLanded = true, Error = landingError };
 
                 return new PatchApplyResult
                 {
@@ -773,6 +797,111 @@ namespace DevMind
             {
                 return new PatchApplyResult { Success = false, Error = ex.Message };
             }
+        }
+
+        /// <summary>
+        /// Test seam (H-34): when set, called with (path, content about to be written) and returns
+        /// the content actually written — lets tests force an edit that does not land. Tests key it
+        /// on their own temp path and return the content unchanged for any other path. Null in
+        /// production.
+        /// </summary>
+        internal static Func<string, string, string> WriteHookForTest;
+
+        // Re-resolves the patch's FIND/REPLACE pairs against the file's CURRENT content and
+        // updates `resolved` in place. Exact matches only: the pairs were approved (or
+        // auto-applied) as an exact edit, and a fuzzy re-match against changed content would be a
+        // different edit than the one reported. Returns null on success, else the failure.
+        private static string RebaseOnto(PatchResolveResult resolved, string current)
+        {
+            var diagnostics = new StringBuilder();
+            PatchResolveResult rebased = null;
+            if (resolved.ParsedPairs != null && resolved.ParsedPairs.Count > 0)
+                rebased = ResolvePairs(resolved.ParsedPairs, resolved.FullPath, resolved.FileName,
+                    current, resolved.FileEncoding, (text, _) => diagnostics.Append(text));
+
+            if (rebased == null || rebased.Confidence != PatchConfidence.Exact)
+            {
+                string why = diagnostics.Length > 0
+                    ? " " + Regex.Replace(diagnostics.ToString(), @"\s+", " ").Trim()
+                    : "";
+                return $"{Path.GetFileName(resolved.FullPath)} changed after this patch was resolved (an earlier patch in the " +
+                       "same batch, or an outside write), and its FIND text no longer matches the current " +
+                       $"file exactly.{why} Nothing was written — re-read the file and re-issue the edit.";
+            }
+
+            resolved.OriginalContent = rebased.OriginalContent;
+            resolved.ResolvedBlocks = rebased.ResolvedBlocks;
+            resolved.Confidence = rebased.Confidence;
+            return null;
+        }
+
+        // Reads the file back and checks each edit at the position it targeted: a non-empty REPLACE
+        // must be there verbatim (so REPLACE text that already existed elsewhere in the file proves
+        // nothing on its own); a pure deletion must have lowered the count of the deleted text. On a
+        // miss the whole write is undone — patch batches are documented as atomic — and the error
+        // names every edit that did and did not land. Returns null when every edit landed.
+        private static string VerifyLanded(
+            string path, string before,
+            List<(int origStart, int origEnd, string replaceText)> edits, List<int> editNumber,
+            Encoding encoding)
+        {
+            var (after, _) = ReadFilePreservingEncoding(path);
+            var landed = new List<int>();
+            var missed = new List<(int n, string why)>();
+            int shift = 0;
+            for (int k = 0; k < edits.Count; k++)
+            {
+                var (start, end, replace) = edits[k];
+                int at = start + shift;
+                shift += replace.Length - (end - start);
+
+                string why = null;
+                if (replace.Length > 0)
+                {
+                    if (at < 0 || at + replace.Length > after.Length
+                        || !string.Equals(after.Substring(at, replace.Length), replace, StringComparison.Ordinal))
+                        why = "its REPLACE text is not at the edited position after the write";
+                }
+                else
+                {
+                    string deleted = before.Substring(start, end - start);
+                    if (deleted.Length > 0 && CountOccurrences(after, deleted) >= CountOccurrences(before, deleted))
+                        why = "the text it deletes is still in the file";
+                }
+
+                if (why == null) landed.Add(editNumber[k]);
+                else missed.Add((editNumber[k], why));
+            }
+
+            if (missed.Count == 0) return null;
+
+            string rollback;
+            try
+            {
+                File.WriteAllText(path, before, encoding);
+                rollback = "The batch is atomic, so the file was restored to its content before this patch";
+                rollback += landed.Count > 0
+                    ? $" (edit{(landed.Count > 1 ? "s" : "")} {string.Join(", ", landed.OrderBy(n => n))} had landed and {(landed.Count > 1 ? "were" : "was")} rolled back)."
+                    : ".";
+            }
+            catch (Exception ex)
+            {
+                rollback = $"ROLLBACK FAILED ({ex.Message}) — the file may be partly modified; re-read it before anything else.";
+            }
+
+            var first = missed.OrderBy(m => m.n).First();
+            string others = missed.Count > 1
+                ? $" Also not landed: edit{(missed.Count > 2 ? "s" : "")} {string.Join(", ", missed.Skip(1).Select(m => m.n).OrderBy(n => n))}."
+                : "";
+            return $"edit {first.n} did not land — {first.why}.{others} {rollback}";
+        }
+
+        private static int CountOccurrences(string text, string value)
+        {
+            int count = 0;
+            for (int i = text.IndexOf(value, StringComparison.Ordinal); i >= 0; i = text.IndexOf(value, i + value.Length, StringComparison.Ordinal))
+                count++;
+            return count;
         }
 
         // ── Ambiguity diagnostics ─────────────────────────────────────────────
