@@ -385,6 +385,23 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   cancel delegate), or accept the manual check as the coverage and say so here.
 - **Status:** open (manual check passed 2026-09-27)
 
+### H-34 - patch_file reports "Applied" but the edit is not in the file
+- **First seen:** 2026-09-27 - job-1719 (plan mode), iteration 46: two `[PATCH] Applied to ...DevMind.TUI/Program.cs [two-way fallback]`
+  lines, yet a later grep found none of the new text (`PlanModePromptNote`) and a read showed the original code. The agent's own
+  diagnosis: the first edit's find text didn't match. The tool still reported success. Found only because the build then failed on
+  the missing symbol.
+- **Why it matters:** a silent non-landing patch is invisible when nothing downstream references the new code (comments, a changed
+  constant, a removed line). Same family as the Sep 17 note "a patch_file silently didn't land on the auth-handler ctor line".
+- **Proposed fix:** after applying, verify each edit's replace text is present in the written file (or re-read and diff); if not,
+  report `[PATCH-FAILED: edit N not found after write]` instead of Applied. Check the two-way-fallback path specifically.
+- **Status:** open
+
+### H-35 - Task-completion report shown twice in the TUI (prose + task_done summary)
+- **First seen:** long-standing (user: "pretty much always"); confirmed 2026-09-27 in a plan-mode run.
+- **Fix:** ac4965f - when the terminal iteration already drew >= 40 visible prose chars, task_done's summary collapses to one dim
+  line and is parked for Ctrl+O / /expand; ask_caller never collapses; history unchanged.
+- **Status:** fixed, pending deploy check
+
 ## Parked
 
 ### P-01 - No-write-streak nudge
