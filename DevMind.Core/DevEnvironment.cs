@@ -20,7 +20,10 @@ namespace DevMind
         /// <summary>Default DEVMIND_SHELL_TIMEOUT (seconds) applied when unset: solution
         /// builds routinely exceeded the old 120 s baseline (a live Parsely build timed out
         /// mid-delegation). It is the budget for build/test/install commands only — every
-        /// other command gets DEVMIND_SHELL_TIMEOUT_SHORT (ShellRunner.ResolveTimeout).</summary>
+        /// other command gets DEVMIND_SHELL_TIMEOUT_SHORT (ShellRunner.ResolveTimeout).
+        /// Related, not set here: DEVMIND_VERIFY_REBUILD (default on) makes a delegated job's
+        /// harness build verification a full -t:Rebuild so its warning count is real; 0 keeps it
+        /// incremental (VerificationBuild).</summary>
         public const int DefaultShellTimeoutSeconds = ShellRunner.DefaultLongTimeoutSeconds;
 
         /// <summary>

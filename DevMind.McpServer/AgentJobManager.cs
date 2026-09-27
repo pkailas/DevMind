@@ -224,11 +224,19 @@ namespace DevMind.McpServer
     {
         public required string Command { get; init; }
         public int ExitCode { get; init; }
-        /// <summary>Last ~2 KB of build output — enough for the error summary. Carries the
-        /// warning-count disclaimer appended, because the verification build is incremental
-        /// and its warning count is therefore not a verified figure.</summary>
+        /// <summary>Last ~2 KB of build output — enough for the error summary — followed by a
+        /// [verification] line saying whether the warning count in it is verified.</summary>
         public required string OutputTail { get; init; }
         public bool Succeeded => ExitCode == 0;
+
+        /// <summary>H-32: true when the harness ran a FULL rebuild (VerificationBuild) and read a
+        /// warning count from it — only then is <see cref="WarningCount"/> a real figure. False
+        /// for an incremental build, which does not re-emit warnings for up-to-date projects.</summary>
+        public bool WarningCountVerified { get; init; }
+
+        /// <summary>The warning count parsed from the FULL output (null when unparseable or
+        /// the build was not a verified rebuild).</summary>
+        public int? WarningCount { get; init; }
     }
 
     /// <summary>One-at-a-time headless-agent job queue with bounded result retention.</summary>
@@ -273,6 +281,14 @@ namespace DevMind.McpServer
         /// Null = production path. Mirrors TestRunnerOverride.
         /// </summary>
         internal Func<string /*workingDirectory*/, CancellationToken, Task<BuildVerification?>>? BuildRunnerOverride { get; set; }
+
+        /// <summary>
+        /// Test seam, narrower than <see cref="BuildRunnerOverride"/>: only the process run is
+        /// replaced. Resolution, the H-32 rebuild rewrite and the warning-count parse all run
+        /// for real, and the seam receives the exact command the harness would execute.
+        /// Returns (output, exitCode). Null = production path.
+        /// </summary>
+        internal Func<string /*command*/, string /*workingDirectory*/, Task<(string output, int exitCode)>>? BuildExecOverride { get; set; }
 
         public AgentJobManager(Action? onJobFinished = null)
         {
@@ -936,11 +952,10 @@ namespace DevMind.McpServer
                         command = job.Build.Command,
                         succeeded = job.Build.Succeeded,
                         exit_code = job.Build.ExitCode,
-                        // Incremental build: up-to-date projects don't re-emit warnings, so any
-                        // "N Warning(s)" in output_tail is not a verified count; only the
-                        // error/exit-code result (succeeded) is reliable. warning_count_verified
-                        // is false so the tail cannot read as a warning check that happened.
-                        warning_count_verified = false,
+                        // H-32: true only when the harness ran a full rebuild; an incremental
+                        // build does not re-emit warnings for up-to-date projects.
+                        warning_count_verified = job.Build.WarningCountVerified,
+                        warning_count = job.Build.WarningCount,
                         output_tail = job.Build.OutputTail,
                     },
                     test_verification = TestVerificationPayload.Create(job),
@@ -954,10 +969,11 @@ namespace DevMind.McpServer
         /// build-sized timeout. Never throws — a verification failure is data.</summary>
         private async Task<BuildVerification?> VerifyBuildAsync(AgentJob job)
         {
+            // Explicit, not ShellRunner's default: a full rebuild is slower than the long budget.
             const int BuildTimeoutSeconds = 600;
             const int TailChars = 2_000;
-            // Appended to every verification tail. The flag alone is not enough: the
-            // misleading "N Warning(s)" is in the tail text, which is what a model reads
+            // Appended to every INCREMENTAL verification tail. The flag alone is not enough:
+            // the misleading "N Warning(s)" is in the tail text, which is what a model reads
             // as prose, so the disclaimer has to sit with it rather than beside it.
             const string BuildWarningCountDisclaimer =
                 "\n[verification] Warning count above is NOT verified - this build is incremental\n" +
@@ -982,18 +998,38 @@ namespace DevMind.McpServer
             if (string.IsNullOrWhiteSpace(command))
                 return null;
 
+            // H-32: a plain `dotnet build` is verified as a full rebuild (-t:Rebuild), so its
+            // warning count is real. Anything else runs as resolved (VerificationBuild).
+            VerificationBuild.Plan plan = VerificationBuild.For(command);
+            command = plan.Command;
+
             try
             {
-                var runner = new ShellRunner(job.WorkingDirectory);
-                var (output, exitCode) = await runner.ExecuteAsync(
-                    command, CancellationToken.None, BuildTimeoutSeconds).ConfigureAwait(false);
+                var (output, exitCode) = BuildExecOverride is { } exec
+                    ? await exec(command, job.WorkingDirectory).ConfigureAwait(false)
+                    : await new ShellRunner(job.WorkingDirectory).ExecuteAsync(
+                        command, CancellationToken.None, BuildTimeoutSeconds).ConfigureAwait(false);
                 string tail = output.Length <= TailChars ? output : output.Substring(output.Length - TailChars);
-                // The warning_count_verified flag is a sibling field; the misleading
-                // "0 Warning(s)" lives here in the tail, which is what a model actually
-                // reads as prose. Keep the disclaimer WITH the text it disclaims, or a
-                // reader takes the count at face value and never looks at the flag.
-                tail += BuildWarningCountDisclaimer;
-                return new BuildVerification { Command = command, ExitCode = exitCode, OutputTail = tail };
+
+                // Parsed from the FULL output: the summary line can fall outside the tail.
+                int? warnings = plan.FullRebuild ? VerificationBuild.ParseWarningCount(output) : null;
+                bool verified = warnings != null;
+
+                // The warning_count_verified flag is a sibling field; the "N Warning(s)" lives
+                // here in the tail, which is what a model actually reads as prose. Keep the
+                // verdict WITH the text it qualifies, or a reader takes the count at face value
+                // and never looks at the flag.
+                tail += verified
+                    ? $"\n[verification] Full rebuild: warning count is verified - {warnings} warning(s).\n"
+                    : BuildWarningCountDisclaimer;
+                return new BuildVerification
+                {
+                    Command = command,
+                    ExitCode = exitCode,
+                    OutputTail = tail,
+                    WarningCountVerified = verified,
+                    WarningCount = warnings,
+                };
             }
             catch (Exception ex)
             {

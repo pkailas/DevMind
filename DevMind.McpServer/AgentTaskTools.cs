@@ -413,12 +413,14 @@ namespace DevMind.McpServer
                     command = job.Build.Command,
                     succeeded = job.Build.Succeeded,
                     exit_code = job.Build.ExitCode,
-                    // The post-run build is incremental: up-to-date projects are not recompiled and
-                    // therefore do not re-emit their warnings, so any "N Warning(s)" in output_tail
-                    // is NOT a verified count. Only the error/exit-code result (succeeded) is
-                    // reliable. The field is present and false so the tail cannot read as a warning
-                    // check that actually happened.
-                    warning_count_verified = false,
+                    // H-32: the harness verifies with a full rebuild when the build command is a
+                    // plain `dotnet build` (VerificationBuild), and then warning_count is real.
+                    // Otherwise (DEVMIND_BUILD_COMMAND, another build system, or
+                    // DEVMIND_VERIFY_REBUILD=0) the build is incremental: up-to-date projects do
+                    // not re-emit warnings, warning_count is null and warning_count_verified is
+                    // false, so the tail cannot read as a warning check that happened.
+                    warning_count_verified = job.Build.WarningCountVerified,
+                    warning_count = job.Build.WarningCount,
                     output_tail = job.Build.OutputTail,
                 },
                 test_verification = TestVerificationPayload.Create(job),

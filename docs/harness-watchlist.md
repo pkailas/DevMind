@@ -139,7 +139,9 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   "0 Warning(s)" while a `--no-incremental` rebuild showed 45 pre-existing warnings (up-to-date projects are not recompiled).
 - **Proposed fix:** build_verification uses a full rebuild (or at least reports that the count is incremental). Already listed in the
   parked tool audit ("build_verification -> .slnx detection + full-rebuild warning counts").
-- **Status:** open
+- **Status:** fixed, pending deploy - with H-32: harness build verification of a plain `dotnet build` is now a `-t:Rebuild` with a
+  verified warning count (reproduced 2026-09-27: a scratch .slnx with one CS0168 printed "1 Warning(s)", then "0 Warning(s)" on the
+  next incremental build; -t:Rebuild and --no-incremental both re-emit it).
 
 ### H-14 - create_file reports success for a path outside the working directory but writes nothing
 - **Source:** DevMind\.devmind\memory\tooling-path-gotchas.md: `create_file` to an absolute path outside the working dir (e.g. %TEMP%)
@@ -368,7 +370,11 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   instruction, then reported "0 warnings". The driver re-ran with -t:Rebuild both times (0/0, so no harm this time).
 - **Proposed fix:** have build_verification itself run -t:Rebuild (or a clean build) when warning counts matter, so the agent's
   choice doesn't decide whether warnings are visible. See H-13.
-- **Status:** open
+- **Status:** fixed, pending deploy - commit "H-32: harness build verification runs a full rebuild". Rule (VerificationBuild): when the
+  resolved build command is a single plain `dotnet build`, the harness verifies with `-t:Rebuild` and reports warning_count_verified =
+  true plus warning_count parsed from that run; a command that is already a rebuild (-t:Rebuild / --no-incremental) runs unchanged and
+  counts as verified; DEVMIND_BUILD_COMMAND overrides, other build systems, custom targets and composite commands run unchanged and
+  stay unverified. DEVMIND_VERIFY_REBUILD=0 restores the incremental build. The agent's own choice of build no longer matters.
 
 ### H-33 - TUI override-steer hook in Program.cs has no test
 - **First seen:** 2026-09-27 - 6c45b7c. With the Program.cs call to Steer.InterruptForOverride disabled, all 471 TUI tests still
