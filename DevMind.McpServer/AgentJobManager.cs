@@ -89,8 +89,19 @@ namespace DevMind.McpServer
                 || (Result?.ThrashStopped ?? false)
                 || Build is { Succeeded: false }
                 || Tests is { Succeeded: false }
+                || HasVerifiedBuildWarnings
                 || NoFinalAnswer
                 || SelfReportMakesIncomplete);
+
+        /// <summary>
+        /// H-32 follow-up: the standard is 0 errors AND 0 warnings, so a harness FULL rebuild that
+        /// reported warnings makes the job stopped_incomplete. Only a verified count counts: an
+        /// incremental build (custom DEVMIND_BUILD_COMMAND, DEVMIND_VERIFY_REBUILD=0, another
+        /// build system) does not re-emit warnings for up-to-date projects, so its number is
+        /// not evidence either way.
+        /// </summary>
+        public bool HasVerifiedBuildWarnings =>
+            Build is { WarningCountVerified: true, WarningCount: > 0 };
 
         /// <summary>
         /// H-20: the run ended but left no answer — nothing but harness status lines
@@ -163,6 +174,14 @@ namespace DevMind.McpServer
             if (Result?.HitDepthCap ?? false) reasons.Add("hit_depth_cap");
             if (Build is { Succeeded: false }) reasons.Add("build_verification_failed");
             if (Tests is { Succeeded: false }) reasons.Add("test_verification_failed");
+            if (HasVerifiedBuildWarnings)
+            {
+                // The count, then the first few warnings themselves — enough for a driver to
+                // continue the job with "fix these" without re-running the build.
+                reasons.Add("build_warnings");
+                reasons.Add($"harness rebuild reported {Build!.WarningCount} warning(s)");
+                reasons.AddRange(Build.WarningLines);
+            }
             if (NoFinalAnswer) reasons.Add("no_final_answer");
 
             // The agent's own words, and the line it said them in — a caller reading
@@ -237,6 +256,10 @@ namespace DevMind.McpServer
         /// <summary>The warning count parsed from the FULL output (null when unparseable or
         /// the build was not a verified rebuild).</summary>
         public int? WarningCount { get; init; }
+
+        /// <summary>The first few distinct warning lines from the FULL output of a verified
+        /// rebuild (empty otherwise) — quoted in incomplete_reasons under build_warnings.</summary>
+        public IReadOnlyList<string> WarningLines { get; init; } = Array.Empty<string>();
     }
 
     /// <summary>One-at-a-time headless-agent job queue with bounded result retention.</summary>
@@ -965,6 +988,9 @@ namespace DevMind.McpServer
             catch { /* sidecar is best-effort — never fail the job over it */ }
         }
 
+        /// <summary>Warning lines quoted under build_warnings in incomplete_reasons.</summary>
+        internal const int MaxQuotedWarningLines = 5;
+
         /// <summary>Runs the working directory's resolved build command with a
         /// build-sized timeout. Never throws — a verification failure is data.</summary>
         private async Task<BuildVerification?> VerifyBuildAsync(AgentJob job)
@@ -1029,6 +1055,9 @@ namespace DevMind.McpServer
                     OutputTail = tail,
                     WarningCountVerified = verified,
                     WarningCount = warnings,
+                    WarningLines = verified && warnings > 0
+                        ? VerificationBuild.ExtractWarningLines(output, MaxQuotedWarningLines)
+                        : Array.Empty<string>(),
                 };
             }
             catch (Exception ex)

@@ -375,6 +375,8 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   true plus warning_count parsed from that run; a command that is already a rebuild (-t:Rebuild / --no-incremental) runs unchanged and
   counts as verified; DEVMIND_BUILD_COMMAND overrides, other build systems, custom targets and composite commands run unchanged and
   stay unverified. DEVMIND_VERIFY_REBUILD=0 restores the incremental build. The agent's own choice of build no longer matters.
+  Follow-up: verified warnings now fail the job - stopped_incomplete with `build_warnings`, the count and up to 5 warning lines
+  (an unverified count never does).
 
 ### H-33 - TUI override-steer hook in Program.cs has no test
 - **First seen:** 2026-09-27 - 6c45b7c. With the Program.cs call to Steer.InterruptForOverride disabled, all 471 TUI tests still

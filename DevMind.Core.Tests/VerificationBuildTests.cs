@@ -127,6 +127,34 @@ namespace DevMind.Core.Tests
             Assert.Equal(0, VerificationBuild.ParseWarningCount(RealDevMindRebuildTail));
         }
 
+        [Fact]
+        public void ExtractWarningLines_RealOutput_DedupedAndProjectSuffixStripped()
+        {
+            // MSBuild prints the CS0168 twice (inline and in the summary): quoted once.
+            var lines = VerificationBuild.ExtractWarningLines(RealRebuildWithOneWarning);
+            Assert.Equal(new[] { "C:\\src\\warnsln\\Warn\\Program.cs(1,5): warning CS0168: The variable 'x' is declared but never used" }, lines);
+        }
+
+        [Fact]
+        public void ExtractWarningLines_CappedInFirstSeenOrder_IgnoresSummaryLines()
+        {
+            string output = string.Join("\n", Enumerable.Range(1, 8).Select(i =>
+                    $"C:\\s\\F{i}.cs({i},1): warning CS0{100 + i}: w{i} [C:\\s\\P.csproj]"))
+                + "\nC:\\s\\P.csproj : warning NU1903: Package 'X' has a known vulnerability [C:\\s\\P.csproj]"
+                + "\n    9 Warning(s)\n    0 Error(s)\nBuild succeeded with 9 warning(s) in 2s\n";
+
+            var lines = VerificationBuild.ExtractWarningLines(output, max: 5);
+
+            Assert.Equal(5, lines.Count);
+            Assert.Equal("C:\\s\\F1.cs(1,1): warning CS0101: w1", lines[0]);
+            Assert.Equal("C:\\s\\F5.cs(5,1): warning CS0105: w5", lines[4]);
+            Assert.DoesNotContain(lines, l => l.Contains("Warning(s)") || l.Contains("warning(s)"));
+        }
+
+        [Fact]
+        public void ExtractWarningLines_NoWarnings_Empty()
+            => Assert.Empty(VerificationBuild.ExtractWarningLines(RealDevMindRebuildTail));
+
         [Theory]
         [InlineData("Build succeeded with 3 warning(s) in 4.2s", 3)]
         [InlineData("Build failed with 2 error(s) and 5 warning(s) in 1.1s", 5)]

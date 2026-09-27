@@ -20,6 +20,7 @@
 //     warning count is not verified.
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
@@ -95,6 +96,37 @@ namespace DevMind
             if (tl.Count > 0) return int.Parse(tl[tl.Count - 1].Groups[1].Value);
             return null;
         }
+
+        /// <summary>
+        /// Up to <paramref name="max"/> distinct compiler/MSBuild warning lines
+        /// ("file(line,col): warning CS0168: ..."), in first-seen order. MSBuild prints each warning
+        /// twice (inline, then in the summary), so duplicates are dropped; the trailing
+        /// " [project]" suffix is removed and a long line is cut to <paramref name="maxLineLength"/>.
+        /// </summary>
+        public static IReadOnlyList<string> ExtractWarningLines(string output, int max = 5, int maxLineLength = 240)
+        {
+            var lines = new List<string>();
+            if (string.IsNullOrEmpty(output) || max <= 0) return lines;
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (string raw in output.Split('\n'))
+            {
+                string line = raw.Trim();
+                if (!WarningLine.IsMatch(line)) continue;
+                line = ProjectSuffix.Replace(line, "");
+                if (line.Length > maxLineLength) line = line.Substring(0, maxLineLength - 1) + "…";
+                if (!seen.Add(line)) continue;
+                lines.Add(line);
+                if (lines.Count >= max) break;
+            }
+            return lines;
+        }
+
+        // "...: warning CS0168: ..." / "...: warning MSB3277: ..." / "...: warning NU1903: ..."
+        private static readonly Regex WarningLine = new Regex(
+            @":\s+warning\s+[A-Za-z]+\d+\s*:", RegexOptions.CultureInvariant);
+
+        // The " [C:\path\Proj.csproj]" MSBuild appends to every diagnostic line.
+        private static readonly Regex ProjectSuffix = new Regex(@"\s+\[[^\[\]]+\]$", RegexOptions.CultureInvariant);
 
         // -t:X, /t:X, -target:X, /target:X, --target:X (X may be a ;-list).
         private static readonly Regex TargetSwitch = new Regex(

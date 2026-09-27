@@ -45,7 +45,7 @@ namespace DevMind.McpServer.Tests
             try { Directory.Delete(_dir, recursive: true); } catch { /* best effort */ }
         }
 
-        private async Task<(string command, JsonElement bv)> RunJobAsync()
+        private async Task<(string command, JsonElement bv, JsonElement root)> RunJobAsync()
         {
             using var server = new EditThenDoneLlmServer(Path.Combine(_dir, "newfile.txt"));
             Environment.SetEnvironmentVariable("DEVMIND_ENDPOINT", server.BaseUrl);
@@ -67,13 +67,14 @@ namespace DevMind.McpServer.Tests
 
             string json = await new AgentTaskTools(mgr).TaskResult(job.Id, CancellationToken.None);
             var doc = JsonDocument.Parse(json);
-            return (ran!, doc.RootElement.GetProperty("build_verification").Clone());
+            JsonElement root = doc.RootElement.Clone();
+            return (ran!, root.GetProperty("build_verification"), root);
         }
 
         [Fact]
         public async Task PlainDotnetBuild_IsVerifiedAsAFullRebuild()
         {
-            var (command, bv) = await RunJobAsync();
+            var (command, bv, root) = await RunJobAsync();
 
             Assert.StartsWith("dotnet build \"", command);
             Assert.EndsWith("W.slnx\" -t:Rebuild", command);
@@ -82,6 +83,16 @@ namespace DevMind.McpServer.Tests
             Assert.Equal(1, bv.GetProperty("warning_count").GetInt32());
             Assert.Contains("[verification] Full rebuild: warning count is verified - 1 warning(s).",
                 bv.GetProperty("output_tail").GetString());
+
+            // A verified warning fails the job (0 errors AND 0 warnings), quoting the warning once.
+            Assert.Equal("stopped_incomplete", root.GetProperty("state").GetString());
+            string[] reasons = root.GetProperty("incomplete_reasons").EnumerateArray().Select(e => e.GetString()!).ToArray();
+            Assert.Equal(new[]
+            {
+                "build_warnings",
+                "harness rebuild reported 1 warning(s)",
+                "C:\\src\\W\\Program.cs(1,5): warning CS0168: The variable 'x' is declared but never used",
+            }, reasons);
         }
 
         [Fact]
@@ -89,9 +100,11 @@ namespace DevMind.McpServer.Tests
         {
             Environment.SetEnvironmentVariable(VerificationBuild.RebuildEnvVar, "0");
 
-            var (command, bv) = await RunJobAsync();
+            var (command, bv, root) = await RunJobAsync();
 
             Assert.DoesNotContain("Rebuild", command);
+            // The same "1 Warning(s)" output, unverified: the job is not failed over it.
+            Assert.Equal("done", root.GetProperty("state").GetString());
             Assert.False(bv.GetProperty("warning_count_verified").GetBoolean());
             Assert.Equal(JsonValueKind.Null, bv.GetProperty("warning_count").ValueKind);
             Assert.Contains("Warning count above is NOT verified", bv.GetProperty("output_tail").GetString());
