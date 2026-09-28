@@ -290,6 +290,87 @@ namespace DevMind.TUI.Tests
                 RewindPlanner.BuildTitle(null, blank, 2));
         }
 
+        [Fact]
+        public void BuildTitle_NamesTheOriginalSession_WhenGiven()
+        {
+            // The fork's title must say WHERE it came from — the turn AND the original's
+            // short id — so it is findable in /history.
+            Assert.Equal("Auth work (rewound from #2 of pid1)",
+                RewindPlanner.BuildTitle("Auth work", Session(), 2, "pid1"));
+        }
+
+        // ── NextTurnNumber: the checkpoint number must be the listing's number ──
+        //
+        // This is the function /rewind's memory checkpoint is numbered by. It MUST equal
+        // the number ListTurns assigns the next user row, computed from the same rows —
+        // a process-wide counter (TurnClock.Advances) drifts from it after a fork or a
+        // resume, and the checkpoint lands on the wrong turn.
+
+        [Fact]
+        public void NextTurnNumber_EmptySession_IsOne()
+        {
+            Assert.Equal(1, RewindPlanner.NextTurnNumber(Array.Empty<HistoryMessage>()));
+        }
+
+        [Fact]
+        public void NextTurnNumber_FullSession_IsOnePastTheLastTurn()
+        {
+            // The five-turn session above → the next turn is 6.
+            Assert.Equal(6, RewindPlanner.NextTurnNumber(Session()));
+        }
+
+        [Fact]
+        public void NextTurnNumber_SkipsSyntheticAndCountsRealUserRowsOnly()
+        {
+            // A session whose rows include synthetic continuations and an ask_caller answer
+            // (two real user rows under one turn number): the count is over REAL user rows
+            // only, exactly as ListTurns numbers them.
+            var rows = new[]
+            {
+                Row(S, 0, "user", "First."),
+                Row(S, 0, "assistant", "Done."),
+                Row(S, 1, "user", "Second."),
+                Row(S, 1, "user", SyntheticPrompts.Continue, synthetic: true),
+                Row(S, 1, "assistant", "Done again."),
+                Row(S, 2, "user", "Third."),
+                Row(S, 2, "assistant", "Third done."),
+            };
+            Assert.Equal(4, RewindPlanner.NextTurnNumber(rows));
+        }
+
+        [Fact]
+        public void NextTurnNumber_ForkHistory_ContinuesFromTheForksOwnTurns_NotTheProcess()
+        {
+            // THE fork drift: the original had 3 turns; /rewind 2 gives the fork 1 turn.
+            // The fork's NEXT turn is turn 2 of the FORK — not turn 4 of the process.
+            // A process-wide counter returns 4 here; NextTurnNumber must return 2.
+            var forkHistory = new[]
+            {
+                Row("fork", 0, "user", "Fix the login bug."),
+                Row("fork", 0, "assistant", "Fixed it in Auth.cs."),
+            };
+            Assert.Equal(2, RewindPlanner.NextTurnNumber(forkHistory));
+        }
+
+        [Fact]
+        public void NextTurnNumber_ResumedSession_ContinuesFromStoredHistory_NotZero()
+        {
+            // THE resume drift: a fresh process (clock at 0) resumes a session that already
+            // has 3 turns. Its next turn is turn 4 — not turn 1 (which would clobber the
+            // session's turn-1 checkpoint). A reset counter returns 1; NextTurnNumber must
+            // return 4.
+            var resumed = new[]
+            {
+                Row(S, 0, "user", "One."),
+                Row(S, 0, "assistant", "a."),
+                Row(S, 1, "user", "Two."),
+                Row(S, 1, "assistant", "b."),
+                Row(S, 2, "user", "Three."),
+                Row(S, 2, "assistant", "c."),
+            };
+            Assert.Equal(4, RewindPlanner.NextTurnNumber(resumed));
+        }
+
         // ── Local time in the listing ─────────────────────────────────────────
 
         /// <summary>

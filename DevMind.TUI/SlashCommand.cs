@@ -207,6 +207,19 @@ namespace DevMind
         /// Null when no host wires it.</summary>
         public NearlineCache NearlineCache { get; set; }
 
+        // -- Memory checkpoints (/rewind part 2a) -----------------------------------
+
+        /// <summary>Root of the per-session memory checkpoints (%LOCALAPPDATA%\devmind\checkpoints
+        /// in production, an injected temp dir in tests). Null disables /rewind's memory
+        /// restore — the conversation fork still happens, and the message says memory was
+        /// left unchanged.</summary>
+        public string MemoryCheckpointRoot { get; set; }
+
+        /// <summary>The repo root holding the memory set (MEMORY.md + .devmind/memory) — the
+        /// working directory the MemoryManager reads and writes. Null disables /rewind's
+        /// memory restore.</summary>
+        public string MemoryRoot { get; set; }
+
         // -- Multimodal (/image) ----------------------------------------------------
 
         /// <summary>Stages an image data URI on the LLM client so the next user message is
@@ -1477,7 +1490,9 @@ namespace DevMind
                 {
                     var s = sessions[i];
                     string title = string.IsNullOrEmpty(s.Title) ? "(untitled)" : s.Title;
-                    string date = s.LastActiveAt.ToString("MMM dd yyyy HH:mm");
+                    // The store's LastActiveAt is UTC; the operator reads local wall-clock time
+                    // (the same conversion /rewind's turn listing makes).
+                    string date = s.LastActiveAt.ToLocalTime().ToString("MMM dd yyyy HH:mm");
                     // The id is here because --resume takes one and this is the only place to
                     // read it. The number stays: it is what /resume <n> takes, and it is
                     // shorter to type when you are already looking at the list.
@@ -1662,8 +1677,12 @@ namespace DevMind
                 if (plan.MessagesToCopy.Length > 0)
                     await ctx.HistoryStore.SaveMessagesAsync(plan.MessagesToCopy);
                 await ctx.HistoryStore.UpsertSessionAsync(newId, ctx.MachineName);
+                // The fork's title names its origin — the turn AND the original session's
+                // short id — so it is findable in /history (a bare "#2" says nothing about
+                // which session #2 was in).
                 await ctx.HistoryStore.SetSessionTitleAsync(
-                    newId, RewindPlanner.BuildTitle(await CurrentSessionTitle(ctx), messages, n));
+                    newId, RewindPlanner.BuildTitle(
+                        await CurrentSessionTitle(ctx), messages, n, ShortId(ctx.SessionId)));
 
                 // The original is untouched in the store from here on: a fork, recoverable
                 // with /history + /resume. Files on disk are never touched by this command.
@@ -1694,10 +1713,50 @@ namespace DevMind
                 if (ctx.SetInputBoxText != null)
                     RunOnUi(ctx, () => ctx.SetInputBoxText(plan.RestoredPrompt));
 
+                // ── Repo memory: the conversation fork cut the rows; this cuts the files ──
+                // The rows of the abandoned turns may have called save_memory, which wrote a
+                // topic file + an index entry — and the index is in EVERY conversation's
+                // system prompt, so the abandoned branch would leak back in through memory.
+                // Restore the ORIGINAL session's turn-N checkpoint (memory as it was BEFORE
+                // turn N ran), and hand the fork turns 1..N-1 so a later /rewind inside the
+                // fork works. File IO only — no views touched, so no UI-thread seam needed.
+                // Absent roots (a host that does not wire them) leave memory unchanged and
+                // the message says so. Failures never break the fork: the conversation is
+                // already cut when this runs.
+                string memoryLine;
+                try
+                {
+                    if (string.IsNullOrEmpty(ctx.MemoryCheckpointRoot) ||
+                        string.IsNullOrEmpty(ctx.MemoryRoot))
+                    {
+                        memoryLine = "Memory: checkpoints unavailable — unchanged.";
+                    }
+                    else
+                    {
+                        var checkpoints = new MemoryCheckpoint(
+                            ctx.MemoryCheckpointRoot, ctx.SessionId, ctx.MemoryRoot);
+                        // The fork gets the original's checkpoints for turns 1..N-1 first:
+                        // the fork's own turn numbering starts after what it inherited, so a
+                        // later /rewind inside the fork restores from ITS copies of the
+                        // original's early turns.
+                        checkpoints.CopyCheckpoints(ctx.SessionId, newId, n - 1);
+                        var restored = checkpoints.Restore(ctx.SessionId, n);
+                        memoryLine = restored != null
+                            ? restored.Value.detail
+                            : $"Memory: no checkpoint for turn {n} — unchanged";
+                    }
+                }
+                catch (Exception mex)
+                {
+                    memoryLine = $"Memory restore failed ({mex.Message}) — unchanged.";
+                }
+
                 return new CommandResult
                 {
                     Message = $"Rewound to before turn {n} (new session {ShortId(newId)}). " +
-                              "Original kept — /resume <n> to go back. Files on disk were NOT changed."
+                              "Original kept — /resume <n> to go back. " +
+                              memoryLine + " " +
+                              "Files on disk were NOT changed."
                               + (skipped > 0 ? $" ({skipped} rows skipped on load)." : ""),
                 };
             }

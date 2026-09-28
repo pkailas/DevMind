@@ -109,6 +109,19 @@ namespace DevMind
         }
 
         /// <summary>
+        /// The number a NEW user turn would get in this session, per the listing's
+        /// 1-based numbering: the count of non-synthetic user rows already present,
+        /// + 1. This is the checkpoint number /rewind's memory restore must use — it is
+        /// the SAME count <see cref="ListTurns"/> takes, computed from the SAME rows, so the
+        /// snapshot written at the start of a turn and the cut taken by a later /rewind can
+        /// never disagree. It is deliberately per-session (not a process-wide counter):
+        /// a fork's second turn is turn 2 of the fork, and a resumed session's next turn
+        /// continues from its stored history, not from zero.
+        /// </summary>
+        public static int NextTurnNumber(IReadOnlyList<HistoryMessage> messages)
+            => ListTurns(messages).Count + 1;
+
+        /// <summary>
         /// The /rewind N plan over a session's rows, in the store's chronological order
         /// (the order <c>LoadSessionMessagesAsync</c> returns). The cut is the position of
         /// turn N's user row: everything before it is copied, everything from it on — that
@@ -198,12 +211,16 @@ namespace DevMind
 
         /// <summary>
         /// The fork's title: the old title, or the first prompt's first line when the
-        /// session had none, plus where it came from.
+        /// session had none, plus where it came from — the turn number AND the original
+        /// session's short id, so the operator can find the original in /history (a bare
+        /// "(rewound from #2)" says nothing about WHICH session #2 was in).
         /// </summary>
         /// <param name="oldTitle">The current session's title ("" when untitled).</param>
         /// <param name="messages">The session's rows, chronological — for the first prompt.</param>
         /// <param name="turn">The turn number the fork was taken from.</param>
-        public static string BuildTitle(string oldTitle, IReadOnlyList<HistoryMessage> messages, int turn)
+        /// <param name="originalShortId">The original session's short id (the trailing segment
+        /// after its last dash), so the fork's title names where it came from. "" when unknown.</param>
+        public static string BuildTitle(string oldTitle, IReadOnlyList<HistoryMessage> messages, int turn, string originalShortId = "")
         {
             string baseTitle = (oldTitle ?? string.Empty).Trim();
             if (baseTitle.Length == 0)
@@ -213,7 +230,10 @@ namespace DevMind
             }
             if (baseTitle.Length == 0)
                 baseTitle = "(untitled)";
-            return $"{baseTitle} (rewound from #{turn})";
+            string origin = string.IsNullOrWhiteSpace(originalShortId)
+                ? $"#{turn}"
+                : $"#{turn} of {originalShortId}";
+            return $"{baseTitle} (rewound from {origin})";
         }
 
         /// <summary>

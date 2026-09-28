@@ -11,6 +11,7 @@
 using DevMind;
 using System;
 using System.IO;
+using System.Text;
 using System.Threading.Tasks;
 using Xunit;
 
@@ -188,7 +189,8 @@ namespace DevMind.TUI.Tests
             // The new session is upserted and titled, and the host adopted it.
             Assert.Equal(host.AdoptedId, store.UpsertedId);
             Assert.Equal(host.AdoptedId, store.TitledId);
-            Assert.Equal("Auth work (rewound from #3)", store.Title);
+            // The title names the origin: the turn AND the original's short id (pid1).
+            Assert.Equal("Auth work (rewound from #3 of pid1)", store.Title);
             Assert.NotNull(host.AdoptedId);
             Assert.NotEqual(S, host.AdoptedId);
 
@@ -426,7 +428,7 @@ namespace DevMind.TUI.Tests
 
             SessionSummary forkSummary = (await store.ListSessionsAsync(machine)).First(x => x.SessionId == forkId);
             Assert.Equal(5, forkSummary.MessageCount);
-            Assert.Equal("Auth work (rewound from #3)", forkSummary.Title);
+            Assert.Equal("Auth work (rewound from #3 of pid1)", forkSummary.Title);
 
             // The original is byte-for-byte unchanged: same rows, same order, same title,
             // same count — and no row in it was re-stamped with the fork's id.
@@ -559,6 +561,274 @@ namespace DevMind.TUI.Tests
             Assert.True(idxGoAhead < idxApple, $"go ahead ({idxGoAhead}) should precede APPLE ({idxApple})");
 
             await store.CloseAsync();
+        }
+
+        // ── Repo memory (part 2a): the live APPLE/BANANA/CHERRY scenario ──────
+        //
+        // The conversation fork cut the rows; /rewind must also cut the files those rows
+        // wrote via save_memory — the MEMORY.md index is in every conversation's system
+        // prompt, so an abandoned branch leaks itself back in through memory. The
+        // checkpoint roots are injected (temp dirs), so the real %LOCALAPPDATA% and the
+        // repo are never touched.
+
+        private readonly string _memCpRoot = Path.Combine(Path.GetTempPath(), $"devmind-rewind-memcp-{Guid.NewGuid():N}");
+        private readonly string _memRepo = Path.Combine(Path.GetTempPath(), $"devmind-rewind-repo-{Guid.NewGuid():N}");
+
+        void SetupMemoryRoots(CommandContext ctx)
+        {
+            Directory.CreateDirectory(_memCpRoot);
+            Directory.CreateDirectory(_memRepo);
+            ctx.MemoryCheckpointRoot = _memCpRoot;
+            ctx.MemoryRoot = _memRepo;
+        }
+
+        void WriteMemIndex(string content)
+        {
+            File.WriteAllText(Path.Combine(_memRepo, "MEMORY.md"), content, Encoding.UTF8);
+        }
+
+        void WriteMemTopic(string slug, string content)
+        {
+            string dir = Path.Combine(_memRepo, ".devmind", "memory");
+            Directory.CreateDirectory(dir);
+            File.WriteAllText(Path.Combine(dir, slug + ".md"), content, Encoding.UTF8);
+        }
+
+        string? ReadMemIndex() =>
+            File.Exists(Path.Combine(_memRepo, "MEMORY.md"))
+                ? File.ReadAllText(Path.Combine(_memRepo, "MEMORY.md"), Encoding.UTF8)
+                : null;
+
+        string? ReadMemTopic(string slug)
+        {
+            string p = Path.Combine(_memRepo, ".devmind", "memory", slug + ".md");
+            return File.Exists(p) ? File.ReadAllText(p, Encoding.UTF8) : null;
+        }
+
+        [Fact]
+        public async Task Rewind_LiveScenario_MemoryWrittenInTurn3_IsGoneAfterRewind3()
+        {
+            var (ctx, _, host) = Context(Session());
+            SetupMemoryRoots(ctx);
+
+            // Turns 1-3 ran. At the START of each turn (before the prompt is sent) the TUI
+            // snapshots the memory set. Turns 1-3 all start with NO memory, so all three
+            // checkpoints are empty. Simulate the turn-start snapshots.
+            var cp = new MemoryCheckpoint(_memCpRoot, S, _memRepo);
+            cp.SnapshotAtTurnStart(1);   // empty
+            cp.SnapshotAtTurnStart(2);   // empty (identical → same-as-1, no copy)
+            cp.SnapshotAtTurnStart(3);   // empty (identical → same-as-1, no copy)
+
+            // Turn 3 RUNS and the model calls save_memory: a topic file + an index entry —
+            // the live APPLE/BANANA/CHERRY write. This happens AFTER the turn-3 snapshot,
+            // so the snapshot does not contain it.
+            WriteMemIndex("# DevMind Memory Index\n- [word-remembered] User asked to remember the words: APPLE, BANANA, CHERRY");
+            WriteMemTopic("word-remembered", "User asked to remember the words: APPLE, BANANA, CHERRY");
+
+            var result = await SlashCommand.Dispatch("/rewind 3", ctx);
+
+            Assert.False(result.IsError, result.Message);
+
+            // The memory from turn 3 is GONE: the turn-3 checkpoint (taken at the START of
+            // turn 3, before save_memory ran) was empty, so the topic file is deleted and
+            // the index is gone too. This is the exact live scenario — the abandoned branch
+            // must not leak back in through MEMORY.md.
+            Assert.True(ReadMemTopic("word-remembered") == null,
+                "the topic file written in turn 3 must be deleted by /rewind 3");
+            Assert.True(ReadMemIndex() == null,
+                "the MEMORY.md index written in turn 3 must be deleted by /rewind 3");
+
+            // The message says so, and the files-on-disk line is still true (for non-memory files).
+            Assert.Contains("Memory restored to turn 3", result.Message);
+            Assert.Contains("Files on disk were NOT changed", result.Message);
+
+            // The fork got the original's checkpoints for turns 1..2 (n-1 = 3-1 = 2), so a
+            // later /rewind inside the fork works. Turn 3 is NOT copied — the fork starts
+            // BEFORE turn 3.
+            string forkId = host.AdoptedId!;
+            Assert.True(Directory.Exists(Path.Combine(_memCpRoot, forkId, "turn-1")),
+                "the fork must inherit the original's turn-1 checkpoint");
+            Assert.True(Directory.Exists(Path.Combine(_memCpRoot, forkId, "turn-2")),
+                "the fork must inherit the original's turn-2 checkpoint");
+            Assert.False(Directory.Exists(Path.Combine(_memCpRoot, forkId, "turn-3")),
+                "the fork must NOT inherit the turn it was rewound from");
+        }
+
+        [Fact]
+        public async Task Rewind_NoCheckpointForTurnN_MemoryUnchanged_AndSaysSo()
+        {
+            var (ctx, _, _) = Context(Session());
+            SetupMemoryRoots(ctx);
+
+            // Memory exists, but NO checkpoint was taken (pre-feature session, or a failed
+            // snapshot). /rewind must leave it exactly as it is and say so.
+            WriteMemIndex("# DevMind Memory Index\n- [existing] a pre-existing topic");
+            WriteMemTopic("existing", "a pre-existing topic");
+
+            var result = await SlashCommand.Dispatch("/rewind 3", ctx);
+
+            Assert.False(result.IsError, result.Message);
+            Assert.Equal("# DevMind Memory Index\n- [existing] a pre-existing topic", ReadMemIndex());
+            Assert.Equal("a pre-existing topic", ReadMemTopic("existing"));
+            Assert.Contains("no checkpoint for turn 3", result.Message);
+            Assert.Contains("unchanged", result.Message);
+        }
+
+        [Fact]
+        public async Task Rewind_NoCheckpointRootsWired_MemoryUnchanged_AndSaysSo()
+        {
+            var (ctx, _, _) = Context(Session());
+            // No SetupMemoryRoots — a host that does not wire the roots (both null). The
+            // conversation fork still happens; the memory restore is skipped and the
+            // message says so. No files are touched at all, so nothing to assert on disk.
+
+            var result = await SlashCommand.Dispatch("/rewind 3", ctx);
+
+            Assert.False(result.IsError, result.Message);
+            Assert.Contains("checkpoints unavailable", result.Message);
+            Assert.Contains("unchanged", result.Message);
+            Assert.Contains("Files on disk were NOT changed", result.Message);
+        }
+
+        [Fact]
+        public async Task Rewind_MemoryRestore_DoesNotTouchNonMemoryFiles_Sentinel()
+        {
+            var (ctx, _, _) = Context(Session());
+            SetupMemoryRoots(ctx);
+
+            var cp = new MemoryCheckpoint(_memCpRoot, S, _memRepo);
+            // Turn 2 ran with "index t2". At the START of turn 3 (before the prompt is
+            // sent) the TUI snapshots the memory set — it still holds "index t2".
+            WriteMemIndex("index t2");
+            cp.SnapshotAtTurnStart(3);
+
+            // A sentinel NEXT to the memory set — part 2a must not touch it.
+            string sentinel = Path.Combine(_memRepo, "NOT-memory.cs");
+            File.WriteAllText(sentinel, "class C {}");
+
+            // Turn 3 RUNS: save_memory rewrites the index and adds a topic, and the
+            // abandoned branch mutates the sentinel too (part 2b would handle that;
+            // part 2a must leave it alone).
+            WriteMemIndex("index t3");
+            WriteMemTopic("word-remembered", "APPLE");
+            File.WriteAllText(sentinel, "class C { /* mutated */ }");
+
+            var result = await SlashCommand.Dispatch("/rewind 3", ctx);
+
+            Assert.False(result.IsError, result.Message);
+            // Memory is back to turn 2…
+            Assert.Equal("index t2", ReadMemIndex());
+            Assert.True(ReadMemTopic("word-remembered") == null);
+            // …and the non-memory sentinel is exactly as the abandoned branch left it.
+            Assert.Equal("class C { /* mutated */ }", File.ReadAllText(sentinel, Encoding.UTF8));
+        }
+
+        // ── Checkpoint NUMBERING: the fork's turns are the fork's, not the process's ──
+        //
+        // The checkpoint a turn is written under MUST be the number RewindPlanner assigns
+        // that turn in THIS session (NextTurnNumber over the session's stored rows) — not a
+        // process-wide counter. After a fork, the fork's second turn is turn 2 of the fork,
+        // and a later /rewind 2 inside the fork must find the fork's OWN turn-2 checkpoint,
+        // not a stale one copied from the original.
+
+        [Fact]
+        public async Task Rewind_ThenContinue_ForksTurnsAreNumberedByTheFork_NotTheProcess()
+        {
+            // Original session S with 3 turns. Snapshots exist for turns 1..3 (as the TUI
+            // would have taken them at each turn start). Memory is empty throughout.
+            var (ctx, _, host) = Context(Session());
+            SetupMemoryRoots(ctx);
+
+            var originalCp = new MemoryCheckpoint(_memCpRoot, S, _memRepo);
+            originalCp.SnapshotAtTurnStart(1);
+            originalCp.SnapshotAtTurnStart(2);
+            originalCp.SnapshotAtTurnStart(3);
+
+            // /rewind 2: the fork gets the original's turns 1..1 (n-1) checkpoints, and the
+            // conversation is cut before turn 2. The fork now has 1 turn of its own history.
+            var rewind = await SlashCommand.Dispatch("/rewind 2", ctx);
+            Assert.False(rewind.IsError, rewind.Message);
+            string forkId = host.AdoptedId!;
+
+            // The fork inherits the original's turn-1 checkpoint (so a /rewind 1 inside the
+            // fork works), and NOT turn 2 (the turn it was rewound from).
+            Assert.True(Directory.Exists(Path.Combine(_memCpRoot, forkId, "turn-1")));
+            Assert.False(Directory.Exists(Path.Combine(_memCpRoot, forkId, "turn-2")));
+
+            // Now the user types a NEW turn in the fork. This is turn 2 OF THE FORK — its
+            // history has 1 turn, so NextTurnNumber is 2. The TUI snapshots it as turn-2 in
+            // the FORK's folder. (A process-wide counter would have made this turn-4.)
+            int forkNextTurn = RewindPlanner.NextTurnNumber(
+                new[] { Row(forkId, 0, "user", "Fix the login bug."),
+                        Row(forkId, 0, "assistant", "Fixed it in Auth.cs.") });
+            // The fork's next turn is turn 2 of the fork.
+            Assert.Equal(2, forkNextTurn);
+
+            // The fork's turn 2 runs and writes memory.
+            var forkCp = new MemoryCheckpoint(_memCpRoot, forkId, _memRepo);
+            forkCp.SnapshotAtTurnStart(forkNextTurn);   // → turn-2 in the fork's folder
+            WriteMemIndex("fork turn-2 index");
+            WriteMemTopic("fork-note", "written in the fork's turn 2");
+
+            // /rewind 2 INSIDE the fork: it must restore the fork's OWN turn-2 checkpoint
+            // (empty — taken before the write above), NOT a stale turn-2 from the original
+            // (there is none, and there must not be one on disk under the fork's id).
+            var ctx2 = Context(Session()).ctx;
+            ctx2.SessionId = forkId;
+            ctx2.MemoryCheckpointRoot = _memCpRoot;
+            ctx2.MemoryRoot = _memRepo;
+            var rewind2 = await SlashCommand.Dispatch("/rewind 2", ctx2);
+            Assert.False(rewind2.IsError, rewind2.Message);
+
+            // The fork's turn-2 memory write is gone — the fork's own turn-2 snapshot was empty.
+            Assert.True(ReadMemTopic("fork-note") == null,
+                "the fork's turn-2 write must be removed by a /rewind 2 inside the fork");
+            Assert.True(ReadMemIndex() == null);
+            Assert.Contains("Memory restored to turn 2", rewind2.Message);
+
+            // The checkpoint on disk under the fork's id is turn-2, not turn-4.
+            Assert.True(Directory.Exists(Path.Combine(_memCpRoot, forkId, "turn-2")),
+                "the fork's second turn's checkpoint must be turn-2 under the fork's id");
+            Assert.False(Directory.Exists(Path.Combine(_memCpRoot, forkId, "turn-4")),
+                "a process-wide counter would have stamped it turn-4 — it must not");
+        }
+
+        [Fact]
+        public void CheckpointNumbering_ResumedSession_ContinuesFromStoredHistory()
+        {
+            // A fresh process (no in-memory counter) resumes a session that already has 3
+            // turns. Its next turn's checkpoint must be turn-4, and turns 1..3 untouched —
+            // a reset counter would have stamped it turn-1 and clobbered the turn-1 snapshot.
+            //
+            // The durable fact is the session's stored rows; NextTurnNumber over them is the
+            // number. (The TUI's RunTurnAsync reads exactly these rows via
+            // LoadSessionMessagesAsync and calls NextTurnNumber — this is that derivation.)
+            var resumed = new[]
+            {
+                Row(S, 0, "user", "One."), Row(S, 0, "assistant", "a."),
+                Row(S, 1, "user", "Two."), Row(S, 1, "assistant", "b."),
+                Row(S, 2, "user", "Three."), Row(S, 2, "assistant", "c."),
+            };
+
+            int next = RewindPlanner.NextTurnNumber(resumed);
+            // A resumed 3-turn session's next turn is turn 4.
+            Assert.Equal(4, next);
+
+            // Snapshot under that number: it is turn-4, and turn-1..3 are distinct entries
+            // that a turn-1 stamp would have overwritten.
+            var cp = new MemoryCheckpoint(_memCpRoot, S, _memRepo);
+            Directory.CreateDirectory(_memRepo);
+            cp.SnapshotAtTurnStart(1);
+            cp.SnapshotAtTurnStart(2);
+            cp.SnapshotAtTurnStart(3);
+            cp.SnapshotAtTurnStart(next);   // → turn-4
+
+            Assert.True(Directory.Exists(Path.Combine(_memCpRoot, S, "turn-4")),
+                "the resumed session's new turn snapshots as turn-4");
+            // turns 1..3 still exist and were not clobbered by a turn-1 write.
+            for (int k = 1; k <= 3; k++)
+                Assert.True(Directory.Exists(Path.Combine(_memCpRoot, S, $"turn-{k}")),
+                    $"turn-{k} must survive — a reset counter would have clobbered turn-1");
         }
     }
 }

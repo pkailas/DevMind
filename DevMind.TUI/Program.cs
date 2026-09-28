@@ -73,6 +73,36 @@ namespace DevMind
         // Turn clock: advances once per user turn at the boundary (TurnClock.BeginTurn),
         // never per agentic-loop iteration, and not again on an ask_caller answer (same turn).
         static TurnClock _turnClock = new();
+
+        // Repo-memory checkpoints for /rewind (part 2a): one MemoryCheckpoint per session,
+        // built lazily on the first turn under that session's id — /rewind forks adopt a new
+        // id mid-process, so a single field keyed by session id is what keeps the fork's
+        // snapshots in the fork's folder from the first of ITS turns on.
+        static MemoryCheckpoint _memoryCheckpoints;
+        static string _memoryCheckpointsSession;
+        static string _memoryRootLastSeen;
+
+        /// <summary>
+        /// The checkpoint writer for the session a turn is about to run under. Rebuilt when
+        /// the session id changes (a /rewind fork adopted one) or the working directory does
+        /// (/dir moved the memory set). This is only the per-session FOLDER the snapshots
+        /// land in; the turn NUMBER is per-session too — RewindPlanner.NextTurnNumber over
+        /// the session's stored rows (NOT a process-wide counter), so a fork's turns and a
+        /// resumed session's turns are numbered by their own history.
+        /// </summary>
+        static MemoryCheckpoint GetMemoryCheckpoints(TuiOptions options, string sessionId)
+        {
+            if (_memoryCheckpoints == null ||
+                !string.Equals(_memoryCheckpointsSession, sessionId, StringComparison.Ordinal) ||
+                !string.Equals(_memoryRootLastSeen, options.WorkingDirectory, StringComparison.Ordinal))
+            {
+                _memoryCheckpointsSession = sessionId;
+                _memoryRootLastSeen = options.WorkingDirectory;
+                _memoryCheckpoints = new MemoryCheckpoint(
+                    MemoryCheckpoint.DefaultRoot(), sessionId, options.WorkingDirectory);
+            }
+            return _memoryCheckpoints;
+        }
         // Double-press-to-exit: armed after first Ctrl+C when idle.
         static bool _ctrlCArmed;
         static DateTime _ctrlCArmedTime;
@@ -1674,6 +1704,13 @@ namespace DevMind
                              // Rebuild system prompt with new context.
                              // (The captured Func<string> in RunTurnAsync will pick this up automatically.)
                         },
+                        // /rewind (part 2a): the repo-memory checkpoint roots. The memory set
+                        // lives in the working directory (MEMORY.md + .devmind/memory), so
+                        // MemoryRoot tracks /dir; the checkpoint root is machine-level and
+                        // fixed for the process. Null here would make /rewind skip the memory
+                        // restore and say so — it does not veto the conversation fork.
+                        MemoryCheckpointRoot = MemoryCheckpoint.DefaultRoot(),
+                        MemoryRoot = options.WorkingDirectory,
                         // /dir -b: interactive directory-only picker, run modally on the UI thread.
                         // Returns the chosen directory, or null on cancel/Esc (handler no-ops).
                         BrowseForDirectory = (startDir) =>
@@ -1832,6 +1869,17 @@ namespace DevMind
             // does not reliably wake the parked Windows input-wait, but an AddTimeout does.
             host.StartRenderPump(app);
 
+            // Fire-and-forget: prune repo-memory checkpoints left by previous runs — sessions
+            // older than 14 days drop entirely, each surviving session keeps its 100 most
+            // recent turns. Runs off the startup path, never blocks the UI, and a failure is
+            // housekeeping noise, not a fault. (The current session's folder is safe: it is
+            // being written THIS process, so its newest turn is now — well inside 14 days.)
+            _ = Task.Run(() =>
+            {
+                try { MemoryCheckpoint.PruneAll(MemoryCheckpoint.DefaultRoot(), DateTime.UtcNow); }
+                catch { /* best-effort cleanup — must never affect startup */ }
+            });
+
             // Fire-and-forget: prune nearline spill folders left by previous runs whose session is
             // not resumable from history. Runs off the startup path so it never blocks the UI.
             _ = Task.Run(async () =>
@@ -1900,8 +1948,45 @@ namespace DevMind
             // answer to a pending ask_caller question resumes the SAME turn rather than
             // advancing a second time. A per-iteration increment ran the context-aging clock
             // ~an order of magnitude faster than dropAge was tuned for.
-            if (_turnClock.BeginTurn())
+            bool advances = _turnClock.BeginTurn();
+            if (advances)
                 llmClient.IncrementTurn();
+
+            // Repo-memory checkpoint for /rewind (part 2a): snapshot the memory set
+            // (MEMORY.md + .devmind/memory) at the START of the turn, BEFORE the prompt is
+            // sent, so the turn-k snapshot is memory as it was before turn k ran.
+            //
+            // k is the number REWINDPLANNER will assign this turn's user row: the count of
+            // non-synthetic user rows already in THIS session's history, + 1. It is computed
+            // from the same source RewindPlanner.ListTurns reads (the session's stored rows),
+            // so it CANNOT drift from the number /rewind uses to cut. This is what makes it
+            // fork- and resume-correct where TurnClock.Advances was not: Advances is a
+            // process-wide counter, so a fork (turn 2 of its own history) would have been
+            // stamped turn-4, and a --resume (clock reset to 0) would have clobbered the
+            // session's turn-1 snapshot. The stored count is per-session and durable across
+            // both. The current turn's row is not saved yet (it lands after the LLM response,
+            // line ~2220), so "already in history" excludes it — exactly the +1 RewindPlanner
+            // will take when it lists the session after this turn completes.
+            //
+            // ask_caller answers and synthetic prompts do not advance the turn clock, so they
+            // do not get a snapshot here either (advances == false) — they are not turns.
+            // A store read that fails simply means no snapshot this turn; a later /rewind says
+            // "no checkpoint for turn k — unchanged". Never blocks the turn.
+            try
+            {
+                if (advances && historyStore != null)
+                {
+                    var sessionRows = await historyStore.LoadSessionMessagesAsync(sessionId);
+                    // The number RewindPlanner will assign this turn's row — the same source
+                    // the /rewind cut reads, so the two cannot drift (see NextTurnNumber).
+                    int turnNumber = RewindPlanner.NextTurnNumber(sessionRows);
+                    GetMemoryCheckpoints(options, sessionId).SnapshotAtTurnStart(turnNumber);
+                }
+            }
+            catch
+            {
+                // Never block or break a turn over a checkpoint — see MemoryCheckpoint.
+            }
 
             // Open the steer window for this turn. A steer pending here is an invariant
             // violation — the previous turn's atomic close must have taken it — so it is
