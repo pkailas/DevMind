@@ -142,6 +142,10 @@ internal sealed class DevMindTools
     }
 
     // ── Phase B: read-only tools ─────────────────────────────────────────────
+    // read_file / list_files / grep_file / find_in_files / diff_file are thin adapters over
+    // FileReadTools (Core) — the same implementation the agent's tools use. What stays here
+    // is the MCP surface: the tool schema, the dispatcher queue, the explicit root parameter,
+    // and the "[<tool> error]" envelope every MCP tool reports exceptions in.
 
     [McpServerTool(Name = "read_file")]
     [Description(
@@ -161,52 +165,10 @@ internal sealed class DevMindTools
         {
             try
             {
-                if (filename.StartsWith("git ", StringComparison.OrdinalIgnoreCase))
-                    return await ReadGitAsync(filename, start_line ?? 0, cancellationToken);
+                if (FileReadTools.IsGitRequest(filename))
+                    return (await _svc.ReadTools.ReadGitAsync(filename, start_line ?? 0, cancellationToken)).Text;
 
-                string? fullPath = ResolveFilePath(filename);
-                if (fullPath == null || !File.Exists(fullPath))
-                    return BuildFileNotFoundMessage("read_file", filename);
-
-                string fileNameOnly = Path.GetFileName(fullPath) ?? Path.GetFileName(filename) ?? filename;
-                string cacheKey     = Path.GetFullPath(fullPath);
-                bool forceFullRead  = force_full == true;
-
-                // ── Line-range path ──────────────────────────────────────────
-                if (start_line.HasValue && start_line.Value > 0)
-                {
-                    EnsureCached(fileNameOnly, fullPath);
-
-                    int totalLines   = _svc.FileCache.GetLineCount(cacheKey);
-                    int rawStart     = start_line.Value;
-                    int rawEnd       = end_line.HasValue ? end_line.Value : totalLines;
-                    if (rawStart > rawEnd) { int t = rawStart; rawStart = rawEnd; rawEnd = t; }
-                    int clampedStart = Math.Max(1, rawStart);
-                    int clampedEnd   = Math.Min(totalLines, rawEnd);
-
-                    string rangeContent = _svc.FileCache.GetLineRange(cacheKey, clampedStart, clampedEnd);
-                    if (rangeContent == null)
-                        return $"[read_file] Range {rawStart}-{rawEnd} out of bounds for {fileNameOnly} ({totalLines} lines)";
-
-                    var rawLines = rangeContent.Split('\n');
-                    var numbered = new StringBuilder();
-                    for (int i = 0; i < rawLines.Length; i++)
-                        numbered.AppendLine($"{clampedStart + i}: {rawLines[i].TrimEnd('\r')}");
-
-                    bool clamped = clampedEnd < rawEnd;
-                    return ContextEngine.RenderReadRangeBlock(
-                        fileNameOnly, clampedStart, clampedEnd, totalLines, numbered.ToString(), clamped);
-                }
-
-                // ── Full / outline path ──────────────────────────────────────
-                string content   = File.ReadAllText(fullPath);
-                _svc.FileCache.Store(cacheKey, content);
-                int lineCount    = content.Split('\n').Length;
-                bool alreadyRead = _svc.FilesRead.Contains(cacheKey);
-                _svc.FilesRead.Add(cacheKey);
-
-                return ContextEngine.RenderReadBlock(
-                    fileNameOnly, content, lineCount, forceFullRead, alreadyRead, out _);
+                return _svc.ReadTools.Read(filename, start_line, end_line, force_full == true).Text;
             }
             catch (Exception ex)
             {
@@ -228,59 +190,9 @@ internal sealed class DevMindTools
     {
         return await _svc.EnqueueAsync(async () =>
         {
-            const int Cap = 200;
             try
             {
-                string searchDir = _svc.WorkingDirectory;
-                if (!string.IsNullOrWhiteSpace(root))
-                {
-                    if (!Path.IsPathRooted(root))
-                        return $"list_files: root must be an absolute path — got '{root}'.";
-                    if (!Directory.Exists(root))
-                        return $"list_files: root does not exist — {root}";
-                    searchDir = Path.GetFullPath(root);
-                }
-
-                string normalizedGlob = (glob ?? "").Replace('\\', '/');
-                string filePattern    = normalizedGlob;
-                string effectiveRoot  = searchDir;
-                int lastSlash         = normalizedGlob.LastIndexOf('/');
-                if (lastSlash >= 0)
-                {
-                    string dirPart   = normalizedGlob.Substring(0, lastSlash);
-                    filePattern      = normalizedGlob.Substring(lastSlash + 1);
-                    string candidate = Path.Combine(searchDir, dirPart.Replace('/', Path.DirectorySeparatorChar));
-                    if (Directory.Exists(candidate)) effectiveRoot = candidate;
-                }
-
-                if (string.IsNullOrWhiteSpace(filePattern))
-                    return "[ERROR: glob pattern is empty]";
-
-                IEnumerable<string> matches = recursive
-                    ? ContextEngine.SafeEnumerateFilesGlob(effectiveRoot, filePattern)
-                        .Where(f => !ContextEngine.IsNoisePath(f))
-                    : Directory.EnumerateFiles(effectiveRoot, filePattern, SearchOption.TopDirectoryOnly)
-                        .Where(f => !ContextEngine.IsNoisePath(f));
-
-                var sorted = matches
-                    .Select(Path.GetFullPath)
-                    .OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
-                    .ToList();
-
-                if (sorted.Count == 0)
-                    return "[no matches]";
-
-                var sb    = new StringBuilder();
-                int shown = Math.Min(sorted.Count, Cap);
-                for (int i = 0; i < shown; i++)
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    sb.AppendLine(sorted[i]);
-                }
-                if (sorted.Count > Cap)
-                    sb.AppendLine($"[truncated — {sorted.Count - Cap} more matches]");
-
-                return sb.ToString().TrimEnd();
+                return _svc.ReadTools.List(glob, recursive, root, cancellationToken).Text;
             }
             catch (OperationCanceledException)
             {
@@ -308,52 +220,9 @@ internal sealed class DevMindTools
     {
         return await _svc.EnqueueAsync(async () =>
         {
-            const int MaxMatches = 50;
             try
             {
-                string? fullPath = ResolveFilePath(filename);
-                if (fullPath == null || !File.Exists(fullPath))
-                    return BuildFileNotFoundMessage("grep_file", filename);
-
-                string fileNameOnly = Path.GetFileName(fullPath) ?? Path.GetFileName(filename) ?? filename;
-                string cacheKey     = Path.GetFullPath(fullPath);
-                EnsureCached(fileNameOnly, fullPath);
-
-                int totalLines = _svc.FileCache.GetLineCount(cacheKey);
-                int scanStart  = start_line.HasValue ? Math.Max(1, start_line.Value) : 1;
-                int scanEnd    = end_line.HasValue   ? Math.Min(totalLines, end_line.Value) : totalLines;
-
-                var matcher = SearchPattern.BuildMatcher(pattern);
-                var matches = new List<(int lineNum, string lineText)>();
-                for (int lineNum = scanStart; lineNum <= scanEnd; lineNum++)
-                {
-                    string lineContent = _svc.FileCache.GetLineRange(cacheKey, lineNum, lineNum);
-                    if (lineContent == null) continue;
-                    if (matcher(lineContent))
-                        matches.Add((lineNum, lineContent));
-                }
-
-                if (matches.Count == 0)
-                {
-                    string baseMsg = $"grep_file: no matches for \"{pattern}\" in {filename}";
-                    return SearchPattern.DescribeSearchMiss(pattern, filename, -1, baseMsg);
-                }
-
-                int totalMatches = matches.Count;
-                bool truncated   = totalMatches > MaxMatches;
-                if (truncated) matches = matches.GetRange(0, MaxMatches);
-
-                int numWidth = matches[matches.Count - 1].lineNum.ToString().Length;
-                string header = truncated
-                    ? $"grep_file results for \"{pattern}\" in {filename} ({MaxMatches} of {totalMatches} matches — narrow your pattern or use a line range):"
-                    : $"grep_file results for \"{pattern}\" in {filename} ({totalMatches} match{(totalMatches == 1 ? "" : "es")}):";
-
-                var sb = new StringBuilder();
-                sb.AppendLine(header);
-                foreach (var (lineNum, lineText) in matches)
-                    sb.AppendLine($"  {lineNum.ToString().PadLeft(numWidth)}: {lineText.TrimEnd()}");
-
-                return sb.ToString().TrimEnd('\r', '\n');
+                return _svc.ReadTools.Grep(pattern, filename, start_line, end_line).Text;
             }
             catch (Exception ex)
             {
@@ -383,95 +252,9 @@ internal sealed class DevMindTools
     {
         return await _svc.EnqueueAsync(async () =>
         {
-            const int MaxMatches = 100;
             try
             {
-                string searchDir = _svc.WorkingDirectory;
-                if (!string.IsNullOrWhiteSpace(root))
-                {
-                    if (!Path.IsPathRooted(root))
-                        return $"find_in_files: root must be an absolute path — got '{root}'.";
-                    if (!Directory.Exists(root))
-                        return $"find_in_files: root does not exist — {root}";
-                    searchDir = Path.GetFullPath(root);
-                }
-                string normalizedGlob = glob.Replace('\\', '/');
-                string filePattern    = normalizedGlob;
-                string effectiveRoot  = searchDir;
-                int lastSlash         = normalizedGlob.LastIndexOf('/');
-                if (lastSlash >= 0)
-                {
-                    string dirPart   = normalizedGlob.Substring(0, lastSlash);
-                    filePattern      = normalizedGlob.Substring(lastSlash + 1);
-                    string candidate = Path.Combine(searchDir, dirPart.Replace('/', Path.DirectorySeparatorChar));
-                    if (Directory.Exists(candidate)) effectiveRoot = candidate;
-                }
-
-                List<string> files;
-                try
-                {
-                    files = ContextEngine.SafeEnumerateFilesGlob(effectiveRoot, filePattern)
-                        .Where(f => !ContextEngine.IsNoisePath(f))
-                        .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
-                        .ToList();
-                }
-                catch (Exception ex)
-                {
-                    return $"find_in_files: error enumerating files for {glob} — {ex.Message}";
-                }
-
-                var findMatcher = SearchPattern.BuildMatcher(pattern);
-                var allMatches = new List<(string fileLabel, int lineNum, string lineText)>();
-                bool hitCap    = false;
-
-                foreach (string filePath in files)
-                {
-                    if (hitCap) break;
-                    string fileNameOnly = Path.GetFileName(filePath);
-                    string cacheKey     = Path.GetFullPath(filePath);
-
-                    _svc.FileCache.InvalidateIfStale(cacheKey, cacheKey); // out-of-band writes
-                    if (!_svc.FileCache.Contains(cacheKey))
-                    {
-                        string diskContent;
-                        try { diskContent = File.ReadAllText(filePath); }
-                        catch { continue; }
-                        _svc.FileCache.Store(cacheKey, diskContent);
-                    }
-
-                    int totalLines = _svc.FileCache.GetLineCount(cacheKey);
-                    int scanStart  = start_line.HasValue ? Math.Max(1, start_line.Value) : 1;
-                    int scanEnd    = end_line.HasValue   ? Math.Min(totalLines, end_line.Value) : totalLines;
-
-                    for (int lineNum = scanStart; lineNum <= scanEnd; lineNum++)
-                    {
-                        string lineContent = _svc.FileCache.GetLineRange(cacheKey, lineNum, lineNum);
-                        if (lineContent == null) continue;
-                        if (findMatcher(lineContent))
-                        {
-                            allMatches.Add((fileNameOnly, lineNum, lineContent));
-                            if (allMatches.Count >= MaxMatches) { hitCap = true; break; }
-                        }
-                    }
-                }
-
-                if (allMatches.Count == 0)
-                {
-                    string baseMsg = $"find_in_files: no matches for \"{pattern}\" in {glob}";
-                    return SearchPattern.DescribeSearchMiss(pattern, glob, files.Count, baseMsg);
-                }
-
-                int shownCount    = allMatches.Count;
-                string findHeader = hitCap
-                    ? $"find_in_files results for \"{pattern}\" in {glob} ({MaxMatches}+ matches — narrow your pattern or add a line range):"
-                    : $"find_in_files results for \"{pattern}\" in {glob} ({shownCount} match{(shownCount == 1 ? "" : "es")}):";
-
-                var sb = new StringBuilder();
-                sb.AppendLine(findHeader);
-                foreach (var (fileLabel, lineNum, lineText) in allMatches)
-                    sb.AppendLine($"  {fileLabel}:{lineNum}: {lineText.TrimEnd()}");
-
-                return sb.ToString().TrimEnd('\r', '\n');
+                return _svc.ReadTools.Find(pattern, glob, root, start_line, end_line).Text;
             }
             catch (Exception ex)
             {
@@ -493,33 +276,7 @@ internal sealed class DevMindTools
         {
             try
             {
-                // Resolve path; handle deleted files (they won't resolve via normal lookup).
-                string? fullPath = ResolveFilePath(filename);
-                if (fullPath == null)
-                {
-                    fullPath = Path.IsPathRooted(filename)
-                        ? filename
-                        : Path.Combine(_svc.WorkingDirectory, filename);
-                }
-
-                if (!_svc.TryGetSnapshot(fullPath, out string snapshot))
-                    return $"diff_file: no session changes tracked for {Path.GetFileName(filename)} — " +
-                           "diff_file reflects changes since first read_file or patch_file call this session.";
-
-                // Current content: empty string if the file was deleted.
-                string current = File.Exists(fullPath)
-                    ? File.ReadAllText(fullPath)
-                    : string.Empty;
-
-                string normOld = snapshot.Replace("\r\n", "\n").Replace("\r", "\n");
-                string normNew = current.Replace("\r\n", "\n").Replace("\r", "\n");
-
-                if (string.Equals(normOld, normNew, StringComparison.Ordinal))
-                    return $"diff_file: no changes detected in {Path.GetFileName(filename)}.";
-
-                string[] oldLines = normOld.Split('\n');
-                string[] newLines = normNew.Split('\n');
-                return DiffHelper.GenerateUnifiedDiff(Path.GetFileName(filename), oldLines, newLines);
+                return _svc.ReadTools.Diff(filename).Text;
             }
             catch (Exception ex)
             {
@@ -2540,102 +2297,6 @@ internal sealed class DevMindTools
         => _svc.WriteRoots.EnsureContained(resolvedFullPath);
 
     /// <summary>
-    /// Loads a file into FileCache if it is not already present.
-    /// </summary>
-    private void EnsureCached(string fileNameOnly, string fullPath)
-    {
-        // Key the cache by the full normalized path, not the basename, so same-named
-        // files in different directories don't collide. fileNameOnly is retained in the
-        // signature for call-site compatibility (display) but is not used as the key.
-        string cacheKey = Path.GetFullPath(fullPath);
-        // Out-of-band writes (task agents in this same process, git, the user's IDE)
-        // must never be masked by session-cached content — a stale entry evicts here
-        // and re-reads below. Field evidence: read_file/grep_file served pre-task
-        // content after a delegated job rewrote the files.
-        _svc.FileCache.InvalidateIfStale(cacheKey, cacheKey);
-        if (_svc.FileCache.Contains(cacheKey)) return;
-        try
-        {
-            string content = File.ReadAllText(fullPath);
-            _svc.FileCache.Store(cacheKey, content);
-        }
-        catch { }
-    }
-
-    /// <summary>
-    /// Handles git log / git diff variants of read_file by delegating to ShellRunner.
-    /// Called from within ReadFile which already holds the gate — no re-entry needed.
-    /// </summary>
-    private async Task<string> ReadGitAsync(
-        string filename, int startLine, CancellationToken cancellationToken)
-    {
-        string gitRoot = ContextEngine.FindGitRoot(_svc.WorkingDirectory);
-        if (gitRoot == null)
-            return "[read_file] git: not a git repository";
-
-        List<string> gitArgs; string header;
-
-        if (filename.StartsWith("git log", StringComparison.OrdinalIgnoreCase))
-        {
-            int count;
-            if (startLine > 0)
-            {
-                count = startLine;
-            }
-            else
-            {
-                string countPart = filename.Substring("git log".Length).Trim();
-                count = 10;
-                if (!string.IsNullOrEmpty(countPart)) int.TryParse(countPart, out count);
-            }
-            count   = Math.Max(1, Math.Min(count, 50));
-            gitArgs = new List<string> { "log", "--oneline", "--no-decorate", $"-{count}" };
-            header  = $"[read_file] git log (last {count} commits)";
-        }
-        else if (filename.StartsWith("git diff", StringComparison.OrdinalIgnoreCase))
-        {
-            string diffArgs = filename.Substring("git diff".Length).Trim();
-            gitArgs = new List<string> { "diff" };
-            gitArgs.AddRange(TokenizeArgs(diffArgs));
-            header  = string.IsNullOrEmpty(diffArgs)
-                ? "[read_file] git diff (working changes)"
-                : $"[read_file] git diff {diffArgs}";
-        }
-        else
-        {
-            return $"[read_file] Unrecognized git command: {filename}";
-        }
-
-        // Temporarily change ShellRunner working directory to the git root.
-        string savedDir = _svc.Shell.WorkingDirectory;
-        _svc.Shell.ChangeDirectory(gitRoot);
-        string output;
-        int exitCode;
-        try
-        {
-            (output, exitCode) = await _svc.Shell.ExecuteArgvAsync("git", gitArgs, cancellationToken);
-        }
-        finally
-        {
-            _svc.Shell.ChangeDirectory(savedDir);
-        }
-
-        if (exitCode != 0)
-            return $"{header}\n(error — exit code {exitCode})\n{output}";
-
-        const int MaxDiffLines = 500;
-        string[] outputLines = output.Split('\n');
-        string truncatedOutput = outputLines.Length > MaxDiffLines
-            ? string.Join("\n", outputLines.Take(MaxDiffLines))
-              + $"\n[... {outputLines.Length - MaxDiffLines} lines omitted — use read_file with 'git diff <filename>' to narrow scope]"
-            : output;
-
-        if (string.IsNullOrWhiteSpace(truncatedOutput)) truncatedOutput = "(no output)";
-
-        return $"{header}\n```\n{truncatedOutput}\n```\n\n";
-    }
-
-    /// <summary>
     /// Returns a "file not found" message that states the resolution SCOPE (which
     /// directories were searched recursively) and lists same-named candidates when the
     /// name matched more than one file. It deliberately does NOT list the working
@@ -2776,41 +2437,7 @@ internal sealed class DevMindTools
     /// worst case for a malformed input is git/dotnet rejecting an odd pathspec — never code
     /// execution. Do not reuse this as a shell parser where fidelity matters.
     /// </summary>
-    private static List<string> TokenizeArgs(string input)
-    {
-        var tokens = new List<string>();
-        if (string.IsNullOrWhiteSpace(input)) return tokens;
-
-        var  sb     = new StringBuilder();
-        char quote  = '\0';
-        bool inTok  = false;
-
-        foreach (char c in input)
-        {
-            if (quote != '\0')
-            {
-                if (c == quote) quote = '\0';
-                else            sb.Append(c);
-            }
-            else if (c == '"' || c == '\'')
-            {
-                quote = c;
-                inTok = true;
-            }
-            else if (c == ' ' || c == '\t')
-            {
-                if (inTok) { tokens.Add(sb.ToString()); sb.Clear(); inTok = false; }
-            }
-            else
-            {
-                sb.Append(c);
-                inTok = true;
-            }
-        }
-
-        if (inTok) tokens.Add(sb.ToString());
-        return tokens;
-    }
+    private static List<string> TokenizeArgs(string input) => ArgTokenizer.Tokenize(input);
 
     /// <summary>
     /// Describes a Win32Exception raised when starting an elevated ("runas") process.

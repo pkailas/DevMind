@@ -98,8 +98,7 @@ namespace DevMind
         private readonly TaskReadSet _taskReadFiles = new TaskReadSet();
 
         // Baseline content keyed by full path, captured before first mutation — powers DIFF.
-        private readonly Dictionary<string, string> _fileSnapshots =
-            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private readonly FileSnapshotStore _fileSnapshots = new FileSnapshotStore();
 
         private readonly MemoryManager _memoryManager;
 
@@ -1210,237 +1209,69 @@ namespace DevMind
             return FindFile(SafeGetFileName(filename), filename.Replace('\\', '/'));
         }
 
+        // ── Read-side tools: thin adapters over FileReadTools ────────────────────
+        // read_file / grep_file / find_in_files / list_files / diff_file behave identically
+        // on every surface (FileReadTools owns them). What stays here is host bookkeeping:
+        // the transcript line, the write-guard set, and the stale-read nudge state.
+
+        private FileReadTools ReadTools => new FileReadTools(FileReadPolicy.Agent,
+            _shellRunner.WorkingDirectory, _fileCache, _filesRead, _fileSnapshots, _shellRunner);
+
+        /// <summary>Prints a read-side result's transcript line and returns its text.</summary>
+        private string Report(FileReadResult r)
+        {
+            if (r.LogLine != null) AppendOutput(r.LogLine + "\n", r.LogColor);
+            return r.Text;
+        }
+
         // ── IAgenticHost.LoadFileContentAsync ────────────────────────────────────
 
-        Task<string> IAgenticHost.LoadFileContentAsync(
+        async Task<string> IAgenticHost.LoadFileContentAsync(
             string fileName, int rangeStart, int rangeEnd, bool forceFullRead)
         {
-            if (fileName.StartsWith("git ", StringComparison.OrdinalIgnoreCase))
-                return LoadGitContentAsync(fileName, rangeStart);
+            if (FileReadTools.IsGitRequest(fileName))
+                return Report(await ReadTools.ReadGitAsync(fileName, rangeStart, CancellationToken));
 
-            return LoadFileContentCoreAsync(fileName, rangeStart, rangeEnd, forceFullRead);
+            try
+            {
+                // The tool call maps an absent start_line/end_line to 0.
+                FileReadResult r = ReadTools.Read(fileName,
+                    rangeStart > 0 ? rangeStart : null, rangeEnd > 0 ? rangeEnd : null, forceFullRead);
+                if (r.FileLoaded)
+                {
+                    string fileNameOnly = FileReadTools.SafeGetFileName(fileName);
+                    _taskReadFiles.MarkKnown(r.ResolvedPath);
+                    _patchesSinceRead.Remove(fileNameOnly);      // model refreshed its view
+                    _editedSpansSinceRead.Remove(fileNameOnly);  // stale-overlap tracking reset with it
+                    _staleRecallsSinceRead.Remove(fileNameOnly); // fresh view supersedes any stale recall
+                }
+                return Report(r);
+            }
+            catch (Exception ex)
+            {
+                AppendOutput($"[READ ERROR] {fileName}: {ex.Message}\n", OutputColor.Error);
+                return $"[ERROR reading {fileName}: {ex.Message}]";
+            }
         }
 
         // ── IAgenticHost.GrepFileAsync ────────────────────────────────────────────
 
         Task<string> IAgenticHost.GrepFileAsync(string pattern, string filename, int? startLine, int? endLine)
         {
-            const int MaxMatches = 50;
-
-            string fileNameOnly = SafeGetFileName(filename);
-            FileResolution res = FindFile(fileNameOnly, filename.Replace('\\', '/'));
-            string resolvedPath = res.Path;
-            if (resolvedPath == null || !File.Exists(resolvedPath))
-                return Task.FromResult(BuildFileNotFoundMessage("GREP", filename, res));
-
-            string cacheKey = FileCacheKey(resolvedPath);
-            _fileCache.InvalidateIfStale(cacheKey, resolvedPath); // out-of-band writes
-            if (!_fileCache.Contains(cacheKey))
-            {
-                string diskContent;
-                try { diskContent = File.ReadAllText(resolvedPath); }
-                catch (Exception ex) { return Task.FromResult($"GREP: error reading {filename} — {ex.Message}"); }
-                _fileCache.Store(cacheKey, diskContent);
-            }
-
-            int totalFileLines = _fileCache.GetLineCount(cacheKey);
-            int scanStart = startLine.HasValue ? Math.Max(1, startLine.Value) : 1;
-            int scanEnd   = endLine.HasValue   ? Math.Min(totalFileLines, endLine.Value) : totalFileLines;
-
-            // Full call parameters + effective window in the transcript line — a bare
-            // "0 matches" summary made the job-8 false negative undiagnosable from logs.
-            string grepScope = $"[lines {scanStart}-{scanEnd} of {totalFileLines}" +
-                $"{(startLine.HasValue || endLine.HasValue ? $", requested start_line={(startLine?.ToString() ?? "-")} end_line={(endLine?.ToString() ?? "-")}" : "")}]";
-
-            var matcher = SearchPattern.BuildMatcher(pattern);
-            var matches = new List<(int lineNum, string lineText)>();
-            for (int lineNum = scanStart; lineNum <= scanEnd; lineNum++)
-            {
-                string lineContent = _fileCache.GetLineRange(cacheKey, lineNum, lineNum);
-                if (lineContent == null) continue;
-                if (matcher(lineContent))
-                    matches.Add((lineNum, lineContent));
-            }
-
-            if (matches.Count == 0)
-            {
-                AppendOutput($"[GREP] no matches for \"{pattern}\" in {filename} {grepScope}\n", OutputColor.Dim);
-                return Task.FromResult(SearchPattern.DescribeSearchMiss(
-                    pattern, $"{filename} {grepScope}", -1,
-                    $"GREP: no matches for \"{pattern}\" in {filename}"));
-            }
-
-            int totalMatches = matches.Count;
-            bool truncated = totalMatches > MaxMatches;
-            if (truncated) matches = matches.GetRange(0, MaxMatches);
-
-            int maxLineNum = matches[matches.Count - 1].lineNum;
-            int numWidth = maxLineNum.ToString().Length;
-
-            string header = truncated
-                ? $"GREP results for \"{pattern}\" in {filename} ({MaxMatches} of {totalMatches} matches — narrow your pattern or use a line range):"
-                : $"GREP results for \"{pattern}\" in {filename} ({totalMatches} match{(totalMatches == 1 ? "" : "es")}):";
-
-            var sb = new StringBuilder();
-            sb.AppendLine(header);
-            foreach (var (lineNum, lineText) in matches)
-                sb.AppendLine($"  {lineNum.ToString().PadLeft(numWidth)}: {lineText.TrimEnd()}");
-
-            _taskReadFiles.MarkKnown(resolvedPath);
-            AppendOutput($"[GREP] {totalMatches} match{(totalMatches == 1 ? "" : "es")} for \"{pattern}\" in {filename} {grepScope}\n", OutputColor.Success);
-            return Task.FromResult(sb.ToString().TrimEnd('\r', '\n'));
+            FileReadResult r = ReadTools.Grep(pattern, filename, startLine, endLine);
+            if (r.MatchCount > 0) _taskReadFiles.MarkKnown(r.ResolvedPath);
+            return Task.FromResult(Report(r));
         }
 
         // ── IAgenticHost.FindInFilesAsync ─────────────────────────────────────────
 
         Task<string> IAgenticHost.FindInFilesAsync(string pattern, string globPattern, int? startLine, int? endLine)
-        {
-            const int MaxMatches = 100;
-
-            string searchDir = _shellRunner.WorkingDirectory;
-            string normalizedGlob = globPattern.Replace('\\', '/');
-            string filePattern = normalizedGlob;
-            string effectiveRoot = searchDir;
-            int lastSlash = normalizedGlob.LastIndexOf('/');
-            if (lastSlash >= 0)
-            {
-                string dirPart = normalizedGlob.Substring(0, lastSlash);
-                filePattern = normalizedGlob.Substring(lastSlash + 1);
-                string candidate = Path.Combine(searchDir, dirPart.Replace('/', Path.DirectorySeparatorChar));
-                if (Directory.Exists(candidate)) effectiveRoot = candidate;
-            }
-
-            List<string> files;
-            try
-            {
-                files = ContextEngine.SafeEnumerateFilesGlob(effectiveRoot, filePattern)
-                    .Where(f => !ContextEngine.IsNoisePath(f))
-                    .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
-                    .ToList();
-            }
-            catch (Exception ex)
-            {
-                return Task.FromResult($"FIND: error enumerating files for {globPattern} — {ex.Message}");
-            }
-
-            var findMatcher = SearchPattern.BuildMatcher(pattern);
-            var allMatches = new List<(string fileLabel, int lineNum, string lineText)>();
-            bool hitCap = false;
-
-            foreach (string filePath in files)
-            {
-                if (hitCap) break;
-                string fileNameOnly = SafeGetFileName(filePath);
-                string cacheKey = FileCacheKey(filePath);
-
-                _fileCache.InvalidateIfStale(cacheKey, filePath); // out-of-band writes
-                if (!_fileCache.Contains(cacheKey))
-                {
-                    // Skip cloud/OneDrive placeholders (would download), binaries, oversized.
-                    if (ContextEngine.ShouldSkipForContentSearch(filePath)) continue;
-
-                    string diskContent;
-                    try { diskContent = File.ReadAllText(filePath); }
-                    catch { continue; }
-                    _fileCache.Store(cacheKey, diskContent);
-                }
-
-                int totalFileLines = _fileCache.GetLineCount(cacheKey);
-                int scanStart = startLine.HasValue ? Math.Max(1, startLine.Value) : 1;
-                int scanEnd   = endLine.HasValue   ? Math.Min(totalFileLines, endLine.Value) : totalFileLines;
-
-                for (int lineNum = scanStart; lineNum <= scanEnd; lineNum++)
-                {
-                    string lineContent = _fileCache.GetLineRange(cacheKey, lineNum, lineNum);
-                    if (lineContent == null) continue;
-                    if (findMatcher(lineContent))
-                    {
-                        allMatches.Add((fileNameOnly, lineNum, lineContent));
-                        if (allMatches.Count >= MaxMatches) { hitCap = true; break; }
-                    }
-                }
-            }
-
-            if (allMatches.Count == 0)
-            {
-                AppendOutput($"[FIND] no matches for \"{pattern}\" in {globPattern}\n", OutputColor.Dim);
-                return Task.FromResult(SearchPattern.DescribeSearchMiss(
-                    pattern, globPattern, files.Count,
-                    $"FIND: no matches for \"{pattern}\" in {globPattern}"));
-            }
-
-            int shownCount = allMatches.Count;
-            string findHeader = hitCap
-                ? $"FIND results for \"{pattern}\" in {globPattern} ({MaxMatches}+ matches — narrow your pattern or add a line range):"
-                : $"FIND results for \"{pattern}\" in {globPattern} ({shownCount} match{(shownCount == 1 ? "" : "es")}):";
-
-            var sb = new StringBuilder();
-            sb.AppendLine(findHeader);
-            foreach (var (fileLabel, lineNum, lineText) in allMatches)
-                sb.AppendLine($"  {fileLabel}:{lineNum}: {lineText.TrimEnd()}");
-
-            AppendOutput($"[FIND] {(hitCap ? MaxMatches + "+" : shownCount.ToString())} match{(shownCount == 1 ? "" : "es")} for \"{pattern}\" in {globPattern}\n", OutputColor.Success);
-            return Task.FromResult(sb.ToString().TrimEnd('\r', '\n'));
-        }
+            => Task.FromResult(Report(ReadTools.Find(pattern, globPattern, root: null, startLine, endLine)));
 
         // ── IAgenticHost.ListFilesAsync ───────────────────────────────────────────
 
         Task<string> IAgenticHost.ListFilesAsync(string glob, bool recursive, CancellationToken cancellationToken)
-        {
-            const int Cap = 200;
-
-            string searchDir = _shellRunner.WorkingDirectory;
-            if (string.IsNullOrEmpty(searchDir))
-                return Task.FromResult("[ERROR: working directory not set]");
-
-            string normalizedGlob = (glob ?? "").Replace('\\', '/');
-            string filePattern = normalizedGlob;
-            string effectiveRoot = searchDir;
-            int lastSlash = normalizedGlob.LastIndexOf('/');
-            if (lastSlash >= 0)
-            {
-                string dirPart = normalizedGlob.Substring(0, lastSlash);
-                filePattern = normalizedGlob.Substring(lastSlash + 1);
-                string candidate = Path.Combine(searchDir, dirPart.Replace('/', Path.DirectorySeparatorChar));
-                if (Directory.Exists(candidate)) effectiveRoot = candidate;
-            }
-
-            if (string.IsNullOrWhiteSpace(filePattern))
-                return Task.FromResult("[ERROR: glob pattern is empty]");
-
-            IEnumerable<string> matches;
-            try
-            {
-                matches = recursive
-                    ? ContextEngine.SafeEnumerateFilesGlob(effectiveRoot, filePattern).Where(f => !ContextEngine.IsNoisePath(f))
-                    : Directory.EnumerateFiles(effectiveRoot, filePattern, SearchOption.TopDirectoryOnly).Where(f => !ContextEngine.IsNoisePath(f));
-            }
-            catch (Exception ex)
-            {
-                return Task.FromResult($"[ERROR: {ex.Message}]");
-            }
-
-            var sorted = matches
-                .Select(Path.GetFullPath)
-                .OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
-                .ToList();
-
-            if (sorted.Count == 0)
-                return Task.FromResult("[no matches]");
-
-            var sb = new StringBuilder();
-            int shown = Math.Min(sorted.Count, Cap);
-            for (int i = 0; i < shown; i++)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                sb.AppendLine(sorted[i]);
-            }
-            if (sorted.Count > Cap)
-                sb.AppendLine($"[truncated — {sorted.Count - Cap} more matches]");
-
-            AppendOutput($"[LIST] {shown} file{(shown == 1 ? "" : "s")} matching \"{glob}\"\n", OutputColor.Dim);
-            return Task.FromResult(sb.ToString().TrimEnd());
-        }
+            => Task.FromResult(Report(ReadTools.List(glob, recursive, root: null, cancellationToken)));
 
         // ── IAgenticHost.RunTestsAsync ────────────────────────────────────────────
         // v1: raw console output. TRX parsing deferred until ParseTrxSummary moves to Core.
@@ -1521,39 +1352,7 @@ namespace DevMind
         // ── IAgenticHost.GetFileDiffAsync ─────────────────────────────────────────
 
         Task<string> IAgenticHost.GetFileDiffAsync(string filename)
-        {
-            string fileNameOnly = SafeGetFileName(filename);
-            FileResolution res = FindFile(fileNameOnly, filename.Replace('\\', '/'));
-            string resolvedPath = res.Path
-                ?? Path.Combine(_shellRunner.WorkingDirectory, filename);
-
-            if (!_fileSnapshots.ContainsKey(resolvedPath))
-            {
-                AppendOutput($"[DIFF] {filename}: not modified this session\n", OutputColor.Dim);
-                return Task.FromResult($"DIFF: No changes — {filename} has not been modified this session.");
-            }
-
-            string original = _fileSnapshots[resolvedPath];
-            string current;
-            try { current = File.ReadAllText(resolvedPath); }
-            catch (Exception ex) { return Task.FromResult($"DIFF: error reading {filename} — {ex.Message}"); }
-
-            string normOld = original.Replace("\r\n", "\n").Replace("\r", "\n");
-            string normNew = current.Replace("\r\n", "\n").Replace("\r", "\n");
-
-            if (string.Equals(normOld, normNew, StringComparison.Ordinal))
-            {
-                AppendOutput($"[DIFF] {filename}: no changes\n", OutputColor.Dim);
-                return Task.FromResult($"DIFF: No changes detected in {filename}.");
-            }
-
-            string[] oldLines = normOld.Split('\n');
-            string[] newLines = normNew.Split('\n');
-            string diffResult = DiffHelper.GenerateUnifiedDiff(filename, oldLines, newLines);
-
-            AppendOutput($"[DIFF] {filename}: changes shown ({oldLines.Length} → {newLines.Length} lines)\n", OutputColor.Dim);
-            return Task.FromResult(diffResult);
-        }
+            => Task.FromResult(Report(ReadTools.Diff(filename)));
 
         // ── IAgenticHost.ResolvePatchAsync ────────────────────────────────────────
 
@@ -1631,7 +1430,7 @@ namespace DevMind
                     AppendOutput($"[AUTO-READ] Loading {fileNameOnly} before patch...\n", OutputColor.Dim);
                     var (cached, _enc) = PatchEngine.ReadFilePreservingEncoding(fullPath);
                     _fileCache.Store(FileCacheKey(fullPath), cached);
-                    _filesRead.Add(fileNameOnly);
+                    _filesRead.Add(FileReadTools.FileKey(fullPath)); // read-set is keyed by full path
                     _taskReadFiles.MarkKnown(fullPath); // same keying as the guard above
                 }
 
@@ -1990,12 +1789,7 @@ namespace DevMind
             return updated;
         }
 
-        private void CaptureFileSnapshot(string fullPath)
-        {
-            if (_fileSnapshots.ContainsKey(fullPath)) return;
-            try { _fileSnapshots[fullPath] = File.ReadAllText(fullPath); }
-            catch { }
-        }
+        private void CaptureFileSnapshot(string fullPath) => _fileSnapshots.Capture(fullPath);
 
         private static string SafeGetFileName(string path)
         {
@@ -2014,190 +1808,6 @@ namespace DevMind
         {
             try { return Path.GetFullPath(fullPath); }
             catch { return fullPath; }
-        }
-
-        // ── Private async helpers ─────────────────────────────────────────────────
-
-        private async Task<string> LoadFileContentCoreAsync(
-            string fileName, int rangeStart, int rangeEnd, bool forceFullRead)
-        {
-            try
-            {
-                string fileNameOnly = SafeGetFileName(fileName);
-                FileResolution res = FindFile(fileNameOnly, fileName.Replace('\\', '/'));
-                string fullPath = res.Path;
-
-                if (fullPath == null || !File.Exists(fullPath))
-                {
-                    AppendOutput($"[READ] File not found: {fileName}\n", OutputColor.Warning);
-                    return BuildFileNotFoundMessage("READ", fileName, res);
-                }
-
-                CaptureFileSnapshot(fullPath);
-
-                if (rangeStart > 0)
-                {
-                    string cacheKey = FileCacheKey(fullPath);
-                    _fileCache.InvalidateIfStale(cacheKey, fullPath); // out-of-band writes
-                    if (!_fileCache.Contains(cacheKey))
-                    {
-                        var (diskContent, _) = PatchEngine.ReadFilePreservingEncoding(fullPath);
-                        _fileCache.Store(cacheKey, diskContent);
-                    }
-
-                    _taskReadFiles.MarkKnown(fullPath);
-                    _patchesSinceRead.Remove(fileNameOnly);      // model refreshed its view
-                    _editedSpansSinceRead.Remove(fileNameOnly);  // stale-overlap tracking reset with it
-                    _staleRecallsSinceRead.Remove(fileNameOnly); // fresh view supersedes any stale recall
-                    int totalLines = _fileCache.GetLineCount(cacheKey);
-
-                    if (rangeStart > rangeEnd) { int t = rangeStart; rangeStart = rangeEnd; rangeEnd = t; }
-                    int clampedEnd   = Math.Min(rangeEnd,   totalLines);
-                    int clampedStart = Math.Max(1, rangeStart);
-
-                    string rangeContent = _fileCache.GetLineRange(cacheKey, clampedStart, clampedEnd);
-                    if (rangeContent == null)
-                    {
-                        AppendOutput($"[READ] Range {rangeStart}-{rangeEnd} out of bounds for {fileNameOnly} ({totalLines} lines)\n", OutputColor.Error);
-                        return $"[READ] Range {rangeStart}-{rangeEnd} out of bounds for {fileNameOnly} ({totalLines} lines)";
-                    }
-
-                    var rawLines = rangeContent.Split('\n');
-                    var numbered = new StringBuilder();
-                    for (int i = 0; i < rawLines.Length; i++)
-                        numbered.AppendLine($"{clampedStart + i}: {rawLines[i].TrimEnd('\r')}");
-
-                    bool clamped = clampedEnd < rangeEnd;
-                    string rangeBlock = ContextEngine.RenderReadRangeBlock(
-                        fileNameOnly, clampedStart, clampedEnd, totalLines, numbered.ToString(), clamped);
-
-                    AppendOutput(
-                        $"[READ] {fileNameOnly}:{clampedStart}-{clampedEnd} ({clampedEnd - clampedStart + 1} lines){(clamped ? " [clamped]" : "")}\n",
-                        OutputColor.Success);
-                    return rangeBlock;
-                }
-
-                // Full / outline path
-                var (content, _enc) = PatchEngine.ReadFilePreservingEncoding(fullPath);
-                _fileCache.Store(FileCacheKey(fullPath), content);
-                _taskReadFiles.MarkKnown(fullPath);
-                _patchesSinceRead.Remove(fileNameOnly);      // model refreshed its view
-                _editedSpansSinceRead.Remove(fileNameOnly);  // stale-overlap tracking reset with it
-                _staleRecallsSinceRead.Remove(fileNameOnly); // fresh view supersedes any stale recall
-                int lineCount = content.Split('\n').Length;
-
-                bool alreadyRead = _filesRead.Contains(fileNameOnly);
-                _filesRead.Add(fileNameOnly);
-
-                string rendered = ContextEngine.RenderReadBlock(
-                    fileNameOnly, content, lineCount, forceFullRead, alreadyRead, out bool wasOutline);
-
-                AppendOutput(wasOutline
-                    ? $"[READ] {fullPath} ({lineCount} lines — outline{(alreadyRead ? ", re-read" : "")})\n"
-                    : $"[READ] Loaded {fullPath} ({lineCount} lines)\n",
-                    OutputColor.Success);
-
-                return rendered;
-            }
-            catch (Exception ex)
-            {
-                AppendOutput($"[READ ERROR] {fileName}: {ex.Message}\n", OutputColor.Error);
-                return $"[ERROR reading {fileName}: {ex.Message}]";
-            }
-        }
-
-        private async Task<string> LoadGitContentAsync(string fileName, int rangeStart)
-        {
-            string gitRoot = FindGitRoot();
-            if (gitRoot == null)
-            {
-                AppendOutput("[READ] git: not a git repository\n", OutputColor.Error);
-                return "[READ] git: not a git repository\n";
-            }
-
-            string command, header;
-
-            if (fileName.StartsWith("git log", StringComparison.OrdinalIgnoreCase))
-            {
-                int count;
-                if (rangeStart > 0)
-                {
-                    count = rangeStart;
-                }
-                else
-                {
-                    string countPart = fileName.Substring("git log".Length).Trim();
-                    count = 10;
-                    if (!string.IsNullOrEmpty(countPart)) int.TryParse(countPart, out count);
-                }
-                count = Math.Max(1, Math.Min(count, 50));
-                command = $"git log --oneline --no-decorate -{count}";
-                header  = $"[READ] git log (last {count} commits)";
-            }
-            else if (fileName.StartsWith("git diff", StringComparison.OrdinalIgnoreCase))
-            {
-                string diffArgs = fileName.Substring("git diff".Length).Trim();
-                command = string.IsNullOrEmpty(diffArgs) ? "git diff" : $"git diff {diffArgs}";
-                header  = string.IsNullOrEmpty(diffArgs) ? "[READ] git diff (working changes)" : $"[READ] git diff {diffArgs}";
-            }
-            else
-            {
-                string errMsg = $"[READ] Unrecognized git command: {fileName}";
-                AppendOutput(errMsg + "\n", OutputColor.Error);
-                return errMsg + "\n";
-            }
-
-            string savedDir = _shellRunner.WorkingDirectory;
-            _shellRunner.ChangeDirectory(gitRoot);
-            string output;
-            int exitCode;
-            try
-            {
-                (output, exitCode) = await _shellRunner.ExecuteAsync(command, CancellationToken);
-            }
-            finally
-            {
-                _shellRunner.ChangeDirectory(savedDir);
-            }
-
-            if (exitCode != 0)
-            {
-                string errMsg = $"{header}\n(error — exit code {exitCode})\n{output}\n";
-                AppendOutput(errMsg, OutputColor.Error);
-                return errMsg;
-            }
-
-            const int MaxDiffLines = 500;
-            string[] outputLines = output.Split('\n');
-            string truncatedOutput;
-            if (outputLines.Length > MaxDiffLines)
-            {
-                int omitted = outputLines.Length - MaxDiffLines;
-                truncatedOutput = string.Join("\n", outputLines.Take(MaxDiffLines))
-                    + $"\n[... {omitted} lines omitted — use READ git diff <filename> for specific files]";
-            }
-            else
-            {
-                truncatedOutput = output;
-            }
-
-            if (string.IsNullOrWhiteSpace(truncatedOutput)) truncatedOutput = "(no output)";
-
-            AppendOutput($"{header}\n", OutputColor.Success);
-            return $"{header}\n```\n{truncatedOutput}\n```\n\n";
-        }
-
-        private string FindGitRoot()
-        {
-            string dir = _shellRunner.WorkingDirectory;
-            while (!string.IsNullOrEmpty(dir))
-            {
-                if (Directory.Exists(Path.Combine(dir, ".git"))) return dir;
-                string parent = Path.GetDirectoryName(dir);
-                if (parent == dir) break;
-                dir = parent;
-            }
-            return null;
         }
     }
 }

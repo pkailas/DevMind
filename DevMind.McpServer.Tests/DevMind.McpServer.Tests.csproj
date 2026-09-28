@@ -21,6 +21,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\DevMind.McpServer\DevMind.McpServer.csproj" />
+    <!-- Read-side golden cases, shared with Core.Tests and the other adapter test project. -->
+    <Compile Include="..\DevMind.Core.Tests\Shared\ReadToolGolden.cs" Link="Shared\ReadToolGolden.cs" />
   </ItemGroup>
 
   <ItemGroup>

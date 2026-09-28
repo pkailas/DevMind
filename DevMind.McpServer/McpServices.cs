@@ -43,7 +43,7 @@ namespace DevMind.McpServer
         public LanguageServerRouter?  Lsp       { get; }
 
         /// <summary>
-        /// Tracks filenames (basename only) read during this session.
+        /// Tracks the full paths read in full during this session.
         /// Controls outline-vs-full behaviour: a re-read file gets an outline
         /// unless force_full is set.
         /// </summary>
@@ -73,11 +73,13 @@ namespace DevMind.McpServer
 
         private readonly Task _consumerTask;
 
-        // Session-baseline snapshots: absolute path → original content captured at first read
-        // or first patch. Powers diff_file.
-        private readonly Dictionary<string, string> _fileSnapshots =
-            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-       private readonly object _snapshotLock = new object();
+        /// <summary>Session baselines for diff_file (captured at first read or first write) —
+        /// the same store the agent hosts use.</summary>
+        public FileSnapshotStore Snapshots { get; } = new FileSnapshotStore();
+
+        /// <summary>The shared read-side tool implementation, with the MCP vocabulary.</summary>
+        public FileReadTools ReadTools =>
+            new FileReadTools(FileReadPolicy.Mcp, WorkingDirectory, FileCache, FilesRead, Snapshots, Shell);
 
        public record SshHostConfig(string Host, string User, string Key, string? Fingerprint);
          public IReadOnlyDictionary<string, SshHostConfig> SshHosts { get; }
@@ -316,61 +318,13 @@ namespace DevMind.McpServer
             }
         }
 
-        // ── Snapshot helpers ─────────────────────────────────────────────────────
+        // ── Snapshot helpers (write-side callers) ─────────────────────────────────
 
-        /// <summary>
-        /// Captures the current on-disk content of <paramref name="fullPath"/> into
-        /// _fileSnapshots only if it has not already been snapshotted this session.
-        /// No-op if the file does not exist or cannot be read.
-        /// </summary>
-        public void TrySnapshot(string fullPath)
-        {
-            lock (_snapshotLock)
-            {
-                if (_fileSnapshots.ContainsKey(fullPath)) return;
-            }
+        /// <summary>Captures the session baseline for <paramref name="fullPath"/> unless one
+        /// exists. A missing file is captured as empty.</summary>
+        public void TrySnapshot(string fullPath) => Snapshots.Capture(fullPath);
 
-            string? content = null;
-            try
-            {
-                if (File.Exists(fullPath))
-                    content = File.ReadAllText(fullPath, Encoding.UTF8);
-            }
-            catch { }
-
-            lock (_snapshotLock)
-            {
-                if (!_fileSnapshots.ContainsKey(fullPath))
-                    _fileSnapshots[fullPath] = content ?? string.Empty;
-            }
-        }
-
-        /// <summary>
-        /// Returns true and sets <paramref name="snapshot"/> if the file was snapshotted
-        /// this session. Returns false if no snapshot exists.
-        /// </summary>
-        public bool TryGetSnapshot(string fullPath, out string snapshot)
-        {
-            lock (_snapshotLock)
-            {
-                return _fileSnapshots.TryGetValue(fullPath, out snapshot!);
-            }
-        }
-
-        /// <summary>
-        /// Moves a snapshot entry from <paramref name="oldPath"/> to <paramref name="newPath"/>.
-        /// Called after rename_file to preserve diff history under the new name.
-        /// </summary>
-        public void MoveSnapshot(string oldPath, string newPath)
-        {
-            lock (_snapshotLock)
-            {
-                if (_fileSnapshots.TryGetValue(oldPath, out string? snap))
-                {
-                    _fileSnapshots.Remove(oldPath);
-                    _fileSnapshots[newPath] = snap;
-                }
-            }
-        }
+        /// <summary>Moves a baseline after rename_file so the diff history follows the file.</summary>
+        public void MoveSnapshot(string oldPath, string newPath) => Snapshots.Move(oldPath, newPath);
     }
 }
