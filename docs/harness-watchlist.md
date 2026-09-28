@@ -442,6 +442,25 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   (input box text at Accepting vs what is echoed/saved).
 - **Status:** open, not reproducible on demand
 
+### H-37 - Job timeout should fire only on a stall, not on wall-clock time
+- **First seen:** 2026-09-28 - job-1726 (rewind git file checkpoints) was cancelled at the 30-minute wall-clock limit while still
+  making progress (iteration 122 of 200, 17/20 new tests passing). Iterations run slower when BEAST's GPU is shared with other
+  work, so the same job takes longer in wall-clock time.
+- **Decision (Paul):** a job that is progressing is already bounded by max_depth; the timeout exists to catch hangs. Replace the
+  wall-clock kill with a STALL timeout: kill only when no iteration has completed (and no tool call has returned) for N minutes.
+  No absolute wall-clock cap.
+- **Status:** open (workaround: pass timeout_minutes 60+ on large briefs)
+
+### H-38 - /rewind files restores LF working files as CRLF under core.autocrlf=true
+- **First seen:** 2026-09-28 - found by job-1727 while fixing the file-checkpoint tests. BEAST's system gitconfig sets
+  core.autocrlf=true. Capture uses `git add -A` into a temp index, which normalises line endings; restore uses
+  `git cat-file --filters`, which applies checkout conversion. A working file that was LF is therefore captured as LF and restored
+  as CRLF: git sees no change, but the bytes differ. The DevMind working tree has many LF files.
+- **Options:** accept (git treats the content as identical; the next commit normalises anyway), or capture raw working-tree bytes
+  (hash each file without filters) so restore is truly byte-for-byte.
+- **Decision:** judge from real /rewind files runs before changing anything.
+- **Status:** open, watching
+
 ## Parked
 
 ### P-01 - No-write-streak nudge
