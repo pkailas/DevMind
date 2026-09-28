@@ -285,11 +285,15 @@ namespace DevMind
         /// falls back to its newest file/dir mtime. Never throws — pruning is housekeeping,
         /// not a load-bearing step.
         /// </summary>
-        public static void PruneAll(string root, DateTime nowUtc, int maxAgeDays = 14, int maxTurnsPerSession = 100)
+        /// <returns>The session ids whose folders were dropped entirely — the caller uses
+        /// this to delete the session's file-checkpoint refs (part 2b) from the repos the
+        /// manifests recorded.</returns>
+        public static List<string> PruneAll(string root, DateTime nowUtc, int maxAgeDays = 14, int maxTurnsPerSession = 100)
         {
+            var pruned = new List<string>();
             try
             {
-                if (string.IsNullOrEmpty(root) || !Directory.Exists(root)) return;
+                if (string.IsNullOrEmpty(root) || !Directory.Exists(root)) return pruned;
 
                 foreach (var sessionDir in Directory.GetDirectories(root))
                 {
@@ -309,7 +313,7 @@ namespace DevMind
 
                     if (nowUtc - newest.Value.ToUniversalTime() > TimeSpan.FromDays(maxAgeDays))
                     {
-                        try { Directory.Delete(sessionDir, recursive: true); }
+                        try { Directory.Delete(sessionDir, recursive: true); pruned.Add(Path.GetFileName(sessionDir)); }
                         catch { /* leave it; nothing to do */ }
                         continue;
                     }
@@ -328,6 +332,7 @@ namespace DevMind
             {
                 // Pruning is best-effort housekeeping at startup — never a crash path.
             }
+            return pruned;
         }
 
         /// <summary>

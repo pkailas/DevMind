@@ -218,7 +218,11 @@ namespace DevMind.TUI.Tests
             Assert.Contains("Rewound to before turn 3", result.Message);
             Assert.Contains("Original kept", result.Message);
             Assert.Contains("/resume", result.Message);
-            Assert.Contains("Files on disk were NOT changed", result.Message);
+            // No checkpoint roots are wired in this context, so the files line is the
+            // "unavailable" variant — the old fixed "Files on disk were NOT changed." was
+            // replaced by the per-state file line when /rewind started listing the diff.
+            Assert.Contains("Files: checkpoints unavailable", result.Message);
+            Assert.Contains("unchanged", result.Message);
         }
 
         /// <summary>
@@ -639,8 +643,11 @@ namespace DevMind.TUI.Tests
                 "the MEMORY.md index written in turn 3 must be deleted by /rewind 3");
 
             // The message says so, and the files-on-disk line is still true (for non-memory files).
+            // WorkingDirectory is not set in this context, so the file line is the
+            // "unavailable" variant — /rewind did NOT write any working files.
             Assert.Contains("Memory restored to turn 3", result.Message);
-            Assert.Contains("Files on disk were NOT changed", result.Message);
+            Assert.Contains("Files: checkpoints unavailable", result.Message);
+            Assert.Contains("unchanged", result.Message);
 
             // The fork got the original's checkpoints for turns 1..2 (n-1 = 3-1 = 2), so a
             // later /rewind inside the fork works. Turn 3 is NOT copied — the fork starts
@@ -687,7 +694,9 @@ namespace DevMind.TUI.Tests
             Assert.False(result.IsError, result.Message);
             Assert.Contains("checkpoints unavailable", result.Message);
             Assert.Contains("unchanged", result.Message);
-            Assert.Contains("Files on disk were NOT changed", result.Message);
+            // The files line is the "unavailable" variant: no roots wired, so nothing on
+            // disk was touched by the file-checkpoint path.
+            Assert.Contains("Files: checkpoints unavailable", result.Message);
         }
 
         [Fact]

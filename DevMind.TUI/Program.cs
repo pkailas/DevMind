@@ -82,6 +82,16 @@ namespace DevMind
         static string _memoryCheckpointsSession;
         static string _memoryRootLastSeen;
 
+        // Git file checkpoints for /rewind (part 2b): the file-tree twin of the
+        // memory checkpoints above — same per-session keying, same turn number
+        // (RewindPlanner.NextTurnNumber), same turn-start moment, a different
+        // payload: a detached git commit of the working tree instead of copied
+        // files. The working directory must be inside a git repo; otherwise the
+        // capture records "no-repo" and /rewind says so.
+        static FileCheckpoint _fileCheckpoints;
+        static string _fileCheckpointsSession;
+        static string _fileCheckpointsDirLastSeen;
+
         /// <summary>
         /// The checkpoint writer for the session a turn is about to run under. Rebuilt when
         /// the session id changes (a /rewind fork adopted one) or the working directory does
@@ -102,6 +112,25 @@ namespace DevMind
                     MemoryCheckpoint.DefaultRoot(), sessionId, options.WorkingDirectory);
             }
             return _memoryCheckpoints;
+        }
+
+        /// <summary>
+        /// The file-checkpoint writer for the session a turn is about to run under —
+        /// rebuilt on a session change (/rewind fork) or a working-directory change
+        /// (/dir moved the repo), exactly like <see cref="GetMemoryCheckpoints"/>.
+        /// </summary>
+        static FileCheckpoint GetFileCheckpoints(TuiOptions options, string sessionId)
+        {
+            if (_fileCheckpoints == null ||
+                !string.Equals(_fileCheckpointsSession, sessionId, StringComparison.Ordinal) ||
+                !string.Equals(_fileCheckpointsDirLastSeen, options.WorkingDirectory, StringComparison.Ordinal))
+            {
+                _fileCheckpointsSession = sessionId;
+                _fileCheckpointsDirLastSeen = options.WorkingDirectory;
+                _fileCheckpoints = new FileCheckpoint(
+                    MemoryCheckpoint.DefaultRoot(), sessionId, options.WorkingDirectory);
+            }
+            return _fileCheckpoints;
         }
         // Double-press-to-exit: armed after first Ctrl+C when idle.
         static bool _ctrlCArmed;
@@ -1876,7 +1905,55 @@ namespace DevMind
             // being written THIS process, so its newest turn is now — well inside 14 days.)
             _ = Task.Run(() =>
             {
-                try { MemoryCheckpoint.PruneAll(MemoryCheckpoint.DefaultRoot(), DateTime.UtcNow); }
+                try
+                {
+                    string root = MemoryCheckpoint.DefaultRoot();
+                    // The pruner drops whole session folders — which deletes the
+                    // files-manifest.json files that record each session's repo root
+                    // and turns. So the repo root and turn numbers for every session
+                    // are captured BEFORE PruneAll runs; the pruner then reports which
+                    // sessions it dropped, and their file checkpoint refs
+                    // (refs/devmind/checkpoints/<session>/turn-*) are deleted from the
+                    // repos the manifests recorded — a pruned session with live refs
+                    // would keep orphaned commits reachable forever.
+                    var refsToClean = new Dictionary<string, (string repoRoot, List<int> turns)>(StringComparer.Ordinal);
+                    if (Directory.Exists(root))
+                    {
+                        foreach (var sessionDir in Directory.GetDirectories(root))
+                        {
+                            string sid = Path.GetFileName(sessionDir);
+                            var repoRoots = new HashSet<string>(StringComparer.Ordinal);
+                            var turns = new List<int>();
+                            foreach (var d in Directory.GetDirectories(sessionDir))
+                            {
+                                string name = Path.GetFileName(d);
+                                if (!name.StartsWith("turn-")) continue;
+                                if (!int.TryParse(name.Substring(5), out int k) || k < 1) continue;
+                                turns.Add(k);
+                                try
+                                {
+                                    string mpath = Path.Combine(d, "files-manifest.json");
+                                    if (!File.Exists(mpath)) continue;
+                                    var m = System.Text.Json.JsonSerializer.Deserialize<
+                                        System.Text.Json.JsonElement>(File.ReadAllText(mpath));
+                                    string status = m.TryGetProperty("Status", out var s) ? s.GetString() : null;
+                                    string rr = m.TryGetProperty("RepoRoot", out var r) ? r.GetString() : null;
+                                    if (status == "ok" && !string.IsNullOrEmpty(rr))
+                                        repoRoots.Add(rr);
+                                }
+                                catch { /* unreadable manifest — no repo recorded */ }
+                            }
+                            if (repoRoots.Count == 1 && turns.Count > 0)
+                                refsToClean[sid] = (System.Linq.Enumerable.First(repoRoots), turns);
+                        }
+                    }
+                    var pruned = MemoryCheckpoint.PruneAll(root, DateTime.UtcNow);
+                    foreach (var s in pruned)
+                    {
+                        if (refsToClean.TryGetValue(s, out var info))
+                            FileCheckpoint.DeleteSessionRefs(info.repoRoot, s, info.turns);
+                    }
+                }
                 catch { /* best-effort cleanup — must never affect startup */ }
             });
 
@@ -1981,6 +2058,11 @@ namespace DevMind
                     // the /rewind cut reads, so the two cannot drift (see NextTurnNumber).
                     int turnNumber = RewindPlanner.NextTurnNumber(sessionRows);
                     GetMemoryCheckpoints(options, sessionId).SnapshotAtTurnStart(turnNumber);
+                    // The file-tree twin (part 2b): the same turn number k, the same
+                    // moment (BEFORE the prompt is sent), a git capture of the working
+                    // tree. Time-boxed and exception-swallowed inside; a non-repo
+                    // working directory records "no-repo" and a later /rewind says so.
+                    await GetFileCheckpoints(options, sessionId).SnapshotAtTurnStartAsync(turnNumber);
                 }
             }
             catch

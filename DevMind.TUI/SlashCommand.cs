@@ -220,6 +220,18 @@ namespace DevMind
         /// memory restore.</summary>
         public string MemoryRoot { get; set; }
 
+        // -- File checkpoints (/rewind part 2b) -----------------------------------
+
+        /// <summary>
+        /// The pending file-restore plan from the last /rewind N: which repo, which
+        /// checkpoint commit, and which paths to restore. Set by /rewind N (after the
+        /// conversation fork and memory restore), consumed and cleared by /rewind files.
+        /// Null when no /rewind N has run in this process, or when /rewind files
+        /// already applied it. The plan is process-state only — a /rewind in a new
+        /// process has no pending plan and says so.
+        /// </summary>
+        public PendingFileRestorePlan FileRestorePlan { get; set; }
+
         // -- Multimodal (/image) ----------------------------------------------------
 
         /// <summary>Stages an image data URI on the LLM client so the next user message is
@@ -235,6 +247,20 @@ namespace DevMind
         /// report the same percentage for the same prompt. 0 only if a non-positive manual
         /// context size was configured; the handler falls back to "window not yet determined".</summary>
         public int ContextWindowSize { get; set; }
+    }
+
+    /// <summary>
+    /// The pending file-restore plan a /rewind N stages for /rewind files to apply:
+    /// the repo root, the checkpoint commit, the turn number (for the report line),
+    /// and the list of paths to restore (A/M/D from the diff, memory set excluded).
+    /// </summary>
+    public sealed class PendingFileRestorePlan
+    {
+        public string SessionId { get; set; } = string.Empty;
+        public string RepoRoot { get; set; } = string.Empty;
+        public string CheckpointCommit { get; set; } = string.Empty;
+        public int TurnNumber { get; set; }
+        public List<FileCheckpoint.FileDiffEntry> Paths { get; set; } = new();
     }
 
    /// <summary>
@@ -1622,6 +1648,12 @@ namespace DevMind
 
         static async Task<CommandResult> RewindHandler(string[] args, CommandContext ctx)
         {
+            // /rewind files: apply the pending file-restore plan from the last /rewind N.
+            // This is a user command (not a model tool), so it is allowed in Plan mode
+            // and does not need the history store — it operates on the working tree.
+            if (args.Length > 0 && args[0].Equals("files", StringComparison.OrdinalIgnoreCase))
+                return await RewindFilesHandler(ctx);
+
             if (ctx.HistoryStore == null)
                 return new CommandResult { Message = "History is not enabled.", IsError = true };
 
@@ -1642,7 +1674,7 @@ namespace DevMind
             if (!int.TryParse(args[0], out int n) || n < 1)
                 return new CommandResult
                 {
-                    Message = "Usage: /rewind [n]  (no argument lists this session's user turns; n rewinds to BEFORE turn n)",
+                    Message = "Usage: /rewind [n|files]  (no argument lists turns; n rewinds to BEFORE turn n; files restores the pending file plan)",
                     IsError = true,
                 };
 
@@ -1740,6 +1772,13 @@ namespace DevMind
                         // later /rewind inside the fork restores from ITS copies of the
                         // original's early turns.
                         checkpoints.CopyCheckpoints(ctx.SessionId, newId, n - 1);
+                        // The file-tree twin (part 2b): the fork gets the original's file
+                        // checkpoint REFS for turns 1..N-1 — the same commits, just re-pointed
+                        // under the fork's session id, so a /rewind inside the fork restores
+                        // from them. The manifests are copied by CopyCheckpoints above.
+                        var fileCp = new FileCheckpoint(
+                            ctx.MemoryCheckpointRoot, ctx.SessionId, ctx.WorkingDirectory);
+                        fileCp.CopyRefs(ctx.SessionId, newId, n - 1);
                         var restored = checkpoints.Restore(ctx.SessionId, n);
                         memoryLine = restored != null
                             ? restored.Value.detail
@@ -1751,12 +1790,71 @@ namespace DevMind
                     memoryLine = $"Memory restore failed ({mex.Message}) — unchanged.";
                 }
 
+                // ── Git file checkpoints (part 2b): list the working-file diff ──
+                // The conversation fork cut the rows; the memory restore cut the memory
+                // files; this lists the WORKING-FILE diff between now and the original
+                // session's turn-N file checkpoint. The user can then /rewind files to
+                // apply it. Nothing is written yet — the plan is staged in TUI state.
+                // Absent roots or a non-repo working directory leave files unchanged and
+                // the message says so. Failures never break the fork.
+                string fileLine;
+                try
+                {
+                    if (string.IsNullOrEmpty(ctx.MemoryCheckpointRoot) ||
+                        string.IsNullOrEmpty(ctx.WorkingDirectory))
+                    {
+                        fileLine = "Files: checkpoints unavailable — unchanged.";
+                    }
+                    else
+                    {
+                        var fileCp = new FileCheckpoint(
+                            ctx.MemoryCheckpointRoot, ctx.SessionId, ctx.WorkingDirectory);
+                        var diff = await fileCp.ComputeRestoreDiffAsync(ctx.SessionId, n);
+                        if (diff == null)
+                        {
+                            fileLine = $"Files: no file checkpoint for turn {n} — unchanged.";
+                        }
+                        else if (diff.Count == 0)
+                        {
+                            fileLine = "Files: no changes since turn " + n + " — nothing to restore.";
+                        }
+                        else
+                        {
+                            // Store the pending restore plan (session id, repo root,
+                            // checkpoint commit, path list) in TUI state. /rewind files
+                            // will apply it. The repo root and commit come from the
+                            // manifest the diff read.
+                            var manifest = ManifestForSession(
+                                ctx.MemoryCheckpointRoot, ctx.SessionId, n);
+                            if (manifest != null && manifest.Status == "ok" &&
+                                !string.IsNullOrEmpty(manifest.RepoRoot) &&
+                                !string.IsNullOrEmpty(manifest.CommitSha))
+                            {
+                                ctx.FileRestorePlan = new PendingFileRestorePlan
+                                {
+                                    SessionId = ctx.SessionId,
+                                    RepoRoot = manifest.RepoRoot,
+                                    CheckpointCommit = manifest.CommitSha,
+                                    TurnNumber = n,
+                                    Paths = new List<FileCheckpoint.FileDiffEntry>(diff),
+                                };
+                            }
+
+                            fileLine = FormatFileDiffListing(diff, n);
+                        }
+                    }
+                }
+                catch (Exception fex)
+                {
+                    fileLine = $"Files: checkpoint read failed ({fex.Message}) — unchanged.";
+                }
+
                 return new CommandResult
                 {
                     Message = $"Rewound to before turn {n} (new session {ShortId(newId)}). " +
                               "Original kept — /resume <n> to go back. " +
                               memoryLine + " " +
-                              "Files on disk were NOT changed."
+                              fileLine
                               + (skipped > 0 ? $" ({skipped} rows skipped on load)." : ""),
                 };
             }
@@ -1764,6 +1862,130 @@ namespace DevMind
             {
                 return new CommandResult { Message = $"Failed to rewind: {ex.Message}", IsError = true };
             }
+        }
+
+        // -- /rewind files --------------------------------------------------------
+        // Applies the pending file-restore plan from the last /rewind N. Refuses while a
+        // turn is running, when no plan is pending, or when the plan belongs to a
+        // different session. Allowed in Plan mode (it's a user command, not a model tool).
+
+        static async Task<CommandResult> RewindFilesHandler(CommandContext ctx)
+        {
+            if (ctx.IsTurnRunning)
+                return new CommandResult
+                {
+                    Message = "/rewind files is not available while a turn is running — Esc to cancel it first.",
+                    IsError = true,
+                };
+
+            var plan = ctx.FileRestorePlan;
+            if (plan == null)
+                return new CommandResult
+                {
+                    Message = "No pending file-restore plan. Run /rewind <n> first to stage one.",
+                    IsError = true,
+                };
+
+            if (!string.Equals(plan.SessionId, ctx.SessionId, StringComparison.Ordinal))
+                return new CommandResult
+                {
+                    Message = $"The pending plan belongs to session {ShortId(plan.SessionId)}, not the current session {ShortId(ctx.SessionId)}. The plan was cleared.",
+                    IsError = true,
+                };
+
+            if (plan.Paths.Count == 0)
+            {
+                ctx.FileRestorePlan = null;
+                return new CommandResult
+                {
+                    Message = "The pending plan is empty — nothing to restore.",
+                };
+            }
+
+            try
+            {
+                var fileCp = new FileCheckpoint(
+                    MemoryCheckpoint.DefaultRoot(), ctx.SessionId, ctx.WorkingDirectory);
+                var (restored, deleted, errors) = await fileCp.ApplyRestoreAsync(
+                    plan.RepoRoot, plan.CheckpointCommit, plan.Paths);
+
+                ctx.FileRestorePlan = null; // clear the plan
+
+                string msg = $"Restored {restored} file(s), deleted {deleted} file(s) to turn {plan.TurnNumber}.";
+                if (errors.Length > 0)
+                    msg += $" Some files had problems: {errors}";
+                return new CommandResult { Message = msg };
+            }
+            catch (Exception ex)
+            {
+                return new CommandResult
+                {
+                    Message = $"File restore failed: {ex.Message}",
+                    IsError = true,
+                };
+            }
+        }
+
+        /// <summary>
+        /// Format the file-diff listing for the /rewind N output: one line per differing
+        /// path with A/M/D status, a flag on paths that also differ from the newest
+        /// checkpoint ("possibly your own edit"), capped at 30 lines.
+        /// </summary>
+        static string FormatFileDiffListing(IReadOnlyList<FileCheckpoint.FileDiffEntry> diff, int turnNumber)
+        {
+            const int maxLines = 30;
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine($"Files changed since turn {turnNumber}:");
+
+            int shown = 0;
+            foreach (var entry in diff)
+            {
+                if (shown >= maxLines)
+                {
+                    sb.Append($"  +{diff.Count - maxLines} more");
+                    break;
+                }
+                string flag = entry.PossiblyOwnEdit ? "  [changed since last turn — possibly your own edit]" : "";
+                sb.Append($"  {entry.Status}  {entry.Path}{flag}");
+                sb.AppendLine();
+                shown++;
+            }
+
+            sb.Append($"  /rewind files to restore these, or leave them.");
+            return sb.ToString().TrimEnd();
+        }
+
+        /// <summary>
+        /// Load the files-manifest.json for a session's turn, or null when absent.
+        /// Exposed for the /rewind N handler to read the repo root and commit sha.
+        /// </summary>
+        static FileCheckpointFilesManifest ManifestForSession(string checkpointRoot, string sessionId, int turn)
+        {
+            try
+            {
+                string dir = Path.Combine(checkpointRoot, sessionId, $"turn-{turn}");
+                if (!Directory.Exists(dir)) return null;
+                string path = Path.Combine(dir, "files-manifest.json");
+                if (!File.Exists(path)) return null;
+                var json = File.ReadAllText(path);
+                return System.Text.Json.JsonSerializer.Deserialize<FileCheckpointFilesManifest>(json);
+            }
+            catch { return null; }
+        }
+
+        /// <summary>
+        /// The files-manifest shape (mirrors FileCheckpoint's internal manifest class).
+        /// </summary>
+        sealed class FileCheckpointFilesManifest
+        {
+            public int Turn { get; set; }
+            public string SessionId { get; set; }
+            public string RepoRoot { get; set; }
+            public string CommitSha { get; set; }
+            public string TreeSha { get; set; }
+            public string Status { get; set; }
+            public string TakenAt { get; set; }
+            public int SameAsTurn { get; set; }
         }
 
         /// <summary>
