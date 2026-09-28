@@ -65,8 +65,8 @@ An agentic turn runs 1–15 min; MCP clients time out long tool calls. Job patte
 **Concurrency:** jobs execute strictly one-at-a-time (single GPU; a queue beats KV-cache thrash).
 The queue is in-process; server restart loses it (acceptable — client re-submits).
 
-**Defaults:** `max_depth` = DevMind's AgenticLoopMaxDepth default (25), `timeout_minutes` = 30
-hard wall-clock kill, `allow_commit` = false.
+**Defaults:** `max_depth` = DevMind's AgenticLoopMaxDepth default (25), `timeout_minutes` = 10
+stall timeout (H-37: cancelled only after that long with no progress; no wall-clock cap), `allow_commit` = false.
 
 ### 4. Coordination rules (usage discipline, not code)
 

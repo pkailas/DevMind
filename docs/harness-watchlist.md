@@ -449,7 +449,15 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Decision (Paul):** a job that is progressing is already bounded by max_depth; the timeout exists to catch hangs. Replace the
   wall-clock kill with a STALL timeout: kill only when no iteration has completed (and no tool call has returned) for N minutes.
   No absolute wall-clock cap.
-- **Status:** open (workaround: pass timeout_minutes 60+ on large briefs)
+- **Status:** fixed, pending deploy - commit "H-37: delegated jobs time out on a stall, not on wall-clock time". The
+  wall-clock CancelAfter is gone. A watchdog runs for the agent turn only and cancels when the job's JobLiveness record
+  shows no progress for timeout_minutes (the name is kept; it is now the stall window, default 10, range 1-240).
+  Progress events: every SSE data chunk the model server streams (text, think and tool-call argument deltas; not
+  DevMind's own [CONTEXT] status lines), each executed tool block returning, each shell/test command starting and
+  returning, each line a running shell command streams, and each completed iteration. A shell or test command holds the
+  clock while it runs, until its own timeout plus one window has passed. The test baseline and the build/test
+  verification run outside the watchdog on their own timeouts. A stalled job is Cancelled with error "stalled: no
+  progress for N min (last progress: <what> at <time> UTC)". Tests: JobLivenessTests, StallTimeoutJobTests.
 
 ### H-38 - /rewind files restores LF working files as CRLF under core.autocrlf=true
 - **First seen:** 2026-09-28 - found by job-1727 while fixing the file-checkpoint tests. BEAST's system gitconfig sets

@@ -21,6 +21,10 @@ namespace DevMind
         private readonly ILlmOptions _options;
         private CancellationToken _cancellationToken;
 
+        /// <summary>Invoked after each tool block has executed (headless stall watchdog,
+        /// H-37). Null = no-op.</summary>
+        public Action<BlockType> BlockExecuted { get; set; }
+
         // Repetition guard — tracks consecutive identical READ/GREP requests to break infinite loops
         private string _lastReadKey;
         private int _lastReadRepeatCount;
@@ -806,6 +810,9 @@ namespace DevMind
                     default:
                         break;
                 }
+
+                if (block.Type is not (BlockType.Text or BlockType.Patch))
+                    BlockExecuted?.Invoke(block.Type);
             }
 
             // ── Batch PATCH processing with diff preview gate ──────────────────
@@ -818,6 +825,7 @@ namespace DevMind
                 if (patchBlocks.Count > 0)
                 {
                     await ExecuteBatchPatchesAsync(patchBlocks, result);
+                    BlockExecuted?.Invoke(BlockType.Patch);
                 }
             }
 

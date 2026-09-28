@@ -30,6 +30,9 @@ namespace DevMind.McpServer
         public required string Prompt { get; init; }
         public required string WorkingDirectory { get; init; }
         public int MaxDepth { get; init; }
+        /// <summary>STALL window in minutes (H-37; the name predates it): the job is cancelled
+        /// only when the agent turn has made no progress for this long. There is no wall-clock
+        /// cap — a progressing job is bounded by <see cref="MaxDepth"/>.</summary>
         public int TimeoutMinutes { get; init; }
         public bool AllowCommit { get; init; }
         public bool VerifyBuild { get; init; }
@@ -56,6 +59,11 @@ namespace DevMind.McpServer
         public AgentJobState State;
         public HeadlessAgentResult? Result;
         public string? Error;
+
+        /// <summary>Set by the stall watchdog when it cancelled the job:
+        /// "stalled: no progress for N min (last progress: &lt;what&gt; at &lt;time&gt;)".
+        /// Becomes <see cref="Error"/> so the result says why, not just "cancelled".</summary>
+        public volatile string? StallReason;
 
         /// <summary>Post-run build verification outcome (null when skipped: no file
         /// changes, no resolvable build command, or verify_build false).</summary>
@@ -312,6 +320,16 @@ namespace DevMind.McpServer
         /// Returns (output, exitCode). Null = production path.
         /// </summary>
         internal Func<string /*command*/, string /*workingDirectory*/, Task<(string output, int exitCode)>>? BuildExecOverride { get; set; }
+
+        /// <summary>Clock for the stall watchdog's liveness record (test seam; default system).</summary>
+        internal TimeProvider Clock { get; set; } = TimeProvider.System;
+
+        /// <summary>Test seam: replaces the job's timeout_minutes stall window (e.g. seconds).</summary>
+        internal TimeSpan? StallWindowOverride { get; set; }
+
+        /// <summary>Test seam: how often the watchdog checks (real time). Null = window / 20,
+        /// clamped to 50 ms..15 s.</summary>
+        internal TimeSpan? WatchdogPollOverride { get; set; }
 
         public AgentJobManager(Action? onJobFinished = null)
         {
@@ -675,7 +693,9 @@ namespace DevMind.McpServer
 
                 job.State = AgentJobState.Running;
                 job.StartedAtUtc = DateTime.UtcNow;
-                job.Cts.CancelAfter(TimeSpan.FromMinutes(job.TimeoutMinutes));
+                // H-37: no wall-clock kill. The stall watchdog below runs for the agent turn
+                // only; the harness phases (test baseline, build/test verification) are not
+                // the agent's time and carry their own timeouts.
 
                 string transcriptPath = Path.Combine(
                     TranscriptDir,
@@ -747,11 +767,27 @@ namespace DevMind.McpServer
                         session.SetHarnessVerifiesTests(job.VerifyTests);
                     }
 
-                    var result = await session.RunTurnAsync(
-                        job.Prompt,
-                        transcriptPath: transcriptPath,
-                        progress: job.AppendTail,
-                        ct: job.Cts.Token).ConfigureAwait(false);
+                    var liveness = new JobLiveness(Clock,
+                        job.ParentJobId == null ? "job started" : "continuation started");
+                    HeadlessAgentResult result;
+                    using (var watchdogStop = new CancellationTokenSource())
+                    {
+                        Task watchdog = RunStallWatchdogAsync(job, liveness, watchdogStop.Token);
+                        try
+                        {
+                            result = await session.RunTurnAsync(
+                                job.Prompt,
+                                transcriptPath: transcriptPath,
+                                progress: job.AppendTail,
+                                ct: job.Cts.Token,
+                                liveness: liveness).ConfigureAwait(false);
+                        }
+                        finally
+                        {
+                            watchdogStop.Cancel();
+                            await watchdog.ConfigureAwait(false);
+                        }
+                    }
 
                     // The RESULT is set as soon as the turn ends — devmind_task_result
                     // reads it once the job is Done, and it's needed to compute the
@@ -766,6 +802,8 @@ namespace DevMind.McpServer
                     // terminal state only once both have settled (end of the try block).
                     job.Result = result;
                     job.Error = result.Error;
+                    if (result.Cancelled && job.StallReason is { } stall)
+                        job.Error = stall; // not a generic cancel: say it stalled, and on what
 
                     // The state the job will report once nothing is left to verify.
                     var terminalState = result.Cancelled ? AgentJobState.Cancelled
@@ -837,6 +875,38 @@ namespace DevMind.McpServer
                     try { _onJobFinished(); } catch { /* never kill the worker */ }
                 }
             }
+        }
+
+        /// <summary>The job's stall window: timeout_minutes (or the test override).</summary>
+        private TimeSpan StallWindow(AgentJob job) =>
+            StallWindowOverride ?? TimeSpan.FromMinutes(job.TimeoutMinutes);
+
+        /// <summary>
+        /// H-37 stall watchdog for one agent turn: polls the liveness record and cancels the
+        /// job once no progress event has happened for the whole window (an in-flight shell or
+        /// test command holds the clock for its own timeout — see JobLiveness). Runs only while
+        /// the turn runs, so the harness phases are never counted or killed by it.
+        /// </summary>
+        private async Task RunStallWatchdogAsync(AgentJob job, JobLiveness liveness, CancellationToken stop)
+        {
+            TimeSpan window = StallWindow(job);
+            TimeSpan poll = WatchdogPollOverride ?? TimeSpan.FromMilliseconds(
+                Math.Clamp(window.TotalMilliseconds / 20, 50, 15_000));
+            try
+            {
+                while (!stop.IsCancellationRequested)
+                {
+                    await Task.Delay(poll, stop).ConfigureAwait(false);
+                    if (!liveness.IsStalled(window, out string reason)) continue;
+
+                    job.StallReason = reason;
+                    job.AppendTail($"\n[job] {reason} - cancelling\n");
+                    Console.Error.WriteLine($"[AgentJobManager] {job.Id} {reason}");
+                    job.Cts.Cancel();
+                    return;
+                }
+            }
+            catch (OperationCanceledException) { /* turn ended first */ }
         }
 
         // ── Active-job marker ────────────────────────────────────────────────

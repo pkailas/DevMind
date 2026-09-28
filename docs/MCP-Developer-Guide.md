@@ -70,7 +70,8 @@ the job pattern in `AgentTaskTools` / `AgentJobManager`:
 - `devmind_task_start` validates the prompt and absolute `working_dir`,
   **health-probes the model server** (fail fast beats a queued job dying
   minutes later), clamps `max_depth` (default 40, 1–100) and `timeout_minutes`
-  (default 30, 1–240), and enqueues. Returns `job_id` + queue position.
+  (default 10, 1–240; a STALL window since H-37 — the job runner's watchdog cancels the
+  agent turn only after that long with no progress, never on wall-clock time), and enqueues. Returns `job_id` + queue position.
 - Jobs execute **strictly one at a time** — single GPU; a queue beats KV-cache
   thrash. The queue is in-process; a server restart loses it (acceptable — the
   client re-submits). `devmind_task_result` falls back to the on-disk

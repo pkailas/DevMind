@@ -25,6 +25,10 @@ namespace DevMind
         private readonly LoopState _state;
         private readonly ITrainingLogger _trainingLogger;
 
+        /// <summary>Headless stall-watchdog record (H-37), set per turn by HeadlessSession;
+        /// ticked each time a tool block returns. Null for the TUI.</summary>
+        public JobLiveness Liveness { get; set; }
+
        // Same heuristic as the extension constant — gives slack for legitimate
         // progressive debugging cycles without masking genuine stuck loops.
         private const int ConsecutiveErrorAbortThreshold = 5;
@@ -192,6 +196,8 @@ namespace DevMind
 
             var executor = new AgenticExecutor(_agenticHost, _options);
             executor.SetCancellationToken(ct);
+            if (Liveness is { } liveness)
+                executor.BlockExecuted = type => liveness.Tick($"tool call returned: {type}");
             int maxDepth = _options.AgenticLoopMaxDepth;
 
             if (_options.ShowDebugOutput)

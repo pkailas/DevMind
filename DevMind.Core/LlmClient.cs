@@ -123,6 +123,13 @@ namespace DevMind
         /// </summary>
         public NearlineCache NearlineCache { get; } = new NearlineCache();
 
+        /// <summary>
+        /// Invoked for every SSE data chunk the server streams — content, reasoning AND
+        /// tool-call argument deltas (a long create_file body streams only the latter).
+        /// Not invoked for the client's own status lines. Headless stall watchdog (H-37).
+        /// </summary>
+        public Action StreamDataReceived { get; set; }
+
         private string _taskScratchpad = "";
         private const int ScratchpadMaxTokens = 200;
 
@@ -1412,6 +1419,7 @@ namespace DevMind
                         break;
 
                     lastDataLine = data;
+                    StreamDataReceived?.Invoke();
 
                     // Live running usage — llama-server attaches an incrementing usage object
                     // (completion_tokens / prompt_tokens) to every streamed chunk. This is the

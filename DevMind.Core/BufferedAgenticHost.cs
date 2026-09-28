@@ -178,6 +178,11 @@ namespace DevMind
         /// </summary>
         public bool NoExecute { get; set; }
 
+        /// <summary>Headless stall-watchdog record (H-37), set per turn by HeadlessSession.
+        /// A shell/test command holds the stall clock for its own timeout while it runs, and
+        /// each streamed shell line is a progress tick. Null outside a headless job.</summary>
+        public JobLiveness Liveness { get; set; }
+
         /// <summary>Standard text for a caller-imposed no_execute block: names the
         /// restriction as the caller's, corrects the false premise (DevMind CAN run
         /// programs — this task may not), and prescribes the only next step (build,
@@ -430,11 +435,17 @@ namespace DevMind
             }
 
             AppendOutput($"[SHELL] > {command}\n", OutputColor.Dim);
+            JobLiveness liveness = Liveness;
             var progress = new Progress<ShellOutputLine>(line =>
-                AppendOutput(line.Line + "\n", line.IsError ? OutputColor.Error : OutputColor.Normal));
+            {
+                liveness?.Tick($"shell output: {command}");
+                AppendOutput(line.Line + "\n", line.IsError ? OutputColor.Error : OutputColor.Normal);
+            });
             string output;
             int exitCode;
             string steerCancel;
+            using (liveness?.BeginToolCall($"shell: {command}",
+                       TimeSpan.FromSeconds(ShellRunner.ResolveTimeout(command, timeoutSeconds))))
             using (var call = _shellInterrupt.Begin(CancellationToken))
             {
                 // The job token still reaps the whole tree on a job cancel; the call's own
@@ -1486,6 +1497,8 @@ namespace DevMind
 
             AppendOutput($"[TEST] > {cmd}\n", OutputColor.Dim);
 
+            using var inFlight = Liveness?.BeginToolCall($"test: {cmd}",
+                TimeSpan.FromSeconds(ShellRunner.ResolveTimeout(cmd, timeoutSeconds)));
             using var call = _shellInterrupt.Begin(CancellationToken);
             try
             {

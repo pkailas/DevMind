@@ -247,12 +247,16 @@ namespace DevMind
         /// Runs one agentic turn: the initial task prompt, or a continuation
         /// ("continue", a refinement, a follow-up). Never throws for task-level
         /// failures — errors are reported in the result. Turns must not overlap.
+        /// <paramref name="liveness"/> (optional) is ticked on every event that proves the turn
+        /// is alive — streamed model output, tool calls starting/returning, shell output lines,
+        /// completed iterations — for the job runner's stall watchdog (H-37).
         /// </summary>
         public async Task<HeadlessAgentResult> RunTurnAsync(
             string prompt,
             string transcriptPath = null,
             Action<string> progress = null,
-            CancellationToken ct = default)
+            CancellationToken ct = default,
+            JobLiveness liveness = null)
         {
             var result = new HeadlessAgentResult();
             var sw = Stopwatch.StartNew();
@@ -274,6 +278,11 @@ namespace DevMind
                 }
             }
             _turnProgress = progress;
+            _host.Liveness = liveness;
+            _driver.Liveness = liveness;
+            // Every streamed chunk — text, think or tool-call arguments — proves generation is
+            // alive; the client's own [CONTEXT] status lines (also sent via onToken) do not.
+            _llmClient.StreamDataReceived = liveness == null ? null : () => liveness.Tick("model output streaming");
 
             using var runCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             _currentTurnCts = runCts;
@@ -446,6 +455,7 @@ namespace DevMind
                         result.Cancelled = true;
                         break;
                     }
+                    liveness?.Tick($"iteration {result.Iterations} completed");
 
                     if (iter.Kind == LoopIterationKind.Terminal || iter.Kind == LoopIterationKind.Cancelled)
                     {
@@ -498,6 +508,9 @@ namespace DevMind
                 sw.Stop();
                 _currentTurnCts = null;
                 _turnProgress = null;
+                _host.Liveness = null;
+                _driver.Liveness = null;
+                _llmClient.StreamDataReceived = null;
                 LastActivityUtc = DateTime.UtcNow;
 
                 // Close the steer window: atomically take the final pending steer AND clear

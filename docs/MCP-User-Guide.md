@@ -27,7 +27,7 @@ client.
 | `prompt` | *(required)* | The task brief: goal, relevant files, constraints, and how to verify success. Write it like a brief for a junior developer. |
 | `working_dir` | *(required)* | **Absolute** path of the directory the agent operates in — its sandbox. |
 | `max_depth` | 40 (1–100) | Max agentic iterations. Rough sizing: verify ~25, single-file feature ~40, cross-cutting ~60. |
-| `timeout_minutes` | 30 (1–240) | Hard wall-clock kill. |
+| `timeout_minutes` | 10 (1–240) | Stall timeout: cancelled only after this long with no progress (model output, tool call, shell output, iteration). No wall-clock limit. |
 | `allow_commit` | false | Whether the agent may run `git commit`. Leave off — the caller owns version control. |
 | `verify_build` | true | After the agent finishes, the job runner builds the working_dir itself and attaches `build_verification` to the result. |
 | `verify_tests` | false | After a successful build verification, also run `dotnet test` and attach `test_verification`. |

@@ -27,6 +27,20 @@ namespace DevMind.McpServer
     {
         private readonly AgentJobManager _jobs;
 
+        /// <summary>Default stall window for timeout_minutes (H-37).</summary>
+        internal const int DefaultStallMinutes = 10;
+
+        /// <summary>timeout_minutes, shared by devmind_task_start and devmind_task_continue.
+        /// The parameter name predates H-37: it is now a STALL window, not a wall-clock limit.</summary>
+        internal const string TimeoutMinutesDescription =
+            "Stall timeout in minutes (default 10, range 1-240). The job is cancelled only when the agent has made " +
+            "NO progress for this long - no streamed model output, no tool call starting or returning, no shell " +
+            "output line, no completed iteration. A shell or test command that is still inside its own timeout " +
+            "counts as progress. There is no wall-clock limit: a job that keeps progressing runs until it finishes " +
+            "or hits max_depth, however long that takes. The harness's own test baseline before the agent and " +
+            "build/test verification after it are not counted (they have their own timeouts). A stalled job reports error \"stalled: no progress for N min " +
+            "(last progress: <what> at <time>)\".";
+
         private static readonly HttpClient _http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
 
         private static readonly JsonSerializerOptions JsonOpts = new JsonSerializerOptions
@@ -100,12 +114,14 @@ namespace DevMind.McpServer
             "Estimate max_depth to the task size (verify ~25, single-file feature ~40, cross-cutting " +
             "~60; default 40) — hitting the cap is cheap to recover: devmind_task_continue resumes " +
             "the conversation where it stopped, and the result reports state stopped_incomplete " +
-            "when the cap or a failed build verification means the work is not trustworthy as-is.")]
+            "when the cap or a failed build verification means the work is not trustworthy as-is. " +
+            "timeout_minutes is a STALL timeout (default 10: cancelled only after that long with no " +
+            "progress), not a wall-clock limit - a job that keeps progressing is never killed for taking long.")]
         public async Task<string> TaskStart(
             [Description("The task brief: goal, relevant files, constraints, and how to verify success.")] string prompt,
             [Description("Absolute path of the directory the agent operates in (its sandbox).")] string working_dir,
             [Description("Max agentic iterations before the agent must stop (default 40, range 1-200). Out-of-range values are clamped into the range and the clamp is reported back as max_depth_notice.")] int? max_depth = null,
-            [Description("Wall-clock kill timeout in minutes (default 30).")] int? timeout_minutes = null,
+            [Description(TimeoutMinutesDescription)] int? timeout_minutes = null,
             [Description("Allow the agent to run git commit (default false — the caller owns version control).")] bool? allow_commit = null,
             [Description("After the agent finishes, the job runner builds the working_dir itself and attaches build_verification to the result (default true).")] bool? verify_build = null,
             [Description("After a successful build verification, also run `dotnet test` in working_dir and attach test_verification (default false — tests can be slow). test_verification reports the after-run's success, exit code and harness-measured total. The before->after delta (baseline_total, delta) exists ONLY when test_baseline is \"before-run\" (the default) — with test_baseline \"off\" there is no before-count, so delta and baseline_total are null by definition; they are also null when the suite's output has no parseable test summary line.")] bool? verify_tests = null,
@@ -141,7 +157,7 @@ namespace DevMind.McpServer
             var job = _jobs.Start(
                 prompt, working_dir,
                 maxDepth: maxDepth,
-                timeoutMinutes: Math.Clamp(timeout_minutes ?? 30, 1, 240),
+                timeoutMinutes: Math.Clamp(timeout_minutes ?? DefaultStallMinutes, 1, 240),
                 allowCommit: allow_commit ?? false,
                 verifyBuild: verify_build ?? true,
                 think: (think ?? false) || show_thinking == true,
@@ -182,12 +198,14 @@ namespace DevMind.McpServer
             "where it left off. Use this when a task hit its iteration cap, or to send follow-up " +
             "instructions ('now also fix the failing test'). Returns a NEW job_id to poll. " +
             "A conversation is a chain: always continue its NEWEST job_id. Conversations expire " +
-            "after ~60 minutes idle — after that, start a fresh task with a continuation brief.")]
+            "after ~60 minutes idle — after that, start a fresh task with a continuation brief. " +
+            "timeout_minutes is a STALL timeout (default 10: cancelled only after that long with no " +
+            "progress), not a wall-clock limit - a continuation that keeps progressing is never killed for taking long.")]
         public async Task<string> TaskContinue(
             [Description("The job_id of the finished task to resume (the newest in its chain).")] string job_id,
             [Description("Instruction for the resumed agent. Default: 'Continue the task from where you left off.'")] string? prompt = null,
             [Description("Max agentic iterations for this continuation (default 40, range 1-200). Out-of-range values are clamped into the range and the clamp is reported back as max_depth_notice.")] int? max_depth = null,
-            [Description("Wall-clock kill timeout in minutes (default 30).")] int? timeout_minutes = null,
+            [Description(TimeoutMinutesDescription)] int? timeout_minutes = null,
             [Description("Run build verification after this turn (default true). Note: post-turn build verification by the job runner is independent of no_execute and unaffected by it.")] bool? verify_build = null,
             [Description("After a successful build verification, also run `dotnet test` and attach test_verification (default false). Reports the after-run's success, exit code and harness-measured total; baseline_total and delta exist ONLY when test_baseline is \"before-run\" — with \"off\" there is no before-count and both are null by definition.")]
             bool? verify_tests = null,
@@ -210,7 +228,7 @@ namespace DevMind.McpServer
                 job_id,
                 string.IsNullOrWhiteSpace(prompt) ? "Continue the task from where you left off." : prompt,
                 maxDepth: maxDepth,
-                timeoutMinutes: Math.Clamp(timeout_minutes ?? 30, 1, 240),
+                timeoutMinutes: Math.Clamp(timeout_minutes ?? DefaultStallMinutes, 1, 240),
                 verifyBuild: verify_build ?? true,
                 out string error,
                 verifyTests: verify_tests ?? false,
