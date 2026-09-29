@@ -4,13 +4,14 @@ DevMind can act as an MCP **client**: launch external MCP servers over stdio, li
 tools and call them. Motivating use: the ComfyUI server (`comfy-mcp`) so DM agents can drive
 ComfyUI.
 
-Status (2026-09-29): **parts 1–2 of 4 done.**
+Status (2026-09-29): **parts 1–3 of 4 done.**
 - Part 1: config and client manager.
 - Part 2: the agent loop can advertise and run the tools of servers that are already started.
+- Part 3: the TUI and headless jobs create the manager and start servers, so MCP tools
+  actually reach the model.
 
-**No host attaches a manager yet, and nothing starts a server.** Both come in part 3, which
-adds auto-start at session start and headless opt-in. Until then, no MCP tool reaches the model
-in the TUI, the CLI or headless jobs.
+**The CLI host (`DevMind.Cli`) is out of scope.** It never creates a manager, so it has no MCP
+tools.
 
 ## Config
 
@@ -25,7 +26,8 @@ An `mcpServers` object in the global config `%APPDATA%\devmind\devmind.json`
     "args": [],
     "env": { "COMFY_BIN": "C:\\Users\\pkailas\\AppData\\Roaming\\Python\\Python314\\Scripts\\comfy.exe" },
     "tools": ["server_info", "validate_workflow", "run_workflow"],
-    "callTimeoutSeconds": 900
+    "callTimeoutSeconds": 900,
+    "autoStart": true
   }
 }
 ```
@@ -38,6 +40,7 @@ An `mcpServers` object in the global config `%APPDATA%\devmind\devmind.json`
 | `env` | no | Overrides applied on top of the host's **full** environment. A `null` value removes a variable. |
 | `tools` | no | Allowlist. Absent = every tool the server lists; `[]` = none (warns). |
 | `callTimeoutSeconds` | no | Per-call timeout, positive integer, default 120. A bad value warns and uses the default. |
+| `autoStart` | no | TUI only: start this server in the background at session start. Default `true`; a non-boolean warns and uses `true`. Headless jobs ignore it and start exactly the servers the job names. |
 | `type` | no | Only `"stdio"` is accepted; a pasted HTTP/SSE entry is skipped with a warning. |
 
 - No block, or an empty one, means the feature is off. Nothing else changes.
@@ -92,7 +95,7 @@ An `mcpServers` object in the global config `%APPDATA%\devmind\devmind.json`
 Collaborators are property-injected, following the existing `LoopDriver.Liveness` /
 `LlmClient.StreamDataReceived` pattern. A host sets the same manager in two places:
 
-- `LlmClient.McpClients` (a `McpClientManager`) advertises the tools.
+- `LlmClient.McpClients` (an `IMcpClientManager`) advertises the tools.
 - `LoopDriver.McpTools` (an `IMcpToolInvoker`) runs them. LoopDriver hands it to each
   iteration's `AgenticExecutor.McpTools`.
 
@@ -136,6 +139,12 @@ because they are host-agnostic.
   (`McpToolName.ResultKey(id)` = `mcp:<id>`), so two identical calls in one turn, such as
   `run_workflow` twice, each keep their own result. The block carries `ToolCallId` so the
   executor can use that key.
+- **Call-id guard (part 3).** A call whose id is missing, or repeats an earlier call's in the
+  same turn, gets a unique `ToolCallResult.FallbackId` from `ToolCallMapper.Map`. The first
+  holder of an id keeps it. The block and the tool-message lookup both use `ResultId`, which
+  is the fallback when set and the id otherwise. The tool message still carries the model's
+  own id as its `tool_call_id`, because that has to match the assistant message already in
+  history.
 - **Size.** Oversize handling is left to the existing ingest cap in
   `LlmClient.AddToolResultMessage`. Above 8,000 chars, a result becomes a head/tail excerpt
   plus a `recall_cache` handle, and the full text is spilled to disk.
@@ -172,6 +181,85 @@ MCP calls use the **same approval class as `run_shell`**: they go through
 - The training log records `{"type":"mcp","server":…,"tool":…}` for the call and
   `type:"mcp"` for its result.
 
+## Hosts (part 3)
+
+All hosts depend on `IMcpClientManager`, which bundles the invoker, `GetExposedTools`,
+`GetStatuses`, `StartAsync`, `RestartAsync` and `CallCount`. `McpClientManager` implements it,
+and tests substitute fakes.
+
+### System prompt
+
+When at least one MCP tool is exposed, both prompt builders add one line:
+"External tools prefixed mcp__<server>__ come from MCP servers; their results may be long —
+prefer narrow queries." The builders are the TUI's `BuildCombinedSystemPrompt` and headless
+`HeadlessSession.BuildSystemPrompt`, and both add the line via `McpPrompt.Note`. The prompt is
+rebuilt every turn, so the line appears once a server is ready and disappears when none is
+running. With no MCP tools exposed, the prompt contains nothing about MCP.
+
+### TUI
+
+- At session start the TUI creates **one** `McpClientManager` from config for the whole
+  process. It sets it on `LlmClient.McpClients` and `LoopDriver.McpTools`.
+- Config warnings about skipped entries are printed once, under the banner.
+- **Servers with `autoStart` start in the background** when the window initializes
+  (`window.Initialized`), each on the thread pool. Startup never waits for them, so a slow or
+  dead server cannot delay the TUI.
+- Each server reports exactly once, marshalled to the UI thread:
+  - `[MCP] comfy ready (39 tools)`
+  - `[MCP] comfy failed to start: <reason>`
+  
+  `<reason>` is the cause only. The stderr tail is in `DevMindLog`.
+- Tools reach the model on the first request after a server is ready.
+- `/mcp` lists every configured server:
+
+  ```
+  MCP servers:
+    comfy    ready     39 tools   all tools
+    blender  failed    -          allowlist  — file not found
+    manual   stopped   -          all tools  (manual start)
+  ```
+
+  - States are stopped, starting, ready and failed.
+  - The allowlist column shows "all tools" or "allowlist".
+  - A server with `autoStart: false` is marked "(manual start)".
+- `/mcp restart <name>` stops the server, clears its automatic-restart budget, starts it
+  again, and reports ready or failed. An unknown name lists the configured ones.
+- The manager is disposed on exit, bounded to 15 s. The job objects already guarantee the
+  servers die with the process; disposing is for clean logs.
+
+### Headless (`devmind_task_start` → `mcp_servers`)
+
+- **Parameter.** `mcp_servers` is an optional array of server names from `devmind.json`.
+  - The names are resolved when `devmind_task_start` is called, not when the job runs. An
+    unknown name rejects the start with the configured names, for example:
+    `mcp_servers: unknown server 'comfyui' — configured: comfy, blender.`
+  - Absent or empty means no manager is created and nothing changes.
+  - `autoStart` is ignored.
+- **Start.** Each job gets its own manager (`AgentJobManager.McpManagerFactory` is the test
+  seam). Before the first LLM request it starts the listed servers **in parallel** and waits
+  for all of them, with a **60 s limit per server** (`McpStartTimeout`). A server that fails or
+  times out is recorded, and the job runs on without it. The transcript tail shows
+  `[job] mcp: comfy started (N tools)` or `… failed to start: <reason> — continuing without it`.
+- **Result.** `devmind_task_result` and the on-disk result sidecar gain an `mcp` section, which
+  is omitted when no servers were requested:
+
+  ```json
+  "mcp": { "requested": ["comfy"], "started": ["comfy"], "failed": [], "calls": 4 }
+  ```
+
+  `failed` holds `{ "server", "reason" }` entries. `calls` counts every MCP tool call the agent
+  made, including failed ones.
+- **Terminal cleanup.** The job's manager is disposed in the worker's `finally` in
+  `AgentJobManager.WorkerLoopAsync`. That block already runs for every terminal state: done,
+  failed, cancelled and stopped_incomplete (Done with `IsIncomplete`). The session is detached
+  first (`HeadlessSession.SetMcpClients(null)`), so the retained conversation never points at
+  a disposed manager.
+- A job cancelled while still queued never reaches the worker, so it never had a manager.
+- **Continuations.** A continuation copies the parent's `McpServers`, the same way it inherits
+  `no_execute`. The parent's manager was disposed when the parent ended, so the continuation's
+  worker creates a fresh manager, starts the servers again and attaches it to the transferred
+  session.
+
 ## Tests
 
 - `DevMind.Core.Tests/McpClientTests.cs`: config parsing, name round-trip, result formatting,
@@ -192,3 +280,24 @@ MCP calls use the **same approval class as `run_shell`**: they go through
   - Executor, through a fake `IMcpToolInvoker`: call-id keying, two identical calls not
     colliding, the error and throw paths, a missing invoker, the size ceiling, and
     Manual/Plan approval.
+- `DevMind.Core.Tests/McpHostTests.cs` (part 3):
+  - `autoStart` default, explicit and bad values.
+  - The call-id fallback for null, empty and repeated ids.
+  - `McpPrompt`, checked on the wire through a real `HeadlessSession`: the line and tools with
+    a server, none without.
+  - Status, restart and `CallCount` on the real manager, and `ShortReason`.
+- `DevMind.McpServer.Tests/McpJobTests.cs` (part 3):
+  - `mcp_servers` resolution, including the unknown-name error text.
+  - No manager when absent.
+  - A failing and a hanging server recorded while the job completes.
+  - A continuation inheriting the list with a fresh manager.
+  - Disposal on done, failed, cancelled and stopped_incomplete.
+  - The payload shape.
+  - A live headless smoke test (`McpJobSmokeTests`, `DEVMIND_MCP_SMOKE=1`) that starts a
+    job-scoped comfy manager, checks the tools are exposed, and checks the process is gone
+    after dispose.
+- `DevMind.TUI.Tests/McpCommandTests.cs` (part 3):
+  - `/mcp` formatting, restart, unknown name and usage.
+  - `/mcp` listed in `/help`.
+  - Autostart returning before a start that never completes.
+  - Each server reporting once.

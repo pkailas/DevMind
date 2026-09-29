@@ -116,7 +116,9 @@ namespace DevMind.McpServer
             "the conversation where it stopped, and the result reports state stopped_incomplete " +
             "when the cap or a failed build verification means the work is not trustworthy as-is. " +
             "timeout_minutes is a STALL timeout (default 10: cancelled only after that long with no " +
-            "progress), not a wall-clock limit - a job that keeps progressing is never killed for taking long.")]
+            "progress), not a wall-clock limit - a job that keeps progressing is never killed for taking long. " +
+            "mcp_servers gives the agent tools from external MCP servers configured in devmind.json " +
+            "(named mcp__<server>__<tool>); the result's \"mcp\" section says which started.")]
         public async Task<string> TaskStart(
             [Description("The task brief: goal, relevant files, constraints, and how to verify success.")] string prompt,
             [Description("Absolute path of the directory the agent operates in (its sandbox).")] string working_dir,
@@ -129,6 +131,7 @@ namespace DevMind.McpServer
             [Description("Enable model reasoning (think blocks) for this task (default false). Leave off for briefed mechanical tasks — thinking runs UNBOUNDED on the local server and can add minutes per iteration. Turn on only for genuinely hard design/debugging tasks. Continuations inherit this setting.")] bool? think = null,
             [Description("Stream the model's think blocks into the job's transcript as it reasons. Omitted = the DEVMIND_TASK_SHOW_THINKING environment variable applies (legacy fallback: off unless it is set); explicit true or false takes precedence over the environment variable. DISPLAY only — think blocks are only streamed when `think` is also on, and showing them adds per-iteration overhead. When true it implies `think: true` — asking to see reasoning that is never generated would be a silent no-op, so this turns generation on instead. Continuations inherit this setting, including an inherited omission.")] bool? show_thinking = null,
             [Description("Restrict the agent to no execution (default false): it may still build (dotnet build / run_build) for compile verification, but running executables, `dotnet run`/`dotnet exec`, the test suite (run_tests / dotnet test), and debug launch/attach are blocked at the harness. This is NOT a sandbox — it blocks a named set of execution invocations, not every conceivable way to start a process; use it to stop an agent from launching (or re-launching) something that hangs or spawns runaway children, not as a security boundary. Continuations inherit this setting.")] bool? no_execute = null,
+            [Description("External MCP servers to give this agent, by their names under \"mcpServers\" in %APPDATA%\\devmind\\devmind.json (e.g. [\"comfy\"]). Omit for none — the default, with no change in behaviour. An unknown name rejects the start with the list of configured names. Each server is started before the agent's first request (60 s limit per server); one that fails to start does not fail the job — the agent runs without it, and devmind_task_result's \"mcp\" section reports requested / started / failed (with reason) / calls. The server's tools appear as mcp__<server>__<tool>, subject to its \"tools\" allowlist; its \"autoStart\" setting is ignored here. Servers stop when the job ends. Continuations inherit this list and start the servers again.")] string[]? mcp_servers = null,
             CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(prompt))
@@ -145,6 +148,19 @@ namespace DevMind.McpServer
             string baseline = string.IsNullOrWhiteSpace(test_baseline) ? "before-run" : test_baseline;
             if (baseline != "before-run" && baseline != "off")
                 return Err($"test_baseline must be \"before-run\" or \"off\" (got \"{test_baseline}\").");
+
+            // Resolved now, not when the job runs: a typo is the caller's to fix, while they are
+            // still here. Reads devmind.json only — nothing starts until the job does.
+            IReadOnlyList<McpServerConfig> mcpServers = Array.Empty<McpServerConfig>();
+            if (mcp_servers is { Length: > 0 })
+            {
+                var resolved = AgentJobManager.ResolveMcpServers(
+                    mcp_servers, McpServerConfig.Load(msg => Console.Error.WriteLine($"[McpServer] Warning: {msg}")),
+                    out string? mcpError);
+                if (resolved == null)
+                    return Err(mcpError!);
+                mcpServers = resolved;
+            }
 
             // Fail fast when the model server is down — better than a queued job that
             // dies minutes later.
@@ -164,7 +180,8 @@ namespace DevMind.McpServer
                 verifyTests: verify_tests ?? false,
                 noExecute: no_execute ?? false,
                 runTestBaseline: baseline != "off",
-                showThinking: show_thinking);
+                showThinking: show_thinking,
+                mcpServers: mcpServers);
 
             const string startHint =
                 "Poll devmind_task_status with this job_id; fetch devmind_task_result when done.";
@@ -443,6 +460,7 @@ namespace DevMind.McpServer
                     output_tail = job.Build.OutputTail,
                 },
                 test_verification = TestVerificationPayload.Create(job),
+                mcp = McpJobReport.Payload(job.Mcp),
             }, JsonOpts));
         }
 

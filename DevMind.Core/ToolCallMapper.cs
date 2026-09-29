@@ -1,6 +1,7 @@
 ﻿// File: ToolCallMapper.cs  v7.4
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
+using System;
 using System.Collections.Generic;
 using System.Text;
 using Newtonsoft.Json.Linq;
@@ -21,6 +22,8 @@ namespace DevMind
         {
             var blocks = new List<ResponseBlock>();
 
+            AssignFallbackIds(toolCalls);
+
             foreach (var tc in toolCalls)
             {
                 var block = MapSingle(tc, buildCommand);
@@ -29,6 +32,27 @@ namespace DevMind
             }
 
             return blocks;
+        }
+
+        /// <summary>
+        /// Gives a call a <see cref="ToolCallResult.FallbackId"/> when its id is missing or
+        /// repeats an earlier call's in the same turn. MCP results are keyed by call id
+        /// (<see cref="McpToolName.ResultKey"/>), so a shared or empty id would hand one call's
+        /// result to both. The first holder of an id keeps it. Idempotent: a call that already
+        /// has a fallback keeps it, so mapping the same list twice cannot re-key it.
+        /// </summary>
+        internal static void AssignFallbackIds(List<ToolCallResult> toolCalls)
+        {
+            if (toolCalls == null) return;
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            for (int i = 0; i < toolCalls.Count; i++)
+            {
+                var tc = toolCalls[i];
+                if (tc == null || tc.FallbackId != null) continue;
+                if (!string.IsNullOrEmpty(tc.Id) && seen.Add(tc.Id)) continue;
+                tc.FallbackId = $"dm_call_{i}_{Guid.NewGuid():N}";
+                seen.Add(tc.FallbackId);
+            }
         }
 
         private static ResponseBlock MapSingle(ToolCallResult tc, string buildCommand)
@@ -407,7 +431,7 @@ namespace DevMind
                             McpServer = mcpServer,
                             McpTool = mcpTool,
                             McpArguments = McpArguments(tc),
-                            ToolCallId = tc.Id,
+                            ToolCallId = tc.ResultId,
                             FromToolCall = true
                         };
                     }

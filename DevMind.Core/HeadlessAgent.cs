@@ -725,6 +725,23 @@ namespace DevMind
             _options.HarnessVerifiesTests = harnessVerifiesTests;
         }
 
+        /// <summary>
+        /// Attaches (or, with null, detaches) the external MCP servers for the turns that
+        /// follow. The session outlives its job — a continuation reuses it — while the manager
+        /// belongs to one job: the job runner attaches the job's manager before the turn and
+        /// detaches it before disposing, so a retained session never points at a dead one.
+        /// Wires the advertiser (LlmClient) and the executor (LoopDriver) together, so an
+        /// advertised tool can always run. The system-prompt note follows on the next build.
+        /// </summary>
+        public void SetMcpClients(IMcpClientManager clients)
+        {
+            _mcpClients = clients;
+            _llmClient.McpClients = clients;
+            _driver.McpTools = clients;
+        }
+
+        private IMcpClientManager _mcpClients;
+
         private string BuildSystemPrompt()
         {
             string llmDirective = LoopHelpers.BuildToolUsePrompt(
@@ -741,7 +758,8 @@ namespace DevMind
                 ? SystemPromptFile.LoadFrom(_promptFilePath)
                 : SystemPromptFile.Load();
             string basePrompt = filePrompt ?? _options.SystemPrompt;
-            string combined = $"{basePrompt}\n\n{llmDirective}";
+            // The MCP line sits with the tool directive, and only while tools are exposed.
+            string combined = $"{basePrompt}\n\n{llmDirective}{McpPrompt.Note(_mcpClients)}";
 
             string context = HeadlessAgent.LoadAgentsContext(_workingDirectory);
             if (!string.IsNullOrEmpty(context))

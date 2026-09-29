@@ -131,7 +131,7 @@ namespace DevMind
             if (McpToolName.TryParse(tc.Name, out _, out _))
             {
                 if (result.ToolResultContents != null &&
-                    result.ToolResultContents.TryGetValue(McpToolName.ResultKey(tc.Id), out string mcpContent))
+                    result.ToolResultContents.TryGetValue(McpToolName.ResultKey(tc.ResultId), out string mcpContent))
                     return mcpContent;
                 if (result.Errors != null && result.Errors.Count > 0)
                     return $"[MCP call failed: {string.Join("; ", result.Errors)}]";

@@ -43,6 +43,10 @@ namespace DevMind
         // Global TUI config — loaded at startup, persisted by slash commands.
         static TuiConfig _config;
 
+        // The session's external MCP servers (null when none are configured). Static like
+        // _config because BuildCombinedSystemPrompt is static and adds the MCP line from it.
+        static IMcpClientManager _mcpClients;
+
         // ── Ctrl+C / Esc state machine ──────────────────────────────────────────
         // Tracks whether a turn is currently running (set around RunTurnAsync calls).
         static bool _isTurnRunning;
@@ -724,6 +728,25 @@ namespace DevMind
             }
             var driver = new LoopDriver(llmClient, host, callbacks, options, state, trainingLogger);
 
+            // External MCP servers (devmind.json "mcpServers"): ONE manager for the whole TUI
+            // process, wired into the loop the same way as headless (LlmClient advertises,
+            // LoopDriver executes). Parsing the config starts nothing. autoStart servers start in
+            // the background once the window is up (window.Initialized, below the banner), so
+            // startup never waits on one — and a dead server never delays it.
+            var mcpConfigWarnings = new List<string>();
+            var mcpConfigs = McpServerConfig.Load(mcpConfigWarnings.Add);
+            McpClientManager mcpClients = mcpConfigs.Count > 0 ? new McpClientManager(mcpConfigs) : null;
+            if (mcpClients != null)
+            {
+                llmClient.McpClients = mcpClients;
+                driver.McpTools = mcpClients;
+                _mcpClients = mcpClients;
+                var autoStartNames = McpTui.AutoStartNames(mcpConfigs);
+                if (autoStartNames.Count > 0)
+                    window.Initialized += (s, e) => _ = McpTui.BeginAutoStart(mcpClients, autoStartNames,
+                        (line, color) => app.Invoke(() => host.AppendOutputLocal(line, color)));
+            }
+
             // Word wrap is set directly at construction (WordWrap = true). Unlike TextView
             // 2.4.4 — whose wrap setter at viewport width 0 degenerated the wrap map and forced
             // a deferred SubViewsLaidOut enable plus an InsertionPoint reset — Editor computes
@@ -795,6 +818,10 @@ namespace DevMind
             // What --resume / --continue did, or why it did nothing.
             foreach (var (text, color) in resumed.Report)
                 host.AppendOutputLocal(text, color);
+
+            // Bad "mcpServers" entries were skipped; say which, once, under the banner.
+            foreach (string warning in mcpConfigWarnings)
+                host.AppendOutputLocal($"[MCP] {warning}\n", OutputColor.Warning);
 
             host.AppendOutputLocal("\n", OutputColor.Dim);
 
@@ -1705,6 +1732,8 @@ namespace DevMind
                         ReplayTranscript = (roles, contents) => ReplayResumed(host, roles, contents),
                         // Nearline cache (for the /cache command).
                         NearlineCache = llmClient.NearlineCache,
+                        // External MCP servers (for /mcp).
+                        McpClients = mcpClients,
                         // Multimodal: /image stages an image on the client; the next
                         // typed message is sent as multimodal content (text + image).
                         StagePendingImage = (dataUri) => llmClient.StagePendingImage(dataUri),
@@ -1989,6 +2018,15 @@ namespace DevMind
             // The UI exited — drop the session's PATCH backups with it. Without this
             // the undo stack's files outlive the process, orphaned in %TEMP%\DevMind.
             host.DrainPatchBackups();
+
+            // Stop the MCP servers. Their job objects already guarantee they die with this
+            // process; disposing is for a clean shutdown in the logs. Bounded so a wedged server
+            // cannot hold the exit.
+            if (mcpClients != null)
+            {
+                try { mcpClients.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(15)); }
+                catch { /* teardown is best-effort */ }
+            }
 
             // How to get back here. Only when the store actually holds this session.
             string hint = ResumeHint.Build(
@@ -2576,6 +2614,9 @@ static string LoadContextFile(string workingDirectory)
         sb.Append(basePrompt);
         sb.Append("\n\n");
         sb.Append(llmDirective);
+        // Present only while a server exposes tools: the prompt is rebuilt per turn, so the
+        // line appears the turn after a server reports ready and goes when none is running.
+        sb.Append(McpPrompt.Note(_mcpClients));
         sb.Append(planNote);
 
         // Behavioral rules — after base prompt, before project context.

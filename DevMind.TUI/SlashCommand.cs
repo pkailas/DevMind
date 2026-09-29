@@ -207,6 +207,9 @@ namespace DevMind
         /// Null when no host wires it.</summary>
         public NearlineCache NearlineCache { get; set; }
 
+        /// <summary>The session's external MCP servers, for /mcp. Null when none are configured.</summary>
+        public IMcpClientManager McpClients { get; set; }
+
         // -- Memory checkpoints (/rewind part 2a) -----------------------------------
 
         /// <summary>Root of the per-session memory checkpoints (%LOCALAPPDATA%\devmind\checkpoints
@@ -513,6 +516,11 @@ namespace DevMind
                 "Show the global system-prompt file path, existence, and assembled prompt size",
                 "/prompt",
                 PromptHandler);
+
+            RegisterCommand("/mcp",
+                "List external MCP servers (state, tools, allowlist), or restart one",
+                "/mcp [restart <name>]",
+                (args, ctx) => McpTui.HandleAsync(args, ctx.McpClients));
 
             RegisterCommand("/lsp",
                 "Show or enable/disable language server tools",
@@ -1345,7 +1353,7 @@ namespace DevMind
             ("Session",    new[] { "/new", "/restart", "/clear", "/cls", "/compact", "/history", "/resume", "/title", "/steer", "/override", "/mode", "/quit", "/exit" }),
             ("Model",      new[] { "/think", "/t", "/reasoning", "/rules", "/system_prompt" }),
             ("Context",    new[] { "/depth-cap", "/context-limit", "/cache", "/output-lines", "/expand" }),
-            ("Workspace",  new[] { "/dir", "/lsp", "/resolve", "/debug" }),
+            ("Workspace",  new[] { "/dir", "/lsp", "/mcp", "/resolve", "/debug" }),
             ("Documents",  new[] { "/image", "/digest", "/library" }),
             ("Training",   new[] { "/training-log", "/training-delete-last" }),
             ("Help",       new[] { "/help" }),

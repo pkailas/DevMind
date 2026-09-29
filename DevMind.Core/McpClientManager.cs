@@ -70,11 +70,63 @@ namespace DevMind
         Task<string> CallToolAsync(string server, string tool, JObject? args, CancellationToken ct);
     }
 
+    /// <summary>Lifecycle of one configured server, as /mcp and devmind_task_result report it.</summary>
+    public enum McpServerState { Stopped, Starting, Ready, Failed }
+
+    /// <summary>A point-in-time view of one configured server.</summary>
+    public sealed class McpServerStatus
+    {
+        public string Name { get; init; } = "";
+        public McpServerState State { get; init; }
+        /// <summary>Tools currently exposed to the model (after the allowlist); 0 unless Ready.</summary>
+        public int ToolCount { get; init; }
+        /// <summary>True when the entry has a "tools" allowlist.</summary>
+        public bool HasAllowlist { get; init; }
+        public bool AutoStart { get; init; }
+        /// <summary>Why it is Failed: the short reason, without the stderr tail. Null otherwise.</summary>
+        public string? Error { get; init; }
+    }
+
+    /// <summary>
+    /// What a host holds: the tool invoker plus lifecycle and the exposed-tool snapshot. The
+    /// TUI, headless jobs and LlmClient depend on this rather than on McpClientManager, so
+    /// tests can substitute a fake (a start that never completes, a scripted failure).
+    /// </summary>
+    public interface IMcpClientManager : IMcpToolInvoker, IAsyncDisposable
+    {
+        IReadOnlyList<string> ServerNames { get; }
+
+        /// <summary>Cached OpenAI tool objects of started servers. Synchronous, no I/O.</summary>
+        IReadOnlyList<JObject> GetExposedTools();
+
+        IReadOnlyList<McpServerStatus> GetStatuses();
+
+        /// <summary>Starts the server if it is not running. Null on success, else the error text. Throws only on cancellation.</summary>
+        Task<string?> StartAsync(string server, CancellationToken ct = default);
+
+        /// <summary>Stops the server if running, clears its failure budget, starts it again. Null on success, else the error text.</summary>
+        Task<string?> RestartAsync(string server, CancellationToken ct = default);
+
+        /// <summary>CallToolAsync invocations so far, successful or not.</summary>
+        int CallCount { get; }
+    }
+
+    /// <summary>The one system-prompt line about MCP tools — present only while some are exposed.</summary>
+    public static class McpPrompt
+    {
+        public const string Line =
+            "External tools prefixed mcp__<server>__ come from MCP servers; their results may be long — prefer narrow queries.";
+
+        /// <summary>A blank line then <see cref="Line"/> when <paramref name="clients"/> exposes at least one tool; "" otherwise.</summary>
+        public static string Note(IMcpClientManager? clients) =>
+            clients != null && clients.GetExposedTools().Count > 0 ? "\n\n" + Line : "";
+    }
+
     /// <summary>
     /// Owns one lazily-started stdio session per configured external MCP server.
     /// Thread-safe; dispose to kill every server it started.
     /// </summary>
-    public sealed class McpClientManager : IAsyncDisposable, IMcpToolInvoker
+    public sealed class McpClientManager : IMcpClientManager
     {
         /// <summary>OpenAI function-name limit: ^[a-zA-Z0-9_-]{1,64}$.</summary>
         internal const int MaxFunctionNameLength = 64;
@@ -82,6 +134,9 @@ namespace DevMind
         private readonly Dictionary<string, ServerSlot> _slots;
         private readonly HashSet<string> _warned = new HashSet<string>(StringComparer.Ordinal);
         private int _disposed;
+        private int _callCount;
+
+        public int CallCount => Volatile.Read(ref _callCount);
 
         public McpClientManager(IEnumerable<McpServerConfig> servers)
         {
@@ -142,6 +197,7 @@ namespace DevMind
         /// </summary>
         public async Task<string> CallToolAsync(string server, string tool, JObject? args, CancellationToken ct = default)
         {
+            Interlocked.Increment(ref _callCount);
             if (!_slots.TryGetValue(server ?? "", out var slot))
                 return UnknownServer(server);
             if (!slot.Config.AllowsTool(tool))
@@ -177,9 +233,79 @@ namespace DevMind
             }
         }
 
+        public IReadOnlyList<McpServerStatus> GetStatuses()
+        {
+            var list = new List<McpServerStatus>(_slots.Count);
+            foreach (var slot in _slots.Values)
+            {
+                var session = slot.Session;
+                bool alive = session != null && session.IsAlive;
+                McpServerState state =
+                    slot.Starting ? McpServerState.Starting
+                    : alive ? McpServerState.Ready
+                    : session != null ? McpServerState.Failed        // died; reaped on the next call
+                    : slot.ConsecutiveFailures > 0 ? McpServerState.Failed
+                    : McpServerState.Stopped;
+                list.Add(new McpServerStatus
+                {
+                    Name         = slot.Config.Name,
+                    State        = state,
+                    ToolCount    = state == McpServerState.Ready ? slot.ExposedTools.Count : 0,
+                    HasAllowlist = slot.Config.Tools != null,
+                    AutoStart    = slot.Config.AutoStart,
+                    Error        = state != McpServerState.Failed ? null
+                                 : session != null ? "the server process exited"
+                                 : slot.LastReason,
+                });
+            }
+            return list;
+        }
+
+        /// <summary>
+        /// Stops <paramref name="server"/> if it is running, forgets its failure budget (an
+        /// operator restart is not an automatic retry), and starts it again.
+        /// </summary>
+        public async Task<string?> RestartAsync(string server, CancellationToken ct = default)
+        {
+            if (!_slots.TryGetValue(server ?? "", out var slot))
+                return UnknownServer(server);
+            await slot.Gate.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                slot.ExposedTools = Array.Empty<JObject>();
+                if (slot.Session != null)
+                    await slot.Session.DisposeAsync().ConfigureAwait(false);
+                slot.Session = null;
+                slot.ConsecutiveFailures = 0;
+                slot.LastError = null;
+                slot.LastReason = null;
+            }
+            finally
+            {
+                slot.Gate.Release();
+            }
+            return await StartAsync(server!, ct).ConfigureAwait(false);
+        }
+
         /// <summary>Test hook: the PID of the running server process, or null.</summary>
         internal int? GetServerProcessId(string server) =>
             _slots.TryGetValue(server, out var slot) ? slot.Session?.ProcessId : null;
+
+        /// <summary>
+        /// The cause in a manager error, for one-line status output: the first line, without
+        /// the "[MCP ERROR] " tag or a leading "server '&lt;name&gt;' failed to start: " (the
+        /// caller's line already names the server and says it failed). The stderr tail, on the
+        /// lines after, is dropped.
+        /// </summary>
+        public static string ShortReason(string error)
+        {
+            string line = (error ?? "").Split('\n')[0].Trim();
+            const string Tag = "[MCP ERROR] ";
+            if (line.StartsWith(Tag, StringComparison.Ordinal))
+                line = line.Substring(Tag.Length);
+            var m = System.Text.RegularExpressions.Regex.Match(line, @"^server '[^']*'(?: failed to start:|:)\s*");
+            return m.Success && m.Length < line.Length ? line.Substring(m.Length) : line;
+        }
 
         /// <summary>Test hook: fills a server's exposed-tool cache as a start would, without launching it.</summary>
         internal void SeedExposedToolsForTest(string server, IEnumerable<McpToolInfo> tools) =>
@@ -328,6 +454,10 @@ namespace DevMind
             /// <summary>Start failures / crashes since the last success. At 2, no further relaunch.</summary>
             public int ConsecutiveFailures;
             public string? LastError;
+            /// <summary>Short form of <see cref="LastError"/> for status lines: the cause only, no stderr tail.</summary>
+            public string? LastReason;
+            /// <summary>True while a start is in flight (read without the gate by GetStatuses).</summary>
+            public volatile bool Starting;
             /// <summary>Cached OpenAI tool objects; empty whenever there is no live session. Swapped whole, never mutated.</summary>
             public volatile IReadOnlyList<JObject> ExposedTools = Array.Empty<JObject>();
         }
@@ -349,6 +479,7 @@ namespace DevMind
                 {
                     // Died between calls: count it, keep its stderr for the message, reap it.
                     slot.LastError = DeadMessage(slot.Config.Name, "the server process exited", null, slot.Session);
+                    slot.LastReason = "the server process exited";
                     slot.ConsecutiveFailures++;
                     DevMindLog.Write(slot.LastError);
                     slot.ExposedTools = Array.Empty<JObject>();
@@ -361,10 +492,13 @@ namespace DevMind
                     return (null, (slot.LastError ?? $"[MCP ERROR] server '{server}' is unavailable.") +
                                   " (automatic restart already attempted; not relaunching)");
 
+                slot.Starting = true;
                 try
                 {
                     slot.Session = await ServerSession.StartAsync(slot.Config, ct).ConfigureAwait(false);
                     await RefreshExposedToolsAsync(slot, slot.Session, ct).ConfigureAwait(false);
+                    slot.LastError = null;
+                    slot.LastReason = null;
                     return (slot.Session, null);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -375,6 +509,7 @@ namespace DevMind
                 {
                     var partial = (ex as SessionStartException)?.Session;
                     slot.LastError = DeadMessage(slot.Config.Name, "failed to start", ex.InnerException ?? ex, partial);
+                    slot.LastReason = (ex.InnerException ?? ex).Message;
                     slot.ConsecutiveFailures++;
                     DevMindLog.Write(slot.LastError);
                     if (partial != null)
@@ -384,6 +519,7 @@ namespace DevMind
             }
             finally
             {
+                slot.Starting = false;
                 slot.Gate.Release();
             }
         }
@@ -405,6 +541,7 @@ namespace DevMind
                 if (ReferenceEquals(slot.Session, session))
                 {
                     slot.LastError = msg;
+                    slot.LastReason = what + " — the server died";
                     slot.ConsecutiveFailures++;
                     DevMindLog.Write(msg);
                     slot.ExposedTools = Array.Empty<JObject>();

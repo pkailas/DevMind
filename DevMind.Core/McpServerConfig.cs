@@ -11,7 +11,8 @@
 //       "args": [],
 //       "env": { "COMFY_BIN": "C:\\...\\comfy.exe" },
 //       "tools": ["server_info", "run_workflow"],   // optional allowlist; absent = all
-//       "callTimeoutSeconds": 900                    // optional; default 120
+//       "callTimeoutSeconds": 900,                   // optional; default 120
+//       "autoStart": true                            // optional; default true (TUI only)
 //     }
 //   }
 //
@@ -50,6 +51,13 @@ namespace DevMind
         public IReadOnlyList<string>? Tools { get; init; }
 
         public int CallTimeoutSeconds { get; init; } = DefaultCallTimeoutSeconds;
+
+        /// <summary>
+        /// Whether the TUI starts this server in the background at session start (default
+        /// true). Headless jobs ignore it: they start exactly the servers the job names in
+        /// devmind_task_start's mcp_servers.
+        /// </summary>
+        public bool AutoStart { get; init; } = true;
 
         /// <summary>True when <paramref name="tool"/> passes the allowlist (always, when there is none).</summary>
         public bool AllowsTool(string tool)
@@ -167,6 +175,15 @@ namespace DevMind
                         warn?.Invoke($"{Where()}: \"callTimeoutSeconds\" must be a positive integer, using {DefaultCallTimeoutSeconds}");
                 }
 
+                bool autoStart = true;
+                if (e.TryGetProperty("autoStart", out var auto) && auto.ValueKind != JsonValueKind.Null)
+                {
+                    if (auto.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                        autoStart = auto.GetBoolean();
+                    else
+                        warn?.Invoke($"{Where()}: \"autoStart\" must be true or false, using true");
+                }
+
                 result.Add(new McpServerConfig
                 {
                     Name               = name,
@@ -175,6 +192,7 @@ namespace DevMind
                     Env                = env,
                     Tools              = tools,
                     CallTimeoutSeconds = timeout,
+                    AutoStart          = autoStart,
                 });
             }
             return result;

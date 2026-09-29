@@ -136,7 +136,7 @@ namespace DevMind
         /// Null — the default — means none. Property-injected like <see cref="StreamDataReceived"/>;
         /// the same manager goes to <see cref="LoopDriver.McpTools"/> so the calls can execute.
         /// </summary>
-        public McpClientManager McpClients { get; set; }
+        public IMcpClientManager McpClients { get; set; }
 
         private string _taskScratchpad = "";
         private const int ScratchpadMaxTokens = 200;

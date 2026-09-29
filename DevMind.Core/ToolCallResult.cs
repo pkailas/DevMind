@@ -30,6 +30,17 @@ namespace DevMind
         /// </summary>
         public JObject RawArguments { get; set; }
 
+        /// <summary>
+        /// Set by ToolCallMapper.Map when <see cref="Id"/> is missing or repeats an earlier
+        /// call's in the same turn: a unique stand-in used only to key this call's result
+        /// (<see cref="ResultId"/>). The tool message still carries <see cref="Id"/> as its
+        /// tool_call_id, because it has to match the assistant message already in history.
+        /// </summary>
+        public string FallbackId { get; set; }
+
+        /// <summary>The id this call's result is filed and looked up under: <see cref="FallbackId"/> if set, else <see cref="Id"/>.</summary>
+        public string ResultId => FallbackId ?? Id;
+
         /// <summary>Reasoning/thinking text from the model, if present.</summary>
         public string ThinkingText { get; set; }
     }

@@ -56,6 +56,14 @@ namespace DevMind.McpServer
         /// on turn 2 (the failure mode this exists to prevent).</summary>
         public bool NoExecute { get; init; }
 
+        /// <summary>External MCP servers this job starts before its first LLM request
+        /// (devmind_task_start mcp_servers, resolved against devmind.json at start time).
+        /// Empty = no manager, no MCP tools. Continuations inherit the list, like NoExecute.</summary>
+        public IReadOnlyList<McpServerConfig> McpServers { get; init; } = Array.Empty<McpServerConfig>();
+
+        /// <summary>What happened to <see cref="McpServers"/> (null when none were requested).</summary>
+        public McpJobReport? Mcp;
+
         public AgentJobState State;
         public HeadlessAgentResult? Result;
         public string? Error;
@@ -246,6 +254,26 @@ namespace DevMind.McpServer
         }
     }
 
+    /// <summary>The "mcp" section of devmind_task_result: which servers the job asked for, which
+    /// started, which did not and why, and how many MCP tool calls the agent made.</summary>
+    internal sealed class McpJobReport
+    {
+        public IReadOnlyList<string> Requested { get; init; } = Array.Empty<string>();
+        public List<string> Started { get; } = new List<string>();
+        /// <summary>Server name → reason it did not start. The job ran on without it.</summary>
+        public Dictionary<string, string> Failed { get; } = new Dictionary<string, string>(StringComparer.Ordinal);
+        public int Calls { get; set; }
+
+        /// <summary>The JSON shape shared by devmind_task_result and the result sidecar; null when no servers were requested.</summary>
+        public static object? Payload(McpJobReport? report) => report == null ? null : new
+        {
+            requested = report.Requested,
+            started = report.Started,
+            failed = report.Failed.Select(kv => new { server = kv.Key, reason = kv.Value }).ToArray(),
+            calls = report.Calls,
+        };
+    }
+
     /// <summary>Outcome of the job runner's own post-agent build check.</summary>
     internal sealed class BuildVerification
     {
@@ -330,6 +358,101 @@ namespace DevMind.McpServer
         /// <summary>Test seam: how often the watchdog checks (real time). Null = window / 20,
         /// clamped to 50 ms..15 s.</summary>
         internal TimeSpan? WatchdogPollOverride { get; set; }
+
+        /// <summary>Test seam: builds a job's MCP manager from its server list. Null = a real
+        /// <see cref="McpClientManager"/>. Lets tests count disposals and script starts.</summary>
+        internal Func<IReadOnlyList<McpServerConfig>, IMcpClientManager>? McpManagerFactory { get; set; }
+
+        /// <summary>How long one requested MCP server may take to start before the job gives up
+        /// on it and runs without it. Settable for tests.</summary>
+        internal TimeSpan McpStartTimeout { get; set; } = TimeSpan.FromSeconds(60);
+
+        /// <summary>
+        /// Resolves devmind_task_start's mcp_servers against the configured servers. Null or
+        /// empty → an empty list (no manager). An unknown name → null, with an error that
+        /// names every configured server, so the caller can fix the call without opening
+        /// devmind.json. Duplicates collapse. Pure, for the tests.
+        /// </summary>
+        internal static IReadOnlyList<McpServerConfig>? ResolveMcpServers(
+            IReadOnlyList<string>? requested, IReadOnlyList<McpServerConfig> configured, out string? error)
+        {
+            error = null;
+            if (requested == null || requested.Count == 0)
+                return Array.Empty<McpServerConfig>();
+
+            var byName = configured.ToDictionary(c => c.Name, StringComparer.Ordinal);
+            var result = new List<McpServerConfig>();
+            var unknown = new List<string>();
+            foreach (string name in requested.Distinct(StringComparer.Ordinal))
+            {
+                if (byName.TryGetValue(name ?? "", out var cfg)) result.Add(cfg);
+                else unknown.Add($"'{name}'");
+            }
+            if (unknown.Count == 0)
+                return result;
+
+            string known = configured.Count == 0
+                ? "none are configured (add an \"mcpServers\" block to %APPDATA%\\devmind\\devmind.json)"
+                : "configured: " + string.Join(", ", configured.Select(c => c.Name));
+            error = $"mcp_servers: unknown server {string.Join(", ", unknown)} — {known}.";
+            return null;
+        }
+
+        /// <summary>
+        /// Starts every requested server in parallel and waits for all of them, each bounded
+        /// by <paramref name="perServer"/>. A server that fails or times out is recorded in the
+        /// report and skipped; it never fails the job. Job cancellation ends the wait (the
+        /// turn that follows then reports Cancelled). Never throws.
+        /// </summary>
+        internal static async Task<McpJobReport> StartJobMcpServersAsync(
+            IMcpClientManager clients, IReadOnlyList<string> names, TimeSpan perServer,
+            Action<string> tail, CancellationToken ct)
+        {
+            var report = new McpJobReport { Requested = names.ToArray() };
+            var outcomes = await Task.WhenAll(names.Select(async name =>
+            {
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                timeout.CancelAfter(perServer);
+                try
+                {
+                    // WaitAsync bounds even a start that ignores its token.
+                    string? err = await clients.StartAsync(name, timeout.Token)
+                        .WaitAsync(perServer, ct).ConfigureAwait(false);
+                    return (name, err: err == null ? null : ShortReason(err));
+                }
+                catch (Exception) when (ct.IsCancellationRequested)
+                {
+                    return (name, err: (string?)"job cancelled while the server was starting");
+                }
+                catch (Exception ex) when (ex is TimeoutException or OperationCanceledException)
+                {
+                    return (name, err: (string?)$"did not start within {perServer.TotalSeconds:0} s");
+                }
+                catch (Exception ex)
+                {
+                    return (name, err: (string?)ex.Message);
+                }
+            })).ConfigureAwait(false);
+
+            var statuses = clients.GetStatuses().ToDictionary(s => s.Name, StringComparer.Ordinal);
+            foreach (var (name, err) in outcomes)
+            {
+                if (err == null)
+                {
+                    report.Started.Add(name);
+                    int tools = statuses.TryGetValue(name, out var st) ? st.ToolCount : 0;
+                    tail($"\n[job] mcp: {name} started ({tools} tools)\n");
+                }
+                else
+                {
+                    report.Failed[name] = err;
+                    tail($"\n[job] mcp: {name} failed to start: {err} — continuing without it\n");
+                }
+            }
+            return report;
+        }
+
+        private static string ShortReason(string error) => McpClientManager.ShortReason(error);
 
         public AgentJobManager(Action? onJobFinished = null)
         {
@@ -425,7 +548,8 @@ namespace DevMind.McpServer
 
         public AgentJob Start(string prompt, string workingDirectory, int maxDepth, int timeoutMinutes,
             bool allowCommit, bool verifyBuild, bool think = false, bool verifyTests = false,
-            bool noExecute = false, bool runTestBaseline = true, bool? showThinking = null)
+            bool noExecute = false, bool runTestBaseline = true, bool? showThinking = null,
+            IReadOnlyList<McpServerConfig>? mcpServers = null)
         {
             var job = new AgentJob
             {
@@ -441,6 +565,7 @@ namespace DevMind.McpServer
                 VerifyTests = verifyTests,
                 NoExecute = noExecute,
                 RunTestBaseline = runTestBaseline,
+                McpServers = mcpServers ?? Array.Empty<McpServerConfig>(),
                 State = AgentJobState.Queued,
             };
 
@@ -522,6 +647,9 @@ namespace DevMind.McpServer
                 // noExecute's ratchet).
                 ShowThinking = showThinking ?? parent.ShowThinking,
                 NoExecute = ResolveContinuationNoExecute(parent.NoExecute, noExecute),
+                // Inherited like NoExecute. The parent's manager was disposed when the parent
+                // ended, so the worker starts these servers again for the continued turn.
+                McpServers = parent.McpServers,
                 RunTestBaseline = runTestBaseline,
                 State = AgentJobState.Queued,
                 ParentJobId = parentJobId,
@@ -703,6 +831,10 @@ namespace DevMind.McpServer
 
                 WriteActiveMarker(job, transcriptPath);
 
+                // Per JOB, not per session: disposed in the finally below whatever the terminal
+                // state, while the session it was attached to lives on for a continuation.
+                IMcpClientManager? jobMcp = null;
+
                 try
                 {
                     // Test baseline (tier 1, opt-in via verify_tests): the harness runs
@@ -767,6 +899,18 @@ namespace DevMind.McpServer
                         session.SetHarnessVerifiesTests(job.VerifyTests);
                     }
 
+                    // External MCP servers (mcp_servers): started and awaited BEFORE the first
+                    // LLM request, so the tools are in that request. A server that fails is
+                    // recorded and skipped — the job runs on without it.
+                    if (job.McpServers.Count > 0)
+                    {
+                        jobMcp = McpManagerFactory?.Invoke(job.McpServers) ?? new McpClientManager(job.McpServers);
+                        job.AppendTail($"\n[job] mcp: starting {string.Join(", ", job.McpServers.Select(s => s.Name))}...\n");
+                        job.Mcp = await StartJobMcpServersAsync(jobMcp, job.McpServers.Select(s => s.Name).ToList(),
+                            McpStartTimeout, job.AppendTail, job.Cts.Token).ConfigureAwait(false);
+                        session.SetMcpClients(jobMcp);
+                    }
+
                     var liveness = new JobLiveness(Clock,
                         job.ParentJobId == null ? "job started" : "continuation started");
                     HeadlessAgentResult result;
@@ -802,6 +946,9 @@ namespace DevMind.McpServer
                     // terminal state only once both have settled (end of the try block).
                     job.Result = result;
                     job.Error = result.Error;
+                    // Before the terminal state is published (see below): a reader that sees Done
+                    // must see the final call count.
+                    if (job.Mcp != null && jobMcp != null) job.Mcp.Calls = jobMcp.CallCount;
                     if (result.Cancelled && job.StallReason is { } stall)
                         job.Error = stall; // not a generic cancel: say it stalled, and on what
 
@@ -858,6 +1005,18 @@ namespace DevMind.McpServer
                 }
                 finally
                 {
+                    // The job's MCP servers end with the job — done, failed, cancelled and
+                    // stopped_incomplete all pass through here. The session is detached first
+                    // so the retained conversation never points at a disposed manager; a
+                    // continuation attaches a fresh one.
+                    if (jobMcp != null)
+                    {
+                        if (job.Mcp != null) job.Mcp.Calls = jobMcp.CallCount;
+                        try { job.Session?.SetMcpClients(null!); } catch { /* never kill the worker */ }
+                        try { await jobMcp.DisposeAsync().ConfigureAwait(false); }
+                        catch (Exception ex) { Console.Error.WriteLine($"[AgentJobManager] {job.Id} MCP dispose failed: {ex.Message}"); }
+                    }
+
                     job.EndedAtUtc = DateTime.UtcNow;
                     ClearActiveMarker();
                     WriteResultSidecar(job);
@@ -1052,6 +1211,7 @@ namespace DevMind.McpServer
                         output_tail = job.Build.OutputTail,
                     },
                     test_verification = TestVerificationPayload.Create(job),
+                    mcp = McpJobReport.Payload(job.Mcp),
                 });
                 File.WriteAllText(Path.Combine(TranscriptDir, $"{job.Id}.result.json"), json);
             }

@@ -164,7 +164,7 @@ namespace DevMind.Core.Tests
                 string path = Path.Combine(dir, "devmind.json");
                 File.WriteAllText(path, """
                     { "approvalMode": "auto",
-                      "mcpServers": { "comfy": { "command": "c.exe", "args": ["x"], "callTimeoutSeconds": 900, "custom": { "k": 1 } } } }
+                      "mcpServers": { "comfy": { "command": "c.exe", "args": ["x"], "callTimeoutSeconds": 900, "autoStart": false, "custom": { "k": 1 } } } }
                     """);
 
                 var cfg = TuiConfig.Load();
@@ -174,9 +174,11 @@ namespace DevMind.Core.Tests
                 var reparsed = JObject.Parse(File.ReadAllText(path));
                 Assert.Equal("manual", (string?)reparsed["approvalMode"]);
                 Assert.True(JToken.DeepEquals(
-                    JObject.Parse("""{ "comfy": { "command": "c.exe", "args": ["x"], "callTimeoutSeconds": 900, "custom": { "k": 1 } } }"""),
+                    JObject.Parse("""{ "comfy": { "command": "c.exe", "args": ["x"], "callTimeoutSeconds": 900, "autoStart": false, "custom": { "k": 1 } } }"""),
                     reparsed["mcpServers"]));
-                Assert.Equal(900, Assert.Single(McpServerConfig.Load()).CallTimeoutSeconds);
+                var loaded = Assert.Single(McpServerConfig.Load());
+                Assert.Equal(900, loaded.CallTimeoutSeconds);
+                Assert.False(loaded.AutoStart);   // part 3: autoStart survives the save too
 
                 // Absent stays absent — Save must not invent an empty block.
                 File.WriteAllText(path, """{ "approvalMode": "auto" }""");
