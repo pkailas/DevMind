@@ -1,6 +1,7 @@
 ﻿// File: ToolRegistry.cs  v8.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
+using System.Collections.Generic;
 using Newtonsoft.Json.Linq;
 
 namespace DevMind
@@ -32,7 +33,28 @@ namespace DevMind
         }
 
         /// <summary>
-        /// Builds the complete tools array for inclusion in the chat completion request.
+        /// The static catalogue followed by <paramref name="extra"/> — the external MCP tools
+        /// (<c>mcp__&lt;server&gt;__&lt;tool&gt;</c>, already in OpenAI function format) of the
+        /// servers a session has started. Each extra is deep-cloned, so the caller's cached
+        /// objects are never parented into (or mutated through) a request.
+        /// <para>
+        /// The no-argument overload stays exactly the static set: ToolCatalogueRegistryParityTests
+        /// and <see cref="ToolCount"/> read it, and dynamic tools are out of that parity test's
+        /// scope by design — they are not in the prompt catalogue and vary per session.
+        /// </para>
+        /// </summary>
+        public static JArray BuildToolsArray(IEnumerable<JObject> extra)
+        {
+            var tools = BuildToolsArray();
+            if (extra == null) return tools;
+            foreach (var tool in extra)
+                if (tool != null)
+                    tools.Add(tool.DeepClone());
+            return tools;
+        }
+
+        /// <summary>
+        /// Builds the complete static tools array for inclusion in the chat completion request.
         /// </summary>
         public static JArray BuildToolsArray()
         {

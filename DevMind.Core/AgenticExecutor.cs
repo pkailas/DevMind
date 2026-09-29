@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Newtonsoft.Json.Linq;
 
 namespace DevMind
 {
@@ -24,6 +25,14 @@ namespace DevMind
         /// <summary>Invoked after each tool block has executed (headless stall watchdog,
         /// H-37). Null = no-op.</summary>
         public Action<BlockType> BlockExecuted { get; set; }
+
+        /// <summary>
+        /// Runs mcp__server__tool calls (BlockType.McpCall). Null — the default — means no MCP
+        /// client is attached, and an MCP call reports that as an error. Set by LoopDriver from
+        /// <see cref="LoopDriver.McpTools"/>; deliberately not an IAgenticHost method, since MCP
+        /// calls are host-agnostic.
+        /// </summary>
+        public IMcpToolInvoker McpTools { get; set; }
 
         // Repetition guard — tracks consecutive identical READ/GREP requests to break infinite loops
         private string _lastReadKey;
@@ -806,6 +815,10 @@ namespace DevMind
                         }
                         break;
 
+                    case BlockType.McpCall:
+                        await ExecuteMcpCallAsync(block, result);
+                        break;
+
                     // Text, Done — already handled during streaming or by resolver
                     default:
                         break;
@@ -836,6 +849,90 @@ namespace DevMind
         /// Resolves all PATCH blocks, determines whether diff preview cards are
         /// needed, shows them if so, and applies approved patches.
         /// </summary>
+
+        /// <summary>
+        /// Hard ceiling on one MCP result before it enters the turn. Normal oversize is NOT
+        /// handled here: LlmClient.AddToolResultMessage nearline-caps every tool result over
+        /// its ingest threshold (8,000 chars by default) to an excerpt + recall_cache handle +
+        /// a full spill file, which keeps the whole text recoverable. web_fetch's own 8,000-char
+        /// hard cut is deliberately not copied: it would throw that recoverable text away. This
+        /// only stops a runaway server from pushing megabytes into the cache and the spill.
+        /// </summary>
+        internal const int MaxMcpResultChars = 200_000;
+
+        /// <summary>
+        /// Runs one mcp__server__tool call. Same approval class as run_shell (MutationKind.Shell):
+        /// an external tool can have arbitrary side effects (run_workflow renders, install_node
+        /// installs) and the executor cannot tell which. The result, or the error text, goes
+        /// into ToolResultContents under the call id, so two identical calls in one turn
+        /// each get their own. Never throws.
+        /// </summary>
+        private async Task ExecuteMcpCallAsync(ResponseBlock block, ExecutionResult result)
+        {
+            string label = $"{block.McpServer}.{block.McpTool}";
+            string key = McpToolName.ResultKey(block.ToolCallId);
+
+            if (McpTools == null)
+            {
+                string none = $"[MCP ERROR] {label}: no MCP client is attached to this session, so " +
+                              $"mcp__{block.McpServer}__{block.McpTool} cannot run.";
+                result.Errors.Add(none);
+                result.ToolResultContents[key] = none;
+                _host.AppendOutput($"[MCP] {label}: no MCP client attached\n", OutputColor.Error);
+                return;
+            }
+
+            if (!await ApproveMutationAsync(MutationKind.Shell, $"Run MCP tool {label} {DescribeMcpArgs(block.McpArguments)}", result))
+            {
+                // ApproveMutationAsync put the decline / plan-mode refusal in Errors; hand the
+                // model that exact text as the tool's result.
+                result.ToolResultContents[key] = result.Errors[result.Errors.Count - 1];
+                return;
+            }
+
+            _host.AppendOutput($"[MCP] {label} running…\n", OutputColor.Dim);
+            try
+            {
+                string text = await McpTools.CallToolAsync(
+                    block.McpServer, block.McpTool, block.McpArguments ?? new JObject(), _cancellationToken) ?? "";
+                if (text.Length > MaxMcpResultChars)
+                    text = text.Substring(0, MaxMcpResultChars) +
+                           $"\n[MCP: result truncated at {MaxMcpResultChars:N0} of {text.Length:N0} chars]";
+                result.ToolResultContents[key] = text;
+
+                if (text.StartsWith("[MCP ERROR]", StringComparison.Ordinal) ||
+                    text.StartsWith("[MCP TOOL ERROR]", StringComparison.Ordinal))
+                {
+                    result.Errors.Add(text);
+                    _host.AppendOutput($"[MCP] {label}: {FirstLine(text)}\n", OutputColor.Error);
+                }
+                else
+                {
+                    _host.AppendOutput($"[MCP] {label} done ({text.Length:N0} chars)\n", OutputColor.Dim);
+                }
+            }
+            catch (Exception ex)
+            {
+                // IMcpToolInvoker reports failures as text; this is its cancellation (Stop) or a
+                // broken implementation. Either way the loop gets an error, not an exception.
+                string msg = $"[MCP ERROR] {label}: {ex.Message}";
+                result.Errors.Add(msg);
+                result.ToolResultContents[key] = msg;
+                _host.AppendOutput($"[MCP] {label}: {ex.Message}\n", OutputColor.Error);
+            }
+        }
+
+        private static string DescribeMcpArgs(JObject args)
+        {
+            string json = args == null ? "{}" : args.ToString(Newtonsoft.Json.Formatting.None);
+            return json.Length <= 200 ? json : json.Substring(0, 200) + "…";
+        }
+
+        private static string FirstLine(string text)
+        {
+            int nl = text.IndexOf('\n');
+            return nl < 0 ? text : text.Substring(0, nl);
+        }
 
         /// <summary>
         /// Gates one mutation on the current mode's decision. True means go ahead.

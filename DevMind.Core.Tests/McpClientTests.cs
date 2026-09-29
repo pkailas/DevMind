@@ -405,6 +405,13 @@ namespace DevMind.Core.Tests
                 Assert.Equal("mcp__comfy__which", which.QualifiedName);
                 Assert.Equal("object", (string?)which.InputSchema["type"]);
 
+                // Part 2: the started server's tools are exposed to the model.
+                var exposed = Assert.Single(m.GetExposedTools(), t => (string?)t["function"]?["name"] == "mcp__comfy__which");
+                Assert.Equal("function", (string?)exposed["type"]);
+                Assert.IsType<JObject>(exposed["function"]!["parameters"]);
+                Assert.StartsWith("[comfy MCP] ", (string?)exposed["function"]!["description"]);
+                Assert.Equal(listing.Tools.Count, m.GetExposedTools().Count);
+
                 string text = await m.CallToolAsync("comfy", "which", new JObject());
                 Assert.Contains("workspace_path", text);
 

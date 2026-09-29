@@ -29,6 +29,14 @@ namespace DevMind
         /// ticked each time a tool block returns. Null for the TUI.</summary>
         public JobLiveness Liveness { get; set; }
 
+        /// <summary>
+        /// Executes the model's mcp__server__tool calls; handed to each iteration's
+        /// AgenticExecutor. Null (the default) means no MCP client: an mcp__ call then returns
+        /// an error to the model. Hosts set this to the same McpClientManager they give
+        /// <see cref="LlmClient.McpClients"/>, so an advertised tool can also run.
+        /// </summary>
+        public IMcpToolInvoker McpTools { get; set; }
+
        // Same heuristic as the extension constant — gives slack for legitimate
         // progressive debugging cycles without masking genuine stuck loops.
         private const int ConsecutiveErrorAbortThreshold = 5;
@@ -196,6 +204,7 @@ namespace DevMind
 
             var executor = new AgenticExecutor(_agenticHost, _options);
             executor.SetCancellationToken(ct);
+            executor.McpTools = McpTools;
             if (Liveness is { } liveness)
                 executor.BlockExecuted = type => liveness.Tick($"tool call returned: {type}");
             int maxDepth = _options.AgenticLoopMaxDepth;

@@ -126,6 +126,18 @@ namespace DevMind
         public static string BuildToolResultContent(ToolCallResult tc, ExecutionResult result,
             List<ResponseBlock> executedBlocks)
         {
+            // External MCP tools have open-ended names, so they cannot be switch cases. Their
+            // results are keyed by tool_call id (McpToolName.ResultKey), not by an argument.
+            if (McpToolName.TryParse(tc.Name, out _, out _))
+            {
+                if (result.ToolResultContents != null &&
+                    result.ToolResultContents.TryGetValue(McpToolName.ResultKey(tc.Id), out string mcpContent))
+                    return mcpContent;
+                if (result.Errors != null && result.Errors.Count > 0)
+                    return $"[MCP call failed: {string.Join("; ", result.Errors)}]";
+                return "[MCP result not available]";
+            }
+
             switch (tc.Name)
             {
                 case "read_file":

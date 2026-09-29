@@ -231,6 +231,15 @@ namespace DevMind
             return Prefix + server + Separator + tool;
         }
 
+        /// <summary>
+        /// The <c>ExecutionResult.ToolResultContents</c> key for one MCP call's result: its
+        /// tool_call id. Every other tool keys its result by an argument value (filename, query,
+        /// url) or a literal ("run_sql"), which is fine for idempotent reads, but two identical
+        /// MCP calls in one turn (run_workflow twice) are two different results, so AgenticExecutor
+        /// writes and LoopHelpers reads under the call id.
+        /// </summary>
+        public static string ResultKey(string toolCallId) => "mcp:" + (toolCallId ?? "");
+
         /// <summary>Splits <c>mcp__server__tool</c>; false for anything else (including a non-MCP tool name).</summary>
         public static bool TryParse(string? qualified, out string server, out string tool)
         {

@@ -478,6 +478,22 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   added to devmind.json by hand without a TuiConfig property.
 - **Status:** fixed in source, pending deploy
 
+### H-40 - Claude Code's LSP index stays stale after a package restore and after out-of-editor edits
+- **First seen:** 2026-09-29, during MCP client parts 1 and 2. `dotnet add package ModelContextProtocol` restored
+  2.2.0 into DevMind.Core, and `dotnet build` resolved it at once. The LSP diagnostics kept reporting
+  `ModelContextProtocol` / `McpClient` / `CallToolResult` as CS0246 "could not be found" for the whole of part 1 and
+  on into the next session. In part 2, members added to project files by a script (`BlockType.McpCall`,
+  `ResponseBlock.McpServer`, `ToolCallResult.RawArguments`) also stayed "missing" in the LSP diagnostics of
+  dependent files, even after a clean build.
+- **Why it matters:** the brief says to confirm SDK APIs with LSP hover / go-to-definition. With a stale index that
+  check is impossible, and the diagnostics look like real compile errors. An agent that trusts them would "fix"
+  code that compiles.
+- **Workaround used:** check SDK APIs by reflection over the restored DLL plus its XML docs, and treat
+  `dotnet build` as the truth over LSP diagnostics.
+- **Proposed fix:** reload the workspace (or restart the language server) after a restore or a
+  `*.csproj` change, and when files change outside the editor.
+- **Status:** open
+
 ## Parked
 
 ### P-01 - No-write-streak nudge

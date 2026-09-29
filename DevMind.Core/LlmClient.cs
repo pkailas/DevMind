@@ -130,6 +130,14 @@ namespace DevMind
         /// </summary>
         public Action StreamDataReceived { get; set; }
 
+        /// <summary>
+        /// External MCP servers whose tools are advertised alongside the static catalogue
+        /// (only servers already started; see <see cref="McpClientManager.GetExposedTools"/>).
+        /// Null — the default — means none. Property-injected like <see cref="StreamDataReceived"/>;
+        /// the same manager goes to <see cref="LoopDriver.McpTools"/> so the calls can execute.
+        /// </summary>
+        public McpClientManager McpClients { get; set; }
+
         private string _taskScratchpad = "";
         private const int ScratchpadMaxTokens = 200;
 
@@ -4065,7 +4073,12 @@ namespace DevMind
                 request["model"] = modelName;
             }
 
-           request["tools"] = ToolRegistry.BuildToolsArray();
+           // External MCP tools (mcp__<server>__<tool>) ride after the static catalogue, for
+           // servers McpClients has already started. GetExposedTools is a cached snapshot — no
+           // I/O on the request path.
+           request["tools"] = McpClients == null
+               ? ToolRegistry.BuildToolsArray()
+               : ToolRegistry.BuildToolsArray(McpClients.GetExposedTools());
 
            // Layer 1 (cold-start): force the model to make a tool call on the
             // opening turn. Without this, the model often writes prose like "let me check X,
@@ -4376,8 +4389,10 @@ namespace DevMind
         /// resulting members into <paramref name="args"/>. When a rung above the fallback had to
         /// act, a one-line description is added to <paramref name="repairNotes"/> for the caller
         /// to surface — a repaired call must not be indistinguishable from a clean one.
+        /// Returns the repaired arguments as a typed object (for <see cref="ToolCallResult.RawArguments"/>),
+        /// or null when they were not a JSON object.
         /// </summary>
-        private static void ApplyRepairedArguments(
+        private static JObject ApplyRepairedArguments(
             string rawArguments, string toolName, Dictionary<string, string> args, ICollection<string> repairNotes)
         {
             var repair = ToolArgumentRepair.Repair(rawArguments);
@@ -4394,6 +4409,7 @@ namespace DevMind
                 {
                     foreach (var prop in obj.Properties())
                         args[prop.Name] = prop.Value?.ToString() ?? "";
+                    return obj;
                 }
             }
             catch (JsonException)
@@ -4401,6 +4417,7 @@ namespace DevMind
                 // Repair guarantees valid JSON, so this is unreachable in practice — but a
                 // parse here must never take down a response that already has tool calls.
             }
+            return null;
         }
 
         /// <summary>
@@ -4446,6 +4463,7 @@ namespace DevMind
 
                     // Parse arguments — may be a JSON string or a JSON object
                     var args = new Dictionary<string, string>();
+                    JObject rawArgs = null;
                     var argsToken = fn["arguments"];
                     if (argsToken != null)
                     {
@@ -4453,12 +4471,13 @@ namespace DevMind
                         {
                             // OpenAI format: arguments is a JSON string — the only shape a
                             // model can malform, so the only one the repair ladder sees.
-                            ApplyRepairedArguments(argsToken.ToString(), name, args, repairNotes);
+                            rawArgs = ApplyRepairedArguments(argsToken.ToString(), name, args, repairNotes);
                         }
                         else if (argsToken.Type == JTokenType.Object)
                         {
                             // Ollama native format: arguments is already an object — the
                             // server parsed it, so there is nothing to repair.
+                            rawArgs = (JObject)argsToken.DeepClone();
                             foreach (var prop in ((JObject)argsToken).Properties())
                                 args[prop.Name] = prop.Value?.ToString() ?? "";
                         }
@@ -4470,6 +4489,7 @@ namespace DevMind
                         Id = string.IsNullOrWhiteSpace(tcId) ? $"call_{results.Count}" : tcId,
                         Name = name,
                         Arguments = args,
+                        RawArguments = rawArgs,
                         ThinkingText = thinking
                     });
                 }
@@ -4676,16 +4696,18 @@ namespace DevMind
                 if (string.IsNullOrEmpty(name)) continue;
 
                 var args = new Dictionary<string, string>();
+                JObject rawArgs = null;
                 var argsToken = fn["arguments"];
                 if (argsToken != null)
-                    ApplyRepairedArguments(argsToken.ToString(), name, args, repairNotes);
+                    rawArgs = ApplyRepairedArguments(argsToken.ToString(), name, args, repairNotes);
 
                 string tcIdArr = tc["id"]?.ToString();
                 results.Add(new ToolCallResult
                 {
                     Id = string.IsNullOrWhiteSpace(tcIdArr) ? $"call_{results.Count}" : tcIdArr,
                     Name = name,
-                    Arguments = args
+                    Arguments = args,
+                    RawArguments = rawArgs
                 });
             }
 

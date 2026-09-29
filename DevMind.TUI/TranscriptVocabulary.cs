@@ -142,6 +142,7 @@ namespace DevMind
                 ["WEB"]         = "Web",
                 ["LEARN"]       = "Learn",
                 ["SQL"]         = "Sql",
+                ["MCP"]         = "Mcp",   // external MCP tool calls: "[MCP] comfy.run_workflow running…"
                 ["DIGEST"]      = "Digest",
                 ["SCRATCHPAD"]  = "Scratchpad",
 

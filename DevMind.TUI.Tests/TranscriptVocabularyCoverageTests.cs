@@ -42,6 +42,10 @@ namespace DevMind.TUI.Tests
             // The quiet filter drops these before the translator ever sees them (brief 09):
             // their numbers live in the status bar.
             "LLM", "TOOL_USE",
+
+            // Result-text prefixes, not line tags: AgenticExecutor only ever writes them after
+            // "[MCP] <server>.<tool>: ", so the translator sees MCP as the line's tag.
+            "MCP TOOL ERROR",
         };
 
         private static string RepoRoot()

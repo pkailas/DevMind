@@ -269,6 +269,10 @@ namespace DevMind
                         calls.Add(new ToolCallEntry { Type = "done", Summary = block.Content });
                         break;
 
+                    case BlockType.McpCall:
+                        calls.Add(new ToolCallEntry { Type = "mcp", Server = block.McpServer, Tool = block.McpTool });
+                        break;
+
                     case BlockType.Text:
                         // Prose is not a tool call. Excluding it explicitly keeps the default
                         // arm below from recording every narration turn as one.
@@ -361,7 +365,11 @@ namespace DevMind
             }
 
             foreach (var kv in result.ToolResultContents)
-                results.Add(new ToolResultEntry { Type = "read", Filename = kv.Key, Success = true, Content = TruncateForLog(kv.Value) });
+            {
+                // MCP results are keyed "mcp:<tool_call id>" (McpToolName.ResultKey), not by a file.
+                bool mcp = kv.Key.StartsWith(McpToolName.ResultKey(""), System.StringComparison.Ordinal);
+                results.Add(new ToolResultEntry { Type = mcp ? "mcp" : "read", Filename = kv.Key, Success = true, Content = TruncateForLog(kv.Value) });
+            }
 
             // The error text was always in hand here and previously thrown away —
             // the entry recorded only Success=false with no content.
@@ -471,6 +479,14 @@ namespace DevMind
 
         [JsonProperty("summary", NullValueHandling = NullValueHandling.Ignore)]
         public string Summary { get; set; }
+
+        /// <summary>External MCP server of an "mcp" call (mcp__server__tool).</summary>
+        [JsonProperty("server", NullValueHandling = NullValueHandling.Ignore)]
+        public string Server { get; set; }
+
+        /// <summary>Tool name on <see cref="Server"/> for an "mcp" call.</summary>
+        [JsonProperty("tool", NullValueHandling = NullValueHandling.Ignore)]
+        public string Tool { get; set; }
     }
 
     [JsonObject(MemberSerialization.OptIn)]

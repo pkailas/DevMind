@@ -61,12 +61,26 @@ namespace DevMind
     }
 
     /// <summary>
+    /// The one call the agent loop makes on external MCP servers — the seam AgenticExecutor
+    /// depends on, so it can be tested without launching a server. Implementations return
+    /// every failure as text ("[MCP ERROR] ...") and throw only on the caller's cancellation.
+    /// </summary>
+    public interface IMcpToolInvoker
+    {
+        Task<string> CallToolAsync(string server, string tool, JObject? args, CancellationToken ct);
+    }
+
+    /// <summary>
     /// Owns one lazily-started stdio session per configured external MCP server.
     /// Thread-safe; dispose to kill every server it started.
     /// </summary>
-    public sealed class McpClientManager : IAsyncDisposable
+    public sealed class McpClientManager : IAsyncDisposable, IMcpToolInvoker
     {
+        /// <summary>OpenAI function-name limit: ^[a-zA-Z0-9_-]{1,64}$.</summary>
+        internal const int MaxFunctionNameLength = 64;
+
         private readonly Dictionary<string, ServerSlot> _slots;
+        private readonly HashSet<string> _warned = new HashSet<string>(StringComparer.Ordinal);
         private int _disposed;
 
         public McpClientManager(IEnumerable<McpServerConfig> servers)
@@ -106,20 +120,8 @@ namespace DevMind
             var slot = _slots[server];
             try
             {
-                var tools = await session.Client.ListToolsAsync(cancellationToken: ct).ConfigureAwait(false);
-                var list = new List<McpToolInfo>();
-                foreach (var t in tools)
-                {
-                    if (!slot.Config.AllowsTool(t.Name)) continue;
-                    list.Add(new McpToolInfo
-                    {
-                        Server        = server,
-                        Name          = t.Name,
-                        QualifiedName = McpToolName.Build(server, t.Name),
-                        Description   = t.Description ?? "",
-                        InputSchema   = ToJObject(t.ProtocolTool.InputSchema),
-                    });
-                }
+                var list = await ListAllowedToolsAsync(slot, session, ct).ConfigureAwait(false);
+                slot.ExposedTools = BuildExposedTools(list, WarnOnce);
                 return new McpToolListing { Tools = list };
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -179,6 +181,125 @@ namespace DevMind
         internal int? GetServerProcessId(string server) =>
             _slots.TryGetValue(server, out var slot) ? slot.Session?.ProcessId : null;
 
+        /// <summary>Test hook: fills a server's exposed-tool cache as a start would, without launching it.</summary>
+        internal void SeedExposedToolsForTest(string server, IEnumerable<McpToolInfo> tools) =>
+            _slots[server].ExposedTools = BuildExposedTools(
+                tools.Where(t => _slots[server].Config.AllowsTool(t.Name)), WarnOnce);
+
+        /// <summary>
+        /// OpenAI-format function objects for every tool of every STARTED server, honouring
+        /// each allowlist: <c>{"type":"function","function":{"name":"mcp__s__t","description":
+        /// "[s MCP] ...","parameters":{...}}}</c>. A snapshot filled when a server starts,
+        /// restarts or is re-listed, and emptied when it dies. No I/O here: this runs on every
+        /// request build. Callers must not mutate the objects;
+        /// <see cref="ToolRegistry.BuildToolsArray(IEnumerable{JObject})"/> clones them.
+        /// </summary>
+        public IReadOnlyList<JObject> GetExposedTools()
+        {
+            List<JObject>? all = null;
+            foreach (var slot in _slots.Values)
+            {
+                var tools = slot.ExposedTools;
+                if (tools.Count > 0)
+                    (all ??= new List<JObject>()).AddRange(tools);
+            }
+            return (IReadOnlyList<JObject>?)all ?? Array.Empty<JObject>();
+        }
+
+        /// <summary>
+        /// Formats listed tools as OpenAI function objects. A tool whose qualified name is longer
+        /// than <see cref="MaxFunctionNameLength"/> or has a character outside [A-Za-z0-9_-]
+        /// cannot be called through the chat API, so it is skipped with a warning.
+        /// </summary>
+        internal static IReadOnlyList<JObject> BuildExposedTools(IEnumerable<McpToolInfo> tools, Action<string>? warn)
+        {
+            var result = new List<JObject>();
+            foreach (var t in tools)
+            {
+                string name = t.QualifiedName;
+                if (name.Length > MaxFunctionNameLength || !IsFunctionNameSafe(name))
+                {
+                    warn?.Invoke($"[MCP] server '{t.Server}': tool '{t.Name}' not exposed: '{name}' is not a valid " +
+                                 $"function name (at most {MaxFunctionNameLength} chars of [A-Za-z0-9_-]).");
+                    continue;
+                }
+                var parameters = t.InputSchema.Count > 0
+                    ? (JObject)t.InputSchema.DeepClone()
+                    : new JObject { ["type"] = "object", ["properties"] = new JObject() };
+                result.Add(new JObject
+                {
+                    ["type"] = "function",
+                    ["function"] = new JObject
+                    {
+                        ["name"]        = name,
+                        ["description"] = $"[{t.Server} MCP] {t.Description}".TrimEnd(),
+                        ["parameters"]  = parameters,
+                    },
+                });
+            }
+            return result;
+        }
+
+        private static bool IsFunctionNameSafe(string name)
+        {
+            foreach (char c in name)
+                if (!(c is (>= 'a' and <= 'z') or (>= 'A' and <= 'Z') or (>= '0' and <= '9') or '_' or '-'))
+                    return false;
+            return true;
+        }
+
+        /// <summary>Logs each distinct warning once per manager (the cache is rebuilt on every restart).</summary>
+        private void WarnOnce(string message)
+        {
+            lock (_warned)
+            {
+                if (!_warned.Add(message)) return;
+            }
+            DevMindLog.Write(message);
+        }
+
+        private static async Task<List<McpToolInfo>> ListAllowedToolsAsync(ServerSlot slot, ServerSession session, CancellationToken ct)
+        {
+            var tools = await session.Client.ListToolsAsync(cancellationToken: ct).ConfigureAwait(false);
+            var list = new List<McpToolInfo>();
+            foreach (var t in tools)
+            {
+                if (!slot.Config.AllowsTool(t.Name)) continue;
+                list.Add(new McpToolInfo
+                {
+                    Server        = slot.Config.Name,
+                    Name          = t.Name,
+                    QualifiedName = McpToolName.Build(slot.Config.Name, t.Name),
+                    Description   = t.Description ?? "",
+                    InputSchema   = ToJObject(t.ProtocolTool.InputSchema),
+                });
+            }
+            return list;
+        }
+
+        /// <summary>
+        /// Fills the exposed-tool cache right after a (re)start, so the tools appear in the next
+        /// request. A listing failure leaves the server running with nothing exposed (calls
+        /// still work and report their own errors) and is logged.
+        /// </summary>
+        private async Task RefreshExposedToolsAsync(ServerSlot slot, ServerSession session, CancellationToken ct)
+        {
+            try
+            {
+                slot.ExposedTools = BuildExposedTools(
+                    await ListAllowedToolsAsync(slot, session, ct).ConfigureAwait(false), WarnOnce);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                slot.ExposedTools = Array.Empty<JObject>();
+                DevMindLog.Write($"[MCP] server '{slot.Config.Name}': tools/list after start failed; no tools exposed: {ex.Message}");
+            }
+        }
+
         public async ValueTask DisposeAsync()
         {
             if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
@@ -187,6 +308,7 @@ namespace DevMind
                 await slot.Gate.WaitAsync().ConfigureAwait(false);
                 try
                 {
+                    slot.ExposedTools = Array.Empty<JObject>();
                     if (slot.Session != null)
                         await slot.Session.DisposeAsync().ConfigureAwait(false);
                     slot.Session = null;
@@ -206,6 +328,8 @@ namespace DevMind
             /// <summary>Start failures / crashes since the last success. At 2, no further relaunch.</summary>
             public int ConsecutiveFailures;
             public string? LastError;
+            /// <summary>Cached OpenAI tool objects; empty whenever there is no live session. Swapped whole, never mutated.</summary>
+            public volatile IReadOnlyList<JObject> ExposedTools = Array.Empty<JObject>();
         }
 
         private async Task<(ServerSession? session, string? error)> AcquireSessionAsync(string server, CancellationToken ct)
@@ -227,6 +351,7 @@ namespace DevMind
                     slot.LastError = DeadMessage(slot.Config.Name, "the server process exited", null, slot.Session);
                     slot.ConsecutiveFailures++;
                     DevMindLog.Write(slot.LastError);
+                    slot.ExposedTools = Array.Empty<JObject>();
                     await slot.Session.DisposeAsync().ConfigureAwait(false);
                     slot.Session = null;
                 }
@@ -239,6 +364,7 @@ namespace DevMind
                 try
                 {
                     slot.Session = await ServerSession.StartAsync(slot.Config, ct).ConfigureAwait(false);
+                    await RefreshExposedToolsAsync(slot, slot.Session, ct).ConfigureAwait(false);
                     return (slot.Session, null);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -281,6 +407,7 @@ namespace DevMind
                     slot.LastError = msg;
                     slot.ConsecutiveFailures++;
                     DevMindLog.Write(msg);
+                    slot.ExposedTools = Array.Empty<JObject>();
                     slot.Session = null;
                     await session.DisposeAsync().ConfigureAwait(false);
                 }

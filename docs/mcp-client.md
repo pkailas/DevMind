@@ -4,9 +4,13 @@ DevMind can act as an MCP **client**: launch external MCP servers over stdio, li
 tools and call them. Motivating use: the ComfyUI server (`comfy-mcp`) so DM agents can drive
 ComfyUI.
 
-Status (2026-09-29): **part 1 of 4 — config + client manager only.** `McpClientManager`
-exists in DevMind.Core but nothing in the agent loop uses it yet (part 2 wires the tools into
-the catalogue as `mcp__<server>__<tool>`).
+Status (2026-09-29): **parts 1–2 of 4 done.**
+- Part 1: config and client manager.
+- Part 2: the agent loop can advertise and run the tools of servers that are already started.
+
+**No host attaches a manager yet, and nothing starts a server.** Both come in part 3, which
+adds auto-start at session start and headless opt-in. Until then, no MCP tool reaches the model
+in the TUI, the CLI or headless jobs.
 
 ## Config
 
@@ -81,6 +85,93 @@ An `mcpServers` object in the global config `%APPDATA%\devmind\devmind.json`
 - `DisposeAsync` disposes the client, which closes stdin (graceful EOF). It then terminates the
   job and waits until the job's process list is empty.
 
+## In the agent loop (part 2)
+
+### Injection
+
+Collaborators are property-injected, following the existing `LoopDriver.Liveness` /
+`LlmClient.StreamDataReceived` pattern. A host sets the same manager in two places:
+
+- `LlmClient.McpClients` (a `McpClientManager`) advertises the tools.
+- `LoopDriver.McpTools` (an `IMcpToolInvoker`) runs them. LoopDriver hands it to each
+  iteration's `AgenticExecutor.McpTools`.
+
+Both default to null, which means the feature is off. MCP calls are not `IAgenticHost` methods,
+because they are host-agnostic.
+
+### Exposure
+
+- `McpClientManager.GetExposedTools()` returns a cached snapshot of OpenAI function objects for
+  **started servers only**, with each server's allowlist applied. It does no I/O, because it
+  runs on every request build.
+- The snapshot is refilled when a server starts, restarts or is re-listed. It is emptied when
+  the server dies or the manager is disposed.
+- The tool name is `mcp__<server>__<tool>`. The description is prefixed `[<server> MCP]`.
+  `parameters` is the server's input schema; an empty schema becomes
+  `{"type":"object","properties":{}}`.
+- A qualified name longer than 64 characters, or containing characters outside
+  `[A-Za-z0-9_-]`, cannot be called through the chat API. That tool is skipped, and a warning
+  is written once to `DevMindLog`.
+- `LlmClient` sends `ToolRegistry.BuildToolsArray(extra)`: the static catalogue with the MCP
+  tools appended as deep clones. The no-argument `BuildToolsArray()` still returns only the
+  static set. `ToolCatalogueRegistryParityTests` and `ToolCount` rely on that, and dynamic
+  tools are outside the parity test's scope.
+
+### Arguments
+
+- `ToolCallResult.Arguments` flattens values through `JToken.ToString()`, so `true` becomes
+  `"True"`, `2` becomes `"2"` and `null` becomes `""`. MCP servers validate against their own
+  schemas, so that flattened form is not usable for them.
+- The parser therefore also keeps `ToolCallResult.RawArguments`, a typed `JObject`. It is taken
+  after `ToolArgumentRepair`, which fixes JSON syntax only and knows nothing about schemas, so it
+  is safe for any tool.
+- `ToolCallMapper` maps any name that parses as `mcp__…` to `BlockType.McpCall` and forwards
+  `RawArguments`. A malformed `mcp__` name falls through to the existing unknown-tool text.
+
+### Results
+
+- **Keying.** Every other tool files its result in `ExecutionResult.ToolResultContents` under
+  an argument value (filename, query, url) or a literal (`"run_sql"`). `LoopHelpers` rebuilds
+  the same key from the tool call's arguments. MCP results are keyed by tool-call id instead
+  (`McpToolName.ResultKey(id)` = `mcp:<id>`), so two identical calls in one turn, such as
+  `run_workflow` twice, each keep their own result. The block carries `ToolCallId` so the
+  executor can use that key.
+- **Size.** Oversize handling is left to the existing ingest cap in
+  `LlmClient.AddToolResultMessage`. Above 8,000 chars, a result becomes a head/tail excerpt
+  plus a `recall_cache` handle, and the full text is spilled to disk.
+- web_fetch's own 8,000-char hard cut was not copied, because it would throw away text the
+  ingest cap keeps recoverable. The executor adds only a 200,000-char safety ceiling, with a
+  `[MCP: result truncated …]` note.
+- **Errors.** Error text (`[MCP ERROR]`, or `[MCP TOOL ERROR]` for a tool's own error result)
+  goes to `result.Errors` and is also what the model receives. The loop never gets an exception.
+- **Transcript.** The transcript shows `[MCP] <server>.<tool> running…` before the call. After
+  it, it shows `done (N chars)` or the first line of the error. In the TUI the tag renders as
+  "Mcp" (`TranscriptVocabulary`, alongside Lsp and Sql).
+
+### Approval
+
+MCP calls use the **same approval class as `run_shell`**: they go through
+`ApproveMutationAsync(MutationKind.Shell, "Run MCP tool <server>.<tool> <args>")`.
+
+| Mode | Behaviour |
+|------|-----------|
+| Auto | Runs without asking. |
+| Manual | Asks first; a decline reaches the model as a refusal. |
+| Plan | Refused without asking. |
+| Headless | Follows the job's mode, exactly as `run_shell` does. |
+
+- An external tool can do anything: render (`run_workflow`), install (`install_node`),
+  download (`download_model`). DevMind cannot tell which calls are harmless.
+- MCP's `readOnlyHint` annotation is self-declared by the server, so it is not trusted here.
+- A separate `MutationKind` would have the same three decisions. It can be split out later if
+  MCP needs a different policy from the shell.
+
+### Bookkeeping
+
+- `ResponseOutcome.HasMcpCalls` counts an MCP call as a directive and a mutation.
+- The training log records `{"type":"mcp","server":…,"tool":…}` for the call and
+  `type:"mcp"` for its result.
+
 ## Tests
 
 - `DevMind.Core.Tests/McpClientTests.cs`: config parsing, name round-trip, result formatting,
@@ -89,3 +180,15 @@ An `mcpServers` object in the global config `%APPDATA%\devmind\devmind.json`
 - Live smoke test (`McpClientSmokeTests`), skipped unless `DEVMIND_MCP_SMOKE=1`. It uses the
   real `comfy` entry with the allowlist ignored. It checks that `which` is listed and that
   calling it returns `workspace_path`, then checks that the server PID is gone after dispose.
+  Since part 2 it also checks that `GetExposedTools()` contains `mcp__comfy__which` with a
+  parameters object.
+- `DevMind.Core.Tests/McpAgentLoopTests.cs` (part 2):
+  - Exposure: the no-argument array is unchanged, extras are cloned, the 64-character and
+    character-set skip works, only started servers are exposed, and the allowlist holds.
+  - End to end over the fake SSE server: the tools are on the wire and the arguments come back
+    typed.
+  - Mapping: `mcp__` names map correctly, malformed ones fall through, other names are
+    unchanged.
+  - Executor, through a fake `IMcpToolInvoker`: call-id keying, two identical calls not
+    colliding, the error and throw paths, a missing invoker, the size ceiling, and
+    Manual/Plan approval.

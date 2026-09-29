@@ -397,6 +397,21 @@ namespace DevMind
                     };
 
                 default:
+                    // External MCP tool: mcp__<server>__<tool>. A malformed mcp__ name fails the
+                    // parse and falls through to the unknown-tool text below, like any other.
+                    if (McpToolName.TryParse(tc.Name, out string mcpServer, out string mcpTool))
+                    {
+                        return new ResponseBlock
+                        {
+                            Type = BlockType.McpCall,
+                            McpServer = mcpServer,
+                            McpTool = mcpTool,
+                            McpArguments = McpArguments(tc),
+                            ToolCallId = tc.Id,
+                            FromToolCall = true
+                        };
+                    }
+
                     // Unknown tool — emit as text so it's visible in output
                     return new ResponseBlock
                     {
@@ -404,6 +419,23 @@ namespace DevMind
                         Content = $"[Unknown tool call: {tc.Name}]"
                     };
             }
+        }
+
+        /// <summary>
+        /// The typed argument object for an MCP call. LlmClient sets <see cref="ToolCallResult.RawArguments"/>
+        /// after the repair ladder (syntax-only, so schema-agnostic and safe for any tool). A
+        /// producer that did not set it gets the flattened string map back as an object of
+        /// strings — lossy for non-string values, but the server's schema check then says so.
+        /// </summary>
+        private static JObject McpArguments(ToolCallResult tc)
+        {
+            if (tc.RawArguments != null)
+                return (JObject)tc.RawArguments.DeepClone();
+            var obj = new JObject();
+            if (tc.Arguments != null)
+                foreach (var kv in tc.Arguments)
+                    obj[kv.Key] = kv.Value;
+            return obj;
         }
 
         private static string GetArg(ToolCallResult tc, string key)

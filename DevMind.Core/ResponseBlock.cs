@@ -2,6 +2,7 @@
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System.Collections.Generic;
+using Newtonsoft.Json.Linq;
 
 namespace DevMind
 {
@@ -50,5 +51,9 @@ namespace DevMind
         public string LibraryQuestion { get; set; }                       // for QueryLibrary — natural-language question for the document library
         public int    LibraryTopK { get; set; }                           // for QueryLibrary — excerpts to retrieve (0 = default)
         public string LibraryDocFilter { get; set; }                      // for QueryLibrary — case-insensitive document-name substring filter; "!" prefix inverts (null/empty = whole library)
+        public string McpServer { get; set; }                             // for McpCall — external MCP server name (mcp__<server>__<tool>)
+        public string McpTool { get; set; }                               // for McpCall — tool name on that server
+        public JObject McpArguments { get; set; }                         // for McpCall — typed arguments, forwarded un-flattened
+        public string ToolCallId { get; set; }                            // for McpCall — the tool_call id; keys the result (see McpToolName.ResultKey)
     }
 }

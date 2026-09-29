@@ -32,6 +32,8 @@ namespace DevMind
         public bool HasListMemory     { get; }
         public bool HasLspRequests    { get; }
         public bool HasWebRequests    { get; }
+        /// <summary>True when the model called an external MCP tool (mcp__server__tool).</summary>
+        public bool HasMcpCalls       { get; }
         public bool IsDone             { get; }
 
         /// <summary>True when the model called ask_caller — the task pauses in a
@@ -89,7 +91,12 @@ namespace DevMind
             HasWebRequests    = Blocks.Any(b => b.Type == BlockType.WebSearch
                                              || b.Type == BlockType.WebFetch);
 
-            bool hasMutatingAction = HasPatches || HasShellCommands || HasFileCreation || HasDeleteRequests || HasRenameRequests || HasTestRequests || HasSaveMemory;
+            HasMcpCalls       = Blocks.Any(b => b.Type == BlockType.McpCall);
+            // An MCP call counts as a mutation, like run_shell: the tool can have any side
+            // effect (run_workflow renders, install_node installs) and nothing here can tell
+            // which. It is also what makes it a directive, so a turn that only calls an MCP
+            // tool is never mistaken for bare prose.
+            bool hasMutatingAction = HasMcpCalls || HasPatches || HasShellCommands || HasFileCreation || HasDeleteRequests || HasRenameRequests || HasTestRequests || HasSaveMemory;
             bool hasInfoGather    = HasReadRequests || HasGrepRequests || HasFindRequests || HasDiffRequests || HasRecallMemory || HasListMemory || HasLspRequests || HasWebRequests;
 
             HasAnyDirective   = hasMutatingAction || hasInfoGather;
