@@ -20,6 +20,7 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Newtonsoft.Json.Linq;
 
 namespace DevMind
 {
@@ -104,7 +105,7 @@ namespace DevMind
                     sb.Append("  — ").Append(s.Error);
                 sb.Append('\n');
             }
-            sb.Append("/mcp restart <name> restarts one server.");
+            sb.Append("/mcp tools <name> lists a server's tools; /mcp restart <name> restarts one.");
             return sb.ToString();
         }
 
@@ -141,7 +142,75 @@ namespace DevMind
                 return new CommandResult { Message = ReadyLine(name, tools).TrimEnd() };
             }
 
-            return new CommandResult { Message = "usage: /mcp  |  /mcp restart <name>", IsError = true };
+            if (args.Length >= 1 && args.Length <= 2 && string.Equals(args[0], "tools", StringComparison.OrdinalIgnoreCase))
+            {
+                string? name = args.Length == 2 ? args[1]
+                    : clients.ServerNames.Count == 1 ? clients.ServerNames[0]
+                    : null;
+                if (name == null)
+                    return new CommandResult { Message = Usage, IsError = true };
+                if (!clients.ServerNames.Contains(name, StringComparer.Ordinal))
+                    return new CommandResult
+                    {
+                        Message = $"/mcp tools: unknown server '{name}' — configured: {string.Join(", ", clients.ServerNames)}.",
+                        IsError = true,
+                    };
+                var status = clients.GetStatuses().First(s => s.Name == name);
+                return new CommandResult { Message = FormatTools(status, clients.GetExposedTools()) };
+            }
+
+            return new CommandResult { Message = Usage, IsError = true };
+        }
+
+        public const string Usage = "usage: /mcp  |  /mcp tools <name>  |  /mcp restart <name>";
+
+        /// <summary>Longest description shown per tool in /mcp tools, before the ellipsis.</summary>
+        public const int ToolDescriptionChars = 80;
+
+        /// <summary>
+        /// /mcp tools &lt;name&gt;: exactly what the model is offered from that server — the
+        /// manager's cached, allowlisted OpenAI tool objects (the set LlmClient sends), filtered by
+        /// the server's mcp__&lt;name&gt;__ prefix. No round-trip to the server. A server that is
+        /// not ready shows its state and "no tools available".
+        /// </summary>
+        public static string FormatTools(McpServerStatus status, IReadOnlyList<JObject> exposed)
+        {
+            string scope = status.HasAllowlist ? "(allowlist active)" : "(all tools)";
+            if (status.State != McpServerState.Ready)
+            {
+                string state = status.State.ToString().ToLowerInvariant();
+                string why = status.State == McpServerState.Failed && !string.IsNullOrEmpty(status.Error)
+                    ? $" ({status.Error})" : "";
+                return $"{status.Name} — {state}{why}; no tools available {scope}";
+            }
+
+            string prefix = $"mcp__{status.Name}__";
+            string descPrefix = $"[{status.Name} MCP] ";
+            var tools = exposed
+                .Select(t => t["function"] as JObject)
+                .Where(f => f != null && ((string?)f["name"])?.StartsWith(prefix, StringComparison.Ordinal) == true)
+                .Select(f => (name: (string)f!["name"]!, desc: OneLine((string?)f["description"] ?? "", descPrefix)))
+                .OrderBy(t => t.name, StringComparer.Ordinal)
+                .ToList();
+
+            var sb = new StringBuilder($"{status.Name} — {tools.Count} tool{(tools.Count == 1 ? "" : "s")} {scope}");
+            int width = tools.Count == 0 ? 0 : tools.Max(t => t.name.Length);
+            foreach (var (name, desc) in tools)
+            {
+                sb.Append("\n  ").Append(name.PadRight(width));
+                if (desc.Length > 0) sb.Append("  ").Append(desc);
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>The description as the operator should read it: without the "[server MCP] " tag the model sees, first line only, cut at <see cref="ToolDescriptionChars"/>.</summary>
+        private static string OneLine(string description, string serverTag)
+        {
+            string d = description.StartsWith(serverTag, StringComparison.Ordinal)
+                ? description.Substring(serverTag.Length)
+                : description;
+            d = d.TrimStart().Split('\n')[0].TrimEnd('\r', ' ');
+            return d.Length <= ToolDescriptionChars ? d : d.Substring(0, ToolDescriptionChars).TrimEnd() + "…";
         }
     }
 }

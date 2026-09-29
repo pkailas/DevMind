@@ -222,6 +222,24 @@ running. With no MCP tools exposed, the prompt contains nothing about MCP.
   - States are stopped, starting, ready and failed.
   - The allowlist column shows "all tools" or "allowlist".
   - A server with `autoStart: false` is marked "(manual start)".
+- `/mcp tools <name>` lists exactly what the model is offered from that server:
+
+  ```
+  comfy — 21 tools (allowlist active)
+    mcp__comfy__fetch_outputs  Fetch the outputs of a finished job…
+    mcp__comfy__get_logs       Return the ComfyUI server log
+  ```
+
+  - The list comes from the manager's cached, allowlisted tool objects, the set `LlmClient`
+    sends. There is no round-trip to the server.
+  - Tools are sorted by name, with the names aligned.
+  - Each description is its first line, without the `[<server> MCP]` tag the model sees, cut
+    at 80 characters with `…`.
+  - The header says "(allowlist active)" or "(all tools)".
+  - A server that is not ready prints its state and "no tools available".
+  - An unknown name lists the configured servers.
+  - With no name, the only configured server is used. With several configured, it is a usage
+    error.
 - `/mcp restart <name>` **re-reads that server's entry from `devmind.json`**, so an edited
   `tools` allowlist, command or env takes effect (`McpClientManager.ConfigReloader`).
   - It then stops the server, clears its automatic-restart budget, starts it again, and

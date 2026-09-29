@@ -18,7 +18,14 @@ namespace DevMind.TUI.Tests
         public List<string> Restarted { get; } = new();
 
         public IReadOnlyList<string> ServerNames => Statuses.Select(s => s.Name).ToList();
-        public IReadOnlyList<JObject> GetExposedTools() => Array.Empty<JObject>();
+        public List<JObject> Tools { get; } = new();
+        public int ExposedToolReads;
+
+        public IReadOnlyList<JObject> GetExposedTools()
+        {
+            ExposedToolReads++;
+            return Tools;
+        }
         public IReadOnlyList<McpServerStatus> GetStatuses() => Statuses;
         public Task<string?> StartAsync(string server, CancellationToken ct = default) => Start(server);
 
@@ -58,7 +65,7 @@ namespace DevMind.TUI.Tests
             Assert.Equal("  blender  failed    -          allowlist  — file not found", lines[2]);
             Assert.Equal("  slow     starting  -          all tools", lines[3]);
             Assert.Equal("  manual   stopped   -          all tools  (manual start)", lines[4]);
-            Assert.Equal("/mcp restart <name> restarts one server.", lines[5]);
+            Assert.Equal("/mcp tools <name> lists a server's tools; /mcp restart <name> restarts one.", lines[5]);
         }
 
         [Fact]
@@ -111,6 +118,111 @@ namespace DevMind.TUI.Tests
             var result = await SlashCommand.Dispatch(input, new CommandContext { McpClients = Fake() });
             Assert.True(result.IsError);
             Assert.StartsWith("usage: /mcp", result.Message);
+        }
+
+        [Fact]
+        public void Usage_names_every_subcommand()
+        {
+            Assert.Equal("usage: /mcp  |  /mcp tools <name>  |  /mcp restart <name>", McpTui.Usage);
+        }
+
+        // ── /mcp tools ───────────────────────────────────────────────────────
+
+        /// <summary>A tool object in the shape McpClientManager caches (BuildExposedTools, internal to Core):
+        /// qualified name, and the description behind the "[server MCP] " tag the model sees.</summary>
+        private static JObject Tool(string server, string name, string description) => new JObject
+        {
+            ["type"] = "function",
+            ["function"] = new JObject
+            {
+                ["name"] = McpToolName.Build(server, name),
+                ["description"] = $"[{server} MCP] {description}",
+                ["parameters"] = new JObject { ["type"] = "object", ["properties"] = new JObject() },
+            },
+        };
+
+        [Fact]
+        public async Task Tools_of_a_ready_server_are_sorted_aligned_and_one_line()
+        {
+            var fake = Fake();
+            fake.Statuses[0] = new McpServerStatus { Name = "comfy", State = McpServerState.Ready, ToolCount = 3, HasAllowlist = true };
+            fake.Tools.Add(Tool("comfy", "run_workflow", "Run a workflow.\nLong second line the operator does not need."));
+            fake.Tools.Add(Tool("comfy", "get_logs", "Return the ComfyUI server log"));
+            fake.Tools.Add(Tool("comfy", "fetch_outputs", new string('d', 120)));
+            fake.Tools.Add(Tool("blender", "render", "Another server's tool"));   // must not appear
+
+            var result = await SlashCommand.Dispatch("/mcp tools comfy", new CommandContext { McpClients = fake });
+
+            Assert.False(result.IsError);
+            string[] lines = result.Message.Split('\n');
+            Assert.Equal(new[]
+            {
+                "comfy — 3 tools (allowlist active)",
+                "  mcp__comfy__fetch_outputs  " + new string('d', McpTui.ToolDescriptionChars) + "…",
+                "  mcp__comfy__get_logs       Return the ComfyUI server log",
+                "  mcp__comfy__run_workflow   Run a workflow.",
+            }, lines);
+        }
+
+        [Fact]
+        public async Task Tools_says_all_tools_without_an_allowlist()
+        {
+            var fake = Fake();   // comfy: Ready, no allowlist
+            fake.Tools.Add(Tool("comfy", "which", "Where things are"));
+            var result = await SlashCommand.Dispatch("/mcp tools comfy", new CommandContext { McpClients = fake });
+            Assert.StartsWith("comfy — 1 tool (all tools)", result.Message);
+        }
+
+        [Theory]
+        [InlineData("blender", "blender — failed (file not found); no tools available (allowlist active)")]
+        [InlineData("slow", "slow — starting; no tools available (all tools)")]
+        [InlineData("manual", "manual — stopped; no tools available (all tools)")]
+        public async Task A_server_that_is_not_ready_has_no_tools_available(string name, string expected)
+        {
+            var result = await SlashCommand.Dispatch($"/mcp tools {name}", new CommandContext { McpClients = Fake() });
+            Assert.False(result.IsError);
+            Assert.Equal(expected, result.Message);
+        }
+
+        [Fact]
+        public async Task Tools_of_an_unknown_server_names_the_configured_ones()
+        {
+            var result = await SlashCommand.Dispatch("/mcp tools nope", new CommandContext { McpClients = Fake() });
+            Assert.True(result.IsError);
+            Assert.Equal("/mcp tools: unknown server 'nope' — configured: comfy, blender, slow, manual.", result.Message);
+        }
+
+        [Fact]
+        public async Task Tools_without_a_name_uses_the_only_server()
+        {
+            var fake = new FakeTuiMcpClients
+            {
+                Statuses = { new McpServerStatus { Name = "comfy", State = McpServerState.Ready, ToolCount = 1 } },
+            };
+            fake.Tools.Add(Tool("comfy", "which", "Where things are"));
+            var result = await SlashCommand.Dispatch("/mcp tools", new CommandContext { McpClients = fake });
+            Assert.False(result.IsError);
+            Assert.StartsWith("comfy — 1 tool", result.Message);
+        }
+
+        [Fact]
+        public async Task Tools_without_a_name_and_several_servers_is_a_usage_error()
+        {
+            var result = await SlashCommand.Dispatch("/mcp tools", new CommandContext { McpClients = Fake() });
+            Assert.True(result.IsError);
+            Assert.Equal(McpTui.Usage, result.Message);
+        }
+
+        [Fact]
+        public async Task Tools_reads_the_cache_and_never_starts_or_restarts_anything()
+        {
+            var fake = Fake();
+            int starts = 0;
+            fake.Start = _ => { starts++; return Task.FromResult<string?>(null); };
+            await SlashCommand.Dispatch("/mcp tools comfy", new CommandContext { McpClients = fake });
+            Assert.Equal(0, starts);
+            Assert.Empty(fake.Restarted);
+            Assert.Equal(1, fake.ExposedToolReads);
         }
 
         [Fact]

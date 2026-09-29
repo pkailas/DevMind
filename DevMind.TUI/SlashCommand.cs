@@ -518,8 +518,8 @@ namespace DevMind
                 PromptHandler);
 
             RegisterCommand("/mcp",
-                "List external MCP servers (state, tools, allowlist), or restart one",
-                "/mcp [restart <name>]",
+                "List external MCP servers (state, tools, allowlist), list one server's tools, or restart one",
+                "/mcp [tools <name> | restart <name>]",
                 (args, ctx) => McpTui.HandleAsync(args, ctx.McpClients));
 
             RegisterCommand("/lsp",

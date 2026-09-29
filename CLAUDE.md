@@ -187,7 +187,7 @@ same thing. Grouping follows `HelpGroups`.
 | **Workspace** | |
 | `/dir [path\|-b]` | Change working directory |
 | `/lsp on\|off` | Show or enable/disable language server tools |
-| `/mcp [restart <name>]` | List external MCP servers (state, tools, allowlist), or restart one |
+| `/mcp [tools <name> \| restart <name>]` | List external MCP servers (state, tools, allowlist), list one server's tools, or restart one |
 | `/resolve accept_proposed\|accept_current\|cancel` | Resolve a pending merge conflict (accept proposed/current, or cancel) |
 | `/debug launch <proj> \| attach <pid\|name> \| break [clear] <file> <line> \| continue \| step \| stepin \| stepout \| inspect <var> \| stack \| eval <expr> \| detach \| stop` | Debug via netcoredbg (launch/attach, breakpoints, stepping, inspect/eval) |
 | **Documents** | |
