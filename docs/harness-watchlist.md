@@ -469,6 +469,15 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Decision:** judge from real /rewind files runs before changing anything.
 - **Status:** open, watching
 
+### H-39 - A deployed TUI older than the MCP client change deletes `mcpServers` from devmind.json
+- **First seen:** 2026-09-29, while adding MCP client part 1 (see docs/mcp-client.md). `TuiConfig.Save()` re-serializes
+  only the properties it models. Before this change it had no `mcpServers`, so any TUI save (`/mode`, `/rules`,
+  `/depth-cap`, ...) silently dropped a hand-added block. The fix is `TuiConfig.McpServers`, a raw `JsonObject` kept verbatim
+  and pinned by `McpServerConfigTests.TuiConfig_save_round_trips_the_block_verbatim`. It only helps once deployed.
+- **Watch:** after deploy, confirm the `comfy` entry survives a `/mode` toggle. The same trap applies to ANY future key
+  added to devmind.json by hand without a TuiConfig property.
+- **Status:** fixed in source, pending deploy
+
 ## Parked
 
 ### P-01 - No-write-streak nudge

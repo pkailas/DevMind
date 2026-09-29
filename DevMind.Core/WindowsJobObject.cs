@@ -34,8 +34,9 @@ namespace DevMind
 {
     /// <summary>
     /// Creates a per-command Windows Job Object with KILL_ON_JOB_CLOSE and
-    /// assigns a started process to it. Internal: the only consumer is
-    /// <see cref="ShellRunner.RunProcessAsync"/>. Windows-only; every other
+    /// assigns a started process to it. Internal: the consumers are
+    /// <see cref="ShellRunner.RunProcessAsync"/> and McpClientManager (one job per
+    /// external MCP server process). Windows-only; every other
     /// platform is a no-op by construction.
     /// </summary>
     internal static class WindowsJobObject

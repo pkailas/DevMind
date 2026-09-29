@@ -127,7 +127,7 @@ User input → LlmClient.SendMessageAsync() → SSE streaming → onComplete
 | `HeadlessAgent` / `HeadlessSession` | The no-human-in-the-loop agent behind `devmind_task_*`. |
 | `SystemPromptFile` | Loads the global system prompt from `%APPDATA%\devmind\system-prompt.md`, re-read on every assembly (hot-reload). |
 | `DevMindPaths` | Single source of truth for `%APPDATA%\devmind`. `DEVMIND_GLOBAL_DIR` overrides it (test seam). |
-| `TuiConfig` | Global TUI config at `%APPDATA%\devmind\devmind.json`. Atomic write-back (`File.Move(..., overwrite: true)`). Fields include `BehavioralRules`, `WorkingDirectory`, `DepthCap`, `ContextLimitPercent`, `TrainingLogEnabled`/`TrainingLogFolder`, `SqlConnections`, the `Library*` RAG settings, `AutoAttachImages`, `AllowedWriteRoots`. |
+| `TuiConfig` | Global TUI config at `%APPDATA%\devmind\devmind.json`. Atomic write-back (`File.Move(..., overwrite: true)`). Fields include `BehavioralRules`, `WorkingDirectory`, `DepthCap`, `ContextLimitPercent`, `TrainingLogEnabled`/`TrainingLogFolder`, `SqlConnections`, the `Library*` RAG settings, `AutoAttachImages`, `AllowedWriteRoots`, `McpServers` (raw, round-tripped verbatim — see `docs/mcp-client.md`). |
 
 ### Model Actions (native tool calls)
 

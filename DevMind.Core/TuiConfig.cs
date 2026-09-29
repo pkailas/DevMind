@@ -9,6 +9,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 
 namespace DevMind
@@ -125,6 +126,14 @@ namespace DevMind
         [JsonPropertyName("allowedWriteRoots")]
         public List<string> AllowedWriteRoots { get; set; } = new List<string>();
 
+        /// <summary>The external MCP servers DevMind may launch as a client, kept verbatim
+        /// (shape mirrors claude_desktop_config.json; <see cref="McpServerConfig"/> parses it).
+        /// Held raw so <see cref="Save"/> round-trips a hand-edited block unchanged — this
+        /// class re-serializes only its own properties, so an unmodelled key would be
+        /// deleted by the next /mode or /rules save. Null (absent) is omitted on write.</summary>
+        [JsonPropertyName("mcpServers")]
+        public JsonObject McpServers { get; set; } = null;
+
         // Path derived from DevMindPaths (single source of truth for the
         // %APPDATA%\devmind state directory) so it cannot drift from the
         // machine-level memory layer's directory.
@@ -220,6 +229,9 @@ namespace DevMind
                         }
                     }
                 }
+
+                if (root.TryGetProperty("mcpServers", out var mcp) && mcp.ValueKind == JsonValueKind.Object)
+                    config.McpServers = JsonNode.Parse(mcp.GetRawText()) as JsonObject;
 
                 if (root.TryGetProperty("sqlConnections", out var sc) && sc.ValueKind == JsonValueKind.Object)
                 {
