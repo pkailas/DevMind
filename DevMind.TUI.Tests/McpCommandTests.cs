@@ -29,6 +29,7 @@ namespace DevMind.TUI.Tests
         }
 
         public int CallCount => 0;
+        public event Action<McpNotice> Notice { add { } remove { } }
         public Task<string> CallToolAsync(string server, string tool, JObject? args, CancellationToken ct) => Task.FromResult("");
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }

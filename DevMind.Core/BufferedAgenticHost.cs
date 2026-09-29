@@ -30,7 +30,7 @@ namespace DevMind
     /// <summary>One recorded host action, for the delegation audit trail.</summary>
     public sealed class HostAction
     {
-        /// <summary>Action kind: shell | save | append | patch | delete | rename | test | conflict.</summary>
+        /// <summary>Action kind: shell | save | append | patch | delete | rename | test | conflict | mcp | mcp_restart (and blocked, steer*, nudge).</summary>
         public string Kind { get; set; }
         /// <summary>Human-readable summary (path, command, exit code...).</summary>
         public string Detail { get; set; }
@@ -38,11 +38,22 @@ namespace DevMind
     }
 
     /// <summary>
+    /// A host that keeps an action journal (the headless <see cref="BufferedAgenticHost"/>; the
+    /// TUI has none — its transcript is the record). A capability, not an IAgenticHost member:
+    /// the executor journals through it when the host has one (MCP calls, which run in the
+    /// executor rather than inside a host operation), and does nothing otherwise.
+    /// </summary>
+    public interface IActionJournal
+    {
+        void RecordAction(string kind, string detail, bool success);
+    }
+
+    /// <summary>
     /// UI-agnostic implementation of <see cref="IAgenticHost"/> with buffered output and
     /// auto-approving interaction defaults (safe for headless use). Interactive hosts
     /// subclass and override the prompt virtuals; see file header.
     /// </summary>
-    public class BufferedAgenticHost : IAgenticHost
+    public class BufferedAgenticHost : IAgenticHost, IActionJournal
     {
         // ── Fields ───────────────────────────────────────────────────────────────
 
@@ -364,6 +375,22 @@ namespace DevMind
         /// iteration N is explainable from the journal alone, like a steer.
         /// </summary>
         public void RecordNudge(string message) => RecordAction("nudge", message);
+
+        /// <summary>The executor's journal seam (MCP calls). Same journal, same entry shape.</summary>
+        void IActionJournal.RecordAction(string kind, string detail, bool success) => RecordAction(kind, detail, success);
+
+        /// <summary>
+        /// A manager lifecycle notice (an MCP server relaunched, or relaunching stopped): one
+        /// line in the transcript, where the job's "[job] mcp: … started" line also lands, and
+        /// one "mcp_restart" entry in the journal. Success is false for "not restarted".
+        /// </summary>
+        public void RecordMcpNotice(McpNotice notice)
+        {
+            if (notice == null) return;
+            AppendOutput(notice.Text + "\n", OutputColor.Warning);
+            RecordAction("mcp_restart", notice.Text.StartsWith("[MCP] ", StringComparison.Ordinal) ? notice.Text.Substring(6) : notice.Text,
+                success: notice.Kind == McpNoticeKind.Restarted);
+        }
 
         // ── Context lifecycle helpers called by the REPL ──────────────────────────
 

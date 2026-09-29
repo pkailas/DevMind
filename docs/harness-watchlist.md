@@ -494,6 +494,30 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   `*.csproj` change, and when files change outside the editor.
 - **Status:** open
 
+### H-41 - MCP calls missing from the action journal
+- **First seen:** 2026-09-29, live check after deploying 2a5eb31. job-1739's result had `"mcp": {"calls": 3}` but
+  `"actions": []`. Shell commands and file edits are journaled; calls to external systems were not, so a reviewer
+  could not see what the agent did to them.
+- **Cause:** the journal is written inside `BufferedAgenticHost`'s own operations (`run_shell` in `RunShellAsync`),
+  and MCP calls run in the executor, so no journal call existed on their path.
+- **Fix:** the executor's `McpCall` case journals every call that runs — ok, error or timeout alike — as kind `mcp`.
+  It writes through an `IActionJournal` capability that `BufferedAgenticHost` implements. The detail is
+  `server.tool {args≤500} → outcome, N chars, S.s s` (see docs/mcp-client.md).
+- **Status:** fixed, pending deploy. Verify: a job with mcp_servers shows one `mcp` action per call.
+
+### H-42 - A crashed MCP server was relaunched silently
+- **First seen:** 2026-09-29, job-1740: the job's comfy-mcp (PID 49700) was killed mid-job. The next `mcp__comfy__which`
+  succeeded after the automatic relaunch, and neither the transcript nor the journal said so.
+- **Fix:**
+  - `McpClientManager` raises a `Notice` once per relaunch: `[MCP] comfy restarted (previous process exited: exit
+    code N)`, or `(restart requested)` for `/mcp restart`.
+  - It raises one more when two failures in a row stop automatic relaunching (`not restarted: failed twice in a
+    row…`), once, not per call.
+  - The TUI prints notices to the transcript. Headless sessions write them to the job transcript and journal them as
+    `mcp_restart`.
+- **Status:** fixed, pending deploy. Verify: kill a job's MCP server mid-job and look for the line and the
+  `mcp_restart` action.
+
 ## Parked
 
 ### P-01 - No-write-streak nudge

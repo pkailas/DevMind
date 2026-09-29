@@ -27,6 +27,7 @@ namespace DevMind.Core.Tests
         public Task<string?> StartAsync(string server, CancellationToken ct = default) => Task.FromResult<string?>(null);
         public Task<string?> RestartAsync(string server, CancellationToken ct = default) => Task.FromResult<string?>(null);
         public int CallCount => Calls.Count;
+        public event Action<McpNotice> Notice { add { } remove { } }
 
         public Task<string> CallToolAsync(string server, string tool, JObject? args, CancellationToken ct)
         {

@@ -222,8 +222,15 @@ running. With no MCP tools exposed, the prompt contains nothing about MCP.
   - States are stopped, starting, ready and failed.
   - The allowlist column shows "all tools" or "allowlist".
   - A server with `autoStart: false` is marked "(manual start)".
-- `/mcp restart <name>` stops the server, clears its automatic-restart budget, starts it
-  again, and reports ready or failed. An unknown name lists the configured ones.
+- `/mcp restart <name>` **re-reads that server's entry from `devmind.json`**, so an edited
+  `tools` allowlist, command or env takes effect (`McpClientManager.ConfigReloader`).
+  - It then stops the server, clears its automatic-restart budget, starts it again, and
+    reports ready or failed.
+  - A server removed from the file is refused with "no longer in mcpServers", and nothing is
+    started.
+  - A server added to the file after startup is not known until the TUI restarts.
+  - An unknown name lists the configured ones.
+  - Before this follow-up it restarted with the entry captured at TUI startup.
 - The manager is disposed on exit, bounded to 15 s. The job objects already guarantee the
   servers die with the process; disposing is for clean logs.
 
@@ -259,6 +266,64 @@ running. With no MCP tools exposed, the prompt contains nothing about MCP.
   `no_execute`. The parent's manager was disposed when the parent ended, so the continuation's
   worker creates a fresh manager, starts the servers again and attaches it to the transferred
   session.
+
+## Observability (follow-up to part 3; watchlist H-41, H-42)
+
+### Action journal: one `mcp` entry per call
+
+- job-1739 made 3 MCP calls, but its `actions` array was empty. Every MCP call that runs is
+  now a journal entry, whether it returned ok, an error or a timeout.
+- The journal (`HostAction`: kind, detail, success) lives in the headless
+  `BufferedAgenticHost`, and `run_shell` writes its entry inside the host's own
+  `RunShellAsync`.
+- An MCP call runs in the executor, not in the host, so the executor's `McpCall` case writes
+  the entry. It does so through a small `IActionJournal` capability that
+  `BufferedAgenticHost` implements, in the same place it writes the transcript's `[MCP] …`
+  lines.
+- The TUI host has no journal; its transcript is the record.
+- Kind is `mcp`. Success is true only for ok. The detail keeps the journal's one-string shape,
+  with its fields in a fixed order (`McpJournal.Detail`):
+
+  ```
+  comfy.run_workflow {"workflow":"a.json","seed":7} → ok, 1,234 chars, 2.3 s
+  comfy.run_workflow {"workflow":"a.json"} → timeout, 187 chars, 900.0 s
+  ```
+
+  | Field | Meaning |
+  |-------|---------|
+  | `server.tool` | The server and tool that were called. |
+  | arguments | Compact JSON, cut at 500 chars with `…`. |
+  | outcome | `ok`, `error` (an `[MCP ERROR]`, an `[MCP TOOL ERROR]`, or a thrown invoker), or `timeout` (the manager's per-call timeout message; `McpJournal.TimeoutPhrase` ties the two together). |
+  | chars | Result size in characters, before the executor's 200k safety cut. |
+  | duration | Seconds, invariant culture. |
+
+- A call that was declined (Manual) or refused (Plan) ran nothing, so it is not journaled.
+  `run_shell` behaves the same way.
+
+### Restart notices
+
+- job-1740's comfy-mcp was killed mid-job. The next call relaunched it and succeeded, and
+  nothing said so.
+- The manager now raises `IMcpClientManager.Notice`, outside its locks, once per event:
+
+  | Event | Line |
+  |-------|------|
+  | Automatic relaunch after the process died | `[MCP] comfy restarted (previous process exited: exit code 1)` — or the reason when there is no exit code |
+  | `/mcp restart` | `[MCP] comfy restarted (restart requested)` |
+  | The failure that stops automatic relaunching (the second in a row) | `[MCP] comfy not restarted: failed twice in a row; it stays down until an explicit restart (<reason>)` — once, not per refused call |
+
+- A server that fails its *first* start is not announced as restarted. Its failure already
+  shows as `[MCP] comfy failed to start: …`.
+- Routing uses the same sinks as the start lines:
+  - **TUI:** the notice goes to the transcript through `app.Invoke`.
+  - **Headless:** `HeadlessSession.SetMcpClients` subscribes `BufferedAgenticHost.RecordMcpNotice`.
+    That writes the line to the job transcript (and so the tail) and journals an `mcp_restart`
+    action. Success is false for "not restarted". Detaching the manager at job end
+    unsubscribes it.
+- The wording differs from the brief's "will retry after a successful call". With two
+  failures in a row, the manager refuses every call without relaunching, so no call can
+  succeed until an explicit restart: `/mcp restart` in the TUI, or a new job headless. The
+  line says what actually happens.
 
 ## Tests
 
@@ -296,6 +361,23 @@ running. With no MCP tools exposed, the prompt contains nothing about MCP.
   - A live headless smoke test (`McpJobSmokeTests`, `DEVMIND_MCP_SMOKE=1`) that starts a
     job-scoped comfy manager, checks the tools are exposed, and checks the process is gone
     after dispose.
+- `DevMind.Core.Tests/McpObservabilityTests.cs` (follow-up):
+  - Journal entries for ok, error, tool-error, timeout and throw, on a real `BufferedAgenticHost`.
+  - One entry per call; the 500-character argument cut; classification.
+  - A journal-less host.
+  - Notice text; "not restarted" raised exactly once; no notice for a failed first start.
+  - Headless transcript and journal routing.
+  - The `/mcp restart` config re-read, including a server removed from the file, and the
+    no-reloader default.
+- `DevMind.McpServer.Tests/McpRestartNoticeTests.cs` (follow-up): a live relaunch against
+  `DevMind.McpServer.exe --root <temp>`.
+  - The process is killed and the next call, through the executor, succeeds.
+  - Exactly one notice with `exit code …`, plus the `mcp` and `mcp_restart` journal entries.
+  - A later call raises nothing further.
+  - `RestartAsync` announces "restart requested".
+- The comfy smoke test (`DEVMIND_MCP_SMOKE=1`) now kills comfy-mcp after the first call. The
+  next `which` must succeed, raise one restart notice, journal `mcp_restart` and `mcp`, and
+  run on a new PID.
 - `DevMind.TUI.Tests/McpCommandTests.cs` (part 3):
   - `/mcp` formatting, restart, unknown name and usage.
   - `/mcp` listed in `/help`.

@@ -735,6 +735,13 @@ namespace DevMind
         /// </summary>
         public void SetMcpClients(IMcpClientManager clients)
         {
+            // Relaunch notices go to this session's transcript (and so the job's tail) and
+            // journal. Unsubscribe from a manager being replaced or detached, so a disposed job
+            // manager can never write into a continued conversation.
+            if (_mcpClients != null)
+                _mcpClients.Notice -= _host.RecordMcpNotice;
+            if (clients != null)
+                clients.Notice += _host.RecordMcpNotice;
             _mcpClients = clients;
             _llmClient.McpClients = clients;
             _driver.McpTools = clients;

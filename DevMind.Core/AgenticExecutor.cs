@@ -891,17 +891,19 @@ namespace DevMind
             }
 
             _host.AppendOutput($"[MCP] {label} running…\n", OutputColor.Dim);
+            var clock = System.Diagnostics.Stopwatch.StartNew();
             try
             {
                 string text = await McpTools.CallToolAsync(
                     block.McpServer, block.McpTool, block.McpArguments ?? new JObject(), _cancellationToken) ?? "";
+                int fullLength = text.Length;
                 if (text.Length > MaxMcpResultChars)
                     text = text.Substring(0, MaxMcpResultChars) +
                            $"\n[MCP: result truncated at {MaxMcpResultChars:N0} of {text.Length:N0} chars]";
                 result.ToolResultContents[key] = text;
 
-                if (text.StartsWith("[MCP ERROR]", StringComparison.Ordinal) ||
-                    text.StartsWith("[MCP TOOL ERROR]", StringComparison.Ordinal))
+                McpCallOutcome outcome = McpJournal.Classify(text);
+                if (outcome != McpCallOutcome.Ok)
                 {
                     result.Errors.Add(text);
                     _host.AppendOutput($"[MCP] {label}: {FirstLine(text)}\n", OutputColor.Error);
@@ -910,6 +912,7 @@ namespace DevMind
                 {
                     _host.AppendOutput($"[MCP] {label} done ({text.Length:N0} chars)\n", OutputColor.Dim);
                 }
+                JournalMcpCall(block, outcome, fullLength, clock.Elapsed);
             }
             catch (Exception ex)
             {
@@ -919,7 +922,23 @@ namespace DevMind
                 result.Errors.Add(msg);
                 result.ToolResultContents[key] = msg;
                 _host.AppendOutput($"[MCP] {label}: {ex.Message}\n", OutputColor.Error);
+                JournalMcpCall(block, McpCallOutcome.Error, msg.Length, clock.Elapsed);
             }
+        }
+
+        /// <summary>
+        /// One "mcp" journal entry per call that actually ran — ok, error or timeout alike — so
+        /// a reviewer sees what the agent did to external systems. Recorded here, where the
+        /// transcript's "[MCP] …" lines are written, so the two cannot disagree. Hosts without
+        /// a journal (the TUI) skip it; their transcript is the record. A declined or
+        /// plan-refused call ran nothing and is not journaled, as with run_shell.
+        /// </summary>
+        private void JournalMcpCall(ResponseBlock block, McpCallOutcome outcome, int resultChars, TimeSpan elapsed)
+        {
+            if (_host is not IActionJournal journal) return;
+            journal.RecordAction("mcp",
+                McpJournal.Detail(block.McpServer, block.McpTool, block.McpArguments, outcome, resultChars, elapsed),
+                outcome == McpCallOutcome.Ok);
         }
 
         private static string DescribeMcpArgs(JObject args)

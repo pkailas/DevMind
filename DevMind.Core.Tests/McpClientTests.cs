@@ -417,7 +417,43 @@ namespace DevMind.Core.Tests
                 string text = await m.CallToolAsync("comfy", "which", new JObject());
                 Assert.Contains("workspace_path", text);
 
+                // job-1740: kill the server mid-session. The next call must succeed after an
+                // automatic relaunch AND say so — a notice, and in a headless journal an
+                // "mcp_restart" entry next to the call's own "mcp" entry.
+                var notices = new List<McpNotice>();
+                m.Notice += n => { lock (notices) notices.Add(n); };
+                string workDir = Path.Combine(Path.GetTempPath(), $"devmind_mcpsmoke_{Guid.NewGuid():N}");
+                Directory.CreateDirectory(workDir);
+                var host = new BufferedAgenticHost(workDir);
+                m.Notice += host.RecordMcpNotice;
+
+                int killed = m.GetServerProcessId("comfy") ?? throw new Xunit.Sdk.XunitException("no server PID");
+                using (var victim = Process.GetProcessById(killed))
+                {
+                    victim.Kill(entireProcessTree: true);
+                    Assert.True(victim.WaitForExit(10_000));
+                }
+
+                var exec = new AgenticExecutor(host, new FakeLlmOptions()) { McpTools = m };
+                var blocks = ToolCallMapper.Map(new List<ToolCallResult>
+                {
+                    new ToolCallResult { Id = "c2", Name = "mcp__comfy__which", RawArguments = new JObject() },
+                }, null!);
+                var turn = await exec.ExecuteAsync(new AgenticAction { Type = ActionType.ApplyAndBuild }, new ResponseOutcome(blocks));
+
+                Assert.Empty(turn.Errors);
+                Assert.Contains("workspace_path", turn.ToolResultContents[McpToolName.ResultKey("c2")]);
+                var restart = Assert.Single(notices);
+                Assert.Equal(McpNoticeKind.Restarted, restart.Kind);
+                Assert.StartsWith("[MCP] comfy restarted (previous process exited:", restart.Text);
+                var actions = host.GetActions();
+                Assert.Contains(actions, a => a.Kind == "mcp_restart" && a.Success);
+                Assert.Contains(actions, a => a.Kind == "mcp" && a.Success && a.Detail.StartsWith("comfy.which {} → ok"));
+                Assert.False(IsRunning(killed));
+                try { Directory.Delete(workDir, recursive: true); } catch { }
+
                 pid = m.GetServerProcessId("comfy") ?? throw new Xunit.Sdk.XunitException("no server PID");
+                Assert.NotEqual(killed, pid);
             }
             finally
             {

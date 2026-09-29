@@ -87,6 +87,37 @@ namespace DevMind
         public string? Error { get; init; }
     }
 
+    public enum McpNoticeKind
+    {
+        /// <summary>The server was relaunched — after its process died, or on an explicit restart.</summary>
+        Restarted,
+        /// <summary>The server failed twice in a row, so automatic relaunching has stopped.</summary>
+        NotRestarted,
+    }
+
+    /// <summary>
+    /// A lifecycle event the manager raises on its own, where no caller would otherwise see it:
+    /// an automatic relaunch happens inside a tool call. Hosts route <see cref="Text"/> to the
+    /// same place as their start lines (TUI transcript, headless transcript and journal).
+    /// </summary>
+    public sealed class McpNotice
+    {
+        public string Server { get; init; } = "";
+        public McpNoticeKind Kind { get; init; }
+        /// <summary>Why: "exit code 1", "the server process exited", "restart requested", ...</summary>
+        public string Reason { get; init; } = "";
+
+        /// <summary>The host line, without a trailing newline.</summary>
+        public string Text => Kind == McpNoticeKind.Restarted
+            ? (Reason == RestartRequested
+                ? $"[MCP] {Server} restarted ({Reason})"
+                : $"[MCP] {Server} restarted (previous process exited: {Reason})")
+            : $"[MCP] {Server} not restarted: failed twice in a row; it stays down until an explicit restart ({Reason})";
+
+        /// <summary>The reason an operator restart (/mcp restart) carries.</summary>
+        public const string RestartRequested = "restart requested";
+    }
+
     /// <summary>
     /// What a host holds: the tool invoker plus lifecycle and the exposed-tool snapshot. The
     /// TUI, headless jobs and LlmClient depend on this rather than on McpClientManager, so
@@ -109,6 +140,12 @@ namespace DevMind
 
         /// <summary>CallToolAsync invocations so far, successful or not.</summary>
         int CallCount { get; }
+
+        /// <summary>
+        /// Raised once per relaunch (automatic or explicit) and once when automatic relaunching
+        /// stops. Raised outside the manager's locks, on whatever thread noticed the change.
+        /// </summary>
+        event Action<McpNotice> Notice;
     }
 
     /// <summary>The one system-prompt line about MCP tools — present only while some are exposed.</summary>
@@ -137,6 +174,41 @@ namespace DevMind
         private int _callCount;
 
         public int CallCount => Volatile.Read(ref _callCount);
+
+        public event Action<McpNotice>? Notice;
+
+        /// <summary>
+        /// Where <see cref="RestartAsync"/> re-reads a server's entry, so an edited devmind.json
+        /// (a changed "tools" allowlist, command, env) takes effect on /mcp restart. Returns null
+        /// when the server is no longer configured. Null (the default) = restart with the entry
+        /// captured at construction; headless jobs leave it unset because each job builds a
+        /// fresh manager from the config anyway.
+        /// </summary>
+        public Func<string, McpServerConfig?>? ConfigReloader { get; set; }
+
+        private void Raise(McpNotice? notice)
+        {
+            if (notice == null) return;
+            DevMindLog.Write(notice.Text);
+            try { Notice?.Invoke(notice); }
+            catch (Exception ex) { DevMindLog.Write($"[MCP] notice handler failed: {ex.Message}"); }
+        }
+
+        /// <summary>
+        /// Counts one more consecutive failure. Returns the "not restarted" notice exactly when
+        /// this failure is the one that stops automatic relaunching (the second in a row), so
+        /// it is raised once however many calls are refused afterwards.
+        /// </summary>
+        private static McpNotice? CountFailure(ServerSlot slot)
+        {
+            slot.ConsecutiveFailures++;
+            if (slot.ConsecutiveFailures != 2) return null;
+            slot.PendingRestartReason = null;
+            return new McpNotice { Server = slot.Config.Name, Kind = McpNoticeKind.NotRestarted, Reason = slot.LastReason ?? "failed" };
+        }
+
+        private static string ExitReason(ServerSession session, string fallback) =>
+            session.ExitCode is int code ? $"exit code {code}" : fallback;
 
         public McpClientManager(IEnumerable<McpServerConfig> servers)
         {
@@ -224,7 +296,7 @@ namespace DevMind
             {
                 // The server may still be working; the SDK has sent notifications/cancelled. The
                 // session stays up — a slow tool is not a dead server.
-                return $"[MCP ERROR] server '{server}': tool '{tool}' timed out after {slot.Config.CallTimeoutSeconds}s " +
+                return $"[MCP ERROR] server '{server}': tool '{tool}' {McpJournal.TimeoutPhrase} {slot.Config.CallTimeoutSeconds}s " +
                        "(raise \"callTimeoutSeconds\" for this server in devmind.json if it legitimately runs longer).";
             }
             catch (Exception ex)
@@ -269,6 +341,17 @@ namespace DevMind
         {
             if (!_slots.TryGetValue(server ?? "", out var slot))
                 return UnknownServer(server);
+
+            // Re-read the entry first: an edited allowlist, command or env is the usual reason
+            // to restart. Reading one file starts nothing, so it is safe before the gate.
+            McpServerConfig? fresh = null;
+            if (ConfigReloader != null)
+            {
+                fresh = ConfigReloader(server!);
+                if (fresh == null)
+                    return $"[MCP ERROR] server '{server}' is no longer in \"mcpServers\" in devmind.json; not restarted.";
+            }
+
             await slot.Gate.WaitAsync(ct).ConfigureAwait(false);
             try
             {
@@ -279,12 +362,19 @@ namespace DevMind
                 slot.ConsecutiveFailures = 0;
                 slot.LastError = null;
                 slot.LastReason = null;
+                slot.PendingRestartReason = null;
+                if (fresh != null)
+                    slot.Config = fresh;
             }
             finally
             {
                 slot.Gate.Release();
             }
-            return await StartAsync(server!, ct).ConfigureAwait(false);
+
+            string? err = await StartAsync(server!, ct).ConfigureAwait(false);
+            if (err == null)
+                Raise(new McpNotice { Server = server!, Kind = McpNoticeKind.Restarted, Reason = McpNotice.RestartRequested });
+            return err;
         }
 
         /// <summary>Test hook: the PID of the running server process, or null.</summary>
@@ -448,7 +538,10 @@ namespace DevMind
         private sealed class ServerSlot
         {
             public ServerSlot(McpServerConfig config) => Config = config;
-            public McpServerConfig Config { get; }
+            /// <summary>Replaced (under the gate) when RestartAsync re-reads devmind.json.</summary>
+            public McpServerConfig Config { get; set; }
+            /// <summary>Set when a live session is lost; the next successful start reports it as a restart.</summary>
+            public string? PendingRestartReason;
             public SemaphoreSlim Gate { get; } = new SemaphoreSlim(1, 1);
             public ServerSession? Session;
             /// <summary>Start failures / crashes since the last success. At 2, no further relaunch.</summary>
@@ -469,6 +562,9 @@ namespace DevMind
             if (!_slots.TryGetValue(server ?? "", out var slot))
                 return (null, UnknownServer(server));
 
+            // A relaunch, or the end of relaunching, is announced once — after the gate is
+            // released, so a slow notice handler never holds up the next caller.
+            McpNotice? notice = null;
             await slot.Gate.WaitAsync(ct).ConfigureAwait(false);
             try
             {
@@ -480,7 +576,8 @@ namespace DevMind
                     // Died between calls: count it, keep its stderr for the message, reap it.
                     slot.LastError = DeadMessage(slot.Config.Name, "the server process exited", null, slot.Session);
                     slot.LastReason = "the server process exited";
-                    slot.ConsecutiveFailures++;
+                    slot.PendingRestartReason = ExitReason(slot.Session, "the server process exited");
+                    notice = CountFailure(slot);
                     DevMindLog.Write(slot.LastError);
                     slot.ExposedTools = Array.Empty<JObject>();
                     await slot.Session.DisposeAsync().ConfigureAwait(false);
@@ -499,6 +596,11 @@ namespace DevMind
                     await RefreshExposedToolsAsync(slot, slot.Session, ct).ConfigureAwait(false);
                     slot.LastError = null;
                     slot.LastReason = null;
+                    if (slot.PendingRestartReason != null)
+                    {
+                        notice = new McpNotice { Server = slot.Config.Name, Kind = McpNoticeKind.Restarted, Reason = slot.PendingRestartReason };
+                        slot.PendingRestartReason = null;
+                    }
                     return (slot.Session, null);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -510,7 +612,7 @@ namespace DevMind
                     var partial = (ex as SessionStartException)?.Session;
                     slot.LastError = DeadMessage(slot.Config.Name, "failed to start", ex.InnerException ?? ex, partial);
                     slot.LastReason = (ex.InnerException ?? ex).Message;
-                    slot.ConsecutiveFailures++;
+                    notice = CountFailure(slot);
                     DevMindLog.Write(slot.LastError);
                     if (partial != null)
                         await partial.DisposeAsync().ConfigureAwait(false);
@@ -521,6 +623,7 @@ namespace DevMind
             {
                 slot.Starting = false;
                 slot.Gate.Release();
+                Raise(notice);
             }
         }
 
@@ -534,6 +637,7 @@ namespace DevMind
             if (session.IsAlive)
                 return $"[MCP ERROR] server '{slot.Config.Name}': {what}: {ex.Message}";
 
+            McpNotice? notice = null;
             await slot.Gate.WaitAsync().ConfigureAwait(false);
             try
             {
@@ -542,17 +646,21 @@ namespace DevMind
                 {
                     slot.LastError = msg;
                     slot.LastReason = what + " — the server died";
-                    slot.ConsecutiveFailures++;
+                    slot.PendingRestartReason = ExitReason(session, "the server died during a call");
+                    notice = CountFailure(slot);
                     DevMindLog.Write(msg);
                     slot.ExposedTools = Array.Empty<JObject>();
                     slot.Session = null;
                     await session.DisposeAsync().ConfigureAwait(false);
                 }
-                return msg + " It will be restarted on the next call.";
+                return msg + (slot.ConsecutiveFailures >= 2
+                    ? " Automatic restart already attempted; not relaunching."
+                    : " It will be restarted on the next call.");
             }
             finally
             {
                 slot.Gate.Release();
+                Raise(notice);
             }
         }
 

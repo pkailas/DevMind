@@ -65,6 +65,7 @@ namespace DevMind.McpServer.Tests
 
         public Task<string?> RestartAsync(string server, CancellationToken ct = default) => StartAsync(server, ct);
         public int CallCount => Calls;
+        public event Action<McpNotice> Notice { add { } remove { } }
 
         public Task<string> CallToolAsync(string server, string tool, JObject? args, CancellationToken ct)
         {

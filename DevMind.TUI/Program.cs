@@ -741,6 +741,17 @@ namespace DevMind
                 llmClient.McpClients = mcpClients;
                 driver.McpTools = mcpClients;
                 _mcpClients = mcpClients;
+                // /mcp restart re-reads the server's entry, so an edited allowlist takes effect.
+                mcpClients.ConfigReloader = name =>
+                {
+                    foreach (var c in McpServerConfig.Load())
+                        if (c.Name == name) return c;
+                    return null;
+                };
+                // Relaunches (after a crash, or /mcp restart) and "not restarted" land in the
+                // transcript the same way the autostart ready/failed lines do.
+                mcpClients.Notice += notice =>
+                    app.Invoke(() => host.AppendOutputLocal(notice.Text + "\n", OutputColor.Warning));
                 var autoStartNames = McpTui.AutoStartNames(mcpConfigs);
                 if (autoStartNames.Count > 0)
                     window.Initialized += (s, e) => _ = McpTui.BeginAutoStart(mcpClients, autoStartNames,
