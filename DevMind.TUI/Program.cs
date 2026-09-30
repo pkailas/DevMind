@@ -587,6 +587,11 @@ namespace DevMind
             var host = new TuiAgenticHost(options.WorkingDirectory, outputView, () => cts.Cancel());
             host.NearlineCache = llmClient.NearlineCache; // for the recall_cache tool
 
+            // After a modal confirm dialog closes, the host hands focus back to the input box so
+            // keys work again. (The non-blocking dialog is the real fix for the focus-loss freeze;
+            // this just lands the cursor where the operator expects it.)
+            host.FocusInputView = inputBox.View;
+
             // The patch card asks in Manual mode, so it needs the mode — read live from the
             // same options object ApprovalModeControl.Apply writes and the executor consults
             // at each dispatch. A value captured here would be the mode at launch, and /mode

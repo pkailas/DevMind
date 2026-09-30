@@ -1253,7 +1253,6 @@ namespace DevMind
             var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             app.Invoke(() =>
             {
-                bool answer = false;
                 var dlg = new Dialog
                 {
                     Title  = title,
@@ -1269,14 +1268,61 @@ namespace DevMind
                 };
                 var yesBtn = new Button { Text = yesText };
                 var noBtn  = new Button { Text = noText, IsDefault = true };
-                yesBtn.Accepting += (s, e) => { answer = true;  e.Handled = true; app.RequestStop(); };
-                noBtn.Accepting  += (s, e) => { answer = false; e.Handled = true; app.RequestStop(); };
                 dlg.Add(label);
                 dlg.AddButton(yesBtn);
                 dlg.AddButton(noBtn);
 
-                try { app.Run(dlg); }
-                finally { dlg.Dispose(); tcs.TrySetResult(answer); }
+                // Non-blocking modal session. The old code called app.Run(dlg) — a NESTED modal
+                // loop — from inside this app.Invoke callback, which parked the main loop for the
+                // dialog's whole life: the render-pump AddTimeout, every other Invoke, and the
+                // input queue were all starved until the nested Run returned. An OS
+                // focus-out/focus-in arriving in that window left the nested loop wedged, and the
+                // TCS only ever resolved in the finally after the (never-returning) Run — the
+                // total freeze. Begin() is the fix: it lays out the dialog, focuses its first
+                // control, draws it, and RETURNS, so the main loop keeps pumping underneath and
+                // keys and the render pump stay live no matter what the terminal does.
+                SessionToken token = null;
+                object pollToken = null;
+
+                // Close the session exactly once from ANY exit path. In the Begin model nothing
+                // else calls app.End (Run's finally is the only caller, and we are not in a Run),
+                // so we own the teardown: End unwinds the session stack and restores the main
+                // window's modal state, then we dispose and hand focus back to the input view so
+                // keys work again. TrySetResult gives exactly-once.
+                void Close(bool answer)
+                {
+                    if (!tcs.TrySetResult(answer)) return; // already resolved — exactly-once
+                    if (pollToken != null) app.RemoveTimeout(pollToken);
+                    if (token != null && dlg.IsRunning) app.End(token);
+                    dlg.Dispose();
+                    FocusInputView?.SetFocus();
+                }
+
+                yesBtn.Accepting += (s, e) => { e.Handled = true; Close(true); };
+                noBtn.Accepting  += (s, e) => { e.Handled = true; Close(false); };
+
+                token = app.Begin(dlg);
+                if (token == null)
+                {
+                    // Begin was cancelled (an IsRunningChanging veto). The dialog never ran.
+                    dlg.Dispose();
+                    tcs.TrySetResult(false);
+                    return;
+                }
+
+                // Esc (Command.Quit) and any other non-button dismissal call RequestStop, which in
+                // the Begin model only sets StopRequested — nothing calls End. Poll for it (and for
+                // IsRunning dropping, e.g. app shutdown) and resolve a decline so the awaiting loop
+                // is never left pending. 100 ms matches the render-pump cadence.
+                pollToken = app.AddTimeout(TimeSpan.FromMilliseconds(100), () =>
+                {
+                    if (!dlg.IsRunning || dlg.StopRequested)
+                    {
+                        Close(false);
+                        return false; // stop polling
+                    }
+                    return true; // keep polling
+                });
             });
             return tcs.Task;
         }
@@ -2090,6 +2136,12 @@ namespace DevMind
 
         /// <summary>The LLM's nearline cache, wired from Program.cs — used by recall_cache. May be null.</summary>
         public NearlineCache NearlineCache { get; set; }
+
+        /// <summary>The input view to refocus after a modal confirm dialog closes, wired from
+        /// Program.cs. May be null (e.g. a test host that never opens a dialog). Setting focus here
+        /// is best-effort: the important part is that the non-blocking dialog leaves the main loop
+        /// pumping, so keys work again even if this is null.</summary>
+        public View FocusInputView { get; set; }
 
         /// <summary>Max characters of a recalled result returned to the model (mirrors the history cap).</summary>
         private const int MaxRecallChars = 50_000;
