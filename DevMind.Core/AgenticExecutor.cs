@@ -993,8 +993,11 @@ namespace DevMind
                 return false;
             }
 
-            // Ask
-            bool approved = await _host.ConfirmContinueAsync(prompt);
+            // Ask. ConfirmActionAsync (not ConfirmContinueAsync) — the approval question
+            // must not be posed under the token-budget guard's title/buttons. Hosts that
+            // do not override it inherit the interface default, which routes here to
+            // ConfirmContinueAsync, so headless and test fakes behave exactly as before.
+            bool approved = await _host.ConfirmActionAsync(prompt);
             if (approved)
                 return true;
 

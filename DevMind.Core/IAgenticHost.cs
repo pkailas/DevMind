@@ -301,12 +301,22 @@ namespace DevMind
         /// </summary>
         Task<string> LearnCodeSearchAsync(string query, int? maxResults);
 
-       /// <summary>
+        /// <summary>
         /// Asks the user a yes/no question mid-turn and awaits the answer (used by the
         /// token-budget guard to pause a long agentic run). Returns true to continue,
         /// false to stop. Hosts without an interactive UI may auto-answer.
         /// </summary>
         Task<bool> ConfirmContinueAsync(string message);
+
+        /// <summary>
+        /// Asks the user to approve a specific mutating action (shell command, file
+        /// write, MCP tool call) in manual approval mode. Returns true to approve,
+        /// false to decline. The default implementation routes to
+        /// <see cref="ConfirmContinueAsync"/> so headless hosts and test fakes keep
+        /// today's behaviour without edits; interactive skins override it to present a
+        /// dialog labelled for the action being approved.
+        /// </summary>
+        Task<bool> ConfirmActionAsync(string action) => ConfirmContinueAsync(action);
 
         /// <summary>
         /// Executes a SQL query and returns formatted results as a text table.

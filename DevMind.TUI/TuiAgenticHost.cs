@@ -1231,6 +1231,15 @@ namespace DevMind
         Task<bool> IAgenticHost.ConfirmContinueAsync(string message)
             => ConfirmAsync("Token budget", message, "_Continue", "_Stop");
 
+        // ── IAgenticHost.ConfirmActionAsync ────────────────────────────────────────
+        // Manual-approval gate for mutating actions (run_shell, file writes, MCP tool
+        // calls). Distinct from the token-budget dialog above: the operator has to see
+        // WHICH action is being approved, under a title and buttons that say so. The
+        // interface default routes to ConfirmContinueAsync, so overriding here only
+        // changes what the TUI shows — headless hosts keep the auto-continue path.
+        Task<bool> IAgenticHost.ConfirmActionAsync(string action)
+            => ConfirmAsync("Approve action", action, "_Approve", "_Skip");
+
         /// <summary>
         /// A modal yes/no on the UI thread, resolving the awaiting worker with the answer.
         /// <para>
@@ -1253,18 +1262,73 @@ namespace DevMind
             var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             app.Invoke(() =>
             {
+                // ── Size the dialog to the message ──────────────────────────────
+                // The old code used a fixed Height=9 and Label{Height=Dim.Fill(2)},
+                // which resolved the label to ZERO rows (the dialog's button bar eats
+                // the content area) — an empty body. Now: word-wrap the text, set the
+                // label's height explicitly, and size the dialog to fit.
+                // Strip \r before wrapping: Windows CRLF in the message would otherwise leave a
+                // stray \r at the end of every line (WrapText splits on \n only), and a trailing
+                // \r on the last line of the label would render past the label's right edge.
+                string text = (message ?? string.Empty).Replace("\r", string.Empty).Trim();
+                if (text.Length == 0) text = "(no details)";
+
+                var drv = app.Driver;
+                int screenRows = drv?.Rows ?? 25;
+                int screenCols = drv?.Cols ?? 80;
+
+                // ── One width, by construction ──────────────────────────────────
+                // The wrap width and the label width MUST be the same number, or any wrapped
+                // line longer than the label's resolved Frame.Width is clipped on screen. The
+                // old code derived them independently — bodyWidth from a Math.Max(40, …) floor
+                // the dialog never had, and the label from Dim.Fill(2) — and they disagreed by
+                // 1–2 columns in a 120-col run (label 78, wrap 80), clipping 79–80-char lines.
+                //
+                // dialogCols: 70% of the screen, floored at 40, capped at the screen so a
+                // narrow terminal can't be asked for more than it has.
+                int dialogCols = Math.Min(screenCols, Math.Max(40, (int)(screenCols * 0.7)));
+
+                // bodyWidth: the label's real width, derived from dialogCols minus the dialog's
+                // horizontal chrome — border (1) + left padding (1) + the label's X offset (1)
+                // on each side = 5 columns, measured in the headless harness (a dialog with
+                // these dimensions lays out its label at Frame.X=1 with
+                // Frame.Width == dialogCols - 5; ApprovalDialogTests asserts the laid-out
+                // label is at least as wide as every wrapped line). We set the label to this
+                // EXACT width below, so wrap width == label width is guaranteed by
+                // construction rather than approximated.
+                int bodyWidth = Math.Max(1, dialogCols - 5);
+
+                string[] lines = WrapText(text, bodyWidth);
+
+                // Cap to a sensible fraction of the screen so a huge prompt can't
+                // fill the whole terminal.
+                int maxBodyRows = Math.Max(2, screenRows / 3);
+                if (lines.Length > maxBodyRows)
+                {
+                    var capped = new string[maxBodyRows];
+                    Array.Copy(lines, capped, maxBodyRows - 1);
+                    string last = lines[maxBodyRows - 1];
+                    capped[maxBodyRows - 1] = last.Length > bodyWidth - 1
+                        ? last.Substring(0, bodyWidth - 1) + "\u2026"
+                        : last + "\u2026";
+                    lines = capped;
+                }
+
+                int bodyRows = lines.Length;
+                string displayText = string.Join("\n", lines);
+
                 var dlg = new Dialog
                 {
                     Title  = title,
-                    Width  = Dim.Percent(70),
-                    Height = 9,
+                    Width  = dialogCols, // absolute — the SAME number bodyWidth was derived from
+                    Height = bodyRows + 5, // body + top border/title + button bar + bottom border
                 };
                 var label = new Label
                 {
-                    Text   = message,
+                    Text   = displayText,
                     X = 1, Y = 1,
-                    Width  = Dim.Fill(2),
-                    Height = Dim.Fill(2),
+                    Width  = bodyWidth, // absolute — the EXACT width WrapText wrapped to
+                    Height = bodyRows, // explicit — Dim.Fill(2) resolved to 0 in the old layout
                 };
                 var yesBtn = new Button { Text = yesText };
                 var noBtn  = new Button { Text = noText, IsDefault = true };
@@ -1325,6 +1389,52 @@ namespace DevMind
                 });
             });
             return tcs.Task;
+        }
+
+        /// <summary>
+        /// Word-wraps <paramref name="text"/> to <paramref name="width"/> columns so a confirm
+        /// dialog's message always fits its label. Breaks at spaces where possible; a single
+        /// token longer than the width (compact JSON has no spaces) is hard-broken so no line
+        /// overflows. Embedded newlines in the input are kept as line breaks, and a blank input
+        /// yields a single empty line (the caller substitutes a placeholder before wrapping).
+        /// </summary>
+        private static string[] WrapText(string text, int width)
+        {
+            if (width < 1) width = 1;
+            var lines = new List<string>();
+            foreach (string raw in text.Split('\n'))
+            {
+                var words = raw.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (words.Length == 0)
+                {
+                    lines.Add(""); // preserve a blank line from the input
+                    continue;
+                }
+                string cur = "";
+                foreach (string w in words)
+                {
+                    // Hard-break an over-long token (nothing to wrap at inside it) into a local
+                    // so the foreach variable is never reassigned.
+                    string word = w;
+                    while (word.Length > width)
+                    {
+                        if (cur.Length > 0) { lines.Add(cur); cur = ""; }
+                        lines.Add(word.Substring(0, width));
+                        word = word.Substring(width);
+                    }
+                    if (cur.Length == 0)
+                        cur = word;
+                    else if (cur.Length + 1 + word.Length <= width)
+                        cur += " " + word;
+                    else
+                    {
+                        lines.Add(cur);
+                        cur = word;
+                    }
+                }
+                lines.Add(cur);
+            }
+            return lines.ToArray();
         }
 
         // ── Model-authored answer (task_done summary, ask_caller questions) ─────
