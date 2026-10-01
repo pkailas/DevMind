@@ -112,6 +112,28 @@ namespace DevMind.Core.Tests
             return null;
         }
 
+        /// <summary>
+        /// SSE payload for a llama.cpp-style streamed response whose TERMINAL chunk carries
+        /// the server timings block: prompt_n = freshly evaluated prompt tokens, cache_n =
+        /// KV-cache-reused prompt tokens (their sum equals usage.prompt_tokens), predicted_n
+        /// = generated tokens. This is what a real llama-server emits on the final chunk, and
+        /// what LlmClient.ParseTimings folds into the per-request usage record.
+        /// </summary>
+        public static string BuildTimedToolCallSse(string toolName, string argumentsJson,
+            int promptN, int cacheN, int predictedN)
+        {
+            string escapedArgs = argumentsJson.Replace("\\", "\\\\").Replace("\"", "\\\"");
+            return "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\"," +
+                   "\"type\":\"function\",\"function\":{\"name\":\"" + toolName + "\"," +
+                   "\"arguments\":\"" + escapedArgs + "\"}}]}}]}\n\n" +
+                   "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]," +
+                   "\"timings\":{\"prompt_n\":" + promptN +
+                   ",\"cache_n\":" + cacheN +
+                   ",\"predicted_n\":" + predictedN +
+                   ",\"n_ctx\":32768}}\n\n" +
+                   "data: [DONE]\n\n";
+        }
+
         /// <summary>SSE payload for a plain streamed text response.</summary>
         public static string BuildTextSse(string text)
         {

@@ -41,11 +41,18 @@ Wires `LlmClient` + `BufferedAgenticHost` + no-op `ILoopCallbacks` + `LoopDriver
 (exact plumbing DevMind.Cli.Main already uses), seeds the prompt, iterates
 `ProcessIterationAsync` until natural completion or depth cap.
 
-`HeadlessAgentResult`:
+ `HeadlessAgentResult`:
 - `Answer` — final model text
 - `Actions[]` — the action journal
 - `Iterations`, `ElapsedSeconds`, `HitDepthCap`, `Cancelled`
 - `TranscriptPath` — full transcript written beside the MCP server logs for post-mortem
+- `TokensInTotal`, `TokensInNew`, `TokensInNewPartial`, `TokensOut` — per-job token usage (THIS
+  job's model requests only; a continuation reports its own, not the chain total). All three
+  counts are null when no request reported usage; `TokensInNew` is null when the server gave
+  no cached/new split for ANY request, a partial sum (with `TokensInNewPartial` true) when it
+  did so for only SOME. `TokensInTotal` is the full prompt size (cached + new — what an API
+  bill counts). The transcript ends with a `[job] tokens: …` line (omitted when all null);
+  `devmind_task_result` and the persisted result sidecar carry the same fields.
 
 Headless system-prompt addendum: never `git commit` unless the task grants `allow_commit: true`;
 operate only within the working directory; no interactive questions (decide and proceed,

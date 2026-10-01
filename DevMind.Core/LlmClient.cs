@@ -320,8 +320,16 @@ namespace DevMind
         public string LastReasoning { get; private set; } = "";
 
         // ── Server-reported timings from last SSE response ──────────────────
-        public int LastPromptTokens { get; private set; }
-        public int LastGeneratedTokens { get; private set; }
+    public int LastPromptTokens { get; private set; }
+    public int LastGeneratedTokens { get; private set; }
+
+    /// <summary>
+    /// Server-reported token usage for the LAST model request, or null when that request
+    /// returned no usage (server sent no timings/usage, the request failed, or the send was
+    /// cancelled). Reset to null at the start of every send, so a request without usage can
+    /// never re-add the PREVIOUS request's counts — the accumulator keys off null.
+    /// </summary>
+    public RequestUsage LastRequestUsage { get; private set; }
         public double LastPromptMs { get; private set; }
         public double LastGeneratedMs { get; private set; }
         public int LastContextUsed { get; private set; }   // n_past
@@ -1352,6 +1360,11 @@ namespace DevMind
                 LivePromptTokens = 0;
                 LiveTokensPerSecond = 0;
 
+                // Reset the per-request usage record BEFORE reading this response, so a
+                // request that returns no usage reports null (not the previous request's
+                // counts) and failed/cancelled sends contribute nothing to the job totals.
+                LastRequestUsage = null;
+
                 // Reset per-response reasoning accumulator — upstream of ThinkFilter so the
                 // corpus captures what the model reasoned regardless of the display switch.
                 _reasoningBuilder.Clear();
@@ -1489,7 +1502,16 @@ namespace DevMind
                 if (ServerType == LlmServerType.Vllm)
                     FinalizeVllmTimings(lastDataLine);
                 else
+                {
                     ParseTimings(lastDataLine);
+                    // Fallback for OpenAI-compatible servers that report usage but no
+                    // llama.cpp timings block: ParseTimings left LastRequestUsage null,
+                    // so read the terminal chunk's usage object directly. When timings
+                    // WERE present, ParseTimings already set the record (and wins — its
+                    // prompt_n/cache_n/predicted_n are the authoritative per-request split).
+                    if (LastRequestUsage == null)
+                        ParseFinalChunkUsage(lastDataLine);
+                }
 
                 // Emit visible status if model responded with tool calls but no content
                 if (accumulatedToolCalls != null && accumulatedToolCalls.Count > 0 && string.IsNullOrWhiteSpace(fullResponse.ToString()))
@@ -4156,6 +4178,17 @@ namespace DevMind
                 // resubmits), so use the sum for both the finalized and live "in" counts.
                 int promptTotal = promptN + cacheN;
                 CacheReuse.RecordTurn(promptN, cacheN, _historyMutatedThisSend);
+
+                // Per-request usage record (headless job totals). prompt_n is the freshly
+                // processed portion, cache_n the KV-cache-reused portion; timings arrive on
+                // the terminal chunk of every llama.cpp stream, so this fires once per request.
+                LastRequestUsage = new RequestUsage
+                {
+                    PromptTotal = promptTotal,
+                    PromptNew = promptN,
+                    Completion = predictedN,
+                };
+
                 if (promptTotal > 0) LastPromptTokens = promptTotal;
                 if (promptTotal > LivePromptTokens) LivePromptTokens = promptTotal;
                 if (promptMs > 0) LastPromptMs = promptMs;
@@ -4227,6 +4260,22 @@ namespace DevMind
                 var usage = JObject.Parse(json)?["usage"];
                 if (usage == null) return;
                 int prompt = usage["prompt_tokens"]?.Value<int>() ?? 0;
+                int completion = usage["completion_tokens"]?.Value<int>() ?? 0;
+                int? cached = usage["prompt_tokens_details"]?["cached_tokens"]?.Value<int>();
+                // Per-request usage record (headless job totals) from the OPENAI-COMPATIBLE
+                // usage object — the generic path for any server that reports usage without
+                // llama.cpp's timings block. The cached/new split comes from
+                // prompt_tokens_details.cached_tokens (OpenAI convention) when present;
+                // without it PromptNew stays null and the job's tokens_in_new is null too.
+                // On llama.cpp this runs per chunk with cumulative counts; the terminal
+                // chunk's values are the authoritative per-request ones, and ParseTimings
+                // overwrites the record right after the stream ends (same source values).
+                LastRequestUsage = new RequestUsage
+                {
+                    PromptTotal = prompt,
+                    PromptNew = cached.HasValue ? Math.Max(0, prompt - cached.Value) : (int?)null,
+                    Completion = completion,
+                };
                 if (prompt > 0)
                 {
                     LastContextUsed = prompt;
@@ -4268,6 +4317,21 @@ namespace DevMind
 
                 int completion = usage["completion_tokens"]?.Value<int>() ?? 0;
                 int prompt = usage["prompt_tokens"]?.Value<int>() ?? 0;
+                int? cached = usage["prompt_tokens_details"]?["cached_tokens"]?.Value<int>();
+
+                // Per-request usage record (headless job totals) from the FINAL chunk's
+                // usage object. Runs for vLLM (its only path) and as the generic fallback
+                // for any OpenAI-compatible server. llama.cpp's ParseTimings overwrites
+                // this record right after the stream ends (same source values —
+                // prompt_n + cache_n == usage.prompt_tokens — plus the authoritative
+                // predicted_n), so the timings path wins when present.
+                LastRequestUsage = new RequestUsage
+                {
+                    PromptTotal = prompt,
+                    PromptNew = cached.HasValue ? Math.Max(0, prompt - cached.Value) : (int?)null,
+                    Completion = completion,
+                };
+
                 long elapsedMs = _streamStartMs > 0 ? Environment.TickCount64 - _streamStartMs : 0;
 
                 if (completion > 0)
@@ -4288,6 +4352,38 @@ namespace DevMind
             catch
             {
                 // Timings missing or malformed — leave previous values unchanged.
+            }
+        }
+
+        /// <summary>
+        /// Records the per-request usage (headless job totals) from the terminal chunk's
+        /// OpenAI-compatible <c>usage</c> object — the fallback path for servers that
+        /// report usage without llama.cpp's <c>timings</c> block (and without being vLLM,
+        /// which has <see cref="FinalizeVllmTimings"/>). No-op when the chunk carries no
+        /// usage object. The cached/new split comes from
+        /// <c>prompt_tokens_details.cached_tokens</c> (OpenAI convention) when present;
+        /// without it PromptNew stays null and the job's tokens_in_new is null too.
+        /// </summary>
+        private void ParseFinalChunkUsage(string lastData)
+        {
+            if (string.IsNullOrEmpty(lastData)) return;
+            try
+            {
+                var usage = JObject.Parse(lastData)?["usage"];
+                if (usage == null) return;
+                int prompt = usage["prompt_tokens"]?.Value<int>() ?? 0;
+                int completion = usage["completion_tokens"]?.Value<int>() ?? 0;
+                int? cached = usage["prompt_tokens_details"]?["cached_tokens"]?.Value<int>();
+                LastRequestUsage = new RequestUsage
+                {
+                    PromptTotal = prompt,
+                    PromptNew = cached.HasValue ? Math.Max(0, prompt - cached.Value) : (int?)null,
+                    Completion = completion,
+                };
+            }
+            catch
+            {
+                // Malformed/partial chunk — no usage record for this request.
             }
         }
 

@@ -96,6 +96,25 @@ namespace DevMind
         public string Error { get; set; }
         /// <summary>Full transcript file (model output + tool activity), when requested.</summary>
         public string TranscriptPath { get; set; }
+
+        // ── Per-job token usage (THIS turn's model requests only — a continuation
+        // reports its own requests, not the chain total). All three are null when no
+        // request in the job reported usage. ──
+        /// <summary>Sum over every model request in this job of the FULL prompt size the
+        /// server reported (cached + newly processed) — what an API bill counts. Null when
+        /// no request reported prompt usage.</summary>
+        public long? TokensInTotal { get; set; }
+        /// <summary>Sum of only the prompt tokens the server actually had to process
+        /// (cache hits excluded). Null when the server did not report the cached/new split
+        /// for ANY request in the job; a partial sum when it did not for SOME (see
+        /// <see cref="TokensInNewPartial"/>).</summary>
+        public long? TokensInNew { get; set; }
+        /// <summary>True when tokens_in_new is a partial sum: the split was reported for
+        /// some requests but not others.</summary>
+        public bool TokensInNewPartial { get; set; }
+        /// <summary>Sum of completion / generated tokens over every request in the job.
+        /// Null when no request reported completion usage.</summary>
+        public long? TokensOut { get; set; }
     }
 
     /// <summary>
@@ -289,6 +308,9 @@ namespace DevMind
 
             // Per-turn resets: write guard set, iteration depth. Conversation history,
             // file caches, and the scratchpad deliberately persist across turns.
+            // Token usage accumulates PER TURN (per job): a continuation reports only its
+            // own requests, not the chain total.
+            var tokenUsage = new TokenUsageAggregator();
             _state.ResetForUserTurn();
             _host.ResetTaskContext();
             _host.ClearActions(); // result.Actions is THIS turn's journal
@@ -457,6 +479,13 @@ namespace DevMind
                     }
                     liveness?.Tick($"iteration {result.Iterations} completed");
 
+                    // One usage record per model request that returned usage (null = the
+                    // request reported nothing — failed/cancelled/no-timings — and
+                    // contributes nothing). Each send's LastRequestUsage is reset before
+                    // its stream, so a context-overflow recovery re-POST is its own
+                    // request, counted once, replacing the rejected first attempt's null.
+                    tokenUsage.Add(_llmClient.LastRequestUsage);
+
                     if (iter.Kind == LoopIterationKind.Terminal || iter.Kind == LoopIterationKind.Cancelled)
                     {
                         result.Cancelled |= iter.Kind == LoopIterationKind.Cancelled;
@@ -535,6 +564,10 @@ namespace DevMind
             result.Answer = HeadlessAgent.SanitizeAnswer(lastResponse);
             result.Actions = _host.GetActions();
             result.ElapsedSeconds = Math.Round(sw.Elapsed.TotalSeconds, 1);
+            result.TokensInTotal = tokenUsage.TotalPromptTokens();
+            result.TokensInNew = tokenUsage.TotalNewPromptTokens();
+            result.TokensInNewPartial = tokenUsage.IsNewPartial();
+            result.TokensOut = tokenUsage.TotalCompletionTokens();
             // HitDepthCap means the loop stopped BECAUSE of the cap (LoopDriver's
             // depth-cap terminal), not that the counter happened to reach it. Field
             // lesson: a run that finished with a clean task_done ON the cap boundary
@@ -572,6 +605,21 @@ namespace DevMind
                 result.Answer = sb.ToString();
             }
 
+            // Final usage line — after the terminal-state line ("[AGENTIC] Task complete.").
+            // Omitted entirely when no request in the job reported any usage. Must be
+            // written BEFORE the transcript is finalized below: the live writer is closed
+            // (or the buffer dumped to disk) in this block, so nothing reaches the file after.
+            string tokensLine = BuildTokenUsageLine(result);
+            if (tokensLine != null)
+            {
+                string line = $"\n[job] tokens: {tokensLine}\n";
+                lock (_transcriptLock)
+                {
+                    _turnTranscript?.Append(line);
+                    try { _turnTranscriptWriter?.Write(line); } catch { /* live tail is best-effort */ }
+                }
+            }
+
             if (!string.IsNullOrEmpty(transcriptPath))
             {
                 lock (_transcriptLock)
@@ -598,6 +646,30 @@ namespace DevMind
 
             return result;
         }
+
+    /// <summary>Formats the per-job token usage line, or null when the job reported no
+    /// usage at all (no transcript line). "(… new)" is omitted when the server gave no
+    /// cached/new split; " (partial)" is appended when the sum mixes split and non-split
+    /// requests.</summary>
+    internal static string BuildTokenUsageLine(HeadlessAgentResult result)
+    {
+        if (result.TokensInTotal == null && result.TokensOut == null)
+            return null;
+
+        var culture = System.Globalization.CultureInfo.InvariantCulture;
+        var sb = new StringBuilder();
+        sb.Append(result.TokensInTotal == null
+            ? "in ?"
+            : $"in {result.TokensInTotal.Value.ToString("N0", culture)} total");
+        if (result.TokensInNew != null)
+        {
+            sb.Append($" ({result.TokensInNew.Value.ToString("N0", culture)} new)");
+            if (result.TokensInNewPartial)
+                sb.Append(" (partial)");
+        }
+        sb.Append(" · out ").Append(result.TokensOut == null ? "?" : result.TokensOut.Value.ToString("N0", culture));
+        return sb.ToString();
+    }
 
         /// <summary>
         /// Queues a steer into this session's running turn — single slot, last-write-wins

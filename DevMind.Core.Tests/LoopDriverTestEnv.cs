@@ -222,6 +222,7 @@ namespace DevMind.Core.Tests
         public double LiveTokensPerSecond => 0;
         public double LastGeneratedMs => 0;
         public int LastPromptTokens => 0;
+        public RequestUsage? LastRequestUsage => null;
         public int CurrentTurn => 1;
         public string SystemPromptContent => "";
         public string? LastCompactionSummary => null;

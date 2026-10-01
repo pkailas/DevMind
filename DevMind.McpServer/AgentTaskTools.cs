@@ -413,8 +413,12 @@ namespace DevMind.McpServer
         [McpServerTool(Name = "devmind_task_result")]
         [Description(
             "Fetch the result of a finished DevMind task: the agent's final answer, the action " +
-            "journal (every file changed, shell command run, build/test outcome — review it like a " +
-            "junior developer's PR), and the transcript file path.")]
+                "journal (every file changed, shell command run, build/test outcome — review it like a " +
+             "junior developer's PR), and the transcript file path. Token usage for the job's own " +
+             "model requests: tokens_in_total (full prompt size, cached + new — what an API bill counts), " +
+             "tokens_in_new (freshly processed only; null when the server gave no cached/new split, " +
+             "partial sum with tokens_in_new_partial true when it did so for only some requests), " +
+             "tokens_out (completion tokens). All null when the server reported no usage.")]
         public Task<string> TaskResult(
             [Description("The job_id returned by devmind_task_start.")] string job_id,
             CancellationToken cancellationToken = default)
@@ -438,6 +442,13 @@ namespace DevMind.McpServer
                     .Select(a => new { kind = a.Kind, detail = a.Detail, success = a.Success }),
                 iterations = r?.Iterations ?? 0,
                 elapsed_seconds = r?.ElapsedSeconds ?? 0,
+                // Per-job token usage (this job's model requests only). Null when the
+                // server reported no usage; tokens_in_new null when no cached/new split
+                // was reported for any request (partial flag says so when it was for some).
+                tokens_in_total = r?.TokensInTotal,
+                tokens_in_new = r?.TokensInNew,
+                tokens_in_new_partial = (bool?)(r?.TokensInNewPartial ?? false),
+                tokens_out = r?.TokensOut,
                 hit_depth_cap = r?.HitDepthCap ?? false,
                 error = job.Error,
                 transcript_path = r?.TranscriptPath,

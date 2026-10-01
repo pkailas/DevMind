@@ -53,6 +53,12 @@ namespace DevMind
         /// <summary>Prompt-token count from the last response's server timings (prompt_n). 0 until first response.</summary>
         int LastPromptTokens { get; }
 
+        /// <summary>Server-reported token usage for the LAST model request, or null when that
+        /// request returned no usage (server sent no timings/usage, the request failed, or the
+        /// send was cancelled). Reset to null at the start of every send, so a request without
+        /// usage can never re-add the previous request's counts.</summary>
+        RequestUsage LastRequestUsage { get; }
+
         /// <summary>1-based index of the current user turn (incremented by <see cref="LlmClient.IncrementTurn"/>).</summary>
         int CurrentTurn { get; }
 

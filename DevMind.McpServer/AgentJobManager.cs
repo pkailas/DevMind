@@ -1176,7 +1176,7 @@ namespace DevMind.McpServer
         /// a transcript tail. Best effort; ids are unique across restarts (see
         /// NextJobId), so a sidecar is never ambiguous.
         /// </summary>
-        private static void WriteResultSidecar(AgentJob job)
+        internal static void WriteResultSidecar(AgentJob job)
         {
             try
             {
@@ -1193,6 +1193,12 @@ namespace DevMind.McpServer
                         .Select(a => new { kind = a.Kind, detail = a.Detail, success = a.Success }),
                     iterations = r?.Iterations ?? 0,
                     elapsed_seconds = r?.ElapsedSeconds ?? 0,
+                    // Per-job token usage (this job's model requests only) — persisted so
+                    // devmind_task_result serves it after a server restart.
+                    tokens_in_total = r?.TokensInTotal,
+                    tokens_in_new = r?.TokensInNew,
+                    tokens_in_new_partial = (bool?)(r?.TokensInNewPartial ?? false),
+                    tokens_out = r?.TokensOut,
                     hit_depth_cap = r?.HitDepthCap ?? false,
                     error = job.Error,
                     transcript_path = r?.TranscriptPath,
