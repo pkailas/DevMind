@@ -33,6 +33,13 @@ Add packages with `dotnet add package` and no version argument. Never write a
 package name or version from memory.
 Generate EF migrations with `dotnet ef`. Never hand-write a migration or snapshot.
 Investigate a few files at a time. No open-ended repo-wide sweeps.
+To learn an API's shape, use LSP hover or write the code and build - let the
+compiler answer. Do not search the web for framework source. If you need a test
+double, write your own class implementing the interface.
+Build after every new or changed test file. Never finish with a file you have
+not compiled.
+Never run git commands that modify the working tree or index (stash, checkout,
+reset, add, commit). Read-only git (status, diff, log) is fine.
 
 If two attempts at the same fix have failed, stop and report what you tried and
 what you observed. Do not keep trying variations.
@@ -57,15 +64,14 @@ Known traps - check these before theorising:
 xUnit v2 asserts take NO message argument. Assert.Equal/NotEqual/Contains(a, b,
 "msg") binds to a comparer overload and fails with CS1503. Use
 Assert.True(cond, "msg") when a message is needed.
-.NET string literals are stored UTF-16LE in the DLL (#US heap), so a UTF-8 grep
-of a DLL for a literal finds nothing even in a freshly built one. That is NEVER
-evidence of a stale build. Compare the DLL's LastWriteTime to the source and
-rebuild with `dotnet build <proj> -t:Rebuild` before claiming one.
+Never inspect bin/, obj/, *.deps.json, DLLs or other build output to explain a
+failure - it is never the evidence. If you truly suspect a stale build, rebuild
+with `dotnet build <proj> -t:Rebuild` and re-run; do not argue from build files.
 Razor: never build markup inside C# strings. A custom tag helper needs the
 fully-qualified type in @addTagHelper, an explicit [HtmlTargetElement] to
 enhance an existing element, and must not bind data-* attributes.
 Before theorising about framework behaviour - Razor, ASP.NET Core
 config/options, xUnit, EF - query the RAG library first: query_library with
 doc_filter "Pitfalls" or "Razor".
-When your final answer lists unfinished work, say so plainly on a line starting
-"INCOMPLETE:".
+Only when work is unfinished, list it on lines starting "INCOMPLETE:". If
+everything is finished, do not write that word at all.
