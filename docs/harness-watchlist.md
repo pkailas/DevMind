@@ -518,6 +518,63 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Status:** fixed, pending deploy. Verify: kill a job's MCP server mid-job and look for the line and the
   `mcp_restart` action.
 
+### H-43 - "INCOMPLETE: none" still trips self_reported_incomplete when followed by text or a bullet
+- **First seen:** 2026-10-01 (Strata / Qwen3.8-Flash-Next backend), job-1850 (`- INCOMPLETE: none. The scheduled-task
+  registration is explicitly left to the caller`) and job-1861 (`INCOMPLETE: none. (Full-suite run intentionally delegated to the
+  harness per job rules.)`). Both jobs were finished and clean; both ended `stopped_incomplete / self_reported_incomplete`.
+  job-1863 (`INCOMPLETE: none.` alone) correctly ended `done`.
+- **Cause:** detector v1.3 treats the marker as "none" only when the WHOLE marker text is none/nothing/n-a; an explanatory sentence
+  after it, or a leading list bullet, makes it count.
+- **Fix:** a marker whose text STARTS with none / nothing / n/a / na / -, optionally after a list bullet (`-`, `*`, `1.`), and
+  followed by punctuation or a sentence is NOT incomplete. "INCOMPLETE: none of the tests ran" must still fire (word-boundary on
+  "none" followed by "of").
+- **Prompt side (done 2026-10-01):** system-prompt.md now says to write the INCOMPLETE word only when something is unfinished.
+- **Status:** open.
+
+### H-44 - DevMind's own test suite writes fake jobs into the live tasks folder
+- **First seen:** 2026-10-01: result sidecars job-1769..job-1848 were created in 4 minutes (11:28-11:32 UTC) while job-1768's
+  test verification ran the McpServer tests. Their working_dir is a temp fixture folder (`%TEMP%\devmind_testcount_job_...`,
+  `devmind_stall_job_...`, `devmind_h31_...`). They consume real job numbers and pollute anything that reads the tasks folder
+  (dm-watch, dm-daily - which now filters working_dir under %TEMP% as a workaround).
+- **Again 2026-10-01 ~11:00-11:40:** job ids jumped from job-1866 to job-1954; all 83 result files in between have a
+  working_dir under %TEMP% (test fixtures) - a DevMind test run in another session.
+- **Fix:** every test that constructs an AgentJobManager / HeadlessSession must use a per-test tasks dir AND a per-test job-id
+  counter. TestTasksDirInitializer evidently does not cover the harness's `dotnet test` run; check whether it is a module
+  initializer in every test assembly that creates jobs, and whether the job-id counter file is shared.
+- **Status:** open.
+
+### H-45 - Test baseline measured on a broken build gives a misleading delta
+- **First seen:** 2026-10-01, job-1859 (continuation of job-1858): the job-1858 tree had a test file that did not compile, so
+  the continuation's baseline run measured only the Core tests (101) and the result reported `delta +747`. The real change was +17.
+- **Fix:** if the baseline build fails, set `baseline_unavailable_reason: "baseline build failed"` and `delta: null` instead of
+  reporting a partial count.
+- **Status:** open.
+
+### H-46 - Nudge when the agent reads build output to explain a failure
+- **First seen:** 2026-10-01, job-1859: twice spent stretches grepping `*.deps.json` and listing bin/ while the cause was a
+  one-line product bug in the page's comparison; an override steer was needed. Same family as the UTF-8 DLL scans (Sep 21-24).
+- **Fix:** when a read/grep/list target is under `bin\`, `obj\`, or is `*.deps.json` / `*.dll` / `*.pdb` during a job with a
+  failing test, inject once: "Build output is never the evidence. Print the failing assertion and the actual value, fix what that
+  shows." (H-19-style hint.) Prompt rule added 2026-10-01; this is the harness backstop.
+- **Status:** open.
+
+### H-47 - Nudge after repeated failed web fetches for framework source
+- **First seen:** 2026-10-01, job-1858: "burned many iterations trying to confirm ServerAddressesFeature's constructor/namespace
+  from GitHub source (repeated 404s) instead of just writing the fake and letting the compiler answer" (agent's own words). The
+  job ended with its tests unwritten.
+- **Fix:** after 2 consecutive web_fetch / learn_fetch failures (404 or not-found) in a job, inject: "Stop fetching. Write the
+  code (or your own class implementing the interface) and build - the compiler is the reference." Prompt rule added 2026-10-01.
+- **Status:** open.
+
+### H-48 - Block mutating git commands in delegated jobs
+- **First seen:** 2026-10-01, job-1862: `git stash` -> run the suite on the base -> `git stash pop` inside the working tree to
+  compare before/after. It restored cleanly this time; a failed pop would lose the job's uncommitted work (Paul owns commits).
+  Seen before on 2026-09-18.
+- **Fix:** the shell guard (which already blocks Stop-Process) refuses `git stash|checkout|switch|reset|clean|restore|add|commit|
+  rebase|merge` in delegated jobs unless allow_commit is set, with a message: "read-only git only (status, diff, log, show)".
+  Prompt rule added 2026-10-01.
+- **Status:** open.
+
 ### H-49 - think:true silently ran at reasoning effort xhigh
 - **First seen:** 2026-10-01, after the switch to Strata (Qwen3.8-Flash-Next). Its chat template (and the Qwen3.8-27B one)
   reads `chat_template_kwargs.reasoning_effort` when thinking is on, and treats a missing value as `xhigh`, which adds a
@@ -529,6 +586,22 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   `{enable_thinking:false}`.
 - **Status:** fixed, pending deploy (commit "Default reasoning_effort to medium when thinking is on; add reasoning_effort
   to devmind_task_start"). Verify: a think:true job's request carries `"reasoning_effort":"medium"`.
+
+### H-50 - Nudge when the agent pages shell output instead of reading the file
+- **First seen:** 2026-10-01, job-1954: read an old file version as `git show HEAD:<file> | Select-String ... | Select-Object
+  -Skip 13`, then `-Skip 16`, `-Skip 19`, `-Skip 22` - one shell call per few lines. Harmless but slow and context-heavy.
+- **Fix:** when 3+ consecutive shell calls differ only in a -Skip/-First/head/tail offset over the same source, inject once:
+  "Use read_file (start_line/end_line), or `git show <rev>:<path>` redirected to a file and read that."
+- **Status:** open.
+
+### H-51 - Override steers are not consumed while the agent repeats one shell command
+- **First seen:** 2026-10-01, job-1866: an override steer was queued at iteration 78 while the agent re-ran the same single test;
+  it kept re-running the same isolation test (isoF..isoK, 6+ identical commands) through iteration 89 with no sign of the steer,
+  and had to be cancelled. On other jobs today overrides were folded in at the next boundary.
+- **Fix:** (a) check whether the steer was actually consumed (journal disposition) and why not; (b) a repeat-command guard:
+  the same shell command 3x in a row with identical output -> inject "same command, same result; state your hypothesis and the
+  one different command that tests it" (the prompt already says this; the model ignored it under a loop).
+- **Status:** open.
 
 ## Parked
 
