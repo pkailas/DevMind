@@ -50,6 +50,11 @@ namespace DevMind.McpServer
         /// heartbeat lines mark visible silence (also wins over the env var). A continuation
         /// inherits the parent's setting, including an inherited null (same rule as Think).
         public bool? ShowThinking { get; init; }
+        /// <summary>Effective chat_template_kwargs.reasoning_effort (low|medium|high|xhigh,
+        /// normalized) when <see cref="Think"/> is on; null when thinking is off (the template
+        /// never reads it then). Resolved at start: per-job value, else devmind.json
+        /// "reasoningEffort", else "medium". A continuation inherits the parent's value.</summary>
+        public string? ReasoningEffort { get; init; }
         /// <summary>Caller-imposed no-execution restriction for this task (default false):
         /// the agent may build but not run executables, tests, or a debugger. Continuations
         /// inherit this from their parent — a constraint set on turn 1 must not evaporate
@@ -549,7 +554,7 @@ namespace DevMind.McpServer
         public AgentJob Start(string prompt, string workingDirectory, int maxDepth, int timeoutMinutes,
             bool allowCommit, bool verifyBuild, bool think = false, bool verifyTests = false,
             bool noExecute = false, bool runTestBaseline = true, bool? showThinking = null,
-            IReadOnlyList<McpServerConfig>? mcpServers = null)
+            IReadOnlyList<McpServerConfig>? mcpServers = null, string? reasoningEffort = null)
         {
             var job = new AgentJob
             {
@@ -562,6 +567,9 @@ namespace DevMind.McpServer
                 VerifyBuild = verifyBuild,
                 Think = think,
                 ShowThinking = showThinking,
+                // Null when thinking is off; otherwise the given value, normalized, or "medium"
+                // (never absent — the Qwen3.8 templates treat absent as xhigh).
+                ReasoningEffort = think ? DevMind.ReasoningEffort.NormalizeOrDefault(reasoningEffort) : null,
                 VerifyTests = verifyTests,
                 NoExecute = noExecute,
                 RunTestBaseline = runTestBaseline,
@@ -646,6 +654,9 @@ namespace DevMind.McpServer
                 // continuation (a display preference flips either way, unlike
                 // noExecute's ratchet).
                 ShowThinking = showThinking ?? parent.ShowThinking,
+                // Inherited with Think (no per-continuation override: the session's options
+                // keep the parent's value, which is what the request actually sends).
+                ReasoningEffort = parent.ReasoningEffort,
                 NoExecute = ResolveContinuationNoExecute(parent.NoExecute, noExecute),
                 // Inherited like NoExecute. The parent's manager was disposed when the parent
                 // ended, so the worker starts these servers again for the continued turn.
@@ -864,6 +875,9 @@ namespace DevMind.McpServer
                             // (see LlmClient.BuildRequestJson) — false = the model does not
                             // generate think blocks at all for this session.
                             ShowLlmThinking = job.Think,
+                            // chat_template_kwargs.reasoning_effort, sent only while thinking
+                            // is on (null when off -> the option default, never sent).
+                            ReasoningEffort = job.ReasoningEffort ?? DevMind.ReasoningEffort.Default,
                             // DISPLAY switch (per-job, from show_thinking): streams the
                             // generated think blocks into the transcript. Tri-state — a
                             // non-null value wins over the DEVMIND_TASK_SHOW_THINKING env

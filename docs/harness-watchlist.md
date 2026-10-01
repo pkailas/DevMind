@@ -518,6 +518,18 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Status:** fixed, pending deploy. Verify: kill a job's MCP server mid-job and look for the line and the
   `mcp_restart` action.
 
+### H-49 - think:true silently ran at reasoning effort xhigh
+- **First seen:** 2026-10-01, after the switch to Strata (Qwen3.8-Flash-Next). Its chat template (and the Qwen3.8-27B one)
+  reads `chat_template_kwargs.reasoning_effort` when thinking is on, and treats a missing value as `xhigh`, which adds a
+  "think carefully" system line. DevMind sent only `{enable_thinking}`, so every think:true job ran at xhigh.
+- **Fix:** with thinking on, the request now sends `reasoning_effort` (default `medium`, which adds no instruction).
+  devmind_task_start takes `reasoning_effort` (low|medium|high|xhigh). Supplying it implies think, and continuations
+  inherit it. The start response and devmind_task_result echo it (null when thinking is off). devmind.json
+  `reasoningEffort` sets the default for MCP jobs and the TUI. With thinking off, the request is unchanged:
+  `{enable_thinking:false}`.
+- **Status:** fixed, pending deploy (commit "Default reasoning_effort to medium when thinking is on; add reasoning_effort
+  to devmind_task_start"). Verify: a think:true job's request carries `"reasoning_effort":"medium"`.
+
 ## Parked
 
 ### P-01 - No-write-streak nudge

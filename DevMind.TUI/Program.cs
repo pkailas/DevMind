@@ -1,4 +1,4 @@
-﻿// File: Program.cs  v4.0
+﻿// File: Program.cs  v4.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 TUI for DevMind.
@@ -441,6 +441,10 @@ namespace DevMind
             // "not set"; 0 = explicitly disabled; 1-99 = the limit percent.
             if (_config.ContextLimitPercent >= 0 && Array.IndexOf(args, "--context-limit") < 0)
                 options.AgenticContextLimitPercent = _config.ContextLimitPercent;
+
+            // Reasoning effort sent while /think (or /t) has thinking on: devmind.json
+            // "reasoningEffort", else "medium". No slash command — config-only.
+            options.ReasoningEffort = ReasoningEffort.NormalizeOrDefault(_config.ReasoningEffort);
 
             // Context file discovery.
             string devMindContext = LoadContextFile(options.WorkingDirectory);

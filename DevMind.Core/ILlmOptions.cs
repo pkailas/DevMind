@@ -1,4 +1,4 @@
-// File: ILlmOptions.cs  v1.2
+// File: ILlmOptions.cs  v1.3
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 namespace DevMind
@@ -18,6 +18,12 @@ namespace DevMind
         bool ShowDebugOutput { get; }
         bool ShowContextBudget { get; }
         bool ShowLlmThinking { get; }
+
+        /// <summary>chat_template_kwargs.reasoning_effort sent when <see cref="ShowLlmThinking"/>
+        /// is on (low|medium|high|xhigh; see <see cref="DevMind.ReasoningEffort"/>). Ignored when
+        /// thinking is off. Invalid or blank values fall back to "medium" at request time.
+        /// Default-implemented so existing option types need not change.</summary>
+        string ReasoningEffort => DevMind.ReasoningEffort.Default;
         ContextEvictionMode ContextEviction { get; }
         int ManualContextSize { get; }
         LlmServerType ServerType { get; }

@@ -1,4 +1,4 @@
-﻿// File: TuiConfig.cs  v1.3
+﻿// File: TuiConfig.cs  v1.4
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Global TUI config persisted to %APPDATA%\devmind\devmind.json.
@@ -118,6 +118,13 @@ namespace DevMind
         [JsonPropertyName("autoAttachImages")]
         public bool AutoAttachImages { get; set; } = true;
 
+        /// <summary>Default chat_template_kwargs.reasoning_effort when thinking is on
+        /// (low|medium|high|xhigh). Null (absent) = "medium"; an unrecognised value also falls
+        /// back to "medium" (see <see cref="DevMind.ReasoningEffort"/>). A per-job reasoning_effort on
+        /// devmind_task_start wins over it. Null is omitted on write.</summary>
+        [JsonPropertyName("reasoningEffort")]
+        public string ReasoningEffort { get; set; } = null;
+
         /// <summary>Additional directories the MCP server may write under, on top of the
         /// working directory and any --dir / DEVMIND_ALLOWED_WRITE_ROOTS startup roots.
         /// Absolute paths only. Re-read by the reload_write_roots MCP tool, so entries
@@ -216,6 +223,9 @@ namespace DevMind
                 if (root.TryGetProperty("autoAttachImages", out var aai)
                     && (aai.ValueKind == JsonValueKind.True || aai.ValueKind == JsonValueKind.False))
                     config.AutoAttachImages = aai.GetBoolean();
+
+                if (root.TryGetProperty("reasoningEffort", out var re) && re.ValueKind == JsonValueKind.String)
+                    config.ReasoningEffort = re.GetString();
 
                 if (root.TryGetProperty("allowedWriteRoots", out var awr) && awr.ValueKind == JsonValueKind.Array)
                 {

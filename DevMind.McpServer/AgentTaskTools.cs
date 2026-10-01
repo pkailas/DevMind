@@ -1,4 +1,4 @@
-// File: AgentTaskTools.cs  v1.1
+// File: AgentTaskTools.cs  v1.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // The devmind_task_* MCP tools: delegate whole coding tasks to DevMind's headless
@@ -128,7 +128,8 @@ namespace DevMind.McpServer
             [Description("After the agent finishes, the job runner builds the working_dir itself and attaches build_verification to the result (default true).")] bool? verify_build = null,
             [Description("After a successful build verification, also run `dotnet test` in working_dir and attach test_verification (default false — tests can be slow). test_verification reports the after-run's success, exit code and harness-measured total. The before->after delta (baseline_total, delta) exists ONLY when test_baseline is \"before-run\" (the default) — with test_baseline \"off\" there is no before-count, so delta and baseline_total are null by definition; they are also null when the suite's output has no parseable test summary line.")] bool? verify_tests = null,
             [Description("How the harness obtains the baseline test count for the structural delta (default \"before-run\": it runs the suite ONCE before the agent starts, so the result reports a real before->after delta the agent cannot misreport. \"off\": skip the before-run — for slow suites — and report only the after total. Only takes effect when verify_tests is on.")] string? test_baseline = null,
-            [Description("Enable model reasoning (think blocks) for this task (default false). Leave off for briefed mechanical tasks — thinking runs UNBOUNDED on the local server and can add minutes per iteration. Turn on only for genuinely hard design/debugging tasks. Continuations inherit this setting.")] bool? think = null,
+            [Description("Enable model reasoning (think blocks) for this task (default false). Leave off for briefed mechanical tasks — thinking runs UNBOUNDED on the local server and can add minutes per iteration. Turn on only for genuinely hard design/debugging tasks. When on, reasoning runs at effort \"medium\" unless `reasoning_effort` says otherwise (or devmind.json \"reasoningEffort\" sets another default). Continuations inherit this setting.")] bool? think = null,
+            [Description("Reasoning effort while thinking is on: \"low\", \"medium\", \"high\" or \"xhigh\" (case-insensitive). Default \"medium\" (or devmind.json \"reasoningEffort\" when set). \"xhigh\" — the model's own default, which adds a think-carefully instruction and much longer reasoning — is used only when asked for here; \"high\" is treated as xhigh by the Qwen3.8 chat template; \"low\" asks for brief thinking. Supplying it implies `think: true`. An unknown value rejects the start. The effective value is echoed as reasoning_effort in this response and in devmind_task_result (null when thinking is off). Continuations inherit it.")] string? reasoning_effort = null,
             [Description("Stream the model's think blocks into the job's transcript as it reasons. Omitted = the DEVMIND_TASK_SHOW_THINKING environment variable applies (legacy fallback: off unless it is set); explicit true or false takes precedence over the environment variable. DISPLAY only — think blocks are only streamed when `think` is also on, and showing them adds per-iteration overhead. When true it implies `think: true` — asking to see reasoning that is never generated would be a silent no-op, so this turns generation on instead. Continuations inherit this setting, including an inherited omission.")] bool? show_thinking = null,
             [Description("Restrict the agent to no execution (default false): it may still build (dotnet build / run_build) for compile verification, but running executables, `dotnet run`/`dotnet exec`, the test suite (run_tests / dotnet test), and debug launch/attach are blocked at the harness. This is NOT a sandbox — it blocks a named set of execution invocations, not every conceivable way to start a process; use it to stop an agent from launching (or re-launching) something that hangs or spawns runaway children, not as a security boundary. Continuations inherit this setting.")] bool? no_execute = null,
             [Description("External MCP servers to give this agent, by their names under \"mcpServers\" in %APPDATA%\\devmind\\devmind.json (e.g. [\"comfy\"]). Omit for none — the default, with no change in behaviour. An unknown name rejects the start with the list of configured names. Each server is started before the agent's first request (60 s limit per server); one that fails to start does not fail the job — the agent runs without it, and devmind_task_result's \"mcp\" section reports requested / started / failed (with reason) / calls. The server's tools appear as mcp__<server>__<tool>, subject to its \"tools\" allowlist; its \"autoStart\" setting is ignored here. Servers stop when the job ends. Continuations inherit this list and start the servers again.")] string[]? mcp_servers = null,
@@ -148,6 +149,10 @@ namespace DevMind.McpServer
             string baseline = string.IsNullOrWhiteSpace(test_baseline) ? "before-run" : test_baseline;
             if (baseline != "before-run" && baseline != "off")
                 return Err($"test_baseline must be \"before-run\" or \"off\" (got \"{test_baseline}\").");
+
+            string? effortError = ResolveReasoningEffort(reasoning_effort, out string effort);
+            if (effortError != null)
+                return Err(effortError);
 
             // Resolved now, not when the job runs: a typo is the caller's to fix, while they are
             // still here. Reads devmind.json only — nothing starts until the job does.
@@ -176,12 +181,15 @@ namespace DevMind.McpServer
                 timeoutMinutes: Math.Clamp(timeout_minutes ?? DefaultStallMinutes, 1, 240),
                 allowCommit: allow_commit ?? false,
                 verifyBuild: verify_build ?? true,
-                think: (think ?? false) || show_thinking == true,
+                // show_thinking and reasoning_effort each imply think: asking to see, or to
+                // tune, reasoning that is never generated would be a silent no-op.
+                think: (think ?? false) || show_thinking == true || !string.IsNullOrWhiteSpace(reasoning_effort),
                 verifyTests: verify_tests ?? false,
                 noExecute: no_execute ?? false,
                 runTestBaseline: baseline != "off",
                 showThinking: show_thinking,
-                mcpServers: mcpServers);
+                mcpServers: mcpServers,
+                reasoningEffort: effort);
 
             const string startHint =
                 "Poll devmind_task_status with this job_id; fetch devmind_task_result when done.";
@@ -194,6 +202,7 @@ namespace DevMind.McpServer
                     queue_position = _jobs.QueuePosition(job),
                     endpoint = _jobs.EndpointUrl,
                     max_depth = maxDepth,
+                    reasoning_effort = job.ReasoningEffort,
                     hint = startHint,
                 }
                 : new
@@ -203,6 +212,7 @@ namespace DevMind.McpServer
                     queue_position = _jobs.QueuePosition(job),
                     endpoint = _jobs.EndpointUrl,
                     max_depth = maxDepth,
+                    reasoning_effort = job.ReasoningEffort,
                     max_depth_notice = depthNotice,
                     hint = startHint,
                 }, JsonOpts);
@@ -450,6 +460,8 @@ namespace DevMind.McpServer
                 tokens_in_new_partial = (bool?)(r?.TokensInNewPartial ?? false),
                 tokens_out = r?.TokensOut,
                 hit_depth_cap = r?.HitDepthCap ?? false,
+                // Effective reasoning effort; null when thinking was off.
+                reasoning_effort = job.ReasoningEffort,
                 error = job.Error,
                 transcript_path = r?.TranscriptPath,
                 parent_job_id = job.ParentJobId,
@@ -612,6 +624,33 @@ namespace DevMind.McpServer
                 return $"Model server unreachable at {_jobs.EndpointUrl} ({ex.Message}). " +
                        "Start it (e.g. llm-launchers\\start-qwen36-mtp-fast.bat) or set DEVMIND_ENDPOINT.";
             }
+        }
+
+        /// <summary>
+        /// Resolves devmind_task_start's reasoning_effort: an explicit value must be one of
+        /// low|medium|high|xhigh (case-insensitive) and wins; omitted/blank falls back to
+        /// devmind.json "reasoningEffort", then "medium" (an unrecognised config value is
+        /// warned about on stderr and ignored — the operator's typo must not block every
+        /// job). Returns an error message for an invalid explicit value, else null.
+        /// </summary>
+        internal static string? ResolveReasoningEffort(string? requested, out string effective)
+        {
+            if (!string.IsNullOrWhiteSpace(requested))
+            {
+                if (DevMind.ReasoningEffort.TryNormalize(requested, out effective))
+                    return null;
+                effective = DevMind.ReasoningEffort.Default;
+                return $"reasoning_effort must be one of: {DevMind.ReasoningEffort.AllowedList} (got \"{requested}\").";
+            }
+
+            string? configured = TuiConfig.Load().ReasoningEffort;
+            if (DevMind.ReasoningEffort.TryNormalize(configured, out effective))
+                return null;
+            if (!string.IsNullOrWhiteSpace(configured))
+                Console.Error.WriteLine($"[McpServer] Warning: devmind.json reasoningEffort \"{configured}\" is not one of " +
+                    $"{DevMind.ReasoningEffort.AllowedList} — using \"{DevMind.ReasoningEffort.Default}\".");
+            effective = DevMind.ReasoningEffort.Default;
+            return null;
         }
 
         private static string Err(string message)

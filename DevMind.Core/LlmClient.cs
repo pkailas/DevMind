@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v7.31
+// File: LlmClient.cs  v7.32
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -4075,11 +4075,19 @@ namespace DevMind
                 //     template medium injects NO instruction text (only 'xhigh' and 'low' have
                 //     branches; medium falls through empty) — an abstention, not a middle.
                 //   * reasoning_effort CAN be set per request via chat_template_kwargs, unlike
-                //     the budget — so the per-job display switch below is all this layer can do.
-                request["chat_template_kwargs"] = new JObject
+                //     the budget. The Qwen3.8 templates (Strata Flash-Next, 27B) default to xhigh
+                //     when the kwarg is absent, so it is sent explicitly whenever thinking is on
+                //     (option default "medium"); with thinking off the template never reads it,
+                //     so the request stays exactly {enable_thinking:false}.
+                var templateKwargs = new JObject
                 {
                     ["enable_thinking"] = _options.ShowLlmThinking
                 };
+                if (_options.ShowLlmThinking)
+                {
+                    templateKwargs["reasoning_effort"] = ReasoningEffort.NormalizeOrDefault(_options.ReasoningEffort);
+                }
+                request["chat_template_kwargs"] = templateKwargs;
                 if (_options.ShowLlmThinking && ServerType == LlmServerType.Vllm)
                 {
                     request["thinking_token_budget"] = 2048;

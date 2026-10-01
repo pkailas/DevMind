@@ -1,4 +1,4 @@
-﻿// File: TuiOptions.cs  v1.4
+﻿// File: TuiOptions.cs  v1.5
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Minimal ILlmOptions implementation for the TUI.
@@ -45,6 +45,8 @@ namespace DevMind
         public bool   ShowDebugOutput          { get; set; } = false;
         public bool   ShowContextBudget        { get; set; } = true;
         public bool   ShowLlmThinking          { get; set; } = false;
+        /// <summary>reasoning_effort sent while thinking is on; set from devmind.json at startup.</summary>
+        public string ReasoningEffort          { get; set; } = DevMind.ReasoningEffort.Default;
         public ContextEvictionMode ContextEviction { get; set; } = ContextEvictionMode.Balanced;
         public int    ManualContextSize        { get; set; } = 0;
         public LlmServerType ServerType        { get; set; } = LlmServerType.LlamaServer;

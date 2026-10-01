@@ -1,4 +1,4 @@
-// File: ShowThinkingJobParameterTests.cs  v1.0
+// File: ShowThinkingJobParameterTests.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Tests for the per-job show_thinking parameter — think-token visibility in a
@@ -48,6 +48,9 @@ namespace DevMind.McpServer.Tests
         private readonly CancellationTokenSource _cts = new();
 
         public string BaseUrl { get; }
+
+        /// <summary>Bodies of the chat POSTs received (lock the list to read it).</summary>
+        public List<string> ChatBodies { get; } = new();
 
         public ThinkTokenLlmServer()
         {
@@ -107,6 +110,7 @@ namespace DevMind.McpServer.Tests
                     if (method == "POST" && !string.IsNullOrEmpty(body))
                     {
                         // POST /v1/chat/completions → SSE: think block, then task_done.
+                        lock (ChatBodies) ChatBodies.Add(body);
                         payload = Encoding.UTF8.GetBytes(BuildThinkThenDoneSse());
                         contentType = "text/event-stream";
                     }

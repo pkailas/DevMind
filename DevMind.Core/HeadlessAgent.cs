@@ -1,4 +1,4 @@
-// File: HeadlessAgent.cs  v2.6
+// File: HeadlessAgent.cs  v2.7
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Headless agentic runner — the engine behind DevMind.McpServer's devmind_task_*
@@ -33,6 +33,8 @@ namespace DevMind
         public bool   ShowDebugOutput          { get; set; } = false;
         public bool   ShowContextBudget        { get; set; } = false;
         public bool   ShowLlmThinking          { get; set; } = false;
+        /// <summary>reasoning_effort sent when <see cref="ShowLlmThinking"/> is on.</summary>
+        public string ReasoningEffort          { get; set; } = DevMind.ReasoningEffort.Default;
         /// <summary>
         /// DISPLAY switch: whether the model's think blocks stream into the transcript.
         /// This does NOT control generation — that is <see cref="ShowLlmThinking"/>
