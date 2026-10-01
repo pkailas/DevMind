@@ -26,7 +26,9 @@ function Get-ActiveState {
     } catch { return 'unknown' }
 }
 
-# Print a completion line for a finished job: local time, final state, iterations, elapsed.
+# Print a completion line for a finished job: local time, final state, iterations, elapsed,
+# and token usage when the result carries it (tokens_* fields, 1.0.548+; omitted on older
+# results or servers that report no usage; "new" omitted when the server gave no cache split).
 # The result file is written as the job ends; give it a few seconds to appear.
 function Write-JobFinished([string]$jobId) {
     $stamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
@@ -41,7 +43,14 @@ function Write-JobFinished([string]$jobId) {
     if ($r) {
         $color = if ($r.state -eq 'done') { 'Green' } else { 'Red' }
         $mins  = [math]::Round([double]$r.elapsed_seconds / 60, 1)
-        Write-Host "── $stamp  $jobId COMPLETE — state: $($r.state), $($r.iterations) iterations, $mins min ──" -ForegroundColor $color
+        $tok = ''
+        if ($null -ne $r.tokens_in_total -or $null -ne $r.tokens_out) {
+            $in  = if ($null -ne $r.tokens_in_total) { ([long]$r.tokens_in_total).ToString('N0') } else { '?' }
+            $new = if ($null -ne $r.tokens_in_new) { " ($(([long]$r.tokens_in_new).ToString('N0')) new$(if ($r.tokens_in_new_partial) { ', partial' }))" } else { '' }
+            $out = if ($null -ne $r.tokens_out) { ([long]$r.tokens_out).ToString('N0') } else { '?' }
+            $tok = ", tokens in $in$new / out $out"
+        }
+        Write-Host "── $stamp  $jobId COMPLETE — state: $($r.state), $($r.iterations) iterations, $mins min$tok ──" -ForegroundColor $color
         if ($r.incomplete_reasons) {
             Write-Host "   reasons: $(($r.incomplete_reasons | Select-Object -First 2) -join ' | ')" -ForegroundColor Red
         }
