@@ -22,6 +22,15 @@ namespace DevMind
         /// </summary>
         public bool   NarrationRetryUsed       { get; set; }
 
+        /// <summary>
+        /// No-tool-call responses in a row (H-52). Reset by any iteration that makes a tool
+        /// call, together with NarrationRetryUsed and PromptedForTaskDone — those two guards
+        /// are per STALL, not per turn, so a delegated job (one user turn for its whole life)
+        /// gets a fresh retry/re-prompt each time it stalls. This counter is the hard stop
+        /// for a model that keeps narrating without ever calling a tool.
+        /// </summary>
+        public int    ConsecutiveNoToolCallResponses { get; set; }
+
         /// <summary>Whether the context-window guard may fire. Set false after the user
         /// continues past the limit (so it doesn't nag every round) and re-armed once usage
         /// drops back below the limit — e.g. after a compaction.</summary>
@@ -57,6 +66,7 @@ namespace DevMind
             ConsecutiveErrorToolName  = null;
             ConsecutiveErrorCount     = 0;
             NarrationRetryUsed        = false;
+            ConsecutiveNoToolCallResponses = 0;
             ContextGuardArmed         = true; // armed at the start of every turn
             LastFailureSignature      = null;
             RepeatedFailureCount      = 0;

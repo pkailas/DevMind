@@ -94,6 +94,12 @@ namespace DevMind
         /// <summary>True when the loop's thrash guard stopped the turn: the same
         /// failure kept recurring even after an injected research directive.</summary>
         public bool ThrashStopped { get; set; }
+        /// <summary>H-52: the loop ended on a no-tool-call reply — neither task_done nor
+        /// ask_caller was called, and no harness stop (cap, thrash) applies. A delegated job
+        /// finishes by calling task_done, so this is never "done": job-1974 ended on the line
+        /// "Let me confirm … then check the enum values." Answer keeps that last prose,
+        /// marked [INCOMPLETE: …].</summary>
+        public bool EndedWithoutTaskDone { get; set; }
         /// <summary>Non-null when the run failed with an error (endpoint down, etc.).</summary>
         public string Error { get; set; }
         /// <summary>Full transcript file (model output + tool activity), when requested.</summary>
@@ -517,6 +523,15 @@ namespace DevMind
                             result.ThrashStopped = true;
                             lastRepeatedFailure = iter.Result?.Errors?.LastOrDefault();
                         }
+                        else if (iter.Kind == LoopIterationKind.Terminal
+                                 && iter.TerminalReason == null
+                                 && !(iter.Outcome?.IsDone ?? false)
+                                 && !result.NeedsInput)
+                        {
+                            // H-52: the prose-finish terminal (or the context guard, which
+                            // auto-continues here). Nothing said the task was finished.
+                            result.EndedWithoutTaskDone = true;
+                        }
                         break;
                     }
 
@@ -605,6 +620,13 @@ namespace DevMind
                 if (!string.IsNullOrWhiteSpace(lastProse))
                     sb.Append("\n\nAgent's last message:\n").Append(lastProse);
                 result.Answer = sb.ToString();
+            }
+            else if (result.EndedWithoutTaskDone && !string.IsNullOrWhiteSpace(lastProse))
+            {
+                // H-52: keep the narration — it says where the agent was — but mark it so it
+                // is not read as a completion summary. With no prose at all the answer stays
+                // empty and the job reports no_final_answer as well (H-20).
+                result.Answer = HeadlessAgent.EndedWithoutTaskDoneMarker + "\n\n" + lastProse;
             }
 
             // Final usage line — after the terminal-state line ("[AGENTIC] Task complete.").
@@ -932,6 +954,12 @@ namespace DevMind
     /// <summary>One-shot convenience wrapper over <see cref="HeadlessSession"/>.</summary>
     public static class HeadlessAgent
     {
+        /// <summary>H-52: first line of the answer of a job that ended without task_done.
+        /// "[" before the word keeps SelfReportedIncompleteDetector from also counting it as
+        /// the agent's own INCOMPLETE: marker — the harness, not the agent, wrote it.</summary>
+        public const string EndedWithoutTaskDoneMarker =
+            "[INCOMPLETE: ended without task_done — last message was narration]";
+
         /// <summary>
         /// Shared behavioral rails appended to every headless system prompt, regardless
         /// of test-verification regime. The commit rule is conditional (see

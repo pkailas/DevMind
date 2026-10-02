@@ -603,6 +603,26 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   one different command that tests it" (the prompt already says this; the model ignored it under a loop).
 - **Status:** open.
 
+### H-52 - A narration-only reply ends a delegated job as "done"
+- **First seen:** 2026-10-02, VLink.Warehouses: job-1974 ended `state: done` after 85 iterations. Its whole answer was one line of
+  narration ("Let me confirm `MailConnectionSettingsJson` API ... then check the `SmtpSecurityMode` enum values.") - no task_done,
+  no report. Its continuation job-1975 ended `done` after 2 s the same way ("Let me read the Notifications CreateConnection tail ...").
+- **Root cause:** on a no-tool-call reply, `LoopDriver` has two guards - the narration-stall retry (`NarrationRetryUsed`) and the
+  prose-finish re-prompt (`PromptedForTaskDone`) - each one-shot, reset only in `LoopState.ResetForUserTurn()`. `HeadlessSession`
+  calls that once per job, so a delegated job got ONE of each for its whole life: an early stall spent them, and the next
+  narration-only reply hit "accepting prose-finish" -> terminal. The headless result then had no harness reason and a non-empty
+  answer, so neither H-20's `no_final_answer` nor H-01's self-report classifier fired, and the job read as `done`.
+- **Fix:** (1) the guards are per stall: any iteration with a tool call resets both, plus a new
+  `LoopState.ConsecutiveNoToolCallResponses`; 3 consecutive no-tool-call responses
+  (`LoopDriver.MaxConsecutiveNoToolCallResponses`) always terminate. Applies to the TUI too; its prose answer is still a valid end.
+  (2) Headless only: a terminal iteration with no task_done, no ask_caller and no harness reason sets
+  `HeadlessAgentResult.EndedWithoutTaskDone`; the answer keeps the last prose under
+  `[INCOMPLETE: ended without task_done — last message was narration]` (no prose -> answer stays empty and `no_final_answer` also
+  fires). `AgentJob.IsIncomplete` / `IncompleteReasons()` extend H-20's path: `stopped_incomplete` with `ended_without_task_done`.
+  Tests: `NarrationStallPerStallTests` (job-1974/1975 narration verbatim); removing the reset fails
+  `SecondNarrationStall_AfterAToolCall_GetsItsOwnRePrompt_AndReachesTaskDone`.
+- **Status:** fixed, pending deploy - commit "H-52: stall guards per stall; a job ending without task_done is stopped_incomplete".
+
 ## Parked
 
 ### P-01 - No-write-streak nudge

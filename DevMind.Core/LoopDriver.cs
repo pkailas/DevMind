@@ -59,9 +59,17 @@ namespace DevMind
         // mid-session stalls that Layer 1 (cold-start) cannot reach.
         //
         // Patterns ported from tools/narration_scan.py (validated against 68-stall scan).
-        // Cap: ONE forced retry per user turn. If it still returns no tool_call, stop.
+        // Cap: ONE forced retry per STALL (H-52). Any iteration that makes a tool call
+        // re-arms it (and the prose-finish re-prompt); a stall that still returns no
+        // tool_call after both falls through to the terminal path.
 
         private const bool NARRATION_RETRY_ENABLED = true;
+
+        // H-52: hard stop for a model that keeps narrating. The narration retry and the
+        // prose-finish re-prompt each fire at most once per stall, so a stall already ends
+        // within three no-tool-call responses; this cap states that bound explicitly so a
+        // future third re-prompt cannot turn it into a loop.
+        internal const int MaxConsecutiveNoToolCallResponses = 3;
 
        private static readonly Regex[] _narrationClaimPatterns =
         {
@@ -220,6 +228,13 @@ namespace DevMind
             if (lastToolCalls != null && lastToolCalls.Count > 0)
             {
                 // Tool use path: model called tools — execute them, then decide next step.
+                // H-52: a tool call ends any stall, so the stall guards re-arm. They were
+                // per-turn, and a delegated job is ONE turn: job-1974 used both on an early
+                // stall, and its next narration-only reply 80 iterations later ended the job.
+                _state.NarrationRetryUsed             = false;
+                _state.PromptedForTaskDone            = false;
+                _state.ConsecutiveNoToolCallResponses = 0;
+
                 var action = new AgenticAction { Type = ActionType.ApplyAndBuild };
                 ExecutionResult result = await executor.ExecuteAsync(action, outcome);
 
@@ -484,6 +499,8 @@ namespace DevMind
                 // "Should I use SQL or ORM?" — must reach it too. A pure one-word
                 // ack ("ok"/"done", < 20 chars) still terminates without re-prompting.
                 bool prosePresent       = trimmedResponse.Length >= 20 && !outcome.HasAnyDirective && !outcome.IsDone;
+                _state.ConsecutiveNoToolCallResponses++;
+                bool stallCapReached    = _state.ConsecutiveNoToolCallResponses >= MaxConsecutiveNoToolCallResponses;
 
                 // ── Layer 2: Narration-stall retry guard ─────────────────────────
                 // When inside an agentic cycle, no tool calls were made, but the prose
@@ -491,9 +508,10 @@ namespace DevMind
                 // re-issue the turn once with tool_choice forced to "required".
                 // This catches mid-session stalls that Layer 1 (cold-start) cannot reach.
                 //
-                // Gate: ONE retry per user turn. If the retry also returns no tool_call,
-                // fall through to the normal prose-finish / terminal path.
-                if (NARRATION_RETRY_ENABLED && insideAgenticCycle && !_state.NarrationRetryUsed && !outcome.IsDone)
+                // Gate: ONE retry per stall (re-armed by any tool call). If the retry also
+                // returns no tool_call, fall through to the normal prose-finish / terminal path.
+                if (NARRATION_RETRY_ENABLED && insideAgenticCycle && !_state.NarrationRetryUsed && !outcome.IsDone
+                    && !stallCapReached)
                 {
                     string claimSignal = MatchNarrationClaim(trimmedResponse);
                     if (claimSignal != null)
@@ -513,7 +531,7 @@ namespace DevMind
                     }
                 }
 
-                if (insideAgenticCycle && prosePresent && !_state.PromptedForTaskDone)
+                if (insideAgenticCycle && prosePresent && !_state.PromptedForTaskDone && !stallCapReached)
                 {
                     // One-shot re-prompt: the model ended in prose with no terminal tool
                     // call — the exact point where it must choose task_done (done) vs
@@ -534,7 +552,11 @@ namespace DevMind
                 _state.AgenticDepth = 0;
                 if (_options.ShowDebugOutput)
                 {
-                    if (_state.PromptedForTaskDone)
+                    if (stallCapReached)
+                        _agenticHost.AppendOutput(
+                            $"[DIAG] {_state.ConsecutiveNoToolCallResponses} consecutive responses with no tool call — accepting prose-finish.\n",
+                            OutputColor.Dim);
+                    else if (_state.PromptedForTaskDone)
                         _agenticHost.AppendOutput(
                             "[DIAG] Tool use loop: re-prompt also produced no tool calls — accepting prose-finish.\n",
                             OutputColor.Dim);

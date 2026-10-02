@@ -296,7 +296,8 @@ namespace DevMind.McpServer
             "Check a delegated DevMind task: state (queued/running/done/needs_input/stopped_incomplete/" +
             "failed/cancelled), elapsed time, queue position, and the live tail of the agent's transcript. " +
             "stopped_incomplete means the job finished but its work is NOT trustworthy as-is (hit " +
-            "the iteration cap mid-task, thrashed on a repeating failure, build/test verification " +
+            "the iteration cap mid-task, thrashed on a repeating failure, ended on a narration-only reply " +
+            "without calling task_done — ended_without_task_done, build/test verification " +
             "failed, or the harness's full rebuild reported warnings — build_warnings, with the count " +
             "and the first few warning lines) — check incomplete_reasons and usually devmind_task_continue it. self_report_note " +
             "(null unless set) quotes a line of the answer that reads like unfinished work but did not " +

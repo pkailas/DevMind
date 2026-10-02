@@ -144,6 +144,33 @@ namespace DevMind.McpServer.Tests
             Assert.Contains("no_final_answer", job.IncompleteReasons());
         }
 
+        // ── H-52: ended without task_done ────────────────────────────────────────────
+        // job-1974 ended state=done on one line of narration. The answer is not empty, so
+        // no_final_answer could not see it; the headless result's flag is the signal.
+
+        [Fact]
+        public void ADoneJobThatEndedWithoutTaskDone_EndsStoppedIncomplete()
+        {
+            var job = JobEndingWith(HeadlessAgent.EndedWithoutTaskDoneMarker + "\n\n" +
+                "Let me confirm `MailConnectionSettingsJson` API ... then check the `SmtpSecurityMode` enum values.");
+            job.Result!.EndedWithoutTaskDone = true;
+
+            Assert.True(job.IsIncomplete);
+            Assert.Contains("ended_without_task_done", job.IncompleteReasons());
+            Assert.DoesNotContain("no_final_answer", job.IncompleteReasons());
+            // The harness's marker is not the agent's own INCOMPLETE: line.
+            Assert.DoesNotContain(SelfReportedIncompleteDetector.Reason, job.IncompleteReasons());
+        }
+
+        [Fact]
+        public void ATaskDoneJob_IsNotEndedWithoutTaskDone()
+        {
+            var job = JobEndingWith("Added the SMTP settings; build 0/0.");
+
+            Assert.False(job.IsIncomplete);
+            Assert.DoesNotContain("ended_without_task_done", job.IncompleteReasons());
+        }
+
         [Fact]
         public void ARealAnswerAfterStatusLines_IsNotNoFinalAnswer()
         {

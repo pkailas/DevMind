@@ -112,6 +112,7 @@ namespace DevMind.McpServer
                 || Tests is { Succeeded: false }
                 || HasVerifiedBuildWarnings
                 || NoFinalAnswer
+                || (Result?.EndedWithoutTaskDone ?? false)
                 || SelfReportMakesIncomplete);
 
         /// <summary>
@@ -204,6 +205,8 @@ namespace DevMind.McpServer
                 reasons.AddRange(Build.WarningLines);
             }
             if (NoFinalAnswer) reasons.Add("no_final_answer");
+            // H-52: the loop ended on a narration-only reply, not task_done / ask_caller.
+            if (Result?.EndedWithoutTaskDone ?? false) reasons.Add("ended_without_task_done");
 
             // The agent's own words, and the line it said them in — a caller reading
             // incomplete_reasons should not have to go back to the answer to find out which
