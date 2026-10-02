@@ -196,7 +196,8 @@ namespace DevMind.Core.Tests
             Assert.Equal(
                 "[CALLER STEER — override] The caller is redirecting you. Stop your current approach and change course:\n"
                 + "handle the null case\n"
-                + "This supersedes your current direction — follow it.",
+                + "This supersedes your current direction — follow it. "
+                + "Acknowledge once, then continue; do not restate this instruction.",
                 override_);
 
             // Distinct framing (the modes are not interchangeable), and both carry the

@@ -1,4 +1,4 @@
-﻿# DevMind Harness Watchlist
+# DevMind Harness Watchlist
 
 Harness issues observed while driving delegated jobs (`devmind_task_*`) and the TUI.
 One entry per issue: date first seen, job id(s), symptom, evidence, proposed fix, status.
@@ -715,6 +715,27 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   fighting the model's training and the descriptions may need the aliases spelt out.
 - **Status:** fixed, pending deploy - commit "H-56: patch_file accepts common find/replace key aliases". Tests:
   `ToolArgumentValidationTests` (H-56 section, mutation-checked: disabling the rename fails all 15).
+
+### H-57 - After one override steer the model re-acknowledges it every turn
+- **First seen:** 2026-10-02, job-2108 (transcript `job-2108-20261002-154500.log`): an override steer folded at iteration 108
+  ("Stop tuning the regex. Find the wrapper with string search instead..."); iterations 109-122 opened with "The caller's
+  string-search approach...", "Following the caller's redirect..." (7 of those by iteration 122; 14 acknowledgements in all before the next steer) - the same steer re-acknowledged each turn.
+- **Finding: the steer is NOT re-sent. The repetition is the model's own.** The transcript has one `[STEER] override folded`
+  line. In code: `HeadlessAgent.DrainSteerIntoPrompt` takes the steer from the single-slot `SteerMailbox` (`Take` clears it)
+  and `Steer.Apply` appends the framed block to THAT iteration's prompt, which `LlmClient.SendMessageAsync` adds to history
+  as one user message. The next iteration's prompt is rebuilt from scratch (`iter.NextContextualMessage`, normally
+  `SyntheticPrompts.Continue`), so later requests carry the steer only as that one history message, with a fresh
+  "Continue with the task." as the newest user message. No system/suffix block holds it; the scratchpad never contained it; no
+  compaction or brainwash ran in that window (brainwash re-anchors on the original task prompt, not on steers). Likely cause:
+  the model copied its own previous replies, which all opened with the acknowledgement.
+- **Fix (framing only, injection unchanged):** the override framing now ends "Acknowledge once, then continue; do not restate
+  this instruction." Suggest framing is unchanged (job-2108's suggest steer at ~line 1420 was acknowledged once).
+- **Status:** fixed, pending deploy - commit "H-57: override steer asks for a single acknowledgement". Tests:
+  `SteerInjectionTests.ConsumedOverride_IsInTheNextRequestOnce_AndNeverReSentAsANewMessage` (the steer appears exactly once in
+  the request that consumes it, in the newest user message; the next request still has one copy, in history, and its newest
+  user message is the re-trigger; mutation-checked - a mailbox that does not clear on Take sends two copies and fails it);
+  `SteerDecisionTests.Frame_DiffersByMode_AndIsMarkedAsACallerSteer` pins the new text. Watch the next override: if the model
+  still echoes it, the problem is self-imitation, and the next step would be a harness nudge rather than more prompt text.
 
 ## Parked
 

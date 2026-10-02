@@ -1,4 +1,4 @@
-// File: Steer.cs  v1.0
+// File: Steer.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // The DECISION logic for steering a RUNNING headless job (devmind_task_steer).
@@ -90,12 +90,16 @@ namespace DevMind
         /// bracketed, caller-attributed instruction so it reads as a human steer and is
         /// visibly distinct from a harness re-trigger (the loop's own synthetic prompts —
         /// Continue, the thrash directive, the finish-up reserve — are plain prose with
-        /// no such marker).
+        /// no such marker). The override ends by asking for a single acknowledgement (H-57):
+        /// the steer is sent once, but job-2108 opened ~10 consecutive replies with
+        /// "Following the caller's redirect..." after one override, echoing its own earlier
+        /// acknowledgements.
         /// </summary>
         public static string Frame(SteerMode mode, string message)
             => mode == SteerMode.Override
                 ? "[CALLER STEER — override] The caller is redirecting you. Stop your current approach and change course:\n"
-                    + message + "\nThis supersedes your current direction — follow it."
+                    + message + "\nThis supersedes your current direction — follow it. "
+                    + "Acknowledge once, then continue; do not restate this instruction."
                 : "[CALLER STEER — suggestion] While you continue your current approach, the caller adds:\n"
                     + message + "\nFold this in as you go; it is not a reason to abandon your current line of work.";
 

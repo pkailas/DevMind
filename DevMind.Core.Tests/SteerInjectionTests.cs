@@ -1,4 +1,4 @@
-// File: SteerInjectionTests.cs  v1.0
+// File: SteerInjectionTests.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // End-to-end behaviour of devmind_task_steer against the REAL HeadlessSession loop:
@@ -10,6 +10,8 @@
 //   * an OVERRIDE is rejected on the LAST iteration and recorded as steer_rejected,
 //     while a SUGGESTION is still folded on the last iteration
 //   * a steer that is pending when the turn ends is recorded as steer_unconsumed
+//   * H-57: a consumed steer is in the next request once and is never re-injected; later
+//     requests carry only its history copy
 //
 // The last-iteration cases need the loop to actually reach the depth the driver flags
 // as "last", so they drive a real multi-iteration turn through a response-GATED server
@@ -362,6 +364,82 @@ namespace DevMind.Core.Tests
             {
                 Environment.SetEnvironmentVariable("DEVMIND_SERVER_TYPE", prior);
             }
+        }
+
+        // ── H-57: a consumed steer is sent once, never re-injected ──
+
+        [Fact]
+        public async Task ConsumedOverride_IsInTheNextRequestOnce_AndNeverReSentAsANewMessage()
+        {
+            // job-2108: after one override the model opened ~10 replies with "Following the
+            // caller's redirect...". The steer is folded into ONE user message at the boundary
+            // that consumes it; later requests carry that message in history (once) and a fresh
+            // re-trigger as their newest user message — the steer is never injected again.
+            using var server = new GatedSseServer();
+            server.SseQueue.Add(FakeSseServer.BuildToolCallSse("create_file",
+                "{\"filename\":\"a.txt\",\"content\":\"x\"}"));   // iter 1 → re-trigger
+            server.SseQueue.Add(FakeSseServer.BuildToolCallSse("create_file",
+                "{\"filename\":\"b.txt\",\"content\":\"y\"}"));   // iter 2 (steer consumed) → re-trigger
+            server.SseQueue.Add(FakeSseServer.BuildToolCallSse("task_done", "{\"summary\":\"done\"}"));
+            var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            server.GateBeforeFirstResponse = gate.Task;
+
+            string? prior = Environment.GetEnvironmentVariable("DEVMIND_SERVER_TYPE");
+            Environment.SetEnvironmentVariable("DEVMIND_SERVER_TYPE", "llama");
+            try
+            {
+                using var session = NewSession(server.BaseUrl);
+                var turn = session.RunTurnAsync("Fix the login bug.");
+                await WaitForAsync(() => server.RequestBodies.Count >= 1);
+                const string steer = "use string search, not the regex";
+                Assert.True(session.EnqueueSteer(steer, SteerMode.Override).Accepted);
+                gate.SetResult();
+                var result = await turn;
+                Assert.Null(result.Error);
+                Assert.Equal(3, server.RequestBodies.Count);
+
+                // Request 2: the boundary that consumed it — exactly once, in the newest user message.
+                var next = UserMessages(server.RequestBodies[1]);
+                Assert.Equal(1, CountOf(server.RequestBodies[1], "[CALLER STEER — override]"));
+                Assert.Contains(steer, next[^1]);
+                Assert.EndsWith("Acknowledge once, then continue; do not restate this instruction.", next[^1]);
+
+                // Request 3: still exactly one copy — the history message — and the newest user
+                // message is the re-trigger, not the steer again.
+                var later = UserMessages(server.RequestBodies[2]);
+                Assert.Equal(1, CountOf(server.RequestBodies[2], "[CALLER STEER — override]"));
+                Assert.Single(later, m => m.Contains(steer));
+                Assert.DoesNotContain(steer, later[^1]);
+                Assert.DoesNotContain("[CALLER STEER", later[^1]);
+
+                Assert.Single(result.Actions, a => a.Kind == "steer");
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("DEVMIND_SERVER_TYPE", prior);
+            }
+        }
+
+        private static List<string> UserMessages(string requestBody)
+            => Newtonsoft.Json.Linq.JObject.Parse(requestBody)["messages"]!
+                .OfType<Newtonsoft.Json.Linq.JObject>()
+                .Where(m => (string?)m["role"] == "user")
+                .Select(m => m["content"]!.ToString())
+                .ToList();
+
+        private static int CountOf(string haystack, string needle)
+        {
+            // Request bodies are JSON, so a non-ASCII needle may be \u-escaped there; count in
+            // the decoded message contents instead.
+            int count = 0;
+            foreach (var m in Newtonsoft.Json.Linq.JObject.Parse(haystack)["messages"]!.OfType<Newtonsoft.Json.Linq.JObject>())
+            {
+                string content = m["content"]?.ToString() ?? "";
+                for (int i = content.IndexOf(needle, StringComparison.Ordinal); i >= 0;
+                     i = content.IndexOf(needle, i + needle.Length, StringComparison.Ordinal))
+                    count++;
+            }
+            return count;
         }
 
         // ── Override on the LAST iteration is rejected; the steer is not sent ──
