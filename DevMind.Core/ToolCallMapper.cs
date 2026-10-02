@@ -1,4 +1,4 @@
-﻿// File: ToolCallMapper.cs  v7.4
+// File: ToolCallMapper.cs  v7.5
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -27,10 +27,14 @@ namespace DevMind
 
             foreach (var tc in toolCalls)
             {
+                // H-56: patch_file's common key aliases (old_text/new_text, ...) are renamed to
+                // find/replace first; a canonical key and a conflicting alias is an error.
+                string aliasError = tc?.Name == "patch_file" ? NormalisePatchAliases(tc) : null;
+
                 // H-53/H-54: a call that cannot run as sent is not mapped to an executable
                 // block. Its ArgumentError becomes its tool result (LoopHelpers), and the
                 // transcript shows the same text.
-                tc.ArgumentError = ValidateArguments(tc);
+                tc.ArgumentError = aliasError ?? ValidateArguments(tc);
                 if (tc.ArgumentError != null)
                 {
                     blocks.Add(new ResponseBlock { Type = BlockType.Text, Content = $"[TOOL ERROR] {tc.ArgumentError}" });
@@ -39,7 +43,10 @@ namespace DevMind
 
                 var block = MapSingle(tc, buildCommand);
                 if (block != null)
+                {
+                    block.ArgumentNote = tc.ArgumentNote;
                     blocks.Add(block);
+                }
             }
 
             return blocks;
@@ -141,7 +148,9 @@ namespace DevMind
         /// patch_file's find/replace shape. An edits array, when given, must be usable as a whole:
         /// an item without 'find' or 'replace' is an error, never a skip, and there is no fallback
         /// to the top-level find/replace (job-1973 sent {old_text,new_text} items and got an empty
-        /// FIND). Without edits, the top-level find and replace are both required.
+        /// FIND). Without edits, the top-level find and replace are both required. Known alias
+        /// keys were already renamed by <see cref="NormalisePatchAliases"/> (H-56); what reaches
+        /// here under another name is genuinely unknown.
         /// </summary>
         private static string ValidatePatchEdits(ToolCallResult tc)
         {
@@ -177,6 +186,101 @@ namespace DevMind
                        "Send find + replace for one edit, or edits: [{\"find\": ..., \"replace\": ...}].";
             if (GetArg(tc, "replace") == null)
                 return $"patch_file: 'find' was given without 'replace'. Received: {received}. Use \"replace\": \"\" to delete.";
+            return null;
+        }
+
+        // ── patch_file key aliases (H-56) ──────────────────────────────────────────
+        // Headless models reach for other editors' key names by reflex: job-2108 lost at least
+        // four iterations to old_text/new_text ("I keep reaching for new_text/old_text by
+        // reflex"). The text is unambiguous, so it is renamed rather than rejected. Anything
+        // not listed here still gets the H-54 error.
+
+        private static readonly (string Canonical, string[] Aliases)[] PatchKeyAliases =
+        {
+            ("find",    new[] { "old_text", "old_string", "search", "from" }),
+            ("replace", new[] { "new_text", "new_string", "to" }),
+        };
+
+        /// <summary>
+        /// Renames patch_file's alias keys to find/replace, at the top level and in every
+        /// <c>edits</c> item, and sets <see cref="ToolCallResult.ArgumentNote"/> when it did.
+        /// Returns an error when a canonical key and an alias (or two aliases) carry different
+        /// text: which one the model meant is a guess. An identical duplicate is dropped.
+        /// A malformed <c>edits</c> is left alone for <see cref="ValidatePatchEdits"/>.
+        /// </summary>
+        internal static string NormalisePatchAliases(ToolCallResult tc)
+        {
+            if (tc?.Arguments == null) return null;
+            var renamed = new List<string>();
+
+            foreach (var (canonical, aliases) in PatchKeyAliases)
+            {
+                var present = aliases.Where(a => tc.Arguments.TryGetValue(a, out string v) && v != null).ToList();
+                if (present.Count == 0) continue;
+                string error = ResolveAlias(canonical, present,
+                    key => tc.Arguments.TryGetValue(key, out string v) ? v : null, "patch_file: the call");
+                if (error != null) return error;
+                if (!tc.Arguments.TryGetValue(canonical, out string current) || current == null)
+                {
+                    tc.Arguments[canonical] = tc.Arguments[present[0]];
+                    renamed.Add($"{present[0]}->{canonical}");
+                }
+                foreach (string alias in present) tc.Arguments.Remove(alias);
+            }
+
+            string editsJson = GetArg(tc, "edits");
+            if (!string.IsNullOrWhiteSpace(editsJson))
+            {
+                JArray edits = null;
+                try { edits = JArray.Parse(editsJson); }
+                catch (Exception) { /* ValidatePatchEdits reports it */ }
+
+                bool changed = false;
+                for (int i = 0; edits != null && i < edits.Count; i++)
+                {
+                    if (!(edits[i] is JObject item)) continue;
+                    foreach (var (canonical, aliases) in PatchKeyAliases)
+                    {
+                        var present = aliases.Where(a => item[a] != null && item[a].Type != JTokenType.Null).ToList();
+                        if (present.Count == 0) continue;
+                        string error = ResolveAlias(canonical, present,
+                            key => item[key] == null || item[key].Type == JTokenType.Null ? null : item[key].ToString(),
+                            $"patch_file: edit {i + 1}");
+                        if (error != null) return error;
+                        if (item[canonical] == null || item[canonical].Type == JTokenType.Null)
+                        {
+                            item.Property(canonical)?.Remove();
+                            item.Property(present[0]).Replace(new JProperty(canonical, item[present[0]]));
+                            renamed.Add($"{present[0]}->{canonical}");
+                            present.RemoveAt(0);
+                        }
+                        foreach (string alias in present) item.Remove(alias);
+                        changed = true;
+                    }
+                }
+                if (changed) tc.Arguments["edits"] = edits.ToString(Newtonsoft.Json.Formatting.None);
+            }
+
+            // Count only, once per call: which renames happened and how many keys.
+            if (renamed.Count > 0)
+                tc.ArgumentNote = $"patch_file: normalised alias {string.Join(", ", renamed.Distinct())} ({renamed.Count} key{(renamed.Count == 1 ? "" : "s")})";
+            return null;
+        }
+
+        /// <summary>Null when <paramref name="canonical"/> and the <paramref name="present"/>
+        /// aliases all carry the same text (or the canonical key is absent and the aliases
+        /// agree); otherwise the "ambiguous" error.</summary>
+        private static string ResolveAlias(string canonical, List<string> present, Func<string, string> valueOf, string where)
+        {
+            string canonicalValue = valueOf(canonical);
+            string reference = canonicalValue ?? valueOf(present[0]);
+            string referenceKey = canonicalValue != null ? canonical : present[0];
+            foreach (string alias in present)
+            {
+                if (valueOf(alias) != reference)
+                    return $"{where} has both '{referenceKey}' and '{alias}' with different text — it is ambiguous which to use. " +
+                           $"Send the text under '{canonical}' only.";
+            }
             return null;
         }
 

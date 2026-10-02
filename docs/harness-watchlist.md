@@ -672,7 +672,8 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   an empty `find`, a non-object item, an empty array or non-JSON. There is no fallback to the top-level find/replace when `edits`
   was given, and no aliases. Without `edits`, `find` and `replace` are both required. `ToolCallMapperTests` pinned the old fallback;
   it now pins the error.
-- **Status:** fixed, pending deploy - same commit as H-53.
+- **Status:** fixed, pending deploy - same commit as H-53. (Known aliases are accepted since H-56; the error now fires only for
+  genuinely unknown keys.)
 
 ### H-55 - A grep and a read of the same file in one turn return the same result
 - **Reported as:** "invalid regex is a silent no-match" - job-1973's grep_file `ConnectAsync|Calls.Add("connect` "returned only the
@@ -699,6 +700,21 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   Tests: `PerCallToolResultTests` (patch then read, read then patch, two patches of one file, two create_files one of which fails).
 - **Status:** fixed, pending deploy - commits "H-53/H-54/H-55: ..." and "H-55: per-call results for patch and write tools; calls
   run in call order".
+
+### H-56 - patch_file called with other editors' key names costs an iteration each time
+- **First seen:** 2026-10-02, job-2108 (Qwen3.8 Flash): lost at least 4 iterations to H-54 errors from `old_text`/`new_text`, and
+  narrated "I keep reaching for new_text/old_text by reflex". Also seen: `old_string`/`new_string`, `search`/`replace`. The H-54
+  error was accurate, but the model repeated the mistake regardless.
+- **Fix:** `ToolCallMapper.NormalisePatchAliases` runs before validation and renames `old_text` | `old_string` | `search` | `from`
+  -> `find` and `new_text` | `new_string` | `to` -> `replace`, at the top level and in every `edits` item. When a canonical key and an
+  alias (or two aliases) carry DIFFERENT text the call is rejected: `patch_file: edit 2 has both 'find' and 'old_text' with different
+  text — it is ambiguous which to use. Send the text under 'find' only.` An identical duplicate is dropped. Any other key still gets
+  the H-54 error. A call that was renamed journals one `tool_args` entry, count only, e.g. `patch_file: normalised alias
+  old_text->find, new_text->replace (4 keys)` (`ToolCallResult.ArgumentNote` -> `ResponseBlock.ArgumentNote`, recorded by
+  `AgenticExecutor` through `IActionJournal`; the TUI has no journal). Watch the count: if it stays high, the schema or prompt is
+  fighting the model's training and the descriptions may need the aliases spelt out.
+- **Status:** fixed, pending deploy - commit "H-56: patch_file accepts common find/replace key aliases". Tests:
+  `ToolArgumentValidationTests` (H-56 section, mutation-checked: disabling the rename fails all 15).
 
 ## Parked
 

@@ -157,6 +157,12 @@ namespace DevMind
 
             foreach (var block in outcome.Blocks)
             {
+                // H-56: the mapper rewrote this call's arguments (patch_file alias keys).
+                // One entry per call, so the journal shows how often it fires.
+                if (block.ArgumentNote != null && (processPatches || block.Type != BlockType.Patch)
+                    && _host is IActionJournal journal)
+                    journal.RecordAction("tool_args", block.ArgumentNote, success: true);
+
                 if (block.Type == BlockType.Patch)
                 {
                     if (processPatches) pendingPatches.Add(block);

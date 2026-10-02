@@ -13,6 +13,9 @@
 //         job-1973 concluded "grep_file is broken for patterns containing parentheses" from a
 //         grep that had found 5 matches. (grep/find are substring matchers, not regex — an
 //         unbalanced paren was never the problem.)
+//   H-56  (job-2108) the model kept sending old_text/new_text "by reflex". Known aliases are now
+//         renamed to find/replace and journaled; a canonical key plus a conflicting alias is
+//         rejected; anything else still gets the H-54 error.
 
 using Newtonsoft.Json.Linq;
 using Xunit;
@@ -137,13 +140,14 @@ namespace DevMind.Core.Tests
         // ── H-54: patch_file edit keys ──────────────────────────────────────────────
 
         [Fact]
-        public void PatchFile_EditsKeyedOldTextNewText_IsAnErrorNamingTheEditAndItsKeys()
+        public void PatchFile_EditsWithUnknownKeys_IsAnErrorNamingTheEditAndItsKeys()
         {
+            // old_text/new_text are aliases since H-56; before/after are not.
             var tc = Call("patch_file", ("filename", @"C:\x\a.cs"),
-                ("edits", "[{\"old_text\":\"a\",\"new_text\":\"b\"}]"));
+                ("edits", "[{\"before\":\"a\",\"after\":\"b\"}]"));
 
             Assert.Equal(
-                "[TOOL ERROR] patch_file: edit 1 has no 'find' key (keys: old_text, new_text). " +
+                "[TOOL ERROR] patch_file: edit 1 has no 'find' key (keys: before, after). " +
                 "Each edit must be {\"find\": ..., \"replace\": ...}.",
                 Map(tc, out var blocks));
             Assert.DoesNotContain(blocks, b => b.Type == BlockType.Patch);
@@ -153,23 +157,23 @@ namespace DevMind.Core.Tests
         public void PatchFile_OneBadEditAmongGoodOnes_RejectsTheWholeCall_NoFallbackToTopLevelFind()
         {
             var tc = Call("patch_file", ("filename", @"C:\x\a.cs"), ("find", "a"), ("replace", "b"),
-                ("edits", "[{\"find\":\"a\",\"replace\":\"b\"},{\"find\":\"c\",\"new_text\":\"d\"}]"));
+                ("edits", "[{\"find\":\"a\",\"replace\":\"b\"},{\"find\":\"c\",\"after\":\"d\"}]"));
 
             string toolResult = Map(tc, out var blocks);
 
-            Assert.Contains("edit 2 has no 'replace' key (keys: find, new_text)", toolResult);
+            Assert.Contains("edit 2 has no 'replace' key (keys: find, after)", toolResult);
             Assert.DoesNotContain(blocks, b => b.Type == BlockType.Patch);
         }
 
         [Fact]
-        public async Task PatchFile_OldTextNewText_EndToEnd_FileUntouched_ModelToldWhy()
+        public async Task PatchFile_UnknownEditKeys_EndToEnd_FileUntouched_ModelToldWhy()
         {
             string file = Path.Combine(_dir, "a.txt");
             File.WriteAllText(file, "alpha\nbeta\n");
             using var server = new FakeSseServer();
             server.SseQueue.Add(FakeSseServer.BuildToolCallSse("patch_file",
                 "{\"filename\":\"" + file.Replace("\\", "\\\\") + "\"," +
-                "\"edits\":[{\"old_text\":\"alpha\",\"new_text\":\"ALPHA\"}]}"));
+                "\"edits\":[{\"before\":\"alpha\",\"after\":\"ALPHA\"}]}"));
             server.SseQueue.Add(FakeSseServer.BuildToolCallSse("task_done", "{\"summary\":\"done\"}"));
 
             var result = await Run(server);
@@ -178,7 +182,7 @@ namespace DevMind.Core.Tests
             Assert.Equal("alpha\nbeta\n", File.ReadAllText(file));
             Assert.DoesNotContain(result.Actions, a => a.Kind == "patch");
             string toolMsg = Assert.Single(ToolMessages(server.RequestBodies[1]));
-            Assert.Contains("patch_file: edit 1 has no 'find' key (keys: old_text, new_text)", toolMsg);
+            Assert.Contains("patch_file: edit 1 has no 'find' key (keys: before, after)", toolMsg);
         }
 
         [Fact]
@@ -197,6 +201,148 @@ namespace DevMind.Core.Tests
             string toolMsg = Assert.Single(ToolMessages(server.RequestBodies[1]));
             Assert.Contains("create_file: missing required argument 'filename'. Received: path, content.", toolMsg);
             Assert.DoesNotContain("Value cannot be null", server.RequestBodies[1]);
+        }
+
+        // ── H-56: patch_file key aliases ────────────────────────────────────────────
+
+        private const string CanonicalEdits = "PATCH C:\\x\\a.cs\nFIND:\na\nREPLACE:\nb\nEND_PATCH";
+
+        [Theory]
+        [InlineData("old_text", "new_text")]
+        [InlineData("old_string", "new_string")]
+        [InlineData("search", "replace")]
+        [InlineData("from", "to")]
+        [InlineData("old_text", "to")]
+        public void PatchFile_AliasPairInEdits_ProducesTheSamePatchAsFindReplace(string findKey, string replaceKey)
+        {
+            var tc = Call("patch_file", ("filename", @"C:\x\a.cs"),
+                ("edits", $"[{{\"{findKey}\":\"a\",\"{replaceKey}\":\"b\"}}]"));
+
+            Map(tc, out var blocks);
+
+            Assert.Null(tc.ArgumentError);
+            var block = Assert.Single(blocks);
+            Assert.Equal(BlockType.Patch, block.Type);
+            Assert.Equal(CanonicalEdits, block.Content);
+        }
+
+        [Theory]
+        [InlineData("old_text", "new_text")]
+        [InlineData("old_string", "new_string")]
+        [InlineData("search", "replace")]
+        [InlineData("from", "to")]
+        public void PatchFile_AliasPairAtTopLevel_ProducesTheSamePatchAsFindReplace(string findKey, string replaceKey)
+        {
+            var tc = Call("patch_file", ("filename", @"C:\x\a.cs"), (findKey, "a"), (replaceKey, "b"));
+
+            Map(tc, out var blocks);
+
+            Assert.Null(tc.ArgumentError);
+            Assert.Equal(CanonicalEdits, Assert.Single(blocks).Content);
+        }
+
+        [Fact]
+        public void PatchFile_Aliases_NoteIsOncePerCall_CountOnly()
+        {
+            var tc = Call("patch_file", ("filename", @"C:\x\a.cs"),
+                ("edits", "[{\"old_text\":\"a\",\"new_text\":\"b\"},{\"old_text\":\"c\",\"new_text\":\"\"},{\"find\":\"e\",\"replace\":\"f\"}]"));
+
+            Map(tc, out var blocks);
+
+            const string note = "patch_file: normalised alias old_text->find, new_text->replace (4 keys)";
+            Assert.Equal(note, tc.ArgumentNote);
+            var block = Assert.Single(blocks);
+            Assert.Equal(note, block.ArgumentNote);
+            Assert.Equal("PATCH C:\\x\\a.cs\nFIND:\na\nREPLACE:\nb\nFIND:\nc\nREPLACE:\n\nFIND:\ne\nREPLACE:\nf\nEND_PATCH", block.Content);
+        }
+
+        [Fact]
+        public void PatchFile_CanonicalKeys_NoNote()
+        {
+            var tc = Call("patch_file", ("filename", @"C:\x\a.cs"), ("find", "a"), ("replace", "b"));
+            Map(tc, out var blocks);
+            Assert.Null(tc.ArgumentNote);
+            Assert.Null(Assert.Single(blocks).ArgumentNote);
+        }
+
+        [Fact]
+        public void PatchFile_CanonicalAndConflictingAliasInAnEdit_IsRejected()
+        {
+            var tc = Call("patch_file", ("filename", @"C:\x\a.cs"),
+                ("edits", "[{\"find\":\"a\",\"replace\":\"b\"},{\"find\":\"c\",\"old_text\":\"x\",\"replace\":\"d\"}]"));
+
+            string toolResult = Map(tc, out var blocks);
+
+            Assert.Equal(
+                "[TOOL ERROR] patch_file: edit 2 has both 'find' and 'old_text' with different text — it is ambiguous " +
+                "which to use. Send the text under 'find' only.",
+                toolResult);
+            Assert.DoesNotContain(blocks, b => b.Type == BlockType.Patch);
+        }
+
+        [Fact]
+        public void PatchFile_CanonicalAndConflictingAliasAtTopLevel_IsRejected()
+        {
+            var tc = Call("patch_file", ("filename", @"C:\x\a.cs"), ("find", "a"), ("replace", "b"), ("new_string", "c"));
+
+            string toolResult = Map(tc, out var blocks);
+
+            Assert.Contains("patch_file: the call has both 'replace' and 'new_string' with different text", toolResult);
+            Assert.DoesNotContain(blocks, b => b.Type == BlockType.Patch);
+        }
+
+        [Fact]
+        public void PatchFile_TwoConflictingAliases_IsRejected()
+        {
+            var tc = Call("patch_file", ("filename", @"C:\x\a.cs"),
+                ("edits", "[{\"old_text\":\"a\",\"search\":\"z\",\"new_text\":\"b\"}]"));
+
+            Assert.Contains("patch_file: edit 1 has both 'old_text' and 'search' with different text", Map(tc, out var blocks));
+            Assert.DoesNotContain(blocks, b => b.Type == BlockType.Patch);
+        }
+
+        [Fact]
+        public void PatchFile_CanonicalAndIdenticalAlias_IsAccepted()
+        {
+            var tc = Call("patch_file", ("filename", @"C:\x\a.cs"),
+                ("edits", "[{\"find\":\"a\",\"old_text\":\"a\",\"replace\":\"b\"}]"));
+
+            Map(tc, out var blocks);
+
+            Assert.Null(tc.ArgumentError);
+            Assert.Equal(CanonicalEdits, Assert.Single(blocks).Content);
+        }
+
+        [Fact]
+        public void PatchFile_AliasPlusUnknownKey_StillGetsTheH54Error()
+        {
+            var tc = Call("patch_file", ("filename", @"C:\x\a.cs"), ("edits", "[{\"old_text\":\"a\",\"after\":\"b\"}]"));
+
+            Assert.Equal(
+                "[TOOL ERROR] patch_file: edit 1 has no 'replace' key (keys: find, after). " +
+                "Each edit must be {\"find\": ..., \"replace\": ...}. Use \"replace\": \"\" to delete.",
+                Map(tc, out _));
+        }
+
+        [Fact]
+        public async Task PatchFile_OldTextNewText_EndToEnd_FilePatched_AliasJournaledOnce()
+        {
+            string file = Path.Combine(_dir, "a.txt");
+            File.WriteAllText(file, "alpha\nbeta\n");
+            using var server = new FakeSseServer();
+            server.SseQueue.Add(FakeSseServer.BuildToolCallSse("patch_file",
+                "{\"filename\":\"" + file.Replace("\\", "\\\\") + "\"," +
+                "\"edits\":[{\"old_text\":\"alpha\",\"new_text\":\"ALPHA\"},{\"old_text\":\"beta\",\"new_text\":\"BETA\"}]}"));
+            server.SseQueue.Add(FakeSseServer.BuildToolCallSse("task_done", "{\"summary\":\"done\"}"));
+
+            var result = await Run(server);
+
+            Assert.Null(result.Error);
+            Assert.Equal("ALPHA\nBETA\n", File.ReadAllText(file));
+            Assert.Contains(result.Actions, a => a.Kind == "patch");
+            var note = Assert.Single(result.Actions, a => a.Kind == "tool_args");
+            Assert.Equal("patch_file: normalised alias old_text->find, new_text->replace (4 keys)", note.Detail);
+            Assert.DoesNotContain("[TOOL ERROR]", Assert.Single(ToolMessages(server.RequestBodies[1])));
         }
 
         // ── H-55: one turn, grep + read of the same file ────────────────────────────

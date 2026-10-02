@@ -49,6 +49,13 @@ namespace DevMind
         /// </summary>
         public string ArgumentError { get; set; }
 
+        /// <summary>
+        /// Set by ToolCallMapper.Map when it rewrote the arguments before running the call:
+        /// patch_file alias keys renamed to find/replace (H-56). Journaled once per call, so
+        /// how often the model reaches for the aliases is visible.
+        /// </summary>
+        public string ArgumentNote { get; set; }
+
         /// <summary>Reasoning/thinking text from the model, if present.</summary>
         public string ThinkingText { get; set; }
     }

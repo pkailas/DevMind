@@ -55,5 +55,6 @@ namespace DevMind
         public string McpTool { get; set; }                               // for McpCall — tool name on that server
         public JObject McpArguments { get; set; }                         // for McpCall — typed arguments, forwarded un-flattened
         public string ToolCallId { get; set; }                            // the call's ResultId; keys the result — McpCall (McpToolName.ResultKey) and the read-side tools (ExecutionResult.ToolResultsByCallId)
+        public string ArgumentNote { get; set; }                          // ToolCallResult.ArgumentNote (H-56 alias rename); journaled by AgenticExecutor
     }
 }
