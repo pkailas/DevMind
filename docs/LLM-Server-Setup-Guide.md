@@ -105,8 +105,10 @@ Notes:
 
 - **Thinking is off by default** for agentic work (the daily driver disables it
   via `--chat-template-kwargs`; DevMind's task tools also default `think=false`)
-  — reasoning runs unbounded on a local server and can add minutes per
-  iteration. Turn it on per-task, not globally.
+  — thinking is capped only by the server's reasoning budget, and with
+  `--reasoning-budget -1` as above it is uncapped and can add minutes per
+  iteration (Strata caps it with `"reasoning_budget_tokens"` in its config).
+  Turn it on per-task, not globally.
 - `--parallel 1` is deliberate: DevMind's MCP job queue runs one task at a time
   on a single GPU — a queue beats KV-cache thrash.
 - If you serve on a LAN address (`--host 10.0.0.15` / `0.0.0.0`), set

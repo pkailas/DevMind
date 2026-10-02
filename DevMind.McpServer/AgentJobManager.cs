@@ -40,7 +40,7 @@ namespace DevMind.McpServer
         /// test_verification to the result (default false — tests can be slow).</summary>
         public bool VerifyTests { get; init; }
         /// <summary>Enable model reasoning (think blocks) for this task. Default false:
-        /// briefed mechanical tasks iterate faster without unbounded thinking.</summary>
+        /// briefed mechanical tasks iterate faster without spending the server's reasoning budget each iteration.</summary>
         public bool Think { get; init; }
         /// Stream the model's think blocks into the job's transcript (DISPLAY only —
         /// generation is <see cref="Think"/> / HeadlessOptions.ShowLlmThinking).

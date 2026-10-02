@@ -31,7 +31,7 @@ client.
 | `allow_commit` | false | Whether the agent may run `git commit`. Leave off — the caller owns version control. |
 | `verify_build` | true | After the agent finishes, the job runner builds the working_dir itself and attaches `build_verification` to the result. |
 | `verify_tests` | false | After a successful build verification, also run `dotnet test` and attach `test_verification`. |
-| `think` | false | Enable model reasoning for this task. Leave off for briefed mechanical tasks — thinking runs unbounded on the local server and can add minutes per iteration. |
+| `think` | false | Enable model reasoning for this task. Capped by the backend server's reasoning budget (e.g. 3000 tokens on the current Strata config; a server without a budget is uncapped) and adds up to that many tokens per iteration. Leave off for mechanical jobs; turn on for jobs that rearrange existing behaviour or need consequence reasoning. |
 
 `devmind_task_start` health-probes the model server first and fails fast with a
 clear message if it's down. Jobs run **one at a time** (single GPU — a queue
