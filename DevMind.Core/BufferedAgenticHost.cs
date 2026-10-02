@@ -214,8 +214,14 @@ namespace DevMind
         /// and destroying two earlier tasks' uncommitted changes; another job taskkilled
         /// the operator's running API to unblock a build. Recovery-from-git and process
         /// control are reserved for the human operator in delegated runs.
+        /// <para>
+        /// H-59: reading git objects is allowed — <c>git show HEAD:path</c> to the console, into a
+        /// variable or piped to Select-String / Compare-Object. Only a write of that content to a
+        /// file inside <paramref name="workingDirectory"/> is blocked (<see cref="GitWriteGuard"/>);
+        /// the old test ("git show" plus any "&gt;" anywhere) blocked regexes and quoted strings.
+        /// </para>
         /// </summary>
-        internal static bool IsBlockedHeadlessCommand(string command, out string reason)
+        internal static bool IsBlockedHeadlessCommand(string command, out string reason, string workingDirectory = null)
         {
             reason = null;
             if (string.IsNullOrWhiteSpace(command)) return false;
@@ -223,18 +229,17 @@ namespace DevMind
 
             bool has(string s) => c.Contains(s, StringComparison.Ordinal);
 
+            // Substring backstop for restore-type commands, kept from the job-11 rule: it also
+            // catches them inside a nested `cmd /c "..."` or `powershell -Command "..."`.
             if (has("git restore") || has("git checkout --") || has("git checkout .")
                 || has("git checkout head") || has("git reset --hard") || has("git clean"))
             {
-                reason = "restores/discards working-tree files from git";
+                reason = GitWriteGuard.RestoreReason;
                 return true;
             }
 
-            if (has("git show") && (has(">") || has("set-content") || has("out-file") || has("| sc ")))
-            {
-                reason = "writes git object content over working-tree files";
-                return true;
-            }
+            reason = GitWriteGuard.Classify(command, workingDirectory);
+            if (reason != null) return true;
 
             if (has("taskkill") || has("stop-process") || has("kill -9"))
             {
@@ -453,7 +458,8 @@ namespace DevMind
                 return (1, NoExecuteBlockMessage("execution of shell command '" + command + "'"));
             }
 
-            if (RestrictWritesToWorkingDirectory && IsBlockedHeadlessCommand(command, out string blockReason))
+            if (RestrictWritesToWorkingDirectory
+                && IsBlockedHeadlessCommand(command, out string blockReason, _shellRunner.WorkingDirectory))
             {
                 RecordAction("blocked", $"shell ({blockReason}): {command}", success: false);
                 AppendOutput($"[SHELL GUARD] Blocked ({blockReason}): {command}\n", OutputColor.Error);
@@ -461,7 +467,9 @@ namespace DevMind
                     $"[BLOCKED] This command is not allowed in delegated tasks: {blockReason}. " +
                     "Do NOT restore files from git history (it can destroy uncommitted work from " +
                     "earlier tasks) and do NOT kill processes. To fix a broken file, READ its " +
-                    "current content and apply corrective patches instead.");
+                    "current content and apply corrective patches instead. Reading history is fine: " +
+                    "`git show <rev>:<path>` to the console, into a variable, or piped to " +
+                    "Select-String / Compare-Object is allowed — just do not write it into the working tree.");
             }
 
             AppendOutput($"[SHELL] > {command}\n", OutputColor.Dim);

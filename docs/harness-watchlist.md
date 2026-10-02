@@ -795,6 +795,37 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   pass de-escalation each fails unit and session tests. Watch: does the note change the next action (a dump / print of the
   actual value) and how often escalation fires per job.
 
+### H-59 - Shell guard blocks read-only `git show HEAD:<path>`
+- **First seen:** 2026-10-02. job-2115 (`$head = git show "HEAD:$f"` ... `Compare-Object $h $n | Where-Object SideIndicator -eq
+  '=>'`) and job-2116 (`git show HEAD:.../Index.cshtml | Select-String -Pattern "p>|label|select|input"`) were both blocked
+  with `[SHELL GUARD] Blocked (writes git object content over working-tree files)`. Neither wrote a file, and the briefs had
+  told the agents to compare against HEAD with `git show`. job-2115 fell back to `git diff`.
+- **Cause:** `BufferedAgenticHost.IsBlockedHeadlessCommand` (the job-11 rule) blocked any command containing `git show` AND
+  `>` / `set-content` / `out-file` / `| sc ` ANYWHERE in its text. The `>` was the quoted `'=>'` in job-2115 and the regex
+  `p>` in job-2116. The same substring approach also MISSED `git checkout <sha> -- <path>` (only `checkout --` and
+  `checkout head` were matched).
+- **Fix (done 2026-10-02):** new `GitWriteGuard` (DevMind.Core/GitWriteGuard.cs). It splits the command into statements
+  (`;` newline `&&` `||`) and pipeline stages (`|`) outside quotes. A source is `git show` / `git cat-file`, or a variable
+  assigned from one (taint follows reassignment: `$h = Toks $head` stays tainted, `$h = 'x'` clears it). From the source
+  on, it blocks only a write whose target resolves inside the job's working dir (following any `cd` in the command): stdout
+  redirects (`>`, `>>`, `1>`, `*>`, but not `2>`, `2>&1`, `>$null`, `>NUL`), Out-File / Set-Content / sc / Add-Content /
+  ac / Tee-Object / tee (not `Tee-Object -Variable`), `[IO.File]::Write*/Append*`, and `git show --output`. `$env:X`,
+  `%X%` and `~` are expanded. A target still holding a variable (`Set-Content $f`) counts as inside. Restore detection
+  moved there too: `checkout` with `--`, `.`, rev+path, or a HEAD rev; `restore`; `reset --hard`; `clean`. The old
+  restore substrings are kept as a backstop (they also catch `cmd /c "git checkout -- x"`). The `[BLOCKED]` message now
+  says reading history to the console, a variable or a pipe is allowed.
+- **Tests:** `GitWriteGuardTests`: job-2115 and job-2116 verbatim (cd target changed) are allowed, as are console / variable /
+  Select-String / Measure / Compare-Object / `2>&1` / `>$null` / `Tee-Object -Variable`, and redirects or writers aimed at
+  `$env:TEMP`, `%TEMP%` or another drive. Blocked: `> a.cs`, `>> a.cs`, `| Set-Content a.cs`, `| sc`, Out-File (both
+  argument orders), Add-Content, Tee-Object -FilePath, job-11 verbatim, `Set-Content $f`, absolute in-tree path, `cd src;`
+  relative, `git cat-file -p ... > a.cs`, `--output=a.cs`, tainted variable via Set-Content / Out-File / `[IO.File]::WriteAllText`,
+  and a redirect inside a ForEach-Object script block. Restores: `checkout HEAD -- a.cs` (still blocked), `checkout <sha> --
+  a.cs` (newly blocked), `checkout HEAD a.cs`, `restore --source`, `git -C <dir> restore`, `reset --hard`, `clean -fd`.
+- **Limits:** lexing is approximate (no brace or here-string tracking). A write via a tool the guard does not know
+  (`Copy-Item` of a file written to %TEMP%, `cmd /c` with a redirect inside quotes) is not caught. That is the same trust
+  boundary as before: shell commands are not sandboxed.
+- **Status:** fixed (2026-10-02), pending deploy.
+
 ## Parked
 
 ### P-01 - No-write-streak nudge
