@@ -1,4 +1,4 @@
-// File: SelfReportedIncompleteDetector.cs  v1.4
+// File: SelfReportedIncompleteDetector.cs  v1.5
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // When the agent's own final answer says the work is not finished.
@@ -45,6 +45,10 @@
 // the TUI; did not commit." — both things the brief forbade) ended stopped_incomplete on a
 // phrase hit while the harness's own build and tests were green. The detector does not decide
 // what a weak hit means; AgentJob does, by weighing it against harness verification.
+//
+// v1.5 (H-43): "INCOMPLETE: none." followed by an explanation is still the all-clear. job-2104
+// ("INCOMPLETE: none. Only the TotalAgility page changed; ...") and job-1850/1861 ended
+// stopped_incomplete because v1.2 accepted the none-word only as the WHOLE marker text.
 
 using System;
 using System.Collections.Generic;
@@ -146,10 +150,16 @@ namespace DevMind
             @"^\s*(?:>\s*)*(?:[-*+]|\d+[.)])\s+", RegexOptions.Compiled);
 
         // The text after a marker that says there is nothing unfinished: none, nothing, n/a, na,
-        // "-" or a dash, optionally emphasised and followed by punctuation. Empty is handled by
-        // the caller, because an empty marker may be a header over a list.
+        // "-" or a dash, optionally emphasised, optionally "outstanding"/"remaining"/"left"/
+        // "pending", then either the end of the line (after optional punctuation) or an
+        // explanation: a sentence after . ! ; ("none. Only the X page changed"), or a
+        // parenthesis or dash ("none (full suite delegated)", "none — X"). A word straight after
+        // it ("none of the tests ran", "n/a for build, but ...") or a comma ("none, but ...") is
+        // a statement about unfinished work and does not match. Empty is handled by the caller,
+        // because an empty marker may be a header over a list.
         private static readonly Regex NothingUnfinished = new Regex(
-            @"^(?:\*\*|__|\*|_)?(?:none|nothing|n/a|na|-|—|–)(?:\*\*|__|\*|_)?[.!;,]*(?:\*\*|__|\*|_)?$",
+            @"^(?:\*\*|__|\*|_)?(?:none|nothing|n/a|na|-|—|–)(?:\*\*|__|\*|_)?(?:\s+(?:outstanding|remaining|left|pending))?(?:\*\*|__|\*|_)?" +
+            @"(?:[.!;,]*(?:\*\*|__|\*|_)?$|[.!;]+(?:\*\*|__|\*|_)?\s+\S.*$|\s+[(\[—–].*$|\s+-\s+.*$)",
             RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
         /// <summary>

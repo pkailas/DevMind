@@ -1,4 +1,4 @@
-// File: SelfReportVerificationGateTests.cs  v1.0
+// File: SelfReportVerificationGateTests.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // H-31: a phrase-list hit in the final answer is weak evidence; green harness verification
@@ -6,13 +6,16 @@
 // it.", 1763/1763 green) and job-1715 ("- Did not run the TUI; did not commit." — both
 // forbidden by the brief; build + 1849/1849 green) ended stopped_incomplete on the phrase alone.
 //
+// H-43: the same holds for an explicit INCOMPLETE: marker. job-2118 ended stopped_incomplete on
+// "INCOMPLETE: full solution test suite (1308 + 11 new) not run by me — harness verifies it."
+// while the harness's own test run was green (1319, +11).
+//
 // The rule, as a table:
-//   STRONG (INCOMPLETE: marker)   → stopped_incomplete, whatever the harness measured
-//   WEAK   (phrase hit only)      → done + self_report_note ONLY when the harness TEST run was
+//   STRONG or WEAK self-report    → done + self_report_note ONLY when the harness TEST run was
 //                                   green (verify_tests on, build and test verification both
 //                                   passed); stopped_incomplete otherwise — a green build alone
 //                                   proves nothing was fixed, and verify_build off is the H-01
-//                                   shape the phrase list exists for
+//                                   shape the self-report exists for
 //   NONE                          → unaffected
 
 using System.Diagnostics;
@@ -82,13 +85,14 @@ namespace DevMind.McpServer.Tests
         };
 
         [Theory]
-        // strong: always incomplete
-        [InlineData("strong", "build-ok+tests-ok", true)]
+        // strong: incomplete only when the harness did not positively verify (H-43)
+        [InlineData("strong", "build-ok+tests-ok", false)]
         [InlineData("strong", "build-ok+tests-not-requested", true)]
         [InlineData("strong", "build-failed", true)]
         [InlineData("strong", "build-not-run", true)]
         [InlineData("strong", "tests-failed", true)]
-        // weak: incomplete only when the harness did not positively verify
+        [InlineData("strong", "tests-requested-not-run", true)]
+        // weak: the same rule (H-31)
         [InlineData("weak", "build-ok+tests-ok", false)]
         [InlineData("weak", "build-ok+tests-not-requested", true)]   // a green build alone is not enough
         [InlineData("weak", "build-failed", true)]
@@ -108,16 +112,59 @@ namespace DevMind.McpServer.Tests
 
             Assert.Equal(expectIncomplete, job.IsIncomplete);
 
-            bool selfReasonExpected = selfReport == "strong" || (selfReport == "weak" && expectIncomplete);
+            bool selfReasonExpected = selfReport != "none" && expectIncomplete;
             Assert.Equal(selfReasonExpected, reasons.Contains(SelfReportedIncompleteDetector.Reason));
 
-            // The weak line is never lost: it is either an incomplete reason or the note.
-            bool noteExpected = selfReport == "weak" && !expectIncomplete;
+            // The self-reported line is never lost: it is either an incomplete reason or the note.
+            bool noteExpected = selfReport != "none" && !expectIncomplete;
             Assert.Equal(noteExpected, job.SelfReportNote != null);
-            if (selfReport == "weak")
-                Assert.True(noteExpected
-                    ? job.SelfReportNote == "The core defect is NOT fixed yet."
-                    : reasons.Contains("The core defect is NOT fixed yet."));
+            if (selfReport != "none")
+            {
+                string line = selfReport == "strong" ? "INCOMPLETE: the migration is not written" : "The core defect is NOT fixed yet.";
+                Assert.True(noteExpected ? job.SelfReportNote == line : reasons.Contains(line));
+            }
+        }
+
+        // Verbatim from job-2118 (H-43).
+        private const string Job2118Line =
+            "INCOMPLETE: full solution test suite (1308 + 11 new) not run by me — harness verifies it. Nothing else outstanding. No commit made.";
+
+        [Fact]
+        public void Job2118_MarkerWithTestsVerifiedGreen_EndsDone_WithTheLineAsANote()
+        {
+            var job = Job("Moved Server > Security onto the shared form layout.\n" + Job2118Line, "build-ok+tests-ok");
+
+            Assert.False(job.IsIncomplete);
+            Assert.Empty(job.IncompleteReasons());
+            Assert.Equal(Job2118Line, job.SelfReportNote);
+        }
+
+        [Theory]
+        [InlineData("tests-failed")]
+        [InlineData("build-ok+tests-not-requested")]   // verify_tests off
+        [InlineData("build-not-run")]
+        public void Job2118_MarkerWithoutAGreenTestRun_EndsStoppedIncomplete(string verification)
+        {
+            var job = Job("Moved Server > Security onto the shared form layout.\n" + Job2118Line, verification);
+
+            Assert.True(job.IsIncomplete);
+            Assert.Contains(SelfReportedIncompleteDetector.Reason, job.IncompleteReasons());
+            Assert.Contains(Job2118Line, job.IncompleteReasons());
+            Assert.Null(job.SelfReportNote);
+        }
+
+        [Theory]
+        [InlineData("INCOMPLETE: none.")]
+        [InlineData("INCOMPLETE: Nothing")]
+        [InlineData("INCOMPLETE: n/a.")]
+        [InlineData("INCOMPLETE: none. Only the TotalAgility page changed; other config pages untouched.")] // job-2104
+        public void ANoneMarker_IsDone_WithNoNote_EvenWithoutTestVerification(string line)
+        {
+            var job = Job("Patched the parser.\n" + line, "build-ok+tests-not-requested");
+
+            Assert.False(job.IsIncomplete);
+            Assert.Empty(job.IncompleteReasons());
+            Assert.Null(job.SelfReportNote);
         }
 
         [Fact]
@@ -164,13 +211,20 @@ namespace DevMind.McpServer.Tests
         }
 
         [Fact]
-        public void APhraseAboveAMarker_IsStillStrong_EvenWhenVerifiedGreen()
+        public void APhraseAboveAMarker_QuotesTheMarker()
         {
-            var job = Job("- Did not run the TUI.\nINCOMPLETE: the migration is not written", "build-ok+tests-ok");
+            // The marker outranks the earlier phrase hit: it is the line a driver must read,
+            // whichever field it lands in.
+            const string answer = "- Did not run the TUI.\nINCOMPLETE: the migration is not written";
 
-            Assert.True(job.IsIncomplete);
-            Assert.Contains("INCOMPLETE: the migration is not written", job.IncompleteReasons());
-            Assert.Null(job.SelfReportNote);
+            var verified = Job(answer, "build-ok+tests-ok");
+            Assert.False(verified.IsIncomplete);
+            Assert.Equal("INCOMPLETE: the migration is not written", verified.SelfReportNote);
+
+            var unverified = Job(answer, "build-ok+tests-not-requested");
+            Assert.True(unverified.IsIncomplete);
+            Assert.Contains("INCOMPLETE: the migration is not written", unverified.IncompleteReasons());
+            Assert.Null(unverified.SelfReportNote);
         }
 
         [Fact]
@@ -236,6 +290,49 @@ namespace DevMind.McpServer.Tests
                 Assert.Equal(JsonValueKind.Null, root.GetProperty("incomplete_reasons").ValueKind);
                 Assert.Equal("- Did not run the TUI; did not commit.", root.GetProperty("self_report_note").GetString());
             }
+        }
+
+        [Fact]
+        public async Task StatusDuringTestVerification_IsRunning_ThenDoneWithTheNote()
+        {
+            // H-43: job-2118's status read stopped_incomplete with "[job] test verification:
+            // running..." as the tail's last line. The verdict must wait for the test run, and the
+            // tail must say when it finished.
+            using var server = new EditThenDoneLlmServer(Path.Combine(_dir, "newfile.txt"), "Patched it.\n" + Job2118Line);
+            Environment.SetEnvironmentVariable("DEVMIND_ENDPOINT", server.BaseUrl);
+
+            var testsStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseTests = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var mgr = new AgentJobManager();
+            mgr.BuildRunnerOverride = (_, _) => Task.FromResult<BuildVerification?>(Run(true));
+            mgr.TestRunnerOverride = async (_, _) =>
+            {
+                testsStarted.TrySetResult();
+                await releaseTests.Task;
+                return Tests(true);
+            };
+
+            var job = mgr.Start("p", _dir, 5, 30, allowCommit: false, verifyBuild: true, verifyTests: true,
+                runTestBaseline: false);
+            var tools = new AgentTaskTools(mgr);
+
+            await testsStarted.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            using (var during = JsonDocument.Parse(await tools.TaskStatus(job.Id, null, CancellationToken.None)))
+            {
+                Assert.Equal("running", during.RootElement.GetProperty("state").GetString());
+                Assert.Equal(JsonValueKind.Null, during.RootElement.GetProperty("incomplete_reasons").ValueKind);
+                Assert.Equal(JsonValueKind.Null, during.RootElement.GetProperty("self_report_note").ValueKind);
+            }
+
+            releaseTests.SetResult();
+            var sw = Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < 30_000 && job.State is AgentJobState.Queued or AgentJobState.Running)
+                await Task.Delay(20);
+
+            using var after = JsonDocument.Parse(await tools.TaskStatus(job.Id, null, CancellationToken.None));
+            Assert.Equal("done", after.RootElement.GetProperty("state").GetString());
+            Assert.Equal(Job2118Line, after.RootElement.GetProperty("self_report_note").GetString());
+            Assert.Contains("[job] test verification: passed (10 tests)", job.GetTail());
         }
     }
 }

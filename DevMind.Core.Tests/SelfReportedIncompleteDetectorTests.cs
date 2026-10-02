@@ -128,6 +128,14 @@ namespace DevMind.Core.Tests
         [InlineData("INCOMPLETE: **none**")]
         [InlineData("1. INCOMPLETE: NONE;")]
         [InlineData("**INCOMPLETE:**\n- none")]
+        // H-43: the none-word followed by an explanation (job-2104, job-1850, job-1861).
+        [InlineData("INCOMPLETE: none. Only the TotalAgility page changed; other config pages untouched.")]
+        [InlineData("- INCOMPLETE: none. The scheduled-task registration is explicitly left to the caller")]
+        [InlineData("INCOMPLETE: none. (Full-suite run intentionally delegated to the harness per job rules.)")]
+        [InlineData("INCOMPLETE: none (full suite delegated to the harness)")]
+        [InlineData("INCOMPLETE: nothing — all items done")]
+        [InlineData("INCOMPLETE: Nothing outstanding.")]
+        [InlineData("INCOMPLETE: N/A; no follow-ups")]
         public void AMarkerThatDeclaresNothingUnfinished_IsNotIncomplete(string line)
         {
             Assert.False(Fires("Patched the parser and rebuilt clean. Suite green.\n" + line), $"false positive: {line}");
@@ -137,6 +145,8 @@ namespace DevMind.Core.Tests
         [InlineData("INCOMPLETE: none of the tests ran")]
         [InlineData("INCOMPLETE: nothing was verified")]
         [InlineData("INCOMPLETE: n/a for build, but the tests are red")]
+        [InlineData("INCOMPLETE: none, but the migration is not written")]
+        [InlineData("INCOMPLETE: nothing compiles yet")]
         public void AMarkerThatOnlyStartsWithANoneWord_IsStillIncomplete(string line)
         {
             var result = SelfReportedIncompleteDetector.Detect("Patched the parser.\n" + line);

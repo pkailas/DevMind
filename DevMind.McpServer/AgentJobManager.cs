@@ -151,7 +151,9 @@ namespace DevMind.McpServer
         /// </para>
         /// </summary>
         public SelfReportedIncomplete SelfReportedIncomplete =>
-            _selfReported ??= SelfReportedIncompleteDetector.Detect(Result?.Answer);
+            Result == null
+                ? SelfReportedIncomplete.None   // not cached: there is no answer to judge yet
+                : _selfReported ??= SelfReportedIncompleteDetector.Detect(Result.Answer);
 
         private SelfReportedIncomplete? _selfReported;
 
@@ -165,27 +167,27 @@ namespace DevMind.McpServer
             Build is { Succeeded: true } && VerifyTests && Tests is { Succeeded: true };
 
         /// <summary>
-        /// Whether the self-report makes the job incomplete. An INCOMPLETE: marker always does.
-        /// A phrase-list hit does unless the harness TEST run was green: wording is weak
-        /// evidence, and a green harness test run outweighs it (job-1714 "was not run by me —
-        /// the harness verifies it", job-1715 "Did not run the TUI" — both forbidden by the
-        /// brief, both with green test verification). A green build alone does not: "The core
-        /// defect is NOT fixed" still compiles. With nothing verified — the H-01 jobs ran with
-        /// verify_build off — the phrase list protects as it always did.
+        /// Whether the self-report makes the job incomplete: it does unless the harness TEST run
+        /// was green. A green harness test run outweighs the agent's own words: job-1714 ("was
+        /// not run by me — the harness verifies it") and job-1715 ("Did not run the TUI") on a
+        /// phrase hit (H-31), and job-2118 ("INCOMPLETE: full solution test suite ... not run by
+        /// me — harness verifies it", 1319 green) on an explicit marker (H-43). A green build
+        /// alone does not: "The core defect is NOT fixed" still compiles. With verify_tests off
+        /// or failed — the H-01 jobs ran with verify_build off — the self-report stops the job.
+        /// Read only once State is Done, which the worker publishes after both verifications.
         /// </summary>
         public bool SelfReportMakesIncomplete =>
-            SelfReportedIncomplete.Strength == SelfReportStrength.Strong
-            || (SelfReportedIncomplete.Strength == SelfReportStrength.Weak && !HarnessTestVerified);
+            SelfReportedIncomplete.Detected && !HarnessTestVerified;
 
         /// <summary>
-        /// A phrase-list line that did NOT make the job incomplete because the harness test run
-        /// was green — surfaced as self_report_note in devmind_task_status / devmind_task_result so a
-        /// driver still reads the line. Null otherwise (including when the line did count: it
-        /// is then in incomplete_reasons).
+        /// The self-reported line (marker or phrase) that did NOT make the job incomplete because
+        /// the harness test run was green — surfaced as self_report_note in devmind_task_status /
+        /// devmind_task_result so a driver still reads the line. Null otherwise (including when
+        /// the line did count: it is then in incomplete_reasons).
         /// </summary>
         public string? SelfReportNote =>
             State == AgentJobState.Done
-            && SelfReportedIncomplete.Strength == SelfReportStrength.Weak
+            && SelfReportedIncomplete.Detected
             && !SelfReportMakesIncomplete
                 ? SelfReportedIncomplete.Line
                 : null;
@@ -994,6 +996,11 @@ namespace DevMind.McpServer
                         // a new state value. Held in Running until the result is final.
                         job.AppendTail("\n[job] build verification: running...\n");
                         job.Build = await VerifyBuildAsync(job).ConfigureAwait(false);
+                        // H-43: close the "running..." line, or the tail's last word on a
+                        // finished job reads as if verification were still going.
+                        job.AppendTail(job.Build == null
+                            ? "[job] build verification: skipped\n"
+                            : $"[job] build verification: {(job.Build.Succeeded ? "passed" : "failed")}\n");
                     }
 
                     // Test verification (opt-in): only when the build verification did
@@ -1005,6 +1012,8 @@ namespace DevMind.McpServer
                         // surface it in the tail while the job stays Running.
                         job.AppendTail("\n[job] test verification: running...\n");
                         job.Tests = await RunTestSuiteAsync(job).ConfigureAwait(false);
+                        job.AppendTail($"[job] test verification: {(job.Tests.Succeeded ? "passed" : "failed")}" +
+                            $"{(job.Tests.Total is int total ? $" ({total} tests)" : "")}\n");
                     }
 
                     // Publish the terminal state. Invariant this line guards: a job

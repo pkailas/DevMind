@@ -529,7 +529,33 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   followed by punctuation or a sentence is NOT incomplete. "INCOMPLETE: none of the tests ran" must still fire (word-boundary on
   "none" followed by "of").
 - **Prompt side (done 2026-10-01):** system-prompt.md now says to write the INCOMPLETE word only when something is unfinished.
-- **Status:** open.
+- **Reopened 2026-10-02:** job-2104 (`INCOMPLETE: none. Only the TotalAgility page changed; ...`) tripped the same way, and
+  job-2118 ended `stopped_incomplete` on `INCOMPLETE: full solution test suite (1308 + 11 new) not run by me — harness verifies
+  it. Nothing else outstanding.` with build verification clean (0 warnings) and test verification green (1319, +11),
+  self_report_note null. Its status already read stopped_incomplete while the tail's last line was `[job] test verification:
+  running...`.
+- **Cause (job-2118):** NOT an ordering bug. The worker already holds the job in Running through build and test verification
+  and publishes Done only after both settle; IsIncomplete / IncompleteReasons / SelfReportNote all require Done. Two real causes:
+  (1) H-31's gate let a green harness test run excuse only a Weak (phrase-list) hit; an explicit INCOMPLETE: marker (Strong)
+  stopped the job whatever the harness measured. (2) Nothing was appended to the tail after verification finished, so a
+  finished job's last tail line was still "test verification: running..." — which read as a verdict issued mid-verification.
+- **Fix (done 2026-10-02):**
+  - AgentJob.SelfReportMakesIncomplete: ANY self-report (marker or phrase) stops the job unless HarnessTestVerified (verify_tests
+    on, build verification passed, test verification passed). When it is excused, the line is quoted in self_report_note.
+    verify_tests off / failed / requested-but-not-run, or a green build alone → stopped_incomplete as before.
+  - SelfReportedIncompleteDetector v1.5: the none-word (none / nothing / n/a / na / dash), optionally "outstanding" /
+    "remaining" / "left" / "pending", followed by end of line, a sentence after `.` `!` `;`, or a parenthesis or dash, is the
+    all-clear. A word straight after it ("none of the tests ran", "n/a for build, but ...", "nothing compiles yet") or a comma
+    ("none, but ...") still fires.
+  - The worker appends `[job] build verification: passed|failed|skipped` and `[job] test verification: passed|failed (N tests)`
+    after each run, so the tail no longer ends on "running..." once the verdict is out.
+  - SelfReportedIncomplete is no longer cached while Result is null (a read before the answer existed would have pinned None).
+  - Tests: SelfReportVerificationGateTests (marker x verification table, job-2118 verbatim green / failed / off / not run,
+    none-markers incl. job-2104 → done with no note, status during a held test run is `running` with no reasons or note, then
+    `done` + note); SelfReportedIncompleteDetectorTests (trailing-explanation none-markers, comma and word negatives).
+- **Trade-off:** an `INCOMPLETE: <real gap>` line on a job whose harness tests are green now ends `done` — the gap is in
+  self_report_note, not incomplete_reasons. A driver must read self_report_note.
+- **Status:** fixed (2026-10-02).
 
 ### H-44 - DevMind's own test suite writes fake jobs into the live tasks folder
 - **First seen:** 2026-10-01: result sidecars job-1769..job-1848 were created in 4 minutes (11:28-11:32 UTC) while job-1768's
