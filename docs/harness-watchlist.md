@@ -737,6 +737,38 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   `SteerDecisionTests.Frame_DiffersByMode_AndIsMarkedAsACallerSteer` pins the new text. Watch the next override: if the model
   still echoes it, the problem is self-imitation, and the next step would be a harness nudge rather than more prompt text.
 
+### H-58 - The same tests fail run after run while the agent changes its theory
+- **First seen:** 2026-10-02, job-2108: the layout tests (`AdminInputWidthTests.*_LongFields_*`,
+  `TargetsEditFormLayoutTests.Get_Header_*`) failed in run after run while the agent re-tuned a regex; it only dumped the
+  real HTML late, and once it looked the fix was quick. The H-52 stall guards do not fire: the agent is editing, so it is
+  "progressing".
+- **Fix (note):** `RepeatedTestFailureGuard` (DevMind.Core/RepeatedTestFailures.cs) reads each iteration's tool output
+  (`run_tests` and `run_shell dotnet test` both land in `ExecutionResult.ShellOutput`). A run is a test-summary line (`Test Run
+  Failed./Successful.`, `Failed!/Passed!  -`, MTP `Test run summary:`); the failing names are the `Failed <name> [<duration>]`
+  lines (the duration keeps out "Failed to load prune package data" noise) and MTP `failed <name> (<duration>)`. The tracked
+  set is the names that failed in EVERY run of the streak, so a full run followed by `--filter` re-runs of one of its failures
+  still counts (job-2108 alternated both). At 3 runs, one note is folded into the next prompt as `[HARNESS GUARD] The same
+  test(s) have failed 3 runs in a row: <names>. Before changing code again, print the actual value being asserted ...` and
+  journaled as kind `harness_note`. Once per distinct set and once per streak. A passing run, or a failing run with no name in
+  common with the streak, resets it; a run whose output names no test (quiet verbosity) and an iteration with no run change
+  nothing. Delivery: the same fold-at-the-boundary path a steer uses (H-57: injected once, kept once in history), framed as the
+  harness's voice like the H-25/H-26 nudges rather than as `[CALLER STEER]`, because the caller did not say it.
+- **Fix (auto-think):** when the note fires on a job started with `think` off, `HeadlessSession` sets `ShowLlmThinking` on
+  and `ReasoningEffort` "medium" on its options; `LlmClient` reads both per request, so the next request thinks. Journaled
+  `harness_note: thinking auto-enabled (repeated failures: <names>)`. It goes off again, back to the job's own values, on a
+  passing run or after 15 requests with it, whichever is first (`thinking auto-disabled (tests passed)` /
+  `(15-iteration cap)`). Every turn starts from the job's own settings, so a continuation never inherits harness-enabled
+  thinking. Not when the job was started with `think: true` (its own effort stands), nor with the new `devmind_task_start`
+  flag `auto_think: false` (default true; continuations inherit it). `devmind_task_result` (and the result sidecar) report
+  `auto_think_escalations` and `auto_think_iterations` (requests sent with harness-enabled thinking).
+- **Status:** fixed, pending deploy - commit "H-58: note and auto-think on repeated identical test failures". Tests:
+  `RepeatedTestFailureTests` - parser (VSTest normal/minimal, MTP, build-only output), guard (3 runs -> one note; changed set
+  and passing run reset; filtered re-run counts; same set never noted twice), escalation decisions, and three runs through
+  the real headless loop (thinking on in exactly request 4 then off when the tests pass; on for exactly 15 requests under a
+  permanent failure; no escalation with think on or auto_think off). Mutation-checked: disabling escalation, the cap or the
+  pass de-escalation each fails unit and session tests. Watch: does the note change the next action (a dump / print of the
+  actual value) and how often escalation fires per job.
+
 ## Parked
 
 ### P-01 - No-write-streak nudge

@@ -55,6 +55,10 @@ namespace DevMind.McpServer
         /// never reads it then). Resolved at start: per-job value, else devmind.json
         /// "reasoningEffort", else "medium". A continuation inherits the parent's value.</summary>
         public string? ReasoningEffort { get; init; }
+        /// <summary>H-58: let the harness turn thinking on when the same tests keep failing
+        /// (default true). Only matters when <see cref="Think"/> is off. A continuation inherits
+        /// the parent's value.</summary>
+        public bool AutoThink { get; init; } = true;
         /// <summary>Caller-imposed no-execution restriction for this task (default false):
         /// the agent may build but not run executables, tests, or a debugger. Continuations
         /// inherit this from their parent — a constraint set on turn 1 must not evaporate
@@ -557,7 +561,8 @@ namespace DevMind.McpServer
         public AgentJob Start(string prompt, string workingDirectory, int maxDepth, int timeoutMinutes,
             bool allowCommit, bool verifyBuild, bool think = false, bool verifyTests = false,
             bool noExecute = false, bool runTestBaseline = true, bool? showThinking = null,
-            IReadOnlyList<McpServerConfig>? mcpServers = null, string? reasoningEffort = null)
+            IReadOnlyList<McpServerConfig>? mcpServers = null, string? reasoningEffort = null,
+            bool autoThink = true)
         {
             var job = new AgentJob
             {
@@ -573,6 +578,7 @@ namespace DevMind.McpServer
                 // Null when thinking is off; otherwise the given value, normalized, or "medium"
                 // (never absent — the Qwen3.8 templates treat absent as xhigh).
                 ReasoningEffort = think ? DevMind.ReasoningEffort.NormalizeOrDefault(reasoningEffort) : null,
+                AutoThink = autoThink,
                 VerifyTests = verifyTests,
                 NoExecute = noExecute,
                 RunTestBaseline = runTestBaseline,
@@ -660,6 +666,7 @@ namespace DevMind.McpServer
                 // Inherited with Think (no per-continuation override: the session's options
                 // keep the parent's value, which is what the request actually sends).
                 ReasoningEffort = parent.ReasoningEffort,
+                AutoThink = parent.AutoThink, // inherited with Think (H-58)
                 NoExecute = ResolveContinuationNoExecute(parent.NoExecute, noExecute),
                 // Inherited like NoExecute. The parent's manager was disposed when the parent
                 // ended, so the worker starts these servers again for the continued turn.
@@ -881,6 +888,8 @@ namespace DevMind.McpServer
                             // chat_template_kwargs.reasoning_effort, sent only while thinking
                             // is on (null when off -> the option default, never sent).
                             ReasoningEffort = job.ReasoningEffort ?? DevMind.ReasoningEffort.Default,
+                            // H-58: the harness may turn thinking on for repeated test failures.
+                            AutoThink = job.AutoThink,
                             // DISPLAY switch (per-job, from show_thinking): streams the
                             // generated think blocks into the transcript. Tri-state — a
                             // non-null value wins over the DEVMIND_TASK_SHOW_THINKING env
@@ -1217,6 +1226,8 @@ namespace DevMind.McpServer
                     tokens_in_new_partial = (bool?)(r?.TokensInNewPartial ?? false),
                     tokens_out = r?.TokensOut,
                     hit_depth_cap = r?.HitDepthCap ?? false,
+                    auto_think_escalations = r?.AutoThinkEscalations ?? 0,
+                    auto_think_iterations = r?.AutoThinkIterations ?? 0,
                     error = job.Error,
                     transcript_path = r?.TranscriptPath,
                     parent_job_id = job.ParentJobId,

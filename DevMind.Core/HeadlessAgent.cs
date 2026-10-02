@@ -44,6 +44,13 @@ namespace DevMind
         /// </summary>
         public bool?  StreamThinkingToTranscript { get; set; }
         /// <summary>
+        /// H-58: when the same test(s) fail three runs in a row and <see cref="ShowLlmThinking"/>
+        /// is off, the harness turns thinking on (effort "medium") until they pass or 15 requests
+        /// have run with it. False = never (devmind_task_start auto_think=false). No effect when
+        /// thinking is already on.
+        /// </summary>
+        public bool   AutoThink                { get; set; } = true;
+        /// <summary>
         /// Whether the JOB HARNESS runs the test suite over the solution after the agent
         /// stops (MCP verify_tests). Decides which test-verification regime is written
         /// into the headless addendum: harness-on tells the agent NOT to run the full
@@ -123,6 +130,11 @@ namespace DevMind
         /// <summary>Sum of completion / generated tokens over every request in the job.
         /// Null when no request reported completion usage.</summary>
         public long? TokensOut { get; set; }
+
+        /// <summary>H-58: times the harness turned thinking on this turn (repeated test failures).</summary>
+        public int AutoThinkEscalations { get; set; }
+        /// <summary>H-58: model requests this turn sent with harness-enabled thinking.</summary>
+        public int AutoThinkIterations { get; set; }
     }
 
     /// <summary>
@@ -169,6 +181,8 @@ namespace DevMind
             string promptFilePath = null)
         {
             _options = options;
+            _jobThinks = options.ShowLlmThinking;
+            _jobEffort = options.ReasoningEffort;
             _workingDirectory = workingDirectory;
             _allowCommit = allowCommit;
             _noExecute = noExecute;
@@ -259,6 +273,14 @@ namespace DevMind
         // counts reset per turn.
         private readonly HarnessNudges _nudges = new HarnessNudges();
 
+        // H-58: repeated identical test failures, and the thinking escalation they trigger.
+        // Per turn (one job): rebuilt in RunTurnAsync. The job's own think / effort are kept so
+        // a de-escalation, and every new turn, restores exactly what the caller chose.
+        private RepeatedTestFailureGuard _testFailures = new RepeatedTestFailureGuard();
+        private AutoThinkEscalation _autoThink;
+        private bool _jobThinks;
+        private string _jobEffort;
+
         private void EmitToTurn(string text)
         {
             if (string.IsNullOrEmpty(text)) return;
@@ -324,6 +346,12 @@ namespace DevMind
             _host.ClearActions(); // result.Actions is THIS turn's journal
             _nudges.AddBrief(prompt);
             _nudges.ResetCompileErrors();
+            // H-58: per job. A turn that ended with harness-enabled thinking still on must not
+            // hand it to a continuation, so the job's own settings are restored first.
+            _options.ShowLlmThinking = _jobThinks;
+            _options.ReasoningEffort = _jobEffort;
+            _testFailures = new RepeatedTestFailureGuard();
+            _autoThink = new AutoThinkEscalation(_jobThinks, _options.AutoThink);
 
             // Turn clock: ONE increment per user turn, at the turn boundary — NOT inside the
             // agentic loop below. The loop re-triggers many iterations for a single turn and
@@ -411,6 +439,7 @@ namespace DevMind
                     // synthetic re-trigger. An override on the last iteration is refused (Steer).
                     // No-op when no steer is pending.
                     DrainSteerIntoPrompt(ref currentPrompt);
+                    _autoThink.OnRequest();
 
                     await _llmClient.SendMessageAsync(
                         currentPrompt,
@@ -547,6 +576,7 @@ namespace DevMind
                     forceToolChoiceRequired = iter.ForceToolChoiceRequired;
                     _callbacks.SetInputText(string.Empty);
                     AppendHarnessNudges(ref currentPrompt, lastResponse, iter);
+                    ObserveTestRuns(ref currentPrompt, iter);
                 }
             }
             finally
@@ -585,6 +615,8 @@ namespace DevMind
             result.TokensInNew = tokenUsage.TotalNewPromptTokens();
             result.TokensInNewPartial = tokenUsage.IsNewPartial();
             result.TokensOut = tokenUsage.TotalCompletionTokens();
+            result.AutoThinkEscalations = _autoThink.Escalations;
+            result.AutoThinkIterations = _autoThink.Iterations;
             // HitDepthCap means the loop stopped BECAUSE of the cap (LoopDriver's
             // depth-cap terminal), not that the counter happened to reach it. Field
             // lesson: a run that finished with a clean task_done ON the cap boundary
@@ -743,6 +775,43 @@ namespace DevMind
                 currentPrompt = HarnessNudgeEvidence.Fold(currentPrompt, nudge);
                 _host.RecordNudge(nudge);
                 EmitToTurn($"[GUARD] nudge injected at this iteration boundary. {nudge}\n");
+            }
+        }
+
+        // H-58: feed this iteration's test run (if any) to the repeated-failure guard. When the
+        // same test(s) have failed three runs in a row, fold one note into the next prompt —
+        // the harness's voice, like the nudges above — and, on a think=false job, turn thinking
+        // on. A passing run, or 15 requests with it, turns that thinking off again.
+        private void ObserveTestRuns(ref string currentPrompt, LoopIterationResult iter)
+        {
+            TestRunOutcome run = TestRunOutcome.Parse(HarnessNudgeEvidence.ToolOutput(iter.Result));
+            IReadOnlyList<string> repeated = _testFailures.Observe(run);
+            if (repeated != null)
+            {
+                string note = RepeatedTestFailureGuard.Note(repeated);
+                currentPrompt = HarnessNudgeEvidence.Fold(currentPrompt, note);
+                _host.RecordHarnessNote(note);
+                EmitToTurn($"[GUARD] harness note injected at this iteration boundary. {note}\n");
+
+                if (_autoThink.TryEscalate())
+                {
+                    _options.ShowLlmThinking = true;
+                    _options.ReasoningEffort = AutoThinkEscalation.Effort;
+                    string on = $"thinking auto-enabled (repeated failures: {string.Join(", ", repeated)})";
+                    _host.RecordHarnessNote(on);
+                    EmitToTurn($"[GUARD] {on}\n");
+                    return;
+                }
+            }
+
+            string off = _autoThink.TryDeEscalate(testsPassed: run?.Passed == true);
+            if (off != null)
+            {
+                _options.ShowLlmThinking = _jobThinks;
+                _options.ReasoningEffort = _jobEffort;
+                string msg = $"thinking auto-disabled ({off})";
+                _host.RecordHarnessNote(msg);
+                EmitToTurn($"[GUARD] {msg}\n");
             }
         }
 

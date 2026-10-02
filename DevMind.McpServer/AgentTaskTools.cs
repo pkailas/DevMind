@@ -133,6 +133,7 @@ namespace DevMind.McpServer
             [Description("Stream the model's think blocks into the job's transcript as it reasons. Omitted = the DEVMIND_TASK_SHOW_THINKING environment variable applies (legacy fallback: off unless it is set); explicit true or false takes precedence over the environment variable. DISPLAY only — think blocks are only streamed when `think` is also on, and showing them adds per-iteration overhead. When true it implies `think: true` — asking to see reasoning that is never generated would be a silent no-op, so this turns generation on instead. Continuations inherit this setting, including an inherited omission.")] bool? show_thinking = null,
             [Description("Restrict the agent to no execution (default false): it may still build (dotnet build / run_build) for compile verification, but running executables, `dotnet run`/`dotnet exec`, the test suite (run_tests / dotnet test), and debug launch/attach are blocked at the harness. This is NOT a sandbox — it blocks a named set of execution invocations, not every conceivable way to start a process; use it to stop an agent from launching (or re-launching) something that hangs or spawns runaway children, not as a security boundary. Continuations inherit this setting.")] bool? no_execute = null,
             [Description("External MCP servers to give this agent, by their names under \"mcpServers\" in %APPDATA%\\devmind\\devmind.json (e.g. [\"comfy\"]). Omit for none — the default, with no change in behaviour. An unknown name rejects the start with the list of configured names. Each server is started before the agent's first request (60 s limit per server); one that fails to start does not fail the job — the agent runs without it, and devmind_task_result's \"mcp\" section reports requested / started / failed (with reason) / calls. The server's tools appear as mcp__<server>__<tool>, subject to its \"tools\" allowlist; its \"autoStart\" setting is ignored here. Servers stop when the job ends. Continuations inherit this list and start the servers again.")] string[]? mcp_servers = null,
+            [Description("Let the harness turn thinking on by itself when the same test(s) fail three runs in a row (default true). It runs at effort \"medium\" and goes off again when the tests pass or after 15 iterations; each switch is journaled as kind \"harness_note\", and devmind_task_result reports auto_think_escalations and auto_think_iterations. Has no effect when `think` is on. false = never. Continuations inherit this setting.")] bool? auto_think = null,
             CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(prompt))
@@ -189,7 +190,8 @@ namespace DevMind.McpServer
                 runTestBaseline: baseline != "off",
                 showThinking: show_thinking,
                 mcpServers: mcpServers,
-                reasoningEffort: effort);
+                reasoningEffort: effort,
+                autoThink: auto_think ?? true);
 
             const string startHint =
                 "Poll devmind_task_status with this job_id; fetch devmind_task_result when done.";
@@ -463,6 +465,9 @@ namespace DevMind.McpServer
                 hit_depth_cap = r?.HitDepthCap ?? false,
                 // Effective reasoning effort; null when thinking was off.
                 reasoning_effort = job.ReasoningEffort,
+                // H-58: harness-enabled thinking for repeated test failures (journal: harness_note).
+                auto_think_escalations = r?.AutoThinkEscalations ?? 0,
+                auto_think_iterations = r?.AutoThinkIterations ?? 0,
                 error = job.Error,
                 transcript_path = r?.TranscriptPath,
                 parent_job_id = job.ParentJobId,

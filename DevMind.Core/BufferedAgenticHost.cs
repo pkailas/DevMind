@@ -376,6 +376,10 @@ namespace DevMind
         /// </summary>
         public void RecordNudge(string message) => RecordAction("nudge", message);
 
+        /// <summary>Audit seam for H-58: the repeated-test-failure note and the thinking it
+        /// switches on and off, journaled as kind "harness_note" (devmind_task_result).</summary>
+        public void RecordHarnessNote(string message) => RecordAction("harness_note", message);
+
         /// <summary>The executor's journal seam (MCP calls). Same journal, same entry shape.</summary>
         void IActionJournal.RecordAction(string kind, string detail, bool success) => RecordAction(kind, detail, success);
 
