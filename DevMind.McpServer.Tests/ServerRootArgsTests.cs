@@ -12,6 +12,7 @@ using Xunit;
 
 namespace DevMind.McpServer.Tests
 {
+    [Collection(ProcessEnvironmentCollection.Name)]
     public class ServerRootArgsTests : IDisposable
     {
         private readonly string _baseDir;

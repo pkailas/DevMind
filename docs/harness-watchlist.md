@@ -541,7 +541,26 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Fix:** every test that constructs an AgentJobManager / HeadlessSession must use a per-test tasks dir AND a per-test job-id
   counter. TestTasksDirInitializer evidently does not cover the harness's `dotnet test` run; check whether it is a module
   initializer in every test assembly that creates jobs, and whether the job-id counter file is shared.
-- **Status:** open.
+- **Recurrence 2026-10-02 (found via a test failure):** `TranscriptDirOverrideTests.StubJobs_WroteArtifactsToPrivateDir_NotTheGlobalFolder`
+  failed in full McpServer runs ("DEVMIND_TASKS_DIR should be set ...") but passed alone - on 64e86d5 and f6e977a alike. The test run
+  at 13:28 wrote job-2094..job-2102 into the live folder and moved the live `_jobcounter.txt` to 2102.
+- **Root cause:** not the initializer. TestTasksDirInitializer is a [ModuleInitializer] and works. `ResultSidecarTokenUsageTests`
+  (added in 6b9b917, 2026-10-01 07:34 - the start of the leak) set DEVMIND_TASKS_DIR to its own dir and, in Dispose, set it to
+  **null** instead of restoring the prior value. Every test that ran after it in the same process fell back to the production
+  default `%TEMP%\devmind\tasks`, so all its stub jobs, transcripts and job ids went to the live folder. The job-id counter is
+  per tasks dir, so it was hit too.
+- **Fix:** `ResultSidecarTokenUsageTests` captures the prior value and restores it. Every other DEVMIND_* env mutation in
+  Core.Tests and McpServer.Tests already restores (checked by grep). New `[Collection("ProcessEnvironment")]`
+  (`ProcessEnvironmentCollection`, DisableParallelization = true) in both assemblies, on every class that repoints
+  DEVMIND_TASKS_DIR or DEVMIND_GLOBAL_DIR. Both assemblies already turn off parallel collections in xunit.runner.json, so this
+  is a second safeguard. Verified: 3 full McpServer runs in a row, 0 failures (StubJobs passes inside the full run), and the live
+  folder listing and `_jobcounter.txt` are byte-identical before and after.
+- **Leftovers (not deleted):** 276 stub-job result sidecars plus their 276 transcripts in `%LOCALAPPDATA%\Temp\devmind\tasks`,
+  job-1769..job-2102 (159 dated 2026-10-01, 117 dated 2026-10-02). They are identified by a working_dir under `%TEMP%\devmind_*`
+  (testcount_job, mcpjob, noexec_job, stall_job, steer_guard, showthinking_job, effort_job, verifyrace_job, jobend_bak, h31,
+  h32). The 330 other sidecars are real jobs. Safe to remove by that working_dir filter whenever convenient.
+- **Status:** fixed - commit "H-44: ResultSidecarTokenUsageTests restores DEVMIND_TASKS_DIR; env-seam tests in one serial
+  collection". Test code only; nothing to deploy.
 
 ### H-45 - Test baseline measured on a broken build gives a misleading delta
 - **First seen:** 2026-10-01, job-1859 (continuation of job-1858): the job-1858 tree had a test file that did not compile, so

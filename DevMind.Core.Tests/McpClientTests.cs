@@ -14,6 +14,7 @@ using Xunit;
 
 namespace DevMind.Core.Tests
 {
+    [Collection(ProcessEnvironmentCollection.Name)]
     public class McpServerConfigTests
     {
         private static (IReadOnlyList<McpServerConfig> servers, List<string> warnings) Parse(string json)

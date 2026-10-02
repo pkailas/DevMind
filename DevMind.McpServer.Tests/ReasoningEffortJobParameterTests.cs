@@ -19,6 +19,7 @@ using Xunit;
 
 namespace DevMind.McpServer.Tests
 {
+    [Collection(ProcessEnvironmentCollection.Name)]
     public sealed class ReasoningEffortJobParameterTests : IDisposable
     {
         private readonly string _dir;

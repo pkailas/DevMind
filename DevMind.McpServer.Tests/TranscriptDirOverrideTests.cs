@@ -35,6 +35,7 @@ using Xunit;
 
 namespace DevMind.McpServer.Tests
 {
+    [Collection(ProcessEnvironmentCollection.Name)]
     public sealed class TranscriptDirOverrideTests : IDisposable
     {
         private readonly string? _prior;

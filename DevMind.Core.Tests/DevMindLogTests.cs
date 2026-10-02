@@ -28,6 +28,7 @@ using Xunit;
 
 namespace DevMind.Core.Tests
 {
+    [Collection(ProcessEnvironmentCollection.Name)]
     public sealed class DevMindLogTests : IDisposable
     {
         private readonly string _root;

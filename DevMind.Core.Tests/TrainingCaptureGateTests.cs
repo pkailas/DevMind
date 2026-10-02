@@ -30,6 +30,7 @@ using Xunit;
 
 namespace DevMind.Core.Tests
 {
+    [Collection(ProcessEnvironmentCollection.Name)]
     public sealed class TrainingCaptureGateTests : IDisposable
     {
         private readonly string _dir;

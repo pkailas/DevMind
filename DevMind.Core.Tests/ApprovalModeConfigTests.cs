@@ -13,6 +13,7 @@ using Xunit;
 
 namespace DevMind.Core.Tests
 {
+    [Collection(ProcessEnvironmentCollection.Name)]
     public class ApprovalModeConfigTests : IDisposable
     {
         private readonly string _dir;

@@ -13,9 +13,11 @@ using Xunit;
 
 namespace DevMind.McpServer.Tests
 {
+    [Collection(ProcessEnvironmentCollection.Name)]
     public sealed class ResultSidecarTokenUsageTests : IDisposable
     {
         private readonly string _dir;
+        private readonly string? _priorTasksDir;
 
         public ResultSidecarTokenUsageTests()
         {
@@ -24,12 +26,15 @@ namespace DevMind.McpServer.Tests
             // DEVMIND_TASKS_DIR is re-evaluated per access (AgentJobManager.TranscriptDir),
             // and this assembly's ModuleInitializer already pointed it at a per-run dir —
             // point it at THIS test's dir so the sidecar path is deterministic and isolated.
+            _priorTasksDir = Environment.GetEnvironmentVariable("DEVMIND_TASKS_DIR");
             Environment.SetEnvironmentVariable("DEVMIND_TASKS_DIR", _dir);
         }
 
         public void Dispose()
         {
-            Environment.SetEnvironmentVariable("DEVMIND_TASKS_DIR", null);
+            // Restore, never clear (H-44 recurrence, 2026-10-02): clearing it dropped every
+            // later test in the run back onto the LIVE %TEMP%\devmind\tasks folder.
+            Environment.SetEnvironmentVariable("DEVMIND_TASKS_DIR", _priorTasksDir);
             try { Directory.Delete(_dir, recursive: true); } catch { }
         }
 
