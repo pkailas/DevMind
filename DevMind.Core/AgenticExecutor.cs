@@ -148,8 +148,28 @@ namespace DevMind
             if (outcome?.Blocks == null)
                 return result;
 
+            // Patches run in call order (H-55 follow-up). They used to be applied as one batch
+            // after EVERY other block, so patch_file then read_file of the same file in one
+            // turn read the pre-patch text, and patch_file then run_build built unpatched
+            // code. Consecutive patch calls still form one batch (one diff-preview card); the
+            // batch is applied before the next non-patch call runs.
+            var pendingPatches = new List<ResponseBlock>();
+
             foreach (var block in outcome.Blocks)
             {
+                if (block.Type == BlockType.Patch)
+                {
+                    if (processPatches) pendingPatches.Add(block);
+                    continue;
+                }
+                if (block.Type != BlockType.Text && pendingPatches.Count > 0)
+                    await FlushPatchesAsync(pendingPatches, result);
+
+                // Write tools report into turn-wide lists (FilesCreated, Errors, ...), so a
+                // failed create_file after a successful one was told "[File created: <the
+                // other file>]". Snapshot the lists and give the call only what it added.
+                WriteCallScope writeScope = WriteCallScope.Begin(block, result);
+
                 switch (block.Type)
                 {
                     case BlockType.Done:
@@ -244,8 +264,8 @@ namespace DevMind
                         break;
 
                     case BlockType.Patch:
-                        // Patches are handled in a batch after the loop — skip individual processing.
-                        // See batch patch handling below.
+                        // Never reached: patches are queued above and applied in batches
+                        // (FlushPatchesAsync) in call order.
                         break;
 
                     case BlockType.Shell:
@@ -845,25 +865,79 @@ namespace DevMind
                         break;
                 }
 
+                writeScope?.End(result);
+
                 if (block.Type is not (BlockType.Text or BlockType.Patch))
                     BlockExecuted?.Invoke(block.Type);
             }
 
-            // ── Batch PATCH processing with diff preview gate ──────────────────
-            if (processPatches)
-            {
-                var patchBlocks = outcome.Blocks
-                    .Where(b => b.Type == BlockType.Patch)
-                    .ToList();
-
-                if (patchBlocks.Count > 0)
-                {
-                    await ExecuteBatchPatchesAsync(patchBlocks, result);
-                    BlockExecuted?.Invoke(BlockType.Patch);
-                }
-            }
+            // ── Trailing PATCH batch (diff preview gate) ───────────────────────
+            if (pendingPatches.Count > 0)
+                await FlushPatchesAsync(pendingPatches, result);
 
             return result;
+        }
+
+        /// <summary>
+        /// One write call's share of the turn-wide result lists: what it added between
+        /// <see cref="Begin"/> and <see cref="End"/>, formatted by LoopHelpers exactly as the
+        /// turn-level result would be, and filed under the call's id (H-55).
+        /// </summary>
+        private sealed class WriteCallScope
+        {
+            private ResponseBlock _block;
+            private string _tool;
+            private int _created, _appended, _deleted, _renamed, _errors;
+
+            public static WriteCallScope Begin(ResponseBlock block, ExecutionResult result)
+            {
+                string tool = block.Type switch
+                {
+                    BlockType.File       => "create_file",
+                    BlockType.AppendFile => "append_file",
+                    BlockType.Delete     => "delete_file",
+                    BlockType.Rename     => "rename_file",
+                    _ => null,
+                };
+                if (tool == null || block.ToolCallId == null) return null;
+                return new WriteCallScope
+                {
+                    _block = block, _tool = tool,
+                    _created = result.FilesCreated.Count, _appended = result.FilesAppended.Count,
+                    _deleted = result.FilesDeleted.Count, _renamed = result.FilesRenamed.Count,
+                    _errors = result.Errors.Count,
+                };
+            }
+
+            public void End(ExecutionResult result)
+            {
+                var own = new ExecutionResult { LintNotes = result.LintNotes };
+                own.FilesCreated.AddRange(result.FilesCreated.Skip(_created));
+                own.FilesAppended.AddRange(result.FilesAppended.Skip(_appended));
+                own.FilesDeleted.AddRange(result.FilesDeleted.Skip(_deleted));
+                own.FilesRenamed.AddRange(result.FilesRenamed.Skip(_renamed));
+                own.Errors.AddRange(result.Errors.Skip(_errors));
+
+                var call = new ToolCallResult { Name = _tool };
+                if (_block.Type == BlockType.Rename)
+                {
+                    call.Arguments["old_filename"] = _block.RenameFrom ?? "";
+                    call.Arguments["new_filename"] = _block.RenameTo ?? "";
+                }
+                else
+                {
+                    call.Arguments["filename"] = _block.FileName ?? "";
+                }
+                result.ToolResultsByCallId[_block.ToolCallId] = LoopHelpers.BuildToolResultContent(call, own, null);
+            }
+        }
+
+        private async Task FlushPatchesAsync(List<ResponseBlock> pendingPatches, ExecutionResult result)
+        {
+            var batch = new List<ResponseBlock>(pendingPatches);
+            pendingPatches.Clear();
+            await ExecuteBatchPatchesAsync(batch, result);
+            BlockExecuted?.Invoke(BlockType.Patch);
         }
 
         /// <summary>
@@ -1139,23 +1213,81 @@ namespace DevMind
             return BuildErrorHints.Annotate(output, workingDirectory);
         }
 
+        /// <summary>
+        /// Applies one batch of consecutive patch calls. Totals (PatchesApplied/Failed,
+        /// PatchedPaths, Errors, the path-keyed context echo) go into <paramref name="result"/>
+        /// as before; each call ALSO gets its own result in ToolResultsByCallId (H-55), built by
+        /// the same formatter from only that call's outcome — two patches of one file, or a patch
+        /// and a read of it, no longer report each other's results.
+        /// </summary>
         private async Task ExecuteBatchPatchesAsync(
             List<ResponseBlock> patchBlocks,
             ExecutionResult result)
         {
+            var scoped = new ExecutionResult[patchBlocks.Count];
+            for (int k = 0; k < scoped.Length; k++)
+                scoped[k] = new ExecutionResult { LintNotes = result.LintNotes };
+            try
+            {
+                await ExecuteBatchPatchesCoreAsync(patchBlocks, result, scoped);
+            }
+            finally
+            {
+                for (int k = 0; k < patchBlocks.Count; k++)
+                {
+                    string id = patchBlocks[k].ToolCallId;
+                    if (id == null) continue;
+                    var call = new ToolCallResult { Name = "patch_file" };
+                    call.Arguments["filename"] = patchBlocks[k].FileName ?? "";
+                    result.ToolResultsByCallId[id] = LoopHelpers.BuildToolResultContent(call, scoped[k], null);
+                }
+            }
+        }
+
+        private async Task ExecuteBatchPatchesCoreAsync(
+            List<ResponseBlock> patchBlocks,
+            ExecutionResult result,
+            ExecutionResult[] scoped)
+        {
+            // Every outcome is recorded twice: in the turn totals and in the call's own scope.
+            void Failed(int k, string error)
+            {
+                result.PatchesFailed++;
+                result.Errors.Add(error);
+                scoped[k].PatchesFailed++;
+                scoped[k].Errors.Add(error);
+            }
+
+            void Applied(int k, string patchedPath, string originalContent)
+            {
+                result.PatchesApplied++;
+                result.PatchedPaths.Add(patchedPath);
+                scoped[k].PatchesApplied++;
+                scoped[k].PatchedPaths.Add(patchedPath);
+                RecordPatchLint(result, patchedPath, originalContent);
+                string ctxEcho = _host.TakePatchContextEcho(patchedPath);
+                if (!string.IsNullOrEmpty(ctxEcho))
+                {
+                    result.ToolResultContents[patchedPath] = ctxEcho;
+                    scoped[k].ToolResultContents[patchedPath] = ctxEcho;
+                }
+                _lastReadKey = null;
+                _lastReadRepeatCount = 0;
+            }
+
             // Plan mode refuses patches outright: no card, no application. The refusal goes
             // into result.Errors per patch, so the model receives the [PLAN MODE] message —
             // the same path a declined write uses — and nothing below ever runs.
             if (ApprovalPolicy.Decide(_options.ApprovalMode, MutationKind.Patch)
                 == ApprovalDecision.Refuse)
             {
-                foreach (var block in patchBlocks)
+                for (int k = 0; k < patchBlocks.Count; k++)
                 {
+                    var block = patchBlocks[k];
                     string failedFile = string.IsNullOrEmpty(block.FileName)
                         ? "unknown" : System.IO.Path.GetFileName(block.FileName);
                     string refusal = ApprovalPolicy.PlanRefusalMessage($"patch {failedFile}");
-                    result.PatchesFailed++;
-                    result.Errors.Add($"[PATCH-REFUSED:{failedFile}] {refusal}");
+                    Failed(k, $"[PATCH-REFUSED:{failedFile}] {refusal}");
                     _host.AppendOutput($"[PLAN MODE] Refused: patch {failedFile}\n", OutputColor.Dim);
                 }
                 return;
@@ -1184,20 +1316,17 @@ namespace DevMind
                     }
                     else
                     {
-                        result.PatchesFailed++;
                         string failedFile = string.IsNullOrEmpty(block.FileName)
                             ? "unknown" : System.IO.Path.GetFileName(block.FileName);
                         string cause = string.IsNullOrEmpty(failureReason) ? "unknown" : failureReason;
-                        result.Errors.Add(
-                            $"[PATCH-FAILED:{failedFile}] Resolve failed: {cause} File was NOT modified.");
+                        Failed(i, $"[PATCH-FAILED:{failedFile}] Resolve failed: {cause} File was NOT modified.");
                     }
                 }
                 catch (Exception ex)
                 {
-                    result.PatchesFailed++;
                     string failedFile = string.IsNullOrEmpty(block.FileName)
                         ? "unknown" : System.IO.Path.GetFileName(block.FileName);
-                    result.Errors.Add($"[PATCH-FAILED:{failedFile}] Resolve error: {ex.Message}");
+                    Failed(i, $"[PATCH-FAILED:{failedFile}] Resolve error: {ex.Message}");
                     _host.AppendOutput($"[PATCH ERROR] {block.FileName}: {ex.Message}\n", OutputColor.Error);
                 }
             }
@@ -1211,6 +1340,7 @@ namespace DevMind
             for (int i = 0; i < resolved.Count; i++)
             {
                 var r = resolved[i];
+                int k = resolveIndices[i];
                 if (!alwaysConfirm && r.Confidence == PatchConfidence.Exact)
                 {
                     // Auto-apply immediately — no card, no await
@@ -1219,31 +1349,21 @@ namespace DevMind
                         var (patchedPath, failureReason) = await _host.ApplyResolvedPatchAsync(r);
                         if (patchedPath != null)
                         {
-                            result.PatchesApplied++;
-                            result.PatchedPaths.Add(patchedPath);
-                            RecordPatchLint(result, patchedPath, r.OriginalContent);
-                            string ctxEcho = _host.TakePatchContextEcho(patchedPath);
-                            if (!string.IsNullOrEmpty(ctxEcho))
-                                result.ToolResultContents[patchedPath] = ctxEcho;
-                            _lastReadKey = null;
-                            _lastReadRepeatCount = 0;
+                            Applied(k, patchedPath, r.OriginalContent);
                         }
                         else
                         {
-                            result.PatchesFailed++;
                             string failedFile = string.IsNullOrEmpty(r.FileName)
                                 ? "unknown" : System.IO.Path.GetFileName(r.FileName);
                             string cause = string.IsNullOrEmpty(failureReason) ? "unknown" : failureReason;
-                            result.Errors.Add(
-                                $"[PATCH-FAILED:{failedFile}] Apply failed: {cause}{NotModifiedSuffix(cause)}");
+                            Failed(k, $"[PATCH-FAILED:{failedFile}] Apply failed: {cause}{NotModifiedSuffix(cause)}");
                         }
                     }
                     catch (Exception ex)
                     {
-                        result.PatchesFailed++;
                         string failedFile = string.IsNullOrEmpty(r.FileName)
                             ? "unknown" : System.IO.Path.GetFileName(r.FileName);
-                        result.Errors.Add($"[PATCH-FAILED:{failedFile}] Apply error: {ex.Message}");
+                        Failed(k, $"[PATCH-FAILED:{failedFile}] Apply error: {ex.Message}");
                         _host.AppendOutput($"[PATCH ERROR] {r.FileName}: {ex.Message}\n", OutputColor.Error);
                     }
                 }
@@ -1265,18 +1385,16 @@ namespace DevMind
                 }
                 catch (OperationCanceledException)
                 {
-                    foreach (var r in needPreview)
-                    {
-                        result.PatchesFailed++;
-                        result.Errors.Add(
-                            $"[PATCH-SKIPPED: {r.FileName} \u2014 user cancelled. Re-READ the file if you need to try again.]");
-                    }
+                    for (int i = 0; i < needPreview.Count; i++)
+                        Failed(resolveIndices[needPreviewIndices[i]],
+                            $"[PATCH-SKIPPED: {needPreview[i].FileName} — user cancelled. Re-READ the file if you need to try again.]");
                     return;
                 }
 
                 // Apply approved, inject SKIPPED for rejected
                 for (int i = 0; i < needPreview.Count; i++)
                 {
+                    int k = resolveIndices[needPreviewIndices[i]];
                     if (approvedIndices.Contains(i))
                     {
                         try
@@ -1284,37 +1402,25 @@ namespace DevMind
                             var (patchedPath, failureReason) = await _host.ApplyResolvedPatchAsync(needPreview[i]);
                             if (patchedPath != null)
                             {
-                                result.PatchesApplied++;
-                                result.PatchedPaths.Add(patchedPath);
-                                RecordPatchLint(result, patchedPath, needPreview[i].OriginalContent);
-                                string ctxEcho = _host.TakePatchContextEcho(patchedPath);
-                                if (!string.IsNullOrEmpty(ctxEcho))
-                                    result.ToolResultContents[patchedPath] = ctxEcho;
-                                _lastReadKey = null;
-                                _lastReadRepeatCount = 0;
+                                Applied(k, patchedPath, needPreview[i].OriginalContent);
                             }
                             else
                             {
-                                result.PatchesFailed++;
                                 string cause = string.IsNullOrEmpty(failureReason) ? "unknown" : failureReason;
-                                result.Errors.Add(
-                                    $"[PATCH-FAILED:{needPreview[i].FileName}] Apply failed: {cause}{NotModifiedSuffix(cause)}");
+                                Failed(k, $"[PATCH-FAILED:{needPreview[i].FileName}] Apply failed: {cause}{NotModifiedSuffix(cause)}");
                             }
                         }
                         catch (Exception ex)
                         {
-                            result.PatchesFailed++;
-                            result.Errors.Add($"[PATCH-FAILED:{needPreview[i].FileName}] Apply error: {ex.Message}");
+                            Failed(k, $"[PATCH-FAILED:{needPreview[i].FileName}] Apply error: {ex.Message}");
                             _host.AppendOutput($"[PATCH ERROR] {needPreview[i].FileName}: {ex.Message}\n", OutputColor.Error);
                         }
                     }
                     else
                     {
-                        result.PatchesFailed++;
-                        result.Errors.Add(
-                            $"[PATCH-SKIPPED: {needPreview[i].FileName} \u2014 user rejected this change. Re-READ the file if you need to try again.]");
+                        Failed(k, $"[PATCH-SKIPPED: {needPreview[i].FileName} — user rejected this change. Re-READ the file if you need to try again.]");
                         _host.AppendOutput(
-                            $"[PATCH] Skipped {needPreview[i].FileName} \u2014 user rejected.\n",
+                            $"[PATCH] Skipped {needPreview[i].FileName} — user rejected.\n",
                             OutputColor.Dim);
                     }
                 }

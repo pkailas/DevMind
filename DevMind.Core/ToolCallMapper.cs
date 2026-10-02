@@ -211,6 +211,7 @@ namespace DevMind
                         Type = BlockType.File,
                         FileName = GetArg(tc, "filename"),
                         Content = GetArg(tc, "content"),
+                        ToolCallId = tc.ResultId,
                         FromToolCall = true
                     };
 
@@ -220,6 +221,7 @@ namespace DevMind
                         Type = BlockType.AppendFile,
                         FileName = GetArg(tc, "filename"),
                         Content = GetArg(tc, "content"),
+                        ToolCallId = tc.ResultId,
                         FromToolCall = true
                     };
 
@@ -261,6 +263,7 @@ namespace DevMind
                             Type = BlockType.Patch,
                             FileName = filename,
                             Content = sb.ToString(),
+                            ToolCallId = tc.ResultId,
                             FromToolCall = true
                         };
                     }
@@ -303,7 +306,8 @@ namespace DevMind
                     return new ResponseBlock
                     {
                         Type = BlockType.Delete,
-                        FileName = GetArg(tc, "filename")
+                        FileName = GetArg(tc, "filename"),
+                        ToolCallId = tc.ResultId
                     };
 
                 case "rename_file":
@@ -311,7 +315,8 @@ namespace DevMind
                     {
                         Type = BlockType.Rename,
                         RenameFrom = GetArg(tc, "old_filename"),
-                        RenameTo = GetArg(tc, "new_filename")
+                        RenameTo = GetArg(tc, "new_filename"),
+                        ToolCallId = tc.ResultId
                     };
 
                 case "diff_file":

@@ -189,7 +189,10 @@ namespace DevMind
                         var patchErrors = result.Errors != null
                             ? result.Errors.Where(e =>
                                 e.StartsWith("[PATCH-FAILED:", StringComparison.Ordinal) ||
-                                e.StartsWith("[PATCH-SKIPPED:", StringComparison.Ordinal))
+                                e.StartsWith("[PATCH-SKIPPED:", StringComparison.Ordinal) ||
+                                // Plan mode's refusal: without it the model was told the
+                                // find-text matched nothing.
+                                e.StartsWith("[PATCH-REFUSED:", StringComparison.Ordinal))
                               .ToList()
                             : null;
 

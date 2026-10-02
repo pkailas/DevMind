@@ -684,9 +684,21 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   hits two reads of different ranges of one file in one turn.
 - **Fix:** read_file, grep_file, diff_file, find_in_files and list_files also file their result under the call's id
   (`ExecutionResult.ToolResultsByCallId`, keyed by `ToolCallResult.ResultId`), and `LoopHelpers` prefers it. The filename-keyed map
-  is unchanged for its other readers (training log, MCP). Not covered: a patch_file and a read_file of the same file in one turn
-  still share the patch-echo key.
-- **Status:** fixed, pending deploy - same commit as H-53.
+  is unchanged for its other readers (training log, MCP).
+- **Finished (second commit):** three more ways a call could get another call's result in the same turn.
+  - patch_file reported from turn-wide state (`PatchedPaths`, `Errors`) and filed its post-patch view under the file path, the key
+    read_file used. Each patch call now gets a result built from only its own outcome (`ExecuteBatchPatchesAsync` keeps a per-call
+    scope), filed under its call id, formatted by the same `LoopHelpers` code.
+  - Patches ran after EVERY other call in the turn, so patch_file then read_file read the pre-patch text, and patch_file then
+    run_build built unpatched code. Calls now run in call order. Consecutive patch calls still form one batch (one diff-preview
+    card), applied before the next non-patch call.
+  - create_file / append_file / delete_file / rename_file reported from turn-wide lists, so a failed create_file after a
+    successful one was told "[File created: <the other file>]". Each now gets only what it added (`WriteCallScope`).
+  - Also: plan mode's `[PATCH-REFUSED:...]` was missing from the patch result's error filter, so the model was told the find-text
+    matched nothing.
+  Tests: `PerCallToolResultTests` (patch then read, read then patch, two patches of one file, two create_files one of which fails).
+- **Status:** fixed, pending deploy - commits "H-53/H-54/H-55: ..." and "H-55: per-call results for patch and write tools; calls
+  run in call order".
 
 ## Parked
 
