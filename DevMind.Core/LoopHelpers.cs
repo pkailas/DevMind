@@ -126,6 +126,16 @@ namespace DevMind
         public static string BuildToolResultContent(ToolCallResult tc, ExecutionResult result,
             List<ResponseBlock> executedBlocks)
         {
+            // H-53/H-54: the call was not run — its argument error IS the result.
+            if (tc.ArgumentError != null)
+                return $"[TOOL ERROR] {tc.ArgumentError}";
+
+            // H-55: read-side results filed under this call's own id win over the
+            // filename-keyed map, where a grep and a read of one file overwrote each other.
+            if (tc.ResultId != null && result.ToolResultsByCallId != null &&
+                result.ToolResultsByCallId.TryGetValue(tc.ResultId, out string callContent))
+                return callContent;
+
             // External MCP tools have open-ended names, so they cannot be switch cases. Their
             // results are keyed by tool_call id (McpToolName.ResultKey), not by an argument.
             if (McpToolName.TryParse(tc.Name, out _, out _))

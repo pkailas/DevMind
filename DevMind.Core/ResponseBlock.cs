@@ -54,6 +54,6 @@ namespace DevMind
         public string McpServer { get; set; }                             // for McpCall — external MCP server name (mcp__<server>__<tool>)
         public string McpTool { get; set; }                               // for McpCall — tool name on that server
         public JObject McpArguments { get; set; }                         // for McpCall — typed arguments, forwarded un-flattened
-        public string ToolCallId { get; set; }                            // for McpCall — the tool_call id; keys the result (see McpToolName.ResultKey)
+        public string ToolCallId { get; set; }                            // the call's ResultId; keys the result — McpCall (McpToolName.ResultKey) and the read-side tools (ExecutionResult.ToolResultsByCallId)
     }
 }

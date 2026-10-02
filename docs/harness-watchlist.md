@@ -642,6 +642,52 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   `SecondNarrationStall_AfterAToolCall_GetsItsOwnRePrompt_AndReachesTaskDone`.
 - **Status:** fixed, pending deploy - commit "H-52: stall guards per stall; a job ending without task_done is stopped_incomplete".
 
+### H-53 - Missing or misnamed tool arguments surface as raw null exceptions
+- **First seen:** 2026-10-02, VLink.Warehouses jobs 1971-1977: `[READ ERROR] : Value cannot be null. (Parameter 'key')` and
+  `[GREP ERROR] : ...` many times (empty file name), and `[FILE ERROR] : Value cannot be null. (Parameter 'path2')` from a
+  create_file with the path under the wrong key. The model guessed its way to the fix.
+- **Root cause:** `ToolCallMapper.GetArg` returns null for a missing key and `MapSingle` built blocks with a null FileName
+  without telling anyone. The executor then indexed `ToolResultContents[null]` (read/grep/diff), and the host did
+  `Path.Combine(dir, null)` (create_file), and the raw exception message became the only feedback.
+- **Fix:** `ToolCallMapper.ValidateArguments` checks the required arguments of read_file, grep_file, find_in_files, create_file,
+  append_file, patch_file, delete_file, rename_file, diff_file, list_files and run_shell before anything runs. The required keys come
+  from `ToolRegistry`'s schemas (every parameter not marked `[optional]`), not a hand-written list. (`write_file` is an MCP-server
+  tool, not in the agent catalogue.) A missing or blank one (blank `content` is allowed: an empty file is legitimate) means the call is
+  not executed. Its tool result is `[TOOL ERROR] read_file: missing required argument 'filename'. Received: path, start_line.
+  Expected: filename (required), start_line, end_line, force_full.` (`ToolCallResult.ArgumentError`, returned first by
+  `LoopHelpers.BuildToolResultContent`). An unknown tool name now gets `[TOOL ERROR] Unknown tool call: x` as its result instead of
+  `[Executed]`. Second safeguard: `AgenticExecutor` (read/grep/diff/create/append/delete) and `BufferedAgenticHost` (save/append/read)
+  report "no file name was provided" instead of the exception.
+- **Status:** fixed, pending deploy - commit "H-53/H-54/H-55: tool argument errors are reported, patch edits validated, per-call
+  read results". Tests: `ToolArgumentValidationTests`.
+
+### H-54 - patch_file edits with the wrong keys are skipped silently
+- **First seen:** 2026-10-02, job-1973: `[PATCH] Block 1: FIND is empty after fence stripping — skipping.` repeatedly - the model
+  sent edits keyed `old_text`/`new_text`, and later wrote "use find/replace keys (not new_text/old_text)" in its own notes.
+- **Root cause:** `ToolCallMapper` skipped every edit item without `find` (`if (string.IsNullOrEmpty(f)) continue;`). With no
+  usable pairs it fell back to the top-level `find` (also absent) and produced an empty FIND that `PatchEngine` skipped. A malformed
+  `edits` JSON fell back the same way, and an item missing `replace` was silently turned into a deletion.
+- **Fix:** an `edits` array, when given, must be usable as a whole. A bad item rejects the call with e.g. `patch_file: edit 1 has
+  no 'find' key (keys: old_text, new_text). Each edit must be {"find": ..., "replace": ...}.`, and likewise for a missing `replace`,
+  an empty `find`, a non-object item, an empty array or non-JSON. There is no fallback to the top-level find/replace when `edits`
+  was given, and no aliases. Without `edits`, `find` and `replace` are both required. `ToolCallMapperTests` pinned the old fallback;
+  it now pins the error.
+- **Status:** fixed, pending deploy - same commit as H-53.
+
+### H-55 - A grep and a read of the same file in one turn return the same result
+- **Reported as:** "invalid regex is a silent no-match" - job-1973's grep_file `ConnectAsync|Calls.Add("connect` "returned only the
+  [READ:] echo and no GREP section", and the agent concluded "grep_file is broken for patterns containing parentheses".
+- **Actual cause (from the job-1973 transcript):** the grep worked - `[GREP] 5 matches for "ConnectAsync|Calls.Add("connect"` -
+  and grep_file/find_in_files are not regex at all (`SearchPattern`: case-insensitive substring, `|` = OR), so an unbalanced paren
+  cannot fail. The same turn also ran read_file on the same file. Read, grep and diff results are all filed under the file name in
+  `ExecutionResult.ToolResultContents`, so the read overwrote the grep and both tool messages carried the read. The same collision
+  hits two reads of different ranges of one file in one turn.
+- **Fix:** read_file, grep_file, diff_file, find_in_files and list_files also file their result under the call's id
+  (`ExecutionResult.ToolResultsByCallId`, keyed by `ToolCallResult.ResultId`), and `LoopHelpers` prefers it. The filename-keyed map
+  is unchanged for its other readers (training log, MCP). Not covered: a patch_file and a read_file of the same file in one turn
+  still share the patch-echo key.
+- **Status:** fixed, pending deploy - same commit as H-53.
+
 ## Parked
 
 ### P-01 - No-write-streak nudge

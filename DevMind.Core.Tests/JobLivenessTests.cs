@@ -142,8 +142,10 @@ namespace DevMind.Core.Tests
             {
                 var blocks = ToolCallMapper.Map(new List<ToolCallResult>
                 {
-                    new ToolCallResult { Name = "list_files", Arguments = new Dictionary<string, string>() },
-                    new ToolCallResult { Name = "grep_file", Arguments = new Dictionary<string, string> { ["pattern"] = "x" } },
+                    // Required arguments present: since H-53 a call missing one is rejected
+                    // by ToolCallMapper and never becomes an executable block.
+                    new ToolCallResult { Name = "list_files", Arguments = new Dictionary<string, string> { ["glob"] = "*.txt" } },
+                    new ToolCallResult { Name = "grep_file", Arguments = new Dictionary<string, string> { ["pattern"] = "x", ["filename"] = "none.txt" } },
                 }, buildCommand: "dotnet build");
                 blocks.Insert(0, new ResponseBlock { Type = BlockType.Text, Content = "prose" });
 

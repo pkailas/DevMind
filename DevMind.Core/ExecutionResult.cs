@@ -38,6 +38,16 @@ namespace DevMind
         public Dictionary<string, string> ToolResultContents { get; set; }
 
         /// <summary>
+        /// The same read-side results (read_file, grep_file, diff_file, find_in_files, list_files)
+        /// keyed by the call's <see cref="ToolCallResult.ResultId"/>. ToolResultContents keys by
+        /// file name, so a grep and a read of ONE file in one turn overwrote each other and both
+        /// calls got the read back — job-1973 concluded "grep_file is broken" from a grep that
+        /// had found 5 matches (H-55). LoopHelpers prefers this map; ToolResultContents is kept
+        /// as it was for everything else that reads it (training log, MCP results).
+        /// </summary>
+        public Dictionary<string, string> ToolResultsByCallId { get; set; }
+
+        /// <summary>
         /// Write-time lint lines ("[LINT] ...") per written file, keyed by the full path the
         /// host returned. Appended to that file's create/append/patch tool result; advisory only.
         /// </summary>
@@ -54,6 +64,7 @@ namespace DevMind
             FilesAppended        = new List<string>();
             Errors               = new List<string>();
             ToolResultContents   = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            ToolResultsByCallId  = new Dictionary<string, string>(StringComparer.Ordinal);
             LintNotes            = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
         }
 

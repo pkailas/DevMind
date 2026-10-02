@@ -41,6 +41,14 @@ namespace DevMind
         /// <summary>The id this call's result is filed and looked up under: <see cref="FallbackId"/> if set, else <see cref="Id"/>.</summary>
         public string ResultId => FallbackId ?? Id;
 
+        /// <summary>
+        /// Set by ToolCallMapper.Map when the call cannot run as sent: a required argument is
+        /// missing or blank, a patch_file edit has no 'find', or the tool is unknown (H-53/H-54).
+        /// The call is not executed; this text is its tool result, so the model learns which
+        /// key it got wrong instead of reading a raw ArgumentNullException or nothing at all.
+        /// </summary>
+        public string ArgumentError { get; set; }
+
         /// <summary>Reasoning/thinking text from the model, if present.</summary>
         public string ThinkingText { get; set; }
     }

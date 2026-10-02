@@ -490,6 +490,12 @@ namespace DevMind
 
         async Task<string> IAgenticHost.SaveFileAsync(string fileName, string content, bool fromToolCall)
         {
+            // H-53: name the cause; Path.Combine(dir, null) reported "(Parameter 'path2')".
+            if (string.IsNullOrWhiteSpace(fileName))
+            {
+                AppendOutput("[FILE ERROR] no file name was provided.\n", OutputColor.Error);
+                return null;
+            }
             string fileNameOnly = SafeGetFileName(fileName);
 
             // Block if a conflict is pending from a previous write attempt
@@ -608,6 +614,11 @@ namespace DevMind
 
         async Task<string> IAgenticHost.AppendFileAsync(string fileName, string content)
         {
+            if (string.IsNullOrWhiteSpace(fileName))
+            {
+                AppendOutput("[APPEND ERROR] no file name was provided.\n", OutputColor.Error);
+                return null;
+            }
             string fileNameOnly = SafeGetFileName(fileName);
 
             // Block if a conflict is pending
@@ -1256,6 +1267,11 @@ namespace DevMind
         async Task<string> IAgenticHost.LoadFileContentAsync(
             string fileName, int rangeStart, int rangeEnd, bool forceFullRead)
         {
+            if (string.IsNullOrWhiteSpace(fileName))
+            {
+                AppendOutput("[READ ERROR] no file name was provided.\n", OutputColor.Error);
+                return "[ERROR: read_file: no file name was provided — pass the file path in 'filename'.]";
+            }
             if (FileReadTools.IsGitRequest(fileName))
                 return Report(await ReadTools.ReadGitAsync(fileName, rangeStart, CancellationToken));
 

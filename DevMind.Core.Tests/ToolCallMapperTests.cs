@@ -56,8 +56,11 @@ public sealed class ToolCallMapperTests
     }
 
     [Fact]
-    public void PatchFile_MalformedEdits_FallsBackToFindReplace()
+    public void PatchFile_MalformedEdits_IsAnError_NoFallbackToFindReplace()
     {
+        // Was: fell back to the top-level find/replace. H-54: an edits array that was given
+        // but is unusable is an error — a silent fallback is how job-1973's {old_text,new_text}
+        // edits became an empty FIND.
         var block = MapPatch(new Dictionary<string, string>
         {
             ["filename"] = "C:\\repo\\Foo.cs",
@@ -66,8 +69,8 @@ public sealed class ToolCallMapperTests
             ["replace"]  = "fallback replace"
         });
 
-        var pairs = PatchEngine.ParsePatchBlocks(block.Content, fromToolCall: true);
-        Assert.Equal(("fallback find", "fallback replace"), Assert.Single(pairs));
+        Assert.Equal(BlockType.Text, block.Type);
+        Assert.Contains("patch_file: 'edits' is not a JSON array", block.Content);
     }
 
     // ── run_shell: detach (H-24) ─────────────────────────────────────────────

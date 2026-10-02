@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using Newtonsoft.Json.Linq;
 
@@ -26,6 +27,16 @@ namespace DevMind
 
             foreach (var tc in toolCalls)
             {
+                // H-53/H-54: a call that cannot run as sent is not mapped to an executable
+                // block. Its ArgumentError becomes its tool result (LoopHelpers), and the
+                // transcript shows the same text.
+                tc.ArgumentError = ValidateArguments(tc);
+                if (tc.ArgumentError != null)
+                {
+                    blocks.Add(new ResponseBlock { Type = BlockType.Text, Content = $"[TOOL ERROR] {tc.ArgumentError}" });
+                    continue;
+                }
+
                 var block = MapSingle(tc, buildCommand);
                 if (block != null)
                     blocks.Add(block);
@@ -55,6 +66,129 @@ namespace DevMind
             }
         }
 
+        // ── Argument validation (H-53 / H-54) ──────────────────────────────────────
+        // job-1971..1977: read_file/grep_file sent with the path under the wrong key reached
+        // the executor with a null FileName and came back as "Value cannot be null.
+        // (Parameter 'key')"; patch_file edits keyed old_text/new_text were skipped one by one
+        // and the call became an empty FIND. The model had to guess what it did wrong.
+
+        /// <summary>Tools whose required arguments are checked before anything runs. The
+        /// required keys themselves come from <see cref="ToolRegistry"/>'s schemas.</summary>
+        private static readonly string[] ValidatedTools =
+        {
+            "read_file", "grep_file", "find_in_files", "create_file", "append_file", "patch_file",
+            "delete_file", "rename_file", "diff_file", "list_files", "run_shell",
+        };
+
+        /// <summary>Arguments that may legitimately be an empty string (an empty file).
+        /// Missing is still an error for them; blank is not.</summary>
+        private static readonly HashSet<string> BlankAllowed = new HashSet<string>(StringComparer.Ordinal) { "content" };
+
+        private sealed class ToolSchema
+        {
+            public List<string> Required = new List<string>();
+            public List<string> All = new List<string>();
+        }
+
+        private static readonly Lazy<Dictionary<string, ToolSchema>> s_schemas =
+            new Lazy<Dictionary<string, ToolSchema>>(BuildSchemas);
+
+        private static Dictionary<string, ToolSchema> BuildSchemas()
+        {
+            var map = new Dictionary<string, ToolSchema>(StringComparer.Ordinal);
+            var wanted = new HashSet<string>(ValidatedTools, StringComparer.Ordinal);
+            foreach (JToken tool in ToolRegistry.BuildToolsArray())
+            {
+                string name = tool["function"]?["name"]?.ToString();
+                if (name == null || !wanted.Contains(name)) continue;
+                var parameters = tool["function"]["parameters"];
+                var schema = new ToolSchema();
+                if (parameters?["properties"] is JObject props)
+                    foreach (var p in props.Properties()) schema.All.Add(p.Name);
+                if (parameters?["required"] is JArray req)
+                    foreach (var r in req) schema.Required.Add(r.ToString());
+                map[name] = schema;
+            }
+            return map;
+        }
+
+        /// <summary>
+        /// Why <paramref name="tc"/> cannot run as sent, or null when it can. Checks the
+        /// schema's required arguments for the file/shell tools, patch_file's find/replace
+        /// shape, and unknown tool names. Other tools are not checked here.
+        /// </summary>
+        internal static string ValidateArguments(ToolCallResult tc)
+        {
+            if (tc == null || string.IsNullOrEmpty(tc.Name)) return "tool call has no name.";
+            if (McpToolName.TryParse(tc.Name, out _, out _)) return null;
+
+            if (s_schemas.Value.TryGetValue(tc.Name, out ToolSchema schema))
+            {
+                foreach (string key in schema.Required)
+                {
+                    bool present = tc.Arguments != null && tc.Arguments.TryGetValue(key, out string value)
+                        && value != null && (BlankAllowed.Contains(key) || !string.IsNullOrWhiteSpace(value));
+                    if (!present)
+                        return $"{tc.Name}: missing required argument '{key}'. Received: {DescribeKeys(tc.Arguments?.Keys)}. " +
+                               $"Expected: {DescribeExpected(schema)}.";
+                }
+                if (tc.Name == "patch_file") return ValidatePatchEdits(tc);
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// patch_file's find/replace shape. An edits array, when given, must be usable as a whole:
+        /// an item without 'find' or 'replace' is an error, never a skip, and there is no fallback
+        /// to the top-level find/replace (job-1973 sent {old_text,new_text} items and got an empty
+        /// FIND). Without edits, the top-level find and replace are both required.
+        /// </summary>
+        private static string ValidatePatchEdits(ToolCallResult tc)
+        {
+            const string shape = "Each edit must be {\"find\": ..., \"replace\": ...}.";
+            string editsJson = GetArg(tc, "edits");
+            if (!string.IsNullOrWhiteSpace(editsJson))
+            {
+                JArray edits;
+                try { edits = JArray.Parse(editsJson); }
+                catch (Exception ex) { return $"patch_file: 'edits' is not a JSON array ({ex.Message}). {shape}"; }
+                if (edits.Count == 0) return $"patch_file: 'edits' is empty. {shape}";
+
+                for (int i = 0; i < edits.Count; i++)
+                {
+                    if (!(edits[i] is JObject item))
+                        return $"patch_file: edit {i + 1} is not an object. {shape}";
+                    string keys = DescribeKeys(item.Properties().Select(p => p.Name));
+                    JToken find = item["find"];
+                    if (find == null || find.Type == JTokenType.Null)
+                        return $"patch_file: edit {i + 1} has no 'find' key (keys: {keys}). {shape}";
+                    if (find.ToString().Length == 0)
+                        return $"patch_file: edit {i + 1} has an empty 'find'. Copy the exact text to replace from read_file output.";
+                    JToken replace = item["replace"];
+                    if (replace == null || replace.Type == JTokenType.Null)
+                        return $"patch_file: edit {i + 1} has no 'replace' key (keys: {keys}). {shape} Use \"replace\": \"\" to delete.";
+                }
+                return null;
+            }
+
+            string received = DescribeKeys(tc.Arguments?.Keys);
+            if (string.IsNullOrEmpty(GetArg(tc, "find")))
+                return $"patch_file: no 'find' and no 'edits'. Received: {received}. " +
+                       "Send find + replace for one edit, or edits: [{\"find\": ..., \"replace\": ...}].";
+            if (GetArg(tc, "replace") == null)
+                return $"patch_file: 'find' was given without 'replace'. Received: {received}. Use \"replace\": \"\" to delete.";
+            return null;
+        }
+
+        private static string DescribeKeys(IEnumerable<string> keys)
+        {
+            var list = keys?.ToList();
+            return list == null || list.Count == 0 ? "no arguments" : string.Join(", ", list);
+        }
+
+        private static string DescribeExpected(ToolSchema schema)
+            => string.Join(", ", schema.All.Select(k => schema.Required.Contains(k) ? k + " (required)" : k));
+
         private static ResponseBlock MapSingle(ToolCallResult tc, string buildCommand)
         {
             switch (tc.Name)
@@ -67,6 +201,7 @@ namespace DevMind
                         RangeStart = GetIntArg(tc, "start_line"),
                         RangeEnd = GetIntArg(tc, "end_line"),
                         ForceFullRead = GetBoolArg(tc, "force_full"),
+                        ToolCallId = tc.ResultId,
                         FromToolCall = true
                     };
 
@@ -100,28 +235,21 @@ namespace DevMind
                         var sb = new StringBuilder();
                         sb.Append("PATCH ").Append(filename).Append('\n');
 
-                        int pairCount = 0;
+                        // ValidatePatchEdits already ran: when edits is given, every item has a
+                        // non-empty find and a replace. No skipping, and no fallback to the
+                        // top-level find/replace when edits was given (H-54).
                         string editsJson = GetArg(tc, "edits");
                         if (!string.IsNullOrWhiteSpace(editsJson))
                         {
-                            try
+                            foreach (var item in JArray.Parse(editsJson))
                             {
-                                foreach (var item in JArray.Parse(editsJson))
-                                {
-                                    string f = item?["find"]?.ToString();
-                                    if (string.IsNullOrEmpty(f)) continue;   // skip empty; PatchEngine would reject anyway
-                                    string r = item?["replace"]?.ToString() ?? "";
-                                    sb.Append("FIND:\n").Append(f).Append('\n');
-                                    sb.Append("REPLACE:\n").Append(r).Append('\n');
-                                    pairCount++;
-                                }
+                                sb.Append("FIND:\n").Append(item["find"].ToString()).Append('\n');
+                                sb.Append("REPLACE:\n").Append(item["replace"].ToString()).Append('\n');
                             }
-                            catch { /* malformed edits — fall through to single find/replace */ }
                         }
-
-                        if (pairCount == 0)
+                        else
                         {
-                            // Single-edit form (or no usable edits): fall back to top-level find/replace.
+                            // Single-edit form: top-level find/replace.
                             sb.Append("FIND:\n").Append(GetArg(tc, "find")).Append('\n');
                             sb.Append("REPLACE:\n").Append(GetArg(tc, "replace")).Append('\n');
                         }
@@ -156,7 +284,8 @@ namespace DevMind
                         Pattern = GetArg(tc, "pattern"),
                         FileName = GetArg(tc, "filename"),
                         RangeStart = GetIntArg(tc, "start_line"),
-                        RangeEnd = GetIntArg(tc, "end_line")
+                        RangeEnd = GetIntArg(tc, "end_line"),
+                        ToolCallId = tc.ResultId
                     };
 
                 case "find_in_files":
@@ -166,7 +295,8 @@ namespace DevMind
                         Pattern = GetArg(tc, "pattern"),
                         GlobPattern = GetArg(tc, "glob"),
                         RangeStart = GetIntArg(tc, "start_line"),
-                        RangeEnd = GetIntArg(tc, "end_line")
+                        RangeEnd = GetIntArg(tc, "end_line"),
+                        ToolCallId = tc.ResultId
                     };
 
                 case "delete_file":
@@ -188,7 +318,8 @@ namespace DevMind
                     return new ResponseBlock
                     {
                         Type = BlockType.Diff,
-                        FileName = GetArg(tc, "filename")
+                        FileName = GetArg(tc, "filename"),
+                        ToolCallId = tc.ResultId
                     };
 
                case "run_tests":
@@ -280,7 +411,8 @@ namespace DevMind
                     {
                         Type = BlockType.ListFiles,
                         ListFilesGlob = GetArg(tc, "glob"),
-                        ListFilesRecursive = tc.Arguments?.ContainsKey("recursive") != true || GetBoolArg(tc, "recursive")
+                        ListFilesRecursive = tc.Arguments?.ContainsKey("recursive") != true || GetBoolArg(tc, "recursive"),
+                        ToolCallId = tc.ResultId
                     };
 
                 case "get_diagnostics":
@@ -436,7 +568,9 @@ namespace DevMind
                         };
                     }
 
-                    // Unknown tool — emit as text so it's visible in output
+                    // Unknown tool — emit as text so it's visible in output, and say so in the
+                    // tool result too (it used to come back as a bare "[Executed]").
+                    tc.ArgumentError = $"Unknown tool call: {tc.Name}";
                     return new ResponseBlock
                     {
                         Type = BlockType.Text,

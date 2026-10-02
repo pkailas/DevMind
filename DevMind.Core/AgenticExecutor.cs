@@ -196,6 +196,7 @@ namespace DevMind
 
                     case BlockType.File:
                         if (!processFiles) break;
+                        if (MissingFileName(block, "create_file", result)) break;
                         if (!await ApproveMutationAsync(MutationKind.CreateFile,
                                 $"Create file {block.FileName} ({block.Content?.Length ?? 0:N0} chars)?", result))
                             break;
@@ -220,6 +221,7 @@ namespace DevMind
 
                     case BlockType.AppendFile:
                         if (!processFiles) break;
+                        if (MissingFileName(block, "append_file", result)) break;
                         if (!await ApproveMutationAsync(MutationKind.AppendFile,
                                 $"Append to {block.FileName} ({block.Content?.Length ?? 0:N0} chars)?", result))
                             break;
@@ -290,6 +292,7 @@ namespace DevMind
                         break;
 
                     case BlockType.Grep:
+                        if (MissingFileName(block, "grep_file", result)) break;
                         try
                         {
                             int? grepStart = block.RangeStart > 0 ? (int?)block.RangeStart : null;
@@ -309,7 +312,10 @@ namespace DevMind
                             }
                             string grepContent = await _host.GrepFileAsync(block.Pattern, block.FileName, grepStart, grepEnd);
                             if (grepContent != null)
+                            {
                                 result.ToolResultContents[block.FileName] = grepContent;
+                                RecordCallResult(result, block, grepContent);
+                            }
                         }
                         catch (Exception ex)
                         {
@@ -338,7 +344,10 @@ namespace DevMind
                             }
                             string findContent = await _host.FindInFilesAsync(block.Pattern, block.GlobPattern, findStart, findEnd);
                             if (findContent != null)
-                                result.ToolResultContents[block.GlobPattern] = findContent;
+                            {
+                                result.ToolResultContents[block.GlobPattern ?? ""] = findContent;
+                                RecordCallResult(result, block, findContent);
+                            }
                         }
                         catch (Exception ex)
                         {
@@ -365,7 +374,10 @@ namespace DevMind
                             string listContent = await _host.ListFilesAsync(
                                 block.ListFilesGlob, block.ListFilesRecursive, _cancellationToken);
                             if (listContent != null)
+                            {
                                 result.ToolResultContents[block.ListFilesGlob ?? ""] = listContent;
+                                RecordCallResult(result, block, listContent);
+                            }
                         }
                         catch (Exception ex)
                         {
@@ -375,6 +387,7 @@ namespace DevMind
                         break;
 
                     case BlockType.Delete:
+                        if (MissingFileName(block, "delete_file", result)) break;
                         if (!await ApproveMutationAsync(MutationKind.DeleteFile,
                                 $"Delete file {block.FileName}?", result))
                             break;
@@ -432,6 +445,7 @@ namespace DevMind
                         break;
 
                     case BlockType.Diff:
+                        if (MissingFileName(block, "diff_file", result)) break;
                         try
                         {
                             string diffKey = $"DIFF:{block.FileName}";
@@ -447,7 +461,10 @@ namespace DevMind
                             }
                             string diffContent = await _host.GetFileDiffAsync(block.FileName);
                             if (diffContent != null)
+                            {
                                 result.ToolResultContents[block.FileName] = diffContent;
+                                RecordCallResult(result, block, diffContent);
+                            }
                         }
                         catch (Exception ex)
                         {
@@ -480,6 +497,7 @@ namespace DevMind
                         break;
 
                     case BlockType.ReadRequest:
+                        if (MissingFileName(block, "read_file", result)) break;
                         try
                         {
                             string readKey = block.RangeStart > 0
@@ -500,7 +518,10 @@ namespace DevMind
                                 block.FileName, block.RangeStart, block.RangeEnd,
                                 block.ForceFullRead);
                             if (readContent != null)
+                            {
                                 result.ToolResultContents[block.FileName] = readContent;
+                                RecordCallResult(result, block, readContent);
+                            }
                         }
                         catch (Exception ex)
                         {
@@ -1042,6 +1063,28 @@ namespace DevMind
         // \u2500\u2500 Write-time lint and build hints (H-19) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
         // Advisory only: a rule that fires appends a line to the tool result; nothing here can
         // fail or undo the write or the build it is commenting on.
+
+        /// <summary>
+        /// H-53 guard: a file tool that reached the executor with no file name. ToolCallMapper
+        /// rejects such calls first, so this only catches a block built some other way — but it
+        /// reports the cause instead of the raw "Value cannot be null. (Parameter 'key')".
+        /// </summary>
+        private bool MissingFileName(ResponseBlock block, string tool, ExecutionResult result)
+        {
+            if (!string.IsNullOrWhiteSpace(block.FileName)) return false;
+            string msg = $"{tool}: no file name was provided — pass the file path in 'filename'.";
+            result.Errors.Add(msg);
+            _host.AppendOutput($"[{tool.ToUpperInvariant()} ERROR] {msg}\n", OutputColor.Error);
+            if (block.ToolCallId != null) result.ToolResultsByCallId[block.ToolCallId] = $"[ERROR: {msg}]";
+            return true;
+        }
+
+        /// <summary>Files a read-side result under its call id as well (H-55), so two calls on
+        /// the same file in one turn each get their own result.</summary>
+        private static void RecordCallResult(ExecutionResult result, ResponseBlock block, string content)
+        {
+            if (block.ToolCallId != null) result.ToolResultsByCallId[block.ToolCallId] = content;
+        }
 
         /// <summary>Lint <paramref name="content"/> (the file as written) and file any lines under its path.</summary>
         private static void RecordLint(ExecutionResult result, string fullPath, string content, ISet<int> changedLines)
