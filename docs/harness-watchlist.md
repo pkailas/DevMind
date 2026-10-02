@@ -826,6 +826,25 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   boundary as before: shell commands are not sandboxed.
 - **Status:** fixed (2026-10-02), pending deploy.
 
+### H-60 - list_files with "**/" in the directory part ignores the rest of the pattern
+- **First seen:** 2026-10-02, job-2112 (iterations ~6-8, VLink.Warehouses). `list_files "**/ConfigPages/*.cs"` and
+  `"tests/**/ConfigPages/*.cs"` both returned the 200-file cap; the agent noted "The glob is being ignored." The literal
+  `tests/Verbella.VLink.Warehouses.Service.Tests/ConfigPages/*.cs` returned 15. Measured: the repo has 448 .cs files outside
+  noise dirs, 24 of them directly under a ConfigPages folder.
+- **Cause:** `FileReadTools.SplitGlob` splits off the last segment as the file pattern and treats the rest as a literal
+  directory. `**/ConfigPages` never exists, so it silently fell back to the search root and enumerated `*.cs` recursively:
+  every .cs in the tree. `find_in_files` shares the split and had the same bug.
+- **Fix (done 2026-10-02):** `FileReadTools.WildcardDirGlob`. When the DIRECTORY part has a wildcard (`**`, `*` or `?`), the
+  root is the literal prefix before the first wildcard segment, with no fallback (a missing prefix matches nothing). The
+  walk is recursive, with noise dirs pruned as before, and each file's root-relative path must match the remaining segments:
+  `**` = zero or more directories, `*`/`?` within one segment, case-insensitive. `recursive` does not apply to such a glob.
+  Globs with no wildcard in the directory part (`*.cs`, `src/X/*.cs`) take the old path unchanged.
+  Used by `list_files` and `find_in_files`.
+- **Tests:** `ListFilesGlobTests` on a temp tree: `**/X/*.cs` (only files directly under any X), `a/**/X/*.cs`, `**/*.cs`
+  (all, bin pruned), `a/*/X/*.cs` (one level), backslash + `./` prefix, missing prefix → no matches, `recursive: false`
+  ignored, absolute prefix, unchanged `*.cs` / `a/X/*.cs`, and find_in_files with the same glob.
+- **Status:** fixed (2026-10-02), pending deploy.
+
 ## Parked
 
 ### P-01 - No-write-streak nudge

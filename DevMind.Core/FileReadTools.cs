@@ -24,6 +24,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -165,6 +166,67 @@ namespace DevMind
             string pattern = normalized.Substring(lastSlash + 1);
             string candidate = Path.Combine(searchDir, dirPart.Replace('/', Path.DirectorySeparatorChar));
             return (Directory.Exists(candidate) ? candidate : searchDir, pattern);
+        }
+
+        /// <summary>
+        /// H-60: a glob whose DIRECTORY part has a wildcard ("**/X/*.cs", "a/**/X/*.cs",
+        /// "src/*/Tests/*.cs"). <see cref="SplitGlob"/> treats the directory part as a literal
+        /// path; "**/ConfigPages" never exists, so it fell back to the search root and listed
+        /// every "*.cs" in the tree (job-2112: 200+ results for a pattern with 24 matches).
+        /// Returns null for any other glob — those keep the <see cref="SplitGlob"/> behaviour.
+        /// Otherwise: the root is the literal directory prefix before the first wildcard
+        /// segment (no fallback — a missing prefix matches nothing), the enumeration is
+        /// recursive with the last segment as the file pattern, and <c>Matches</c> filters
+        /// each file's path relative to that root: "**" is zero or more directories, "*" and
+        /// "?" stay within one segment, case-insensitive.
+        /// </summary>
+        internal static (string root, string filePattern, Regex matches)? WildcardDirGlob(string searchDir, string glob)
+        {
+            string normalized = (glob ?? "").Replace('\\', '/').Trim();
+            while (normalized.StartsWith("./", StringComparison.Ordinal)) normalized = normalized.Substring(2);
+            string[] segments = normalized.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            if (segments.Length < 2) return null;
+            int firstWild = Array.FindIndex(segments, s => s.IndexOfAny(new[] { '*', '?' }) >= 0);
+            if (firstWild < 0 || firstWild == segments.Length - 1) return null; // wildcard only in the file name
+
+            // The literal prefix as written (keeps a leading "/" or "C:/"), then resolved against
+            // the search root — Path.Combine returns an absolute prefix unchanged.
+            string root = searchDir;
+            if (firstWild > 0)
+            {
+                string prefix = normalized.Substring(0, normalized.IndexOf(segments[firstWild], StringComparison.Ordinal)).TrimEnd('/');
+                if (prefix.EndsWith(":", StringComparison.Ordinal)) prefix += "/";
+                root = Path.Combine(searchDir, prefix.Replace('/', Path.DirectorySeparatorChar));
+            }
+
+            var rx = new StringBuilder("^");
+            for (int i = firstWild; i < segments.Length; i++)
+            {
+                bool last = i == segments.Length - 1;
+                string seg = segments[i];
+                if (seg == "**")
+                {
+                    rx.Append(last ? ".*" : "(?:[^/]+/)*");
+                    continue;
+                }
+                foreach (char c in seg)
+                    rx.Append(c switch { '*' => "[^/]*", '?' => "[^/]", _ => Regex.Escape(c.ToString()) });
+                if (!last) rx.Append('/');
+            }
+            rx.Append('$');
+
+            string filePattern = segments[^1] == "**" ? "*" : segments[^1];
+            return (root, filePattern, new Regex(rx.ToString(), RegexOptions.IgnoreCase | RegexOptions.CultureInvariant));
+        }
+
+        /// <summary>Files under <paramref name="root"/> whose root-relative path matches the
+        /// <see cref="WildcardDirGlob"/> filter. Noise directories are pruned by the walk.</summary>
+        private static IEnumerable<string> EnumerateWildcardDirGlob((string root, string filePattern, Regex matches) g)
+        {
+            if (!Directory.Exists(g.root)) return Enumerable.Empty<string>();
+            string rootFull = Path.GetFullPath(g.root);
+            return ContextEngine.SafeEnumerateFilesGlob(rootFull, g.filePattern)
+                .Where(f => g.matches.IsMatch(Path.GetRelativePath(rootFull, f).Replace('\\', '/')));
         }
 
         /// <summary>The search root: an explicit absolute <paramref name="root"/> (MCP) or the
@@ -463,11 +525,14 @@ namespace DevMind
             if (rootError != null) return new FileReadResult { Text = rootError };
 
             var (effectiveRoot, filePattern) = SplitGlob(searchDir, glob);
+            var wildcardDirs = WildcardDirGlob(searchDir, glob);
 
             List<string> files;
             try
             {
-                files = ContextEngine.SafeEnumerateFilesGlob(effectiveRoot, filePattern)
+                files = (wildcardDirs is { } g
+                        ? EnumerateWildcardDirGlob(g)
+                        : ContextEngine.SafeEnumerateFilesGlob(effectiveRoot, filePattern))
                     .Where(f => !ContextEngine.IsNoisePath(f))
                     .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
                     .ToList();
@@ -553,13 +618,17 @@ namespace DevMind
             var (effectiveRoot, filePattern) = SplitGlob(searchDir, glob);
             if (string.IsNullOrWhiteSpace(filePattern))
                 return new FileReadResult { Text = "[ERROR: glob pattern is empty]" };
+            // A wildcard in the directory part spells out its own depth, so `recursive` does not apply.
+            var wildcardDirs = WildcardDirGlob(searchDir, glob);
 
             List<string> sorted;
             try
             {
-                IEnumerable<string> matches = recursive
-                    ? ContextEngine.SafeEnumerateFilesGlob(effectiveRoot, filePattern)
-                    : Directory.EnumerateFiles(effectiveRoot, filePattern, SearchOption.TopDirectoryOnly);
+                IEnumerable<string> matches = wildcardDirs is { } g
+                    ? EnumerateWildcardDirGlob(g)
+                    : recursive
+                        ? ContextEngine.SafeEnumerateFilesGlob(effectiveRoot, filePattern)
+                        : Directory.EnumerateFiles(effectiveRoot, filePattern, SearchOption.TopDirectoryOnly);
                 // Materialized INSIDE the try: enumeration is lazy, and its errors used to
                 // escape the agent hosts' try as an unhandled tool exception.
                 sorted = matches
