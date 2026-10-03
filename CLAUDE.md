@@ -177,7 +177,7 @@ same thing. Grouping follows `HelpGroups`.
 | `/reasoning on\|off` | Toggle reasoning display (alias for /think) |
 | `/rules [text\|clear]` | Show, set, or clear behavioral rules |
 | `/system_prompt` | Display the assembled system prompt |
-| `/prompt` | Show the global system-prompt file path, existence, and assembled prompt size |
+| `/prompt [name\|default]` | Show system-prompt state (file, active profile, saved profiles, size), or switch this session to a saved prompt in `%APPDATA%\devmind\prompts`; `default` restores the chain |
 | **Context** | |
 | `/depth-cap [N]` | Show or set agentic depth cap (1-200) |
 | `/context-limit [1-99\|off]` | Show or set the context-window % at which the loop pauses to ask |

@@ -39,6 +39,17 @@ namespace DevMind
         /// </summary>
         public string ExplicitSystemPrompt { get; set; }
 
+        /// <summary>
+        /// Name of the saved prompt profile (%APPDATA%\devmind\prompts\&lt;name&gt;.md) selected
+        /// for THIS session, or null for none. Set by /prompt &lt;name&gt; at runtime and by
+        /// --prompt at launch; in memory only — never written to devmind.json, because a
+        /// profile chosen in a session belongs to the session. The prompt is rebuilt per
+        /// turn from this object (the same freshness guarantee /mode and /rules rely on),
+        /// so assigning it here is all the plumbing switching needs. While it is set it
+        /// beats --system-prompt and system-prompt.md: it is the most recent explicit choice.
+        /// </summary>
+        public string ActivePromptProfile { get; set; }
+
         public string ModelName                { get; set; } = "";
         public int    RequestTimeoutMinutes    { get; set; } = 10;
         public int    FirstTokenTimeoutMinutes { get; set; } = 5;
@@ -114,6 +125,14 @@ namespace DevMind
                         // Both: SystemPrompt keeps every existing reader working,
                         // ExplicitSystemPrompt records that this one was typed.
                         opts.ExplicitSystemPrompt = opts.SystemPrompt = args[++i];
+                        break;
+                    case "--prompt" when i + 1 < args.Length:
+                        // The profile itself is resolved at startup (Program), where a bad
+                        // value can be reported to the operator instead of silently ignored.
+                        // "default" means none — same word /prompt default uses.
+                        string promptArg = args[++i];
+                        if (!promptArg.Equals("default", StringComparison.OrdinalIgnoreCase))
+                            opts.ActivePromptProfile = promptArg;
                         break;
                     case "--build-command" when i + 1 < args.Length: opts.BuildCommand           = args[++i]; break;
                     case "--dir"          when i + 1 < args.Length: i++; break;

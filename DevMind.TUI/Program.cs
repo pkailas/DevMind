@@ -25,6 +25,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Text;
 using System.Threading;
@@ -824,6 +825,14 @@ namespace DevMind
                 });
             }
 
+            // Resolve --prompt NOW, before the first prompt is built, so the very first turn
+            // carries the chosen profile and the operator sees the bad-value warning under
+            // the banner rather than finding out from the model's behaviour. "A silent no-op
+            // is not acceptable" — the same argument the mcpServers warnings below make.
+            var promptProfileWarnings = new List<string>();
+            options.ActivePromptProfile = ResolvePromptProfile(
+                options.ActivePromptProfile, PromptProfiles.ProfilesDir, promptProfileWarnings.Add);
+
            // Build combined system prompt (initial — scratchpad is empty at startup).
              string combinedSystemPrompt = BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules, host.TaskScratchpad);
 
@@ -842,6 +851,12 @@ namespace DevMind
             // Bad "mcpServers" entries were skipped; say which, once, under the banner.
             foreach (string warning in mcpConfigWarnings)
                 host.AppendOutputLocal($"[MCP] {warning}\n", OutputColor.Warning);
+
+            // A --prompt value that cannot be honoured: the session runs on the default
+            // chain, and the operator is told that in those words — naming the bad value
+            // and the prompts that DO exist. Same one-shot-under-the-banner pattern.
+            foreach (string warning in promptProfileWarnings)
+                host.AppendOutputLocal($"[PROMPT] {warning}\n", OutputColor.Warning);
 
             host.AppendOutputLocal("\n", OutputColor.Dim);
 
@@ -1768,6 +1783,12 @@ namespace DevMind
                          {
                              return BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules, host.TaskScratchpad);
                          },
+                        // Prompt profiles (/prompt <name>). Session state on options — the
+                        // per-turn closures re-read it, so no history rewrite is needed. No
+                        // _config.Save(): a profile chosen mid-session belongs to the session,
+                        // not to devmind.json.
+                        ActivePromptProfile = options.ActivePromptProfile,
+                        SetActivePromptProfile = (name) => { options.ActivePromptProfile = name; },
                         // Working directory.
                         WorkingDirectory = options.WorkingDirectory,
                        SetWorkingDirectory = (dir) =>
@@ -2590,6 +2611,78 @@ static string LoadContextFile(string workingDirectory)
             : BuildCommandResolver.Resolve(options.WorkingDirectory);
 
     /// <summary>
+    /// The system-prompt chain for one assembly, profile on top:
+    ///
+    ///   1. the active saved profile (/prompt &lt;name&gt; or --prompt) — the most recent
+    ///      explicit operator choice, so it beats --system-prompt;
+    ///   2. the --system-prompt argument this invocation typed;
+    ///   3. the authored system-prompt.md;
+    ///   4. options.SystemPrompt (devmind.json, else the built-in default).
+    ///
+    /// The profile is re-read on EVERY assembly (same hot-reload property as
+    /// system-prompt.md): a profile deleted or blanked mid-session yields null here and the
+    /// turn falls back to the chain rather than breaking it. The default chain below is
+    /// byte-for-byte what it was before profiles existed.
+    /// </summary>
+    internal static string ResolveBaseSystemPrompt(TuiOptions options)
+    {
+        string profileText = options.ActivePromptProfile == null
+            ? null
+            : PromptProfiles.LoadProfile(options.ActivePromptProfile);
+
+        string basePrompt = profileText ?? SystemPromptFile.Resolve(
+            options.ExplicitSystemPrompt, SystemPromptFile.Load(), options.SystemPrompt);
+
+        return basePrompt;
+    }
+
+    /// <summary>
+    /// Resolve the --prompt launch flag into a usable session profile (null = default
+    /// chain), warning the caller through <paramref name="warn"/> instead of silently
+    /// dropping the operator's choice. Three failure modes get a warning each: a name the
+    /// validator rejects (it names the rule), a name with no matching file (it names the
+    /// saved prompts, so the fix is obvious), and a file that is empty (it names the file
+    /// to fill in). "default" is already mapped to null by the parser and never arrives.
+    /// </summary>
+    internal static string ResolvePromptProfile(string requested, string profilesDir, Action<string> warn)
+    {
+        if (requested == null) return null;
+
+        if (!PromptProfiles.IsValidName(requested))
+        {
+            warn($"--prompt \"{requested}\" is not a valid profile name (letters, digits, '-' and '_' only) — using the default chain. "
+                 + $"Saved prompts: {ProfileListing(PromptProfiles.ListProfilesIn(profilesDir))}.");
+            return null;
+        }
+
+        // Resolve case-insensitively against the on-disk listing and keep the canonical
+        // spelling — the same rule /prompt <name> applies, so the two routes to a profile
+        // cannot end up displaying different names for one file.
+        string canonical = PromptProfiles.ListProfilesIn(profilesDir)
+            .FirstOrDefault(n => n.Equals(requested, StringComparison.OrdinalIgnoreCase));
+        if (canonical == null)
+        {
+            warn($"--prompt \"{requested}\" was not found in {profilesDir} — using the default chain. "
+                 + $"Saved prompts: {ProfileListing(PromptProfiles.ListProfilesIn(profilesDir))}.");
+            return null;
+        }
+
+        if (PromptProfiles.LoadProfileIn(profilesDir, canonical) == null)
+        {
+            warn($"--prompt \"{canonical}\" is empty — using the default chain. "
+                 + $"Write text into {System.IO.Path.Combine(profilesDir, canonical + PromptProfiles.Extension)} to use it.");
+            return null;
+        }
+
+        return canonical;
+    }
+
+    /// <summary>The saved-profile names for the startup warning, or the plain statement
+    /// when there are none.</summary>
+    static string ProfileListing(string[] names)
+        => names.Length == 0 ? "none saved" : string.Join(", ", names);
+
+    /// <summary>
     /// The plan-mode note appended to the TUI's system prompt while the mode is Plan —
     /// short on purpose: the per-mutation [PLAN MODE] refusal is the enforcement, this is
     /// the heads-up so the model plans instead of discovering the wall tool by tool.
@@ -2627,8 +2720,7 @@ static string LoadContextFile(string workingDirectory)
         // prompt needs its own field because options.SystemPrompt is always populated,
         // so this site cannot otherwise tell a typed prompt from a default.
         // The file is read on EVERY assembly, so editing it takes effect next turn.
-        string basePrompt = SystemPromptFile.Resolve(
-            options.ExplicitSystemPrompt, SystemPromptFile.Load(), options.SystemPrompt);
+        string basePrompt = ResolveBaseSystemPrompt(options);
 
         var sb = new StringBuilder();
         sb.Append(basePrompt);

@@ -152,6 +152,19 @@ namespace DevMind
        /// <summary>Called to rebuild the system prompt after rules change.</summary>
         public Func<string> RebuildSystemPrompt { get; set; }
 
+        /// <summary>
+        /// The saved prompt profile (/prompt &lt;name&gt;) selected for this session, or null
+        /// for none. Read live so the /prompt listing can mark the active entry.
+        /// </summary>
+        public string ActivePromptProfile { get; set; }
+
+        /// <summary>
+        /// Switch the session's system prompt to a saved profile (null clears it back to
+        /// the default chain). Session state only — the setter writes TuiOptions, never
+        /// devmind.json, and touches no conversation history.
+        /// </summary>
+        public Action<string> SetActivePromptProfile { get; set; }
+
         // -- Working directory ----------------------------------------------------
 
         /// <summary>Current working directory.</summary>
@@ -513,8 +526,8 @@ namespace DevMind
                 SteerHandler);
 
             RegisterCommand("/prompt",
-                "Show the global system-prompt file path, existence, and assembled prompt size",
-                "/prompt",
+                "Show system-prompt state, or switch this session to a saved prompt profile",
+                "/prompt [name|default]",
                 PromptHandler);
 
             RegisterCommand("/mcp",
@@ -789,10 +802,27 @@ namespace DevMind
 
         // -- /prompt ---------------------------------------------------------------
 
+        /// <summary>
+        /// /prompt               — system-prompt state: the standing file, the active saved
+        ///                         profile, the saved-profile listing, assembled size, and
+        ///                         authoring guidance.
+        /// /prompt &lt;name&gt;      — switch THIS session's base prompt to
+        ///                         %APPDATA%\devmind\prompts\&lt;name&gt;.md. Session state only:
+        ///                         nothing is persisted and conversation history is untouched
+        ///                         (the prompt is rebuilt per turn from TuiOptions, so the
+        ///                         next turn simply carries the new text).
+        /// /prompt default       — clear the profile, back to the default chain.
+        /// "default" is reserved: a default.md file can never be selected, because the
+        /// clear-word and the profile name would be the same token.
+        /// </summary>
         static Task<CommandResult> PromptHandler(string[] args, CommandContext ctx)
         {
             string path = SystemPromptFile.Path;
             bool exists = File.Exists(path);
+
+            string savedDir = PromptProfiles.ProfilesDir;
+            string[] savedNames = PromptProfiles.ListProfiles();
+            bool defaultFileExists = savedNames.Any(n => n.Equals("default", StringComparison.OrdinalIgnoreCase));
 
             string assembled = ctx.SystemPrompt ?? "";
             int promptTokens = (assembled.Length / 4) + 4;
@@ -825,15 +855,112 @@ namespace DevMind
                 "Contradictions fail silently; the model picks one, unpredictably.\n" +
                 "Budget: 5% of the loaded context window.";
 
-            var sb = new System.Text.StringBuilder();
-            sb.AppendLine($"System prompt file: {path}");
-            sb.AppendLine($"  {fileStatus}");
-            sb.AppendLine(sizeLine);
-            sb.AppendLine();
-            sb.AppendLine("Guidance for authoring the file:");
-            sb.AppendLine(guidance);
+            // Argless: state, then guidance. The active profile is part of the state —
+            // what the model is currently being told includes it, and "which one am I on"
+            // is the question the listing has to answer.
+            if (args == null || args.Length == 0)
+            {
+                var sb = new System.Text.StringBuilder();
+                sb.AppendLine($"System prompt file: {path}");
+                sb.AppendLine($"  {fileStatus}");
 
-            return Task.FromResult(new CommandResult { Message = sb.ToString().TrimEnd() });
+                string active = ctx.ActivePromptProfile;
+                if (active == null)
+                {
+                    sb.AppendLine("Active prompt profile: none (default chain)");
+                }
+                else if (PromptProfiles.LoadProfile(active) == null)
+                {
+                    // Deleted or blanked mid-session: the next turn silently falls back to
+                    // the default chain — say so rather than let the operator find out from
+                    // the model's behaviour.
+                    sb.AppendLine($"Active prompt profile: {active} (file missing, using default chain)");
+                }
+                else
+                {
+                    sb.AppendLine($"Active prompt profile: {active}");
+                }
+
+                sb.AppendLine($"Saved prompts: {savedDir}");
+                sb.AppendLine($"  {SavedPromptListing(savedNames, active)}");
+                if (defaultFileExists)
+                    sb.AppendLine("  Note: default.md is ignored — \"default\" is reserved for clearing the profile.");
+
+                sb.AppendLine(sizeLine);
+                sb.AppendLine();
+                sb.AppendLine("Guidance for authoring the file:");
+                sb.AppendLine(guidance);
+
+                return Task.FromResult(new CommandResult { Message = sb.ToString().TrimEnd() });
+            }
+
+            string requested = args[0];
+
+            if (requested.Equals("default", StringComparison.OrdinalIgnoreCase))
+            {
+                ctx.SetActivePromptProfile?.Invoke(null);
+                ctx.RebuildSystemPrompt?.Invoke();
+                return Task.FromResult(new CommandResult { Message = "Prompt profile cleared — using the default chain (session only; history kept)." });
+            }
+
+            if (!PromptProfiles.IsValidName(requested))
+                return Task.FromResult(new CommandResult
+                {
+                    Message = $"Invalid profile name \"{requested}\" — a saved-prompt name uses only letters, digits, '-' and '_'.\n"
+                            + $"Saved prompts: {SavedPromptListing(savedNames, ctx.ActivePromptProfile)}",
+                    IsError = true,
+                });
+
+            // Resolve case-insensitively against the on-disk listing and store the
+            // canonical name, so "Rigorous" and "rigorous" select the same file and the
+            // state displays what /prompt would list.
+            string canonical = savedNames.FirstOrDefault(
+                n => n.Equals(requested, StringComparison.OrdinalIgnoreCase));
+            if (canonical == null)
+            {
+                // A "default" request can never land here: the clear-word branch above
+                // matches it case-insensitively first, which is exactly what makes
+                // default.md unselectable — and the argless listing says so when the
+                // file exists.
+                return Task.FromResult(new CommandResult
+                {
+                    Message = $"No saved prompt \"{requested}\" in {savedDir}.\n"
+                            + $"Saved prompts: {SavedPromptListing(savedNames, ctx.ActivePromptProfile)}",
+                    IsError = true,
+                });
+            }
+
+            // Exists but empty/whitespace — SystemPromptFile maps that to null. Switching
+            // to an empty prompt is not a capability anyone asked for; refuse and say why.
+            if (PromptProfiles.LoadProfile(canonical) == null)
+                return Task.FromResult(new CommandResult
+                {
+                    Message = $"Saved prompt \"{canonical}\" is empty — write text into "
+                            + $"{Path.Combine(savedDir, canonical + PromptProfiles.Extension)} before selecting it.",
+                    IsError = true,
+                });
+
+            ctx.SetActivePromptProfile?.Invoke(canonical);
+            ctx.RebuildSystemPrompt?.Invoke();
+            return Task.FromResult(new CommandResult
+            {
+                Message = $"System prompt: {canonical} (session only; history kept). " +
+                          "/prompt default restores the default chain.",
+            });
+        }
+
+        /// <summary>
+        /// The saved-profile names for /prompt output, the active one marked. One helper
+        /// so the state view and the error view can never drift in how they present the
+        /// same listing.
+        /// </summary>
+        static string SavedPromptListing(string[] savedNames, string active)
+        {
+            if (savedNames.Length == 0)
+                return $"none saved (add {PromptProfiles.ProfilesDirName}\\<name>{PromptProfiles.Extension})";
+
+            return string.Join(", ", savedNames.Select(
+                n => n == active ? $"[{n}]" : n));
         }
 
         // -- /image <path> [page|first-last|all] --------------------------------
@@ -1351,7 +1478,7 @@ namespace DevMind
         static readonly (string Title, string[] Commands)[] HelpGroups =
         {
             ("Session",    new[] { "/new", "/restart", "/clear", "/cls", "/compact", "/history", "/resume", "/title", "/steer", "/override", "/mode", "/quit", "/exit" }),
-            ("Model",      new[] { "/think", "/t", "/reasoning", "/rules", "/system_prompt" }),
+            ("Model",      new[] { "/think", "/t", "/reasoning", "/rules", "/prompt", "/system_prompt" }),
             ("Context",    new[] { "/depth-cap", "/context-limit", "/cache", "/output-lines", "/expand" }),
             ("Workspace",  new[] { "/dir", "/lsp", "/mcp", "/resolve", "/debug" }),
             ("Documents",  new[] { "/image", "/digest", "/library" }),

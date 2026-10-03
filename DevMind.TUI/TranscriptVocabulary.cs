@@ -143,6 +143,12 @@ namespace DevMind
                 ["LEARN"]       = "Learn",
                 ["SQL"]         = "Sql",
                 ["MCP"]         = "Mcp",   // external MCP tool calls: "[MCP] comfy.run_workflow running…"
+
+                // Startup warning for --prompt: a launch flag whose value could not be
+                // honoured, announced once under the banner (same one-shot pattern as MCP
+                // config warnings above). Not a call that happened — a state the operator
+                // is acting on, so it takes the running word.
+                ["PROMPT"]      = "Prompt",
                 ["DIGEST"]      = "Digest",
                 ["SCRATCHPAD"]  = "Scratchpad",
 
