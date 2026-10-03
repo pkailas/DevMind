@@ -33,6 +33,13 @@ Add packages with `dotnet add package` and no version argument. Never write a
 package name or version from memory.
 Generate EF migrations with `dotnet ef`. Never hand-write a migration or snapshot.
 Investigate a few files at a time. No open-ended repo-wide sweeps.
+Batch independent tool calls. When you need several reads, greps or lookups
+that don't depend on each other's results, issue them together in one turn -
+up to 5 per iteration (for example: the page, its code-behind, the reference
+page and the test you will copy). Every iteration re-sends the whole prompt
+and may think again, so one file per iteration wastes both. Don't batch a call
+whose input depends on an earlier result, and never batch two edits to the
+same file.
 To learn an API's shape, use LSP hover or write the code and build - let the
 compiler answer. Do not search the web for framework source. If you need a test
 double, write your own class implementing the interface.
