@@ -942,3 +942,41 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **What worked (2026-09-26, PSCP connector jobs 1697-1702):** override steers were consumed at the next iteration boundary every
   time; continue chains kept full context across four hops; build/test reporting was honest throughout; the
   reflection-into-private-fields on-screen probe was an effective verification instrument once the driver directed the agent to it.
+
+### H-61 - With thinking on, the agent reasons at length from memory instead of looking things up first
+- **First seen:** 2026-10-03, jobs 2133 and 2137 (VLink.Warehouses LT-34 / LT-42, thinking on, effort medium).
+- **Symptom:** job-2137 spent several long think blocks reasoning from memory about questions a lookup or a build would
+  settle in seconds: whether `System.Diagnostics.EventLog` is in the shared framework, whether CA1416 fires on a guarded
+  `new`, and how built-in DI handles optional constructor parameters. It made no `learn_*` / `library_query` calls in the
+  run. It usually landed on the right answer ("EventLogChannel compiles without a package reference, so the type resolves"),
+  but at a real cost in tokens and wall time. Job-2133 made one `[LEARN]` search for `TimeZoneInfo.CreateCustomTimeZone` and
+  still assigned to read-only `TransitionTime` properties until the driver steered it. LSP use (`find_symbol`,
+  `get_diagnostics`) was early and frequent; only documentation lookups were missing.
+- **Proposed fix (Paul asked to pin, 2026-10-03):** a "look up before reasoning at length" nudge, complementary to the
+  existing auto-think-on-repeated-failure guard. Options: (a) a standing rule in the headless system prompt ("when unsure about
+  a framework API, analyzer rule or DI/runtime behaviour, settle it with LSP hover/diagnostics, a quick probe build,
+  `learn_search` or `library_query` before reasoning past a couple of paragraphs"); (b) a HarnessNudges guard that fires when
+  a think block exceeds N tokens with no tool call between consecutive iterations and names those tools; (c) both.
+  Measure against the trace corpus: think tokens per iteration before vs after.
+- **Status:** open (pinned).
+
+### H-62 - "Optional item" guard misfires on the word "optional" describing a file, not the work
+- **First seen:** 2026-10-04, job-2140 (TokenLedgerTray), iteration 9. The brief said "Settings: optional
+  TokenLedgerTray.json next to the exe ... Missing file = defaults" (the FILE is optional at runtime; reading it is
+  required work). The HarnessNudges optional-work guard injected "This item was marked optional in the brief. Drop it and
+  continue with the required work." The agent correctly kept it (the required `--selftest` prints the resolved paths), so
+  no damage this time, but a less careful run would have dropped required functionality.
+- **Proposed fix:** only treat a brief item as optional when "optional" qualifies the task itself ("optional:", "(optional)",
+  "if time permits", "nice to have" at the start of an item), not when it is an adjective on a noun inside the item; or have
+  the nudge ask the agent to confirm instead of instructing it to drop the item.
+- **Status:** open.
+
+### H-63 - Foreground run_shell that starts a long-lived GUI child blocks the device bridge until the timeout
+- **First seen:** 2026-10-04 (driver-side run_shell, not a delegated job). Running Install-TokenLedgerTray.ps1 in the
+  foreground with `detach: true`: the script's last step starts the tray exe, which inherits the shell's stdout/stderr pipe,
+  so the call never sees end-of-stream and sat until its 300 s timeout; every other device call (even trivial ones) timed
+  out at the bridge's 60 s in the meantime, and the timeout killed the script after publish but before the Startup shortcut
+  was written. Re-running with `background: true` finished in 43 s.
+- **Proposed fix:** when `detach` is set, start children with redirected/null std handles (or close the pipe write ends in
+  the parent after spawn) so a detached child cannot hold the call open; or auto-promote a detach run to background.
+- **Status:** open.
