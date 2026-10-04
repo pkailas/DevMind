@@ -71,25 +71,10 @@ if (-not (Test-Path -LiteralPath $CsprojPath)) {
 Write-Step "Publishing $CsprojPath -> $InstallDir"
 New-Item -Path $InstallDir -ItemType Directory -Force | Out-Null
 
-$publishArgs = @{
-    FilePath               = 'dotnet'
-    ArgumentList           = @(
-        'publish',
-        $CsprojPath,
-        '-c', 'Release',
-        '-r', 'win-x64',
-        '--self-contained', 'false',
-        '-o', $InstallDir
-    )
-    NoNewWindow            = $true
-    Wait                   = $true
-    PassThru               = $true
-}
-$pub = Start-Process @publishArgs
-if ($pub.ExitCode -ne 0) {
-    Write-Error "dotnet publish failed with exit code $($pub.ExitCode)"
-    exit 1
-}
+# Called directly, not via Start-Process -Wait: -Wait also waits for every descendant, and the
+# compiler server (VBCSCompiler) that publish leaves running kept the script blocked for minutes (H-63).
+& dotnet publish $CsprojPath -c Release -r win-x64 --self-contained false -o $InstallDir
+if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed with exit code $LASTEXITCODE" }
 
 $exePath = Join-Path $InstallDir 'TokenLedgerTray.exe'
 if (-not (Test-Path -LiteralPath $exePath)) {

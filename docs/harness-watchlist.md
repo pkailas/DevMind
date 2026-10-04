@@ -999,12 +999,24 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   `Detector_ItemLevelQualifier_IsOptional`, `Detector_OptionalAsAdjectiveOrNegated_IsRequiredWork`,
   `SpendGuard_MessageQuotesTheItem`, `OptionalWorkMessage_QuotesAtMost80CharsOfTheItem`.
 
-### H-63 - Foreground run_shell that starts a long-lived GUI child blocks the device bridge until the timeout
+### H-63 - Install-TokenLedgerTray.ps1 publish step blocked run_shell for 300 s (Start-Process -Wait waits on build-server descendants)
 - **First seen:** 2026-10-04 (driver-side run_shell, not a delegated job). Running Install-TokenLedgerTray.ps1 in the
-  foreground with `detach: true`: the script's last step starts the tray exe, which inherits the shell's stdout/stderr pipe,
-  so the call never sees end-of-stream and sat until its 300 s timeout; every other device call (even trivial ones) timed
-  out at the bridge's 60 s in the meantime, and the timeout killed the script after publish but before the Startup shortcut
-  was written. Re-running with `background: true` finished in 43 s.
-- **Proposed fix:** when `detach` is set, start children with redirected/null std handles (or close the pipe write ends in
-  the parent after spawn) so a detached child cannot hold the call open; or auto-promote a detach run to background.
-- **Status:** open.
+  foreground with `detach: true` sat until the 300 s timeout; every other device call (even trivial ones) timed out at the
+  bridge's 60 s in the meantime, and the timeout killed the script after publish but before the Startup shortcut was
+  written. Re-running with `background: true` finished in 43 s. First blamed on the tray exe holding the shell's output
+  pipe open; that was wrong (see Cause).
+- **Cause:** not ShellRunner and not the tray. ShellRunner ends a call on the shell's `Exited` event plus a 5 s drain cap
+  (`WaitForExit(5_000)`), not on pipe EOF: a command that `Start-Process`-es a 25 s child returned in 0.22-0.30 s across six
+  runs (Hidden / plain / -NoNewWindow, detach true and false). The tray launch is step 4, after the step that never
+  completed. Step 2 published with `Start-Process dotnet ... -NoNewWindow -Wait -PassThru`, and PowerShell's `-Wait` waits
+  for the process AND all its descendants; VBCSCompiler (the compiler server) outlives `dotnet publish` by minutes, and
+  MSBUILDDISABLENODEREUSE does not stop it. Repro: a `Start-Process -Wait` child that leaves a 20 s grandchild behind makes the
+  call take about 21.5 s, with detach true and false alike. The 43 s background re-run likely reused the compiler server
+  already alive from the first run, so publish started no new descendant (unverified).
+- **Fix:** the script is fixed in this commit: publish is a direct `& dotnet publish <same args>` with a `$LASTEXITCODE` check
+  (waits for dotnet only). It was the only `Start-Process -Wait` around a build/publish in tools/TokenLedger*/. The harness
+  side is a run_shell description note (Claude, separate commit); no runtime detection.
+- **Verified:** 2026-10-04, the edited script via run_shell `background: true`: publish, Startup shortcut and tray launch all
+  completed, exit 0, script wall time 3.45 s (the test tray, pid 96200, was then killed by PID). No VBCSCompiler was running
+  afterwards, so this run did not itself re-create the hang condition; the fix rests on the repro above.
+- **Status:** fixed - commit "H-63: install script publishes without Start-Process -Wait; watchlist cause corrected".
