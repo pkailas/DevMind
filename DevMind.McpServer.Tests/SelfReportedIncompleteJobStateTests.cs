@@ -84,7 +84,7 @@ namespace DevMind.McpServer.Tests
         public void TheFullAnswerIsKeptExactlyAsBefore()
         {
             // The classifier reads the answer; it does not edit it.
-            const string answer = "The core defect is NOT fixed — the caller must not report LT-04 as fixed.";
+            const string answer = "INCOMPLETE: the core defect is not fixed — the caller must not report LT-04 as fixed.";
             var job = JobEndingWith(answer);
 
             Assert.True(job.IsIncomplete);

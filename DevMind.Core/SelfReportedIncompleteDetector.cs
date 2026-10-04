@@ -1,4 +1,4 @@
-// File: SelfReportedIncompleteDetector.cs  v1.5
+// File: SelfReportedIncompleteDetector.cs  v1.6
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // When the agent's own final answer says the work is not finished.
@@ -49,43 +49,29 @@
 // v1.5 (H-43): "INCOMPLETE: none." followed by an explanation is still the all-clear. job-2104
 // ("INCOMPLETE: none. Only the TotalAgility page changed; ...") and job-1850/1861 ended
 // stopped_incomplete because v1.2 accepted the none-word only as the WHOLE marker text.
+//
+// v1.6 (H-64): phrase list dropped; only an INCOMPLETE: declaration counts (job-2143's "did not run" obeyed its brief).
 
-using System;
-using System.Collections.Generic;
 using System.Text.RegularExpressions;
 
 namespace DevMind
 {
-    /// <summary>How a final answer said the work is unfinished.</summary>
-    public enum SelfReportStrength
-    {
-        /// <summary>It did not.</summary>
-        None,
-        /// <summary>A phrase-list hit only ("not fixed", "did not run") — wording, not a declaration.</summary>
-        Weak,
-        /// <summary>An explicit INCOMPLETE: marker line.</summary>
-        Strong,
-    }
-
-    /// <summary>What a final answer admitted, if anything.</summary>
+    /// <summary>What a final answer declared unfinished, if anything.</summary>
     public readonly struct SelfReportedIncomplete
     {
-        /// <summary>How the answer said it — an explicit marker or a phrase hit.</summary>
-        public readonly SelfReportStrength Strength;
+        /// <summary>True when the answer carries an INCOMPLETE: declaration.</summary>
+        public readonly bool Detected;
 
-        /// <summary>The first line that said so, trimmed for a reason field.</summary>
+        /// <summary>The declaring line, trimmed for a reason field.</summary>
         public readonly string Line;
 
-        /// <summary>True when the answer says the work is unfinished, by either route.</summary>
-        public bool Detected => Strength != SelfReportStrength.None;
-
-        public SelfReportedIncomplete(SelfReportStrength strength, string line)
+        public SelfReportedIncomplete(string line)
         {
-            Strength = strength;
+            Detected = true;
             Line = line ?? string.Empty;
         }
 
-        public static readonly SelfReportedIncomplete None = new SelfReportedIncomplete(SelfReportStrength.None, string.Empty);
+        public static readonly SelfReportedIncomplete None = default;
     }
 
     /// <summary>
@@ -102,32 +88,6 @@ namespace DevMind
         /// <summary>The explicit convention: a line that opens with this is a declaration.</summary>
         public const string ExplicitMarker = "INCOMPLETE:";
 
-        /// <summary>
-        /// Phrases that mean the work is unfinished, whatever sentence they sit in.
-        /// <para>
-        /// Kept blunt on purpose. Every one of these is taken from a final answer that ended
-        /// as `done`, and the list is not trying to parse English — a sentence like "nothing
-        /// was not done" would be missed, and that is an acceptable trade for a rule anyone
-        /// can read and predict.
-        /// </para>
-        /// </summary>
-        public static readonly IReadOnlyList<string> Phrases = new[]
-        {
-            "not done",
-            "not fixed",
-            "not verified",
-            "not demonstrated",
-            "did not run",
-            "was not run",
-            "were not run",
-            "never executed",
-            "must not report",
-            "remaining work",
-            "still failing",
-            "could not finish",
-            "hit the iteration cap",
-        };
-
         // ``` or ~~~ opening or closing a fenced block, with optional leading whitespace.
         private static readonly Regex Fence = new Regex(@"^\s*(```|~~~)", RegexOptions.Compiled);
 
@@ -139,11 +99,6 @@ namespace DevMind
         private static readonly Regex Marker = new Regex(
             @"^\s*(?:>\s*)*(?:#{1,6}\s+)?(?:(?:[-*+]|\d+[.)])\s+)?(?:\*\*|__|\*|_)?INCOMPLETE(?:\*\*|__|\*|_)?:(?:\*\*|__|\*|_)?",
             RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-
-        // A markdown ATX header: "#" to "######" then whitespace or end of line, after optional
-        // indent/">". "#hashtag" and "#123" are not headers.
-        private static readonly Regex Header = new Regex(
-            @"^\s*(?:>\s*)*#{1,6}(?:\s|$)", RegexOptions.Compiled);
 
         // A list item: "-", "*", "+", "1.", "1)" followed by whitespace, after optional indent/">".
         private static readonly Regex ListItem = new Regex(
@@ -166,10 +121,9 @@ namespace DevMind
         /// Examine a final answer.
         /// </summary>
         /// <returns>
-        /// The first INCOMPLETE: declaration (<see cref="SelfReportStrength.Strong"/>) anywhere in
-        /// the answer; failing that, the first phrase-list line (<see cref="SelfReportStrength.Weak"/>);
-        /// otherwise <see cref="SelfReportedIncomplete.None"/>. Lines inside a fenced code block
-        /// are skipped: a phrase in a diff or a pasted log is being quoted, not claimed.
+        /// The first INCOMPLETE: declaration anywhere in the answer, otherwise
+        /// <see cref="SelfReportedIncomplete.None"/>. Lines inside a fenced code block are
+        /// skipped: a marker in a diff or a pasted log is being quoted, not claimed.
         /// </returns>
         public static SelfReportedIncomplete Detect(string answer)
         {
@@ -177,7 +131,6 @@ namespace DevMind
 
             bool inFence = false;
             string bareMarker = null;     // a marker line with nothing after it, e.g. "**INCOMPLETE:**"
-            string firstWeak = null;      // the first phrase-list hit — kept while a marker may still follow
 
             foreach (string raw in answer.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
             {
@@ -205,43 +158,22 @@ namespace DevMind
                         Match inner = Marker.Match(itemText);
                         if (inner.Success) itemText = itemText.Substring(inner.Length).Trim();
                         if (itemText.Length == 0 || NothingUnfinished.IsMatch(itemText)) continue;
-                        return new SelfReportedIncomplete(SelfReportStrength.Strong, Trim(line));
+                        return new SelfReportedIncomplete(Trim(line));
                     }
                 }
 
-                // The explicit convention first: it is a declaration, not a guess, so it is
-                // checked before the phrase list and never subject to it — including when it
-                // declares that nothing is unfinished ("INCOMPLETE: none.").
+                // The explicit convention — including when it declares that nothing is
+                // unfinished ("INCOMPLETE: none."). A marker in a header still counts.
                 Match marker = Marker.Match(line);
                 if (marker.Success)
                 {
                     string rest = line.Substring(marker.Length).Trim();
                     if (rest.Length == 0) bareMarker = line;
-                    else if (!NothingUnfinished.IsMatch(rest)) return new SelfReportedIncomplete(SelfReportStrength.Strong, Trim(line));
-                    continue;
-                }
-
-                // A header titles a section; it does not report on the work ("## Caller must know").
-                if (Header.IsMatch(line)) continue;
-
-                // A phrase hit is weak evidence, and a later INCOMPLETE: line outranks it: keep
-                // reading, or an answer with "Did not run the TUI." above an "INCOMPLETE: X" line
-                // would report only the weak line, and a green harness build would excuse a
-                // declared gap.
-                if (firstWeak != null) continue;
-                foreach (string phrase in Phrases)
-                {
-                    if (line.IndexOf(phrase, StringComparison.OrdinalIgnoreCase) >= 0)
-                    {
-                        firstWeak = Trim(line);
-                        break;
-                    }
+                    else if (!NothingUnfinished.IsMatch(rest)) return new SelfReportedIncomplete(Trim(line));
                 }
             }
 
-            return firstWeak != null
-                ? new SelfReportedIncomplete(SelfReportStrength.Weak, firstWeak)
-                : SelfReportedIncomplete.None;
+            return SelfReportedIncomplete.None;
         }
 
         private static string Trim(string line)

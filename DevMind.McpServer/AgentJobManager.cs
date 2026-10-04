@@ -167,20 +167,19 @@ namespace DevMind.McpServer
             Build is { Succeeded: true } && VerifyTests && Tests is { Succeeded: true };
 
         /// <summary>
-        /// Whether the self-report makes the job incomplete: it does unless the harness TEST run
-        /// was green. A green harness test run outweighs the agent's own words: job-1714 ("was
-        /// not run by me — the harness verifies it") and job-1715 ("Did not run the TUI") on a
-        /// phrase hit (H-31), and job-2118 ("INCOMPLETE: full solution test suite ... not run by
-        /// me — harness verifies it", 1319 green) on an explicit marker (H-43). A green build
-        /// alone does not: "The core defect is NOT fixed" still compiles. With verify_tests off
-        /// or failed — the H-01 jobs ran with verify_build off — the self-report stops the job.
+        /// Whether the INCOMPLETE: declaration makes the job incomplete: it does unless the harness
+        /// TEST run was green. job-2118 ("INCOMPLETE: full solution test suite ... not run by me —
+        /// harness verifies it", 1319 green) ended stopped_incomplete on a gap the harness had
+        /// already closed (H-43). A green build alone does not count: a declared gap still
+        /// compiles. With verify_tests off or failed — the H-01 jobs ran with verify_build off —
+        /// the declaration stops the job.
         /// Read only once State is Done, which the worker publishes after both verifications.
         /// </summary>
         public bool SelfReportMakesIncomplete =>
             SelfReportedIncomplete.Detected && !HarnessTestVerified;
 
         /// <summary>
-        /// The self-reported line (marker or phrase) that did NOT make the job incomplete because
+        /// The INCOMPLETE: line that did NOT make the job incomplete because
         /// the harness test run was green — surfaced as self_report_note in devmind_task_status /
         /// devmind_task_result so a driver still reads the line. Null otherwise (including when
         /// the line did count: it is then in incomplete_reasons).

@@ -1032,5 +1032,26 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   cannot tell "skipped what was asked" from "did what was asked".
 - **Decision (Paul, 2026-10-04):** drop the weak phrase list. A job is self_reported_incomplete only on an explicit
   `INCOMPLETE:` declaration (existing marker rules, incl. the "none" all-clear); a missing task_done stays covered by H-20/H-52.
-- **Status:** parked (2026-10-04) - CC prompt written in chat, not yet run. Future idea: a fine-tuned local decision model
-  (Laya) reading brief + answer as an advisory flag on top of the marker rule.
+- **Fix (2026-10-04):**
+  - SelfReportedIncompleteDetector v1.6: the `Phrases` list and the phrase-matching path are gone, with what only they used:
+    the `SelfReportStrength` enum (None/Weak/Strong) and `SelfReportedIncomplete.Strength` (now `Detected` + `Line`), and the
+    Header regex (headers were skipped only for the phrase list; a marker in a header still counts). Marker rules unchanged:
+    emphasis/list forms, bare header over a list, the none / n/a / - all-clear and its H-43 explanation forms, fences.
+  - AgentJob gate (`HarnessTestVerified` / `SelfReportMakesIncomplete`) and `self_report_note` KEPT: since H-43 a green harness
+    test run also excuses an INCOMPLETE: marker (job-2118), so the note is produced by the marker path, not only by phrase hits.
+    Only the comments changed; the devmind_task_status description now says the note quotes the agent's INCOMPLETE: line.
+  - Headless CompletionReportRule: forbidden steps are now "don't list them as INCOMPLETE:" (was "don't report them as not done").
+    prompts/system-prompt.md already described only the INCOMPLETE: line; unchanged.
+  - Tests: new `SelfReportedIncompleteDetectorTests.Job2143_ForbiddenStepsDescribedInProse_IsNotIncomplete` (job-2143 verbatim;
+    red on v1.5), `UnfinishedWordingWithoutTheMarker_IsNotIncomplete`, `SelfReportVerificationGateTests.
+    Job2143_BuildVerifiedNoTestProject_EndsDone_WithNoNote`, `UnfinishedWordingWithoutTheMarker_EndsDone`. Removed phrase-only
+    tests (`AFinalAnswerThatSaysItIsUnfinished_IsDetected`, `TheReportedLineIsTheOneThatSaidSo`, header/hash phrase tests,
+    `CallerMust_IsNoLongerAPhrase`, `MatchingIgnoresCase`, `EveryDocumentedPhraseActuallyFires`, `PhraseOnly_IsWeak`,
+    `TwoPhraseLines_ReportTheFirst`, the weak rows of `SelfReport_x_Verification`, `Job1714_/Job1715_VerifiedGreen_...`,
+    `NotFixed_WithAGreenBuild_...`, `H01Shape_NothingVerified_...`). Fence and bare-marker tests now use INCOMPLETE: lines;
+    SelfReportStrengthTests.cs folded into SelfReportedIncompleteDetectorTests (Strength asserts dropped); payload tests read
+    the note from a marker answer.
+- **Trade-off:** an H-01-shaped answer ("The core defect is NOT fixed") with no INCOMPLETE: line now ends `done`. The headless
+  prompt asks for the marker; a missing task_done is still caught by H-20/H-52.
+- **Status:** fixed, pending deploy - commit "H-64: self-report detection uses the INCOMPLETE: marker only". Future idea: a
+  fine-tuned local decision model (Laya) reading brief + answer as an advisory flag on top of the marker rule.

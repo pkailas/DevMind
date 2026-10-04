@@ -1,22 +1,20 @@
-// File: SelfReportVerificationGateTests.cs  v1.1
+// File: SelfReportVerificationGateTests.cs  v1.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
-// H-31: a phrase-list hit in the final answer is weak evidence; green harness verification
-// outweighs it. job-1714 ("The full solution suite was not run by me — the harness verifies
-// it.", 1763/1763 green) and job-1715 ("- Did not run the TUI; did not commit." — both
-// forbidden by the brief; build + 1849/1849 green) ended stopped_incomplete on the phrase alone.
+// H-43: green harness test verification outweighs an explicit INCOMPLETE: marker. job-2118
+// ended stopped_incomplete on "INCOMPLETE: full solution test suite (1308 + 11 new) not run by
+// me — harness verifies it." while the harness's own test run was green (1319, +11).
 //
-// H-43: the same holds for an explicit INCOMPLETE: marker. job-2118 ended stopped_incomplete on
-// "INCOMPLETE: full solution test suite (1308 + 11 new) not run by me — harness verifies it."
-// while the harness's own test run was green (1319, +11).
+// H-64: the phrase list (H-31's weak hits — job-1714, job-1715, job-2143) is gone. Wording
+// without the marker is not a self-report at all, whatever the verification.
 //
 // The rule, as a table:
-//   STRONG or WEAK self-report    → done + self_report_note ONLY when the harness TEST run was
+//   INCOMPLETE: declaration       → done + self_report_note ONLY when the harness TEST run was
 //                                   green (verify_tests on, build and test verification both
 //                                   passed); stopped_incomplete otherwise — a green build alone
 //                                   proves nothing was fixed, and verify_build off is the H-01
 //                                   shape the self-report exists for
-//   NONE                          → unaffected
+//   NONE (incl. phrase wording)   → unaffected
 
 using System.Diagnostics;
 using System.Text.Json;
@@ -28,16 +26,12 @@ namespace DevMind.McpServer.Tests
     public sealed class SelfReportVerificationGateTests : IDisposable
     {
         private const string StrongAnswer = "Patched the parser.\nINCOMPLETE: the migration is not written";
-        private const string WeakAnswer = "Patched the parser.\nThe core defect is NOT fixed yet.";
         private const string NoneAnswer = "Patched the parser. Build 0/0, suite green.";
 
-        // Verbatim final-answer lines from the two H-31 jobs.
-        private const string Job1714Answer =
-            "Added ResolveTimeout(command, explicit) and IsLongRunningCommand with a table test.\n" +
-            "The full solution suite was not run by me — the harness verifies it.";
-        private const string Job1715Answer =
-            "Added the H-31 detector split and the job-state table.\n" +
-            "- Did not run the TUI; did not commit.";
+        // Verbatim final line from job-2143 (H-64): the brief had said "Do not run the service".
+        private const string Job2143Line =
+            "- No test projects exist, so per the brief I ran no tests and did not run the service. " +
+            "The only verification is the 0/0 rebuild plus read-back of the changed file.";
 
         private static BuildVerification Run(bool ok) => new()
         {
@@ -79,7 +73,6 @@ namespace DevMind.McpServer.Tests
         private static string Answer(string kind) => kind switch
         {
             "strong" => StrongAnswer,
-            "weak" => WeakAnswer,
             "none" => NoneAnswer,
             _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
         };
@@ -92,13 +85,6 @@ namespace DevMind.McpServer.Tests
         [InlineData("strong", "build-not-run", true)]
         [InlineData("strong", "tests-failed", true)]
         [InlineData("strong", "tests-requested-not-run", true)]
-        // weak: the same rule (H-31)
-        [InlineData("weak", "build-ok+tests-ok", false)]
-        [InlineData("weak", "build-ok+tests-not-requested", true)]   // a green build alone is not enough
-        [InlineData("weak", "build-failed", true)]
-        [InlineData("weak", "build-not-run", true)]
-        [InlineData("weak", "tests-failed", true)]
-        [InlineData("weak", "tests-requested-not-run", true)]
         // none: only the harness's own failures count
         [InlineData("none", "build-ok+tests-ok", false)]
         [InlineData("none", "build-ok+tests-not-requested", false)]
@@ -120,7 +106,7 @@ namespace DevMind.McpServer.Tests
             Assert.Equal(noteExpected, job.SelfReportNote != null);
             if (selfReport != "none")
             {
-                string line = selfReport == "strong" ? "INCOMPLETE: the migration is not written" : "The core defect is NOT fixed yet.";
+                const string line = "INCOMPLETE: the migration is not written";
                 Assert.True(noteExpected ? job.SelfReportNote == line : reasons.Contains(line));
             }
         }
@@ -168,45 +154,26 @@ namespace DevMind.McpServer.Tests
         }
 
         [Fact]
-        public void Job1714_VerifiedGreen_EndsDone_WithTheLineAsANote()
+        public void Job2143_BuildVerifiedNoTestProject_EndsDone_WithNoNote()
         {
-            var job = Job(Job1714Answer, "build-ok+tests-ok");
+            // job-2143's shape: harness build green, no tests to verify, and a final line that
+            // describes what the brief forbade. Not a self-report: no reason, no note.
+            var job = Job("Removed the v1 mailbox-path code.\n" + Job2143Line, "build-ok+tests-not-requested");
 
             Assert.False(job.IsIncomplete);
             Assert.Empty(job.IncompleteReasons());
-            Assert.Equal("The full solution suite was not run by me — the harness verifies it.", job.SelfReportNote);
-        }
-
-        [Fact]
-        public void Job1715_VerifiedGreen_EndsDone_WithTheLineAsANote()
-        {
-            var job = Job(Job1715Answer, "build-ok+tests-ok");
-
-            Assert.False(job.IsIncomplete);
-            Assert.Empty(job.IncompleteReasons());
-            Assert.Equal("- Did not run the TUI; did not commit.", job.SelfReportNote);
-        }
-
-        [Fact]
-        public void NotFixed_WithAGreenBuild_AndNoTestRun_EndsStoppedIncomplete()
-        {
-            // Compiling proves nothing was fixed: without a harness test run the phrase stands.
-            var job = Job("The core defect is NOT fixed", "build-ok+tests-not-requested");
-
-            Assert.True(job.IsIncomplete);
-            Assert.Contains(SelfReportedIncompleteDetector.Reason, job.IncompleteReasons());
-            Assert.Contains("The core defect is NOT fixed", job.IncompleteReasons());
             Assert.Null(job.SelfReportNote);
         }
 
-        [Fact]
-        public void H01Shape_NothingVerified_StillEndsStoppedIncomplete()
+        [Theory]
+        [InlineData("build-ok+tests-not-requested")]
+        [InlineData("build-not-run")]
+        public void UnfinishedWordingWithoutTheMarker_EndsDone(string verification)
         {
-            // The H-01 jobs ran with verify_build off: the phrase list is the only signal.
-            var job = Job("The core defect is NOT fixed — the caller must not report LT-04 as fixed.", "build-not-run");
+            var job = Job("Patched the parser.\nThe migration is not done.\nDid not run the TUI.", verification);
 
-            Assert.True(job.IsIncomplete);
-            Assert.Contains(SelfReportedIncompleteDetector.Reason, job.IncompleteReasons());
+            Assert.False(job.IsIncomplete);
+            Assert.DoesNotContain(SelfReportedIncompleteDetector.Reason, job.IncompleteReasons());
             Assert.Null(job.SelfReportNote);
         }
 
@@ -230,7 +197,7 @@ namespace DevMind.McpServer.Tests
         [Fact]
         public void ANonDoneJob_HasNoNote()
         {
-            var job = Job(Job1715Answer, "build-ok+tests-ok");
+            var job = Job(StrongAnswer, "build-ok+tests-ok");
             job.State = AgentJobState.Failed;
 
             Assert.Null(job.SelfReportNote);
@@ -261,7 +228,7 @@ namespace DevMind.McpServer.Tests
         [Fact]
         public async Task StatusAndResultPayloads_CarryTheNote_AndStateDone()
         {
-            using var server = new EditThenDoneLlmServer(Path.Combine(_dir, "newfile.txt"), Job1715Answer);
+            using var server = new EditThenDoneLlmServer(Path.Combine(_dir, "newfile.txt"), StrongAnswer);
             Environment.SetEnvironmentVariable("DEVMIND_ENDPOINT", server.BaseUrl);
 
             using var mgr = new AgentJobManager();
@@ -275,7 +242,7 @@ namespace DevMind.McpServer.Tests
                 await Task.Delay(20);
             Assert.Equal(AgentJobState.Done, job.State);
             Assert.True(job.Tests is { Succeeded: true }, "the harness test run did not happen");
-            Assert.Contains("Did not run the TUI", job.Result!.Answer);
+            Assert.Contains("INCOMPLETE: the migration is not written", job.Result!.Answer);
 
             var tools = new AgentTaskTools(mgr);
             foreach (string json in new[]
@@ -288,7 +255,7 @@ namespace DevMind.McpServer.Tests
                 JsonElement root = doc.RootElement;
                 Assert.Equal("done", root.GetProperty("state").GetString());
                 Assert.Equal(JsonValueKind.Null, root.GetProperty("incomplete_reasons").ValueKind);
-                Assert.Equal("- Did not run the TUI; did not commit.", root.GetProperty("self_report_note").GetString());
+                Assert.Equal("INCOMPLETE: the migration is not written", root.GetProperty("self_report_note").GetString());
             }
         }
 

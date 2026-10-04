@@ -302,8 +302,8 @@ namespace DevMind.McpServer
             "without calling task_done — ended_without_task_done, build/test verification " +
             "failed, or the harness's full rebuild reported warnings — build_warnings, with the count " +
             "and the first few warning lines) — check incomplete_reasons and usually devmind_task_continue it. self_report_note " +
-            "(null unless set) quotes a line of the answer that reads like unfinished work but did not " +
-            "stop the job because the harness's own test run (verify_tests) passed — read it. " +
+            "(null unless set) quotes the agent's INCOMPLETE: line when it did not stop the job because " +
+            "the harness's own test run (verify_tests) passed — read it. " +
             "needs_input means " +
             "the agent paused with specific questions (in the result answer) — answer them via " +
             "devmind_task_continue. Optional wait_seconds: when > 0, blocks until the job's state " +

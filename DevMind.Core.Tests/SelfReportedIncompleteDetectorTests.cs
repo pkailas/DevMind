@@ -1,13 +1,11 @@
-// File: SelfReportedIncompleteDetectorTests.cs  v1.0
+// File: SelfReportedIncompleteDetectorTests.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Reading the agent's own verdict on its own work.
 //
-// The positive cases below are quotes. Every one of them is from a job that ended
-// state=done with incomplete_reasons=null while saying, in the final message the caller was
-// handed, that the work was not finished. Five of them in two days — which is why the list
-// is blunt rather than clever: a false positive costs one extra look at an answer somebody
-// was going to read anyway, and a false negative is what produced the five.
+// v1.1 (H-64): the phrase list is gone, and so are the tests that only asserted it. An
+// explicit INCOMPLETE: declaration is the one signal; wording like "not done" or "did not run"
+// without it is not a declaration (job-2143).
 //
 // The negative cases matter just as much. A clean summary must stay clean, or "done" stops
 // meaning anything in the other direction and the signal is worth nothing again.
@@ -22,24 +20,6 @@ namespace DevMind.Core.Tests
             => SelfReportedIncompleteDetector.Detect(answer!).Detected;
 
         // ── The evidence ─────────────────────────────────────────────────────────
-
-        [Theory]
-        // job-1670 (LT-04)
-        [InlineData("The core defect is NOT fixed — the caller must not report LT-04 as fixed.")]
-        // job-1668
-        [InlineData("Summary: no test run was performed, so the red run was NOT demonstrated.")]
-        [InlineData("Resume by fixing the 7 CS1503 errors; the test project did not run.")]
-        // job-1667 / job-1652 / job-1654
-        [InlineData("NOT DONE — caller must finish the remaining steps.")]
-        [InlineData("The fix is not verified; I could not finish the last step.")]
-        [InlineData("Three tests are still failing after the change.")]
-        [InlineData("I hit the iteration cap before the last file was patched.")]
-        [InlineData("The integration suite was not run.")]
-        [InlineData("Remaining work: wire the handler and add a test.")]
-        public void AFinalAnswerThatSaysItIsUnfinished_IsDetected(string answer)
-        {
-            Assert.True(Fires(answer), $"missed: {answer}");
-        }
 
         [Fact]
         public void TheExplicitConventionIsDetected()
@@ -110,8 +90,8 @@ namespace DevMind.Core.Tests
         [Fact]
         public void ABareMarkerDoesNotSwallowTheLineAfterIt()
         {
-            // No list under the header, but the next line reports unfinished work on its own.
-            Assert.True(Fires("INCOMPLETE:\nThe core defect is NOT fixed."));
+            // No list under the header, but the next line declares unfinished work on its own.
+            Assert.True(Fires("INCOMPLETE:\nINCOMPLETE: the core defect is not fixed."));
         }
 
         // job-1679 finished its work and wrote "INCOMPLETE: none." — the all-clear, not a
@@ -162,16 +142,6 @@ namespace DevMind.Core.Tests
         }
 
         [Fact]
-        public void TheReportedLineIsTheOneThatSaidSo()
-        {
-            var result = SelfReportedIncompleteDetector.Detect(
-                "Built cleanly.\nThe core defect is NOT fixed.\nMore prose after.");
-
-            Assert.True(result.Detected);
-            Assert.Equal("The core defect is NOT fixed.", result.Line);
-        }
-
-        [Fact]
         public void AVeryLongLineIsTrimmedForTheReasonField()
         {
             string answer = "INCOMPLETE: " + new string('x', 500);
@@ -182,6 +152,29 @@ namespace DevMind.Core.Tests
             Assert.True(result.Line.Length <= SelfReportedIncompleteDetector.MaxLineLength,
                 $"line is {result.Line.Length} chars");
             Assert.EndsWith("…", result.Line);
+        }
+
+        // ── H-64: only the INCOMPLETE: marker counts ─────────────────────────────
+
+        // job-2143's final line, verbatim. The brief had said "Do not run the service"; the
+        // detector cannot see the brief, so wording about skipped steps is not a declaration.
+        private const string Job2143Line =
+            "- No test projects exist, so per the brief I ran no tests and did not run the service. " +
+            "The only verification is the 0/0 rebuild plus read-back of the changed file.";
+
+        [Fact]
+        public void Job2143_ForbiddenStepsDescribedInProse_IsNotIncomplete()
+        {
+            Assert.False(Fires("Removed the v1 mailbox-path code; rebuild 0 errors / 0 warnings.\n" + Job2143Line));
+        }
+
+        [Theory]
+        [InlineData("The migration step is not done; the brief left it to the caller.")]
+        [InlineData("Did not run the TUI; did not commit.")]
+        [InlineData("The core defect is NOT fixed.")]
+        public void UnfinishedWordingWithoutTheMarker_IsNotIncomplete(string line)
+        {
+            Assert.False(Fires("Patched the parser.\n" + line), $"false positive: {line}");
         }
 
         // ── What must stay clean ─────────────────────────────────────────────────
@@ -199,15 +192,14 @@ namespace DevMind.Core.Tests
         }
 
         [Fact]
-        public void APhraseInsideAFencedBlockIsQuoted_NotClaimed()
+        public void AMarkerInsideAFencedBlockIsQuoted_NotClaimed()
         {
-            // A pasted log or diff is evidence the agent is showing, not a statement about
-            // its own work — and test output in particular is full of "did not run".
+            // A pasted log, diff or template is evidence the agent is showing, not a
+            // statement about its own work.
             string answer =
                 "Everything is green now.\n" +
                 "```\n" +
-                "  Failed: SomeTest — the fix is not verified\n" +
-                "  did not run: 0\n" +
+                "+ INCOMPLETE: placeholder line in the report template\n" +
                 "```\n" +
                 "Build 0 errors / 0 warnings.";
 
@@ -215,14 +207,14 @@ namespace DevMind.Core.Tests
         }
 
         [Fact]
-        public void APhraseAfterAFenceClosesStillCounts()
+        public void AMarkerAfterAFenceClosesStillCounts()
         {
             // The fence toggles; it does not swallow the rest of the answer.
             string answer =
                 "```\n" +
                 "some log output\n" +
                 "```\n" +
-                "The core defect is NOT fixed.";
+                "INCOMPLETE: the core defect is not fixed.";
 
             Assert.True(Fires(answer));
         }
@@ -230,9 +222,7 @@ namespace DevMind.Core.Tests
         [Fact]
         public void TildeFencesCountAsFencesToo()
         {
-            // (Was "the caller must do something" — "caller must" left the phrase list in v1.3,
-            // and a phrase that no longer fires would make this test pass for the wrong reason.)
-            string answer = "~~~\nthe fix is not verified\n~~~\nAll green.";
+            string answer = "~~~\nINCOMPLETE: quoted from the old log\n~~~\nAll green.";
 
             Assert.False(Fires(answer));
         }
@@ -255,38 +245,11 @@ namespace DevMind.Core.Tests
             Assert.False(Fires(answer));
         }
 
-        [Theory]
-        [InlineData("# Not done")]
-        [InlineData("### Remaining work")]
-        [InlineData("###### Still failing (fixed below)")]
-        [InlineData("  > ## Not verified")]
-        [InlineData("##")]
-        public void APhraseInAMarkdownHeader_IsATitle_NotAClaim(string header)
-        {
-            Assert.False(Fires("All green.\n" + header + "\nNothing outstanding."), $"false positive: {header}");
-        }
-
-        [Theory]
-        // Not a header: no space after the hashes, so the line is prose and the phrase counts.
-        [InlineData("#1 remaining work: wire the handler")]
-        [InlineData("####### not done")]   // seven hashes is not a markdown header
-        public void AHashThatIsNotAHeader_StillCounts(string line)
-        {
-            Assert.True(Fires(line), $"missed: {line}");
-        }
-
         [Fact]
         public void TheMarkerInAHeader_StillCounts()
         {
-            // The header skip is for the phrase list only; the explicit marker is a declaration.
+            // The explicit marker is a declaration wherever it opens a line, headers included.
             Assert.True(Fires("All green.\n## INCOMPLETE: the migration was not applied"));
-        }
-
-        [Fact]
-        public void CallerMust_IsNoLongerAPhrase()
-        {
-            Assert.DoesNotContain("caller must", SelfReportedIncompleteDetector.Phrases);
-            Assert.False(Fires("The caller must restart the service to pick up the new config."));
         }
 
         [Fact]
@@ -298,20 +261,45 @@ namespace DevMind.Core.Tests
             Assert.Equal("INCOMPLETE: caller must run the migration", result.Line);
         }
 
-        [Fact]
-        public void MatchingIgnoresCase()
+        // ── Marker reporting (was SelfReportStrengthTests, H-31) ──────────────────
+
+        [Theory]
+        [InlineData("Done.\nINCOMPLETE: tests not run", "INCOMPLETE: tests not run")]
+        [InlineData("Done.\n- INCOMPLETE: the migration", "- INCOMPLETE: the migration")]
+        [InlineData("**INCOMPLETE:**\n- wire the TUI hook", "- wire the TUI hook")]
+        public void Marker_IsStrong(string answer, string line)
         {
-            Assert.True(Fires("the core defect is not fixed"));
-            Assert.True(Fires("THE CORE DEFECT IS NOT FIXED"));
+            var r = SelfReportedIncompleteDetector.Detect(answer);
+            Assert.True(r.Detected);
+            Assert.Equal(line, r.Line);
+        }
+
+        [Theory]
+        [InlineData("All done.\nINCOMPLETE: none")]
+        [InlineData("All done.\nINCOMPLETE: n/a.")]
+        [InlineData("Added the handler; build 0/0; suite green.")]
+        [InlineData("")]
+        public void NothingUnfinished_IsNone(string answer)
+        {
+            var r = SelfReportedIncompleteDetector.Detect(answer);
+            Assert.False(r.Detected);
         }
 
         [Fact]
-        public void EveryDocumentedPhraseActuallyFires()
+        public void APhraseLineAboveAMarker_ReportsTheMarker()
         {
-            // The list is the documentation; a phrase in it that does not work would be a
-            // promise this makes and does not keep.
-            foreach (string phrase in SelfReportedIncompleteDetector.Phrases)
-                Assert.True(Fires($"Note: {phrase} yet."), $"documented phrase never fires: {phrase}");
+            var r = SelfReportedIncompleteDetector.Detect("- Did not run the TUI.\nINCOMPLETE: the migration is not written");
+            Assert.True(r.Detected);
+            Assert.Equal("INCOMPLETE: the migration is not written", r.Line);
+        }
+
+        [Fact]
+        public void TheCompletionReportRule_IsInTheHeadlessAddendum()
+        {
+            string addendum = HeadlessAgent.BuildHeadlessAddendum(harnessVerifiesTests: false);
+            Assert.Contains(HeadlessAgent.CompletionReportRule, addendum);
+            Assert.Contains("INCOMPLETE:", HeadlessAgent.CompletionReportRule);
+            Assert.Contains("NOT to do are not unfinished work", HeadlessAgent.CompletionReportRule);
         }
     }
 }
