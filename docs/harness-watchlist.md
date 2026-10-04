@@ -1021,3 +1021,15 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   completed, exit 0, script wall time 3.45 s (the test tray, pid 96200, was then killed by PID). No VBCSCompiler was running
   afterwards, so this run did not itself re-create the hang condition; the fix rests on the repro above.
 - **Status:** fixed - commit "H-63: install script publishes without Start-Process -Wait; watchlist cause corrected".
+
+### H-64 - Weak phrase-list hits mark finished jobs self_reported_incomplete
+- **First seen:** 2026-10-04, job-2143 (VLink.PDFSanitizer, v1 mailbox-path removal). Build verification passed, the work was
+  complete, but the job ended stopped_incomplete / self_reported_incomplete on the line "No test projects exist, so per the
+  brief I ran no tests and did not run the service." The brief had said "Do not run the service." The phrase "did not run"
+  matched; with no test project there was no green harness test run to outweigh the weak hit (H-31 rule).
+- **Pattern:** every phrase-list false positive so far (job-1686, job-1715, job-2143) came from the weak list, and each time
+  the agent was describing something the brief forbade or a notes heading. The checker has no view of the brief, so it
+  cannot tell "skipped what was asked" from "did what was asked".
+- **Decision (Paul, 2026-10-04):** drop the weak phrase list. A job is self_reported_incomplete only on an explicit
+  `INCOMPLETE:` declaration (existing marker rules, incl. the "none" all-clear); a missing task_done stays covered by H-20/H-52.
+- **Status:** open.
