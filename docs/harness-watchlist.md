@@ -139,7 +139,39 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   of >=16 control chars (bridging printable gaps of <=8, control chars >=50% of it) with "[... N bytes of binary data ...]". Text,
   non-ASCII letters, box-drawing and ANSI-coloured output are untouched. The live transcript still shows the raw bytes (the host
   streams it before the executor sees the output). Deployed 1.0.568 (2026-10-04).
-- **Status:** open (binary part fixed)
+- **Reproduced (2026-10-04, current harness):** inside the wrapper `[Console]::OutputEncoding` was IBM437 and `$OutputEncoding`
+  us-ascii, and .NET decoded the pipes with the OEM code page: `Write-Output '— é ✓ ┌─┐'` came back `- é √ ┌─┐`, a native
+  command's UTF-8 (`cmd /c type`) as `ΓÇö ├⌐ Γ£ô ΓöîΓöÇΓöÉ`; `'é — x' > f` and `2> f` wrote UTF-16LE (`FF FE …`); `Write-Error`
+  reached the tool output as a `#< CLIXML <Objs …>` blob (native stderr was already plain).
+- **Fix (2026-10-04)** — ShellRunner v1.11:
+  1. The wrapper preamble sets `[Console]::OutputEncoding` (guarded) and `$OutputEncoding` to UTF-8 (no BOM), and the string path's
+     ProcessStartInfo decodes stdout/stderr as UTF-8. The cmd.exe path (npm/npx/yarn/pnpm/bun shims) runs `chcp 65001 >nul & `
+     first — kept because a test shows it is needed: without it that path returns `- � � �Ŀ`; `chcp` works with no console
+     window. ExecuteArgvAsync (shell-free git/dotnet calls) is unchanged.
+  2. `$PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'`: `>`, `>>`, `2>` and Out-File write UTF-8. PS 5.1's 'utf8' writes a
+     BOM — accepted: read_file strips it (PatchEngine.ReadFilePreservingEncoding), and PS 5.1's own Get-Content needs it (it reads a
+     BOM-less file as ANSI). Not `'*:Encoding'`: it would also force Get-Content / Add-Content and mis-read or mix encodings in
+     existing UTF-16 files.
+  3. `cmd /c "... > log 2>&1"` writing only "The system cannot find the path specified." with exit 0 (job-1655): NOT the
+     harness's. A cmd redirection inside the wrapper writes its log, with `%TEMP%` or an absolute path, after `cd /d` and inside
+     `( … )` (replayed job-1655's shapes: `python --version` and a missing script both landed in the log). That message is cmd's own
+     for a batch file whose path does not resolve (a missing file in an existing folder gives "is not recognized" instead). job-1655's
+     first command wrote `$env:TEMP\regen_cmd.bat` but ran `H:\users\pkailas\docs\_regen.bat` — a different file, one of the six
+     "junk files" the job deleted at the end, so the 44 bytes came from running that leftover batch file; the agent then read the
+     same stale log after every later run and concluded the wrapper "mangles the redirection". `%ERRORLEVEL%` in its
+     `& echo exitcode=%ERRORLEVEL%` is expanded when cmd parses the line, so it always printed 0. Nothing added to the harness; a
+     guard test pins that the redirection works.
+  4. CLIXML: still produced for a PowerShell error record (Write-Error, a failing cmdlet) on stderr. ShellRunner now drops the
+     `#< CLIXML` marker line and converts the `<Objs>` line to its plain text (XML entities and `_xHHHH_` escapes decoded) at the
+     process boundary, so the tool result and the live transcript both get text. Native stderr (`cmd /c "echo x 1>&2"`, git) was
+     already plain.
+  5. run_shell's description (agent ToolRegistry and MCP DevMindTools) now says the output comes back inline as UTF-8 text, so
+     redirecting to a file and reading it back is unnecessary, and that a redirect writes UTF-8.
+- **Tests:** ShellRunnerUtf8Tests (PowerShell / native / cmd.exe-path non-ASCII byte-exact, `>` and `2>` write UTF-8, no CLIXML from
+  native stderr or Write-Error, ClixmlToText, the cmd-redirection guard). Mutation checks: removing StandardOutputEncoding fails
+  `PowerShellOutput_NonAscii_ArrivesExact`, `NativeCommandOutput_Utf8_ArrivesExact` and `CmdExePath_NonAscii_ArrivesExact`; removing
+  the chcp prefix fails `CmdExePath_NonAscii_ArrivesExact`. Tokenizer / %VAR% / && behaviour untouched (H-21/H-27).
+- **Status:** fixed, pending deploy - commit "H-07: UTF-8 shell output end to end; CLIXML converted at the boundary".
 
 ### H-08 - `run_tests` has no `--blame-hang` option
 - **First seen:** 2026-09-23 - job-1652 ("run_tests tool has no arg for them")

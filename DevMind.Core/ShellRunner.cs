@@ -1,4 +1,4 @@
-// File: ShellRunner.cs  v1.7
+// File: ShellRunner.cs  v1.11
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 // v1.5: trace mcp.shell.spawn / output_line / exit events via DevMind.Trace (alias DmTrace).
 // v1.6: fix git stdio hang by setting GIT_REDIRECT_STDIN/STDERR (Git for Windows handle-inheritance issue).
@@ -24,6 +24,12 @@ using System.Threading;
 using System.Threading.Tasks;
 using DmTrace = DevMind.Trace;
 
+// v1.11 (H-07): UTF-8 end to end on the string path. The PowerShell wrapper sets
+//        [Console]::OutputEncoding / $OutputEncoding to UTF-8 (they were IBM437 / us-ascii, so
+//        "—" came back as "-" and a native tool's UTF-8 as mojibake) and makes Out-File — and so
+//        the > / >> / 2> operators — write UTF-8 (PS 5.1 wrote UTF-16LE); the cmd.exe path runs
+//        chcp 65001 first; both are decoded as UTF-8. A PowerShell error record that still reaches
+//        stderr as "#< CLIXML" is converted to its plain text at this boundary.
 // v1.10: MSBUILDDISABLENODEREUSE=1 on every spawned shell so dotnet build/test does
 //        not leave a persistent MSBuild worker pool behind; reap (taskkill /F /T) failures
 //        are now reported instead of swallowed, and a process still alive after the reap
@@ -163,10 +169,17 @@ namespace DevMind
             else
             {
                 sanitized = SanitizeCommand(command);
-                args = @"/c " + @"""" + sanitized + @"""";
+                // H-07: UTF-8 code page first, so cmd's own output and node's (the .cmd shims that
+                // take this path) arrive as UTF-8 like the PowerShell path's.
+                args = @"/c " + @"""" + CmdUtf8Prefix + sanitized + @"""";
             }
 
-            var psi = new ProcessStartInfo(shell, args);
+            var psi = new ProcessStartInfo(shell, args)
+            {
+                // H-07: both shells are told to emit UTF-8 (the wrapper / chcp 65001), so read it as such.
+                StandardOutputEncoding = Utf8NoBom,
+                StandardErrorEncoding  = Utf8NoBom,
+            };
            return await RunProcessAsync(
                 psi, shell, args, sanitized, usePowerShell, forceCmdExe,
                 cancellationToken, effectiveTimeout, onLine, allowChildBreakaway: detach,
@@ -314,16 +327,23 @@ namespace DevMind
                 {
                     if (e.Data != null)
                     {
-                        outputBuffer.AppendLine(e.Data);
-                        onLine?.Report(new ShellOutputLine(e.Data, isError: true));
-                        stderrBytes += e.Data.Length;
-                        stderrLines += 1;
-                        DmTrace.Event("debug", "mcp.shell.output_line",
-                            new Dictionary<string, object>
-                            {
-                                ["is_error"] = true,
-                                ["line"]     = e.Data
-                            });
+                        // H-07: a serialised PowerShell error record arrives as a "#< CLIXML" marker
+                        // line and one <Objs> line; hand on its plain text instead.
+                        if (e.Data == ClixmlMarker) return;
+                        List<string> lines = ClixmlToText(e.Data) ?? new List<string> { e.Data };
+                        foreach (string line in lines)
+                        {
+                            outputBuffer.AppendLine(line);
+                            onLine?.Report(new ShellOutputLine(line, isError: true));
+                            stderrBytes += line.Length;
+                            stderrLines += 1;
+                            DmTrace.Event("debug", "mcp.shell.output_line",
+                                new Dictionary<string, object>
+                                {
+                                    ["is_error"] = true,
+                                    ["line"]     = line
+                                });
+                        }
                     }
                 };
 
@@ -878,12 +898,63 @@ namespace DevMind
         {
             return "$ErrorActionPreference = 'Continue';\n" +
                    "$ProgressPreference = 'SilentlyContinue';\n" +
+                   Utf8Preamble +
                    "$Error.Clear();\n" +
                    "& {\n" +
                    command + "\n" +
                    "} 6>&1 3>&1 | ForEach-Object { if ($_ -is [System.Management.Automation.WarningRecord]) { \"WARNING: $_\" } else { $_ } } | Out-String -Stream -Width 200\n" +
                    "if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }\n";
         }
+
+        /// <summary>UTF-8 without a BOM: how both shells' redirected output is decoded (H-07).</summary>
+        internal static readonly Encoding Utf8NoBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+
+        /// <summary>
+        /// H-07: the PowerShell wrapper's UTF-8 preamble. <c>[Console]::OutputEncoding</c> is what
+        /// PowerShell uses to DECODE a native command's output and to ENCODE its own stdout (it was
+        /// IBM437); <c>$OutputEncoding</c> is what it uses to pipe text INTO a native command (it was
+        /// us-ascii). The Out-File default makes <c>&gt;</c>, <c>&gt;&gt;</c>, <c>2&gt;</c> and Out-File write
+        /// UTF-8 instead of PS 5.1's UTF-16LE. PS 5.1's 'utf8' writes a BOM: read_file strips it
+        /// (PatchEngine.ReadFilePreservingEncoding), and PS 5.1's own Get-Content needs it — without a
+        /// BOM it reads the file as ANSI. Only Out-File: a blanket '*:Encoding' would also force
+        /// Get-Content / Add-Content and mis-read or mix encodings in existing UTF-16 files. The
+        /// console assignment is guarded — it must never stop the command from running.
+        /// </summary>
+        internal const string Utf8Preamble =
+            "try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch { }\n" +
+            "$OutputEncoding = [System.Text.UTF8Encoding]::new($false);\n" +
+            "$PSDefaultParameterValues['Out-File:Encoding'] = 'utf8';\n";
+
+        /// <summary>H-07: prefix for the cmd.exe path — UTF-8 code page, silently.</summary>
+        internal const string CmdUtf8Prefix = "chcp 65001 >nul & ";
+
+        /// <summary>
+        /// H-07: PowerShell serialises an error record that reaches stderr with no console host as
+        /// "#&lt; CLIXML" followed by one &lt;Objs …&gt; line (Write-Error, a failing cmdlet). Returns the
+        /// plain text of such a line, one entry per line of it; null when the line is not a CLIXML
+        /// payload. The marker line itself is dropped by the caller.
+        /// </summary>
+        internal static List<string> ClixmlToText(string line)
+        {
+            if (string.IsNullOrEmpty(line) || !line.StartsWith("<Objs ", StringComparison.Ordinal)
+                || line.IndexOf("schemas.microsoft.com/powershell", StringComparison.Ordinal) < 0)
+                return null;
+
+            var text = new StringBuilder();
+            foreach (Match m in ClixmlString.Matches(line))
+                text.Append(ClixmlEscape.Replace(System.Net.WebUtility.HtmlDecode(m.Groups[1].Value),
+                    e => ((char)Convert.ToInt32(e.Groups[1].Value, 16)).ToString()));
+
+            var lines = text.ToString().Replace("\r\n", "\n").Split('\n')
+                .Select(l => l.TrimEnd())
+                .ToList();
+            while (lines.Count > 0 && lines[lines.Count - 1].Length == 0) lines.RemoveAt(lines.Count - 1);
+            return lines;
+        }
+
+        private static readonly Regex ClixmlString = new Regex(@"<S S=""[^""]*"">(.*?)</S>", RegexOptions.Compiled);
+        private static readonly Regex ClixmlEscape = new Regex(@"_x([0-9A-Fa-f]{4})_", RegexOptions.Compiled);
+        internal const string ClixmlMarker = "#< CLIXML";
 
         private static readonly HashSet<string> _cmdShims = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {

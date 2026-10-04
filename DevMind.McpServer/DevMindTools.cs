@@ -1140,6 +1140,8 @@ internal sealed class DevMindTools
     [McpServerTool(Name = "run_shell")]
     [Description(
         "Execute a shell command and return its output. Commands run via PowerShell. " +
+        "The output (stdout and stderr together, as UTF-8 text, capped) comes back inline in the result, so " +
+        "redirecting it to a file and reading the file back is unnecessary; a > or 2> redirect you do need writes UTF-8. " +
         "This tool is for RUNNING things, never for producing files. Do not list or search " +
         "files with it — use list_files or find_in_files. Do not route file content through " +
         "it: use create_file or write_file for new content and patch_file for edits. The " +

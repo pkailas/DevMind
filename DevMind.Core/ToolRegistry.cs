@@ -107,6 +107,9 @@ namespace DevMind
            // ── run_shell ────────────────────────────────────────────────────
             tools.Add(MakeTool("run_shell",
                 "Execute a shell command and return its output. " +
+                "The output (stdout and stderr together, as UTF-8 text) comes back inline in this tool's result — very long " +
+                "output is shortened with the full text kept for recall_cache — so redirecting it to a file and reading the " +
+                "file back is unnecessary. A > or 2> redirect you do need writes UTF-8. " +
                 "Commands run via powershell.exe. Default timeout: 300s for builds, tests, restores and package installs " +
                 "(dotnet build/test/restore/publish/pack/run/ef, msbuild, npm/pnpm/yarn install/ci/run/test/build, nuget restore, vstest.console), " +
                 "60s for everything else; pass timeout_seconds when a command legitimately needs longer. " +
