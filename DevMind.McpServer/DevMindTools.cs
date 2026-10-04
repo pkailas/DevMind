@@ -997,19 +997,32 @@ internal sealed class DevMindTools
 
                 bool existed = File.Exists(fullPath);
 
+                // Ensure a newline separator between existing content and appended content.
+                // An existing file keeps its BOM/encoding, and the appended text takes its
+                // dominant line ending.
+                TextFileFormat? format = null;
+                string? existing = null, appended = null;
+                if (existed)
+                {
+                    format           = TextFileFormat.Detect(fullPath);
+                    existing         = File.ReadAllText(fullPath);
+                    string separator = existing.Length > 0 && !existing.EndsWith("\n", StringComparison.Ordinal) ? (format.NewLine ?? "\n") : "";
+                    appended         = existing + separator + format.NormalizeLineEndings(content);
+                }
+
+                // H-04: a .cs append that adds a syntax error is refused before anything is
+                // written — the same gate as write_file / create_file and the agent hosts.
+                string? syntaxRefusal = CSharpSyntaxGate.Check(fullPath, existing, existed ? appended : content);
+                if (syntaxRefusal != null)
+                    return $"append_file: failed — {syntaxRefusal}";
+
                 string? dir = Path.GetDirectoryName(fullPath);
                 if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                     Directory.CreateDirectory(dir);
 
-                // Ensure a newline separator between existing content and appended content.
-                // An existing file keeps its BOM/encoding, and the appended text takes its
-                // dominant line ending.
                 if (existed)
                 {
-                    var format       = TextFileFormat.Detect(fullPath);
-                    string existing  = File.ReadAllText(fullPath);
-                    string separator = existing.Length > 0 && !existing.EndsWith("\n", StringComparison.Ordinal) ? (format.NewLine ?? "\n") : "";
-                    format.Write(fullPath, existing + separator + format.NormalizeLineEndings(content));
+                    format!.Write(fullPath, appended!);
                 }
                 else
                 {

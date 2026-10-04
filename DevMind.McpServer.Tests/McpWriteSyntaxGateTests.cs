@@ -80,5 +80,54 @@ namespace DevMind.McpServer.Tests
             string r = await _tools.WriteFile(Path.Combine(_dir, name), "function f() {\n");
             Assert.StartsWith("write_file: created", r);
         }
+
+        // ── append_file (07's loose end from 05b) ──
+
+        [Fact]
+        public async Task AppendFile_ThatBreaksACsFile_IsRefused_FileUnchanged()
+        {
+            string path = Path.Combine(_dir, "A.cs");
+            File.WriteAllText(path, "public class A { }\n");
+
+            string r = await _tools.AppendFile(path, "public class B {\n");
+
+            Assert.StartsWith("append_file: failed — " + CSharpSyntaxGate.Marker, r);
+            Assert.Contains("re-read the region and patch again", r);
+            Assert.Equal("public class A { }\n", File.ReadAllText(path));
+        }
+
+        [Fact]
+        public async Task AppendFile_CreatingABrokenCsFile_IsRefused_NothingCreated()
+        {
+            string path = Path.Combine(_dir, "sub", "New.cs");
+            string r = await _tools.AppendFile(path, "public class New {\n");
+
+            Assert.StartsWith("append_file: failed — " + CSharpSyntaxGate.Marker, r);
+            Assert.False(File.Exists(path));
+        }
+
+        [Fact]
+        public async Task AppendFile_AValidCsAppend_IsWritten()
+        {
+            string path = Path.Combine(_dir, "A.cs");
+            File.WriteAllText(path, "public class A { }\n");
+
+            string r = await _tools.AppendFile(path, "public class B { }\n");
+
+            Assert.StartsWith("append_file: appended", r);
+            Assert.Contains("public class B { }", File.ReadAllText(path));
+        }
+
+        [Fact]
+        public async Task AppendFile_NonCs_IsNeverGated()
+        {
+            string path = Path.Combine(_dir, "notes.txt");
+            File.WriteAllText(path, "one\n");
+
+            string r = await _tools.AppendFile(path, "function f() {\n");
+
+            Assert.StartsWith("append_file: appended", r);
+            Assert.EndsWith("function f() {\n", File.ReadAllText(path).Replace("\r\n", "\n"));
+        }
     }
 }

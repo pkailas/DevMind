@@ -96,8 +96,9 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   ("[CREATE_FILE FAILED: ... [SYNTAX-GATE] ... The file on disk was NOT changed.]"). Out of scope: `.cshtml` / `.razor` (a different
   parser).
 - **MCP write path (2026-10-04, 05b):** MCP `write_file` / `create_file` (DevMindTools.WriteFileCore — their own write code) now
-  run the same gate before anything is written: "write_file: failed — [SYNTAX-GATE] ...". MCP `append_file` is still ungated (not
-  in 05b's scope). Tests: McpWriteSyntaxGateTests; EditPreservesFormatTests' New.cs BOM case now writes valid C#. commit "H-69: real three-way merge; headless conflicts refuse one write; MCP write_file syntax gate; satellite trim".
+  run the same gate before anything is written: "write_file: failed — [SYNTAX-GATE] ...". MCP `append_file` gated too (07's loose
+  end, commit "H-04: MCP append_file runs the C# syntax gate"): the whole resulting text (current + separator + appended) is
+  checked before anything is written, a refused new file is not created, "append_file: failed — [SYNTAX-GATE] ...". Tests: McpWriteSyntaxGateTests; EditPreservesFormatTests' New.cs BOM case now writes valid C#. commit "H-69: real three-way merge; headless conflicts refuse one write; MCP write_file syntax gate; satellite trim".
 - **Size:** self-contained single-file publish (run-deploy.ps1 settings) grows 17.1 MB per exe: DevMind.TUI.exe 105,212,061 ->
   122,307,417 bytes, DevMind.McpServer.exe 102,179,596 -> 119,274,952 bytes. Both publishes succeed.
 - **Tests:** PatchSafetyTests `H04_*` — job-1652 replay (an insert lands inside DetailPage_ContainsMetadataAndImage; refused with
