@@ -168,6 +168,13 @@ namespace DevMind
             _mutationsSinceFailure = 0;
         }
 
+        /// <summary>Whether a shell command (or AgenticExecutor's "TEST &lt;project&gt;") runs tests.
+        /// Shared with HarnessNudges so both read build/test commands the same way.</summary>
+        internal static bool IsTestCommand(string command) => Classify(command) == Stage.Test;
+
+        /// <summary>Whether a shell command builds (and does not run tests).</summary>
+        internal static bool IsBuildCommand(string command) => Classify(command) == Stage.Build;
+
         private static Stage Classify(string command)
         {
             if (string.IsNullOrWhiteSpace(command)) return Stage.None;

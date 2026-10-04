@@ -364,6 +364,7 @@ namespace DevMind
             _host.ClearActions(); // result.Actions is THIS turn's journal
             _nudges.AddBrief(prompt);
             _nudges.ResetCompileErrors();
+            _nudges.ResetToolCallGuards();
             // H-58: per job. A turn that ended with harness-enabled thinking still on must not
             // hand it to a continuation, so the job's own settings are restored first.
             _options.ShowLlmThinking = _jobThinks;
@@ -802,7 +803,8 @@ namespace DevMind
         {
             List<string> nudges = _nudges.ObserveIteration(
                 HarnessNudgeEvidence.AgentText(assistantResponse, iter.ToolCalls),
-                HarnessNudgeEvidence.ToolOutput(iter.Result));
+                HarnessNudgeEvidence.ToolOutput(iter.Result),
+                HarnessNudgeEvidence.ToolCalls(iter.ToolCalls, iter.Result, iter.Outcome?.Blocks));
             foreach (string nudge in nudges)
             {
                 currentPrompt = HarnessNudgeEvidence.Fold(currentPrompt, nudge);

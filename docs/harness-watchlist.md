@@ -670,7 +670,17 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Fix:** when a read/grep/list target is under `bin\`, `obj\`, or is `*.deps.json` / `*.dll` / `*.pdb` during a job with a
   failing test, inject once: "Build output is never the evidence. Print the failing assertion and the actual value, fix what that
   shows." (H-19-style hint.) Prompt rule added 2026-10-01; this is the harness backstop.
-- **Status:** open.
+- **Done (2026-10-04):** while the latest build/test run is failing, a read_file / grep_file (filename), find_in_files /
+  list_files (glob) under a `bin\` / `obj\` segment or on a `.deps.json` / `.runtimeconfig.json` / `.dll` / `.pdb`, or a shell
+  command with a read verb (Get-Content, Select-String, Get-ChildItem, type, cat, findstr, ...) on such a path, injects once:
+  "Build output is never the evidence. Print the failing assertion and the actual value, and fix what that shows." "Failing" is
+  the latest run_build / run_tests / build-or-test shell command: test runs by their summary (also when the model printed it
+  through Select-String), builds by exit code. A build command that mentions bin\ is not a read.
+  Same framing/journal/transcript as H-25/H-26 (`[HARNESS GUARD]`, journal kind `nudge`, `[GUARD] nudge injected`), once per key per job turn;
+  fed a structured record per tool call (`ToolCallEvidence`: name, arguments, the result text the model was handed,
+  exit code) built from the iteration by `HarnessNudgeEvidence.ToolCalls` — not re-parsed from flattened text. Code: DevMind.Core\ToolCallNudges.cs.
+- **Tests:** ToolCallNudgesTests `H46_*` (each target shape, shell readers, green job / no run yet / green again do not fire).
+- **Status:** fixed, pending deploy - commit "H-46/H-47/H-50/H-51b: per-tool-call harness nudges; close H-51a".
 
 ### H-47 - Nudge after repeated failed web fetches for framework source
 - **First seen:** 2026-10-01, job-1858: "burned many iterations trying to confirm ServerAddressesFeature's constructor/namespace
@@ -678,7 +688,15 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   job ended with its tests unwritten.
 - **Fix:** after 2 consecutive web_fetch / learn_fetch failures (404 or not-found) in a job, inject: "Stop fetching. Write the
   code (or your own class implementing the interface) and build - the compiler is the reference." Prompt rule added 2026-10-01.
-- **Status:** open.
+- **Done (2026-10-04):** 2 failed web_fetch / learn_fetch calls in a row inject once "Stop fetching. Write the code (or your own
+  class implementing the interface) and build — the compiler is the reference." Failed = the tool's error / no-content marker
+  (`[web_fetch error] 404 NotFound`, `[learn_fetch] No content ...`), an empty result, or a short (< 300 chars) page that says
+  404 / not found. A successful fetch resets the count; other tools in between do not.
+  Same framing/journal/transcript as H-25/H-26 (`[HARNESS GUARD]`, journal kind `nudge`, `[GUARD] nudge injected`), once per key per job turn;
+  fed a structured record per tool call (`ToolCallEvidence`: name, arguments, the result text the model was handed,
+  exit code) built from the iteration by `HarnessNudgeEvidence.ToolCalls` — not re-parsed from flattened text. Code: DevMind.Core\ToolCallNudges.cs.
+- **Tests:** ToolCallNudgesTests `H47_*`.
+- **Status:** fixed, pending deploy - commit "H-46/H-47/H-50/H-51b: per-tool-call harness nudges; close H-51a".
 
 ### H-48 - Block mutating git commands in delegated jobs
 - **First seen:** 2026-10-01, job-1862: `git stash` -> run the suite on the base -> `git stash pop` inside the working tree to
@@ -724,7 +742,15 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   -Skip 13`, then `-Skip 16`, `-Skip 19`, `-Skip 22` - one shell call per few lines. Harmless but slow and context-heavy.
 - **Fix:** when 3+ consecutive shell calls differ only in a -Skip/-First/head/tail offset over the same source, inject once:
   "Use read_file (start_line/end_line), or `git show <rev>:<path>` redirected to a file and read that."
-- **Status:** open.
+- **Done (2026-10-04):** 3 consecutive run_shell calls that are the same after their paging numbers are replaced (-Skip / -First /
+  -Last / -Head / -Tail / -Index / -TotalCount, `head -n`, `tail -n`, `tail -20`), with at least two different offsets, inject
+  once "Use read_file with start_line/end_line, or write the output to a file once and read that." Any other tool call between
+  them breaks the run. The same command three times is not paging (that is H-51b's case).
+  Same framing/journal/transcript as H-25/H-26 (`[HARNESS GUARD]`, journal kind `nudge`, `[GUARD] nudge injected`), once per key per job turn;
+  fed a structured record per tool call (`ToolCallEvidence`: name, arguments, the result text the model was handed,
+  exit code) built from the iteration by `HarnessNudgeEvidence.ToolCalls` — not re-parsed from flattened text. Code: DevMind.Core\ToolCallNudges.cs.
+- **Tests:** ToolCallNudgesTests `H50_*`, ToolCallNudgesSessionTests `PagingShellOutput_NudgeInjectedOnce_AndJournalled` (end to end).
+- **Status:** fixed, pending deploy - commit "H-46/H-47/H-50/H-51b: per-tool-call harness nudges; close H-51a".
 
 ### H-51 - Override steers are not consumed while the agent repeats one shell command
 - **First seen:** 2026-10-01, job-1866: an override steer was queued at iteration 78 while the agent re-ran the same single test;
@@ -733,7 +759,33 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Fix:** (a) check whether the steer was actually consumed (journal disposition) and why not; (b) a repeat-command guard:
   the same shell command 3x in a row with identical output -> inject "same command, same result; state your hypothesis and the
   one different command that tests it" (the prompt already says this; the model ignored it under a loop).
-- **Status:** open.
+- **(a) closed, no defect (2026-10-04):** job-1866's journal (job-1866.result.json) shows the override steer CONSUMED — journal
+  entry 72 (1-based), kind `steer`, success true — and obeyed: every later command dropped the
+  `$env:ASPNETCORE_ENVIRONMENT="Staging"` prefix (the steer said the test already passes under Staging). The agent then
+  started a second loop on the same test (entries 73-82). Not a steer-consumption defect; (b) is the backstop for the loop.
+- **(b) done (2026-10-04):** the key is semantic, because none of job-1866's runs (11 before the steer, 10 after) were
+  byte-identical (redirect targets isoA.txt ... isoK.txt; later commands differ by one character):
+  - test runs (`dotnet test` shell commands, run_tests): key = project/solution + `--filter` value, normalized; redirects
+    (`> f`, `*> f`, `2>&1`), `| Out-File` / `| Tee-Object`, env-var statements, loggers, verbosity and everything after the
+    `dotnet test` statement are ignored (quote-aware, so a `|` inside the filter stays). Outcome = the summed
+    Failed/Passed/Skipped/Total counts (found anywhere in a line, so the model's own `L57: Passed! ...` excerpt counts) plus the
+    failing names (TestRunOutcome.Parse).
+  - other shell commands: redirect targets, capture pipes, temp-file paths and digits stripped from the command; output compared
+    after removing only volatile numbers (durations, clock times, dates, GUIDs, temp paths) — a changed count is a changed result.
+  - 3 in a row with the same key and outcome inject once "Same tests, same result, three times. State in one sentence what
+    question you are still answering and the one different command that would answer it — or move on."
+  - A file change (save/append/patch/delete/rename) starts the streak over: re-running after an edit is the normal loop. Reads in
+    between do not.
+  - No double nudges: a run whose failing tests are named is H-58's (RepeatedTestFailureGuard) — the same parser decides — and a
+    repeated compile error is H-25's; paging commands are H-50's.
+  Same framing/journal/transcript as H-25/H-26 (`[HARNESS GUARD]`, journal kind `nudge`, `[GUARD] nudge injected`), once per key per job turn;
+  fed a structured record per tool call (`ToolCallEvidence`: name, arguments, the result text the model was handed,
+  exit code) built from the iteration by `HarnessNudgeEvidence.ToolCalls` — not re-parsed from flattened text. Code: DevMind.Core\ToolCallNudges.cs.
+- **Tests:** ToolCallNudgesTests `H51b_*` (job-1866 replay with isoA..isoE redirect files and differing line numbers/durations
+  fires on the 3rd, once; different filter / changed outcome / file change start over; key normalization; run_tests; generic
+  shell; `H51b_AndH58_DoNotBothFire_ForTheSameRepeatedFailingTests`; `H51b_ARepeatedCompileError_IsLeftToH25`). Mutation check:
+  putting the redirect target back into the key fails `H51b_Job1866Replay_SameFilterDifferentRedirectFiles_FiresOnTheThird_Once`.
+- **Status:** fixed, pending deploy - commit "H-46/H-47/H-50/H-51b: per-tool-call harness nudges; close H-51a".
 
 ### H-52 - A narration-only reply ends a delegated job as "done"
 - **First seen:** 2026-10-02, VLink.Warehouses: job-1974 ended `state: done` after 85 iterations. Its whole answer was one line of

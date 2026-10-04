@@ -1,4 +1,4 @@
-// File: HarnessNudges.cs  v1.0
+// File: HarnessNudges.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Two harness nudges for the headless loop (watchlist H-25 / H-26). Pure and stateful per
@@ -21,6 +21,10 @@
 // stopwords and do NOT occur (up to a plural "s") in the brief's other sentences, so words shared with the
 // required work ("test", the project name) never count as evidence of the optional item.
 // An iteration references the item when it mentions at least min(2, keyword count) of them.
+//
+// v1.1: the per-tool-call nudges H-46 / H-47 / H-50 / H-51b (ToolCallNudges) run from
+// ObserveIteration too, fed a structured record per tool call (HarnessNudgeEvidence.ToolCalls)
+// instead of re-parsing the flattened text. The two nudges above are unchanged.
 
 using System;
 using System.Collections.Generic;
@@ -82,6 +86,34 @@ namespace DevMind
             var parts = new List<string> { result.ShellOutput ?? "" };
             if (result.Errors != null) parts.AddRange(result.Errors.Where(e => e != null));
             return string.Join("\n", parts);
+        }
+
+        /// <summary>
+        /// One record per tool call of the iteration: name, arguments, the result text the model
+        /// was handed (LoopHelpers.BuildToolResultContent — the same text the tool message
+        /// carried), and for shell/build/test calls the exit code.
+        /// </summary>
+        public static List<ToolCallEvidence> ToolCalls(
+            IEnumerable<ToolCallResult> toolCalls, ExecutionResult result, List<ResponseBlock> executedBlocks)
+        {
+            var list = new List<ToolCallEvidence>();
+            if (toolCalls == null) return list;
+            ExecutionResult r = result ?? ExecutionResult.None();
+            foreach (var tc in toolCalls)
+            {
+                if (tc == null) continue;
+                string content;
+                try { content = LoopHelpers.BuildToolResultContent(tc, r, executedBlocks); }
+                catch { content = ""; }
+                list.Add(new ToolCallEvidence
+                {
+                    Name = tc.Name ?? "",
+                    Arguments = tc.Arguments ?? new Dictionary<string, string>(),
+                    Result = content ?? "",
+                    ExitCode = tc.Name is "run_shell" or "run_build" or "run_tests" ? r.ShellExitCode : null,
+                });
+            }
+            return list;
         }
 
         /// <summary>Appends a nudge as its own delimited block — the harness's voice, visibly
@@ -154,6 +186,8 @@ namespace DevMind
         private readonly Dictionary<string, int> _errorCounts = new Dictionary<string, int>(StringComparer.Ordinal);
         private readonly HashSet<string> _errorFired = new HashSet<string>(StringComparer.Ordinal);
 
+        private readonly ToolCallNudges _toolCallNudges = new ToolCallNudges();
+
         public IReadOnlyList<OptionalBriefItem> OptionalItems => _items;
 
         /// <summary>
@@ -199,12 +233,23 @@ namespace DevMind
         /// <summary>Compile-error counts are per turn (one job run); optional items persist.</summary>
         public void ResetCompileErrors() => _errorCounts.Clear();
 
+        /// <summary>The per-tool-call guards (H-46/H-47/H-50/H-51b) are per job turn: streaks and
+        /// fired keys start over.</summary>
+        public void ResetToolCallGuards() => _toolCallNudges.Reset();
+
         /// <summary>
         /// Records one iteration: <paramref name="agentText"/> is the agent's prose plus its
         /// tool-call arguments, <paramref name="toolOutput"/> the shell/build/test output and
         /// errors. Returns the nudges to append to the next prompt (usually none).
         /// </summary>
         public List<string> ObserveIteration(string agentText, string toolOutput)
+            => ObserveIteration(agentText, toolOutput, null);
+
+        /// <summary>
+        /// As above, plus the iteration's tool calls for the per-call nudges (H-46 / H-47 / H-50 /
+        /// H-51b). Null calls = only the two text-based nudges, exactly as before.
+        /// </summary>
+        public List<string> ObserveIteration(string agentText, string toolOutput, IReadOnlyList<ToolCallEvidence> calls)
         {
             var nudges = new List<string>();
 
@@ -227,6 +272,7 @@ namespace DevMind
                     nudges.Add(RepeatedCompileErrorMessage + "\nError: " + key);
             }
 
+            nudges.AddRange(_toolCallNudges.Observe(calls));
             return nudges;
         }
 
