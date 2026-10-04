@@ -1,4 +1,4 @@
-// File: WriteEcho.cs  v1.0
+// File: WriteEcho.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // What a write says about itself in the transcript.
@@ -17,6 +17,11 @@
 // an internal phrase for "there was no base cache entry, this was overwrite detection only"
 // was shown to the operator verbatim. It means the merge could not be verified, so it is a
 // warning that says that.
+//
+// v1.1 (H-05): the badge rode on EVERY clean write, because "fallback" also meant base ==
+// current (nobody else changed the file — the normal case). The note now follows the merge
+// mode: nothing for a clean or real three-way merge, and a note that names the actual
+// fallback for the two that are one.
 
 using System;
 using System.IO;
@@ -29,8 +34,11 @@ namespace DevMind
         /// <summary>What a line says when the path is not under the working directory.</summary>
         public const string OutsideNote = "(outside working directory)";
 
-        /// <summary>What a line says when the three-way merge had no base to work from.</summary>
-        public const string FuzzyNote = "(fuzzy merge — verify)";
+        /// <summary>What a line says when the merge had no base to work from.</summary>
+        public const string NoBaseNote = "(no base: overwrite check only)";
+
+        /// <summary>What a line says when the merge engine failed and the proposed text was taken as-is.</summary>
+        public const string DiffEngineFailedNote = "(merge engine failed: proposed text accepted)";
 
         /// <summary>
         /// Describe a completed write.
@@ -38,7 +46,8 @@ namespace DevMind
         /// <param name="fileNameOnly">The short label used when the write landed where expected.</param>
         /// <param name="fullPath">The resolved path actually written.</param>
         /// <param name="workingDirectory">The session's working directory.</param>
-        /// <param name="usedFallback">The merge fell back to overwrite detection.</param>
+        /// <param name="mergeMode">How the merge check reached its result; only a genuine
+        /// fallback (no base, or the merge engine failed) adds a note.</param>
         /// <param name="sizeNote">Optional trailing detail such as "(16 lines)".</param>
         /// <returns>
         /// The text after the tag, and the colour — which the vocabulary (brief 12) turns into
@@ -46,7 +55,7 @@ namespace DevMind
         /// </returns>
         public static (string Detail, OutputColor Color) Describe(
             string fileNameOnly, string fullPath, string workingDirectory,
-            bool usedFallback, string sizeNote = null)
+            MergeMode mergeMode, string sizeNote = null)
         {
             bool outside = IsOutside(fullPath, workingDirectory);
 
@@ -58,9 +67,15 @@ namespace DevMind
             string detail = label ?? string.Empty;
             if (!string.IsNullOrEmpty(sizeNote)) detail += " " + sizeNote;
             if (outside) detail += " " + OutsideNote;
-            if (usedFallback) detail += " " + FuzzyNote;
+            string mergeNote = mergeMode switch
+            {
+                MergeMode.NoBase => NoBaseNote,
+                MergeMode.DiffEngineFailed => DiffEngineFailedNote,
+                _ => null,
+            };
+            if (mergeNote != null) detail += " " + mergeNote;
 
-            OutputColor color = outside || usedFallback ? OutputColor.Warning : OutputColor.Success;
+            OutputColor color = outside || mergeNote != null ? OutputColor.Warning : OutputColor.Success;
             return (detail, color);
         }
 

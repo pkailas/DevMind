@@ -84,13 +84,41 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Symptom:** an insert intended between two test methods landed inside `DetailPage_ContainsMetadataAndImage`, leaving it unterminated and later producing a duplicate copy; ~6 iterations to untangle.
 - **Related:** Sep 1 ambiguous-match thrash on near-duplicate bodies.
 - **Proposed fix:** after applying a patch to a .cs file, run a syntax check (Roslyn parse) and reject/undo the patch if it introduced parse errors, reporting the location.
-- **Status:** open
+- **Fix (2026-10-04):** `CSharpSyntaxGate` (DevMind.Core, new dependency Microsoft.CodeAnalysis.CSharp 5.9.0 — parse only:
+  `CSharpSyntaxTree.ParseText`, LanguageVersion.Preview, no compilation, no references, not LSP). Before a `.cs` file is written,
+  the current and the new text are parsed; if the new text has a syntax error (Severity Error) the current text does not —
+  compared as a multiset of (id, message), so a file already mid-edit can still be patched elsewhere — nothing is written and the
+  tool error names the first NEW diagnostic (id, message, line:column) with the 3 proposed lines around it and "the edit broke the
+  file's structure; re-read the region and patch again". A new file is compared against zero errors. Wired into
+  PatchEngine.ApplyPatch (shared by the headless host, the TUI host and MCP `patch_file`; result `Rejected`) and into
+  SaveFileAsync / AppendFileAsync (new and existing file) of BOTH hosts — so it applies to the TUI too, where a refusal is a tool
+  error the model reads like any other. The host lets the refusal through to the executor, so the model's tool result carries it
+  ("[CREATE_FILE FAILED: ... [SYNTAX-GATE] ... The file on disk was NOT changed.]"). Not covered: MCP `write_file` / `create_file`
+  (DevMindTools' own write path). Out of scope: `.cshtml` / `.razor` (a different parser).
+- **Size:** self-contained single-file publish (run-deploy.ps1 settings) grows 17.1 MB per exe: DevMind.TUI.exe 105,212,061 ->
+  122,307,417 bytes, DevMind.McpServer.exe 102,179,596 -> 119,274,952 bytes. Both publishes succeed.
+- **Tests:** PatchSafetyTests `H04_*` — job-1652 replay (an insert lands inside DetailPage_ContainsMetadataAndImage; refused with
+  CS0106 at line 12:5, file unchanged), a correct insert between the methods is written, a file already broken elsewhere is still
+  patchable, write_file / create_file / append_file refusals, the model-facing tool result, non-.cs files never parsed, both hosts
+  gate all four write paths. Mutation check: making the comparison always pass fails the job-1652 replay by name.
+- **Status:** fixed, pending deploy - commit "H-04/H-05/H-67: C# syntax gate on writes, merge mode labels, fuzzy-patch duplication guard".
 
 ### H-05 - `[two-way fallback]` label on every clean patch
 - **First seen:** 2026-09-01 (item b), still present 2026-09-23 on every patch
 - **Symptom:** `ThreeWayMergeCheck` sets `UsedFallback` when base == current (the normal case); the transcript prints `[two-way fallback]` for clean patches, which trains the reader to ignore it.
 - **Proposed fix:** only label when a genuine divergence forced the fallback.
-- **Status:** open (semantics decision pending since Sep 1)
+- **Fix (2026-10-04, Paul's decision: label only a genuine fallback):** `MergeCheckResult.Mode` (`MergeMode`): ThreeWay,
+  CleanNoDivergence (base == current — the normal case, NO label, no trace event), NoBase (label " [no base: overwrite check only]",
+  trace `merge_fallback` with the old wording), DiffEngineFailed (label " [merge engine failed: proposed text accepted]", trace with
+  the exception type). `UsedFallback` stays as a computed property (true only for NoBase / DiffEngineFailed), so the conflict-state
+  copy and the structural tests keep working. `MergeReport` is the one place for the label and the trace; the trace event name is the
+  constant `merge_fallback` (the hosts were passing the message text as the event NAME — `Trace.Event(level, name, data)` was called
+  as `Trace.Event("merge_fallback", "<message>")`). Every caller updated: the Core host's three emits, the TUI host's three (its
+  WriteEcho note now follows the mode: "(no base: overwrite check only)" / "(merge engine failed: proposed text accepted)", nothing
+  for a clean write). Found while doing this: H-69.
+- **Tests:** PatchSafetyTests `Merge_*` and `Host_*` (clean patch prints no label, no-base save prints its label, forced DiffPlex
+  failure prints its label); WriteEchoTests updated for the mode and extended (clean / three-way carry no note; engine failure).
+- **Status:** fixed, pending deploy - commit "H-04/H-05/H-67: C# syntax gate on writes, merge mode labels, fuzzy-patch duplication guard".
 
 ### H-06 - Lessons don't carry between jobs or repos
 - **First seen:** 2026-09-23 - job-1651 learned the Razor `\"`-in-`@()` RZ1000 trap; job-1652 re-discovered it from scratch the next job.
@@ -1229,7 +1257,26 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   same family as the open fuzzy-match items (fuzzy applied to structured files; exact match losing to a fuzzy runner-up).
 - **Proposed fix:** don't auto-apply a fuzzy match to C#/XAML; on any fuzzy apply, re-read the patched region and fail the
   patch if the result contains the FIND's neighbourhood twice or the bracket balance changed.
-- **Status:** open.
+- **Fix (2026-10-04):**
+  1. `.cs`: the H-04 syntax gate refuses the `)]]` damage (replay: a FIND that stops before a `[LoggerMessage(...)]` attribute's
+     `]` with a REPLACE that closes it again -> `{Reason}")]]`, refused, file unchanged).
+  2. Any fuzzy apply (`PatchEngine.FuzzyDuplication`, checked at resolve time, before anything is written): lines compared with ALL
+     whitespace removed (so whitespace drift never trips it) and only lines with a letter/digit and 4+ chars counted. Refused when
+     (a) a line ends up twice in a row where the file has no such pair (job-2146's newest `// vX.Y.Z` line re-added above itself), or
+     (b) a line ends up more often than the edit means (in file - in FIND + in REPLACE) — the general form of "a REPLACE line now
+     appears more often than the original count plus what REPLACE adds"; taken literally that rule can never fire (the fuzzy span
+     can only remove lines), the real failure is a FIND line the span did not contain. That includes a FIND line that is not in the
+     file as written, echoed in the REPLACE: the edit would write the model's (wrong) version of a line it meant to keep — refused
+     too, with its own message. The refusal shows the fuzzy candidate region and asks for an exact FIND.
+  3. Structured files (`.xaml`, `.axaml`, `.csproj`, `.props`, `.targets`, `.slnx`, `.sln`, `.json`, `.xml`, `.resx`, `.config`, and
+     already `.yml`/`.yaml`/`.vbproj`/`.fsproj`/`.vcxproj`) were already never fuzzy-applied; the refusal now names the closest
+     candidate's line and similarity.
+  4. Exact beats fuzzy: verified already true — ResolvePairs tries the whitespace-normalized exact match first and never calls the
+     fuzzy scorer when it finds one (also on the H-34 rebase path, which is exact-only). Pinned by a test (exact match next to a 99%
+     runner-up is the line edited).
+- **Tests:** PatchSafetyTests `H67_*` (job-2143 and job-2146 replays, whitespace-drift fuzzy apply written, echoed-typo refused,
+  non-exact on .xaml / .csproj / .json refused with the candidate, exact beats the runner-up).
+- **Status:** fixed, pending deploy - commit "H-04/H-05/H-67: C# syntax gate on writes, merge mode labels, fuzzy-patch duplication guard".
 
 ### H-68 - Harness build verification fails on files locked by the user's running app
 - **First seen:** 2026-10-04, job-2152 (VLink.PDFSanitizer config app). The code was clean (the agent proved 0/0 with an
@@ -1240,3 +1287,18 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   `build_verification_locked` (environmental), name the locking processes from the message, and don't count those
   warnings as build_warnings.
 - **Status:** open.
+
+### H-69 - The three-way merge never merges: DiffPlex rejects the null chunker
+- **Found:** 2026-10-04, while fixing H-05 (the new merge-mode test for a real divergence came back DiffEngineFailed).
+- **Cause:** ThreeWayMergeCheck calls `ThreeWayDiffer.CreateMerge(base, proposed, current, ignoreWhiteSpace: false, ignoreCase:
+  false, chunker: null)`. DiffPlex 1.9.0 throws `ArgumentNullException: chunker`; with `DiffPlex.Chunkers.LineChunker.Instance` the
+  same merge succeeds (checked directly against the 1.9.0 DLL: a/b/c with A on one side and C on the other merges to A/b/C).
+  `chunker: null` dates from the merge gate's first commit (3948341, 2026-06-26), so every real divergence since then (someone else
+  changed the file after the agent read it) has taken the PROPOSED text unmerged, and conflicts were never detected. The old
+  "[two-way fallback]" label sat on every write and hid it; since H-05 such a write is labelled
+  "[merge engine failed: proposed text accepted]" and traced `merge_fallback` with ArgumentNullException.
+- **Not fixed here, on purpose:** passing LineChunker changes write behaviour — real merges, and real conflicts, which block every
+  later write until `/resolve` — and a headless job has nobody to run `/resolve`. Needs a decision: what a delegated job does on a
+  conflict (fail the write with the conflict as the tool error?).
+- **Pinned by:** PatchSafetyTests `Merge_RealDivergence_TodayAlwaysFallsBack_DiffPlexRejectsTheNullChunker_H69` (flip it when fixed).
+- **Status:** open — decision pending.

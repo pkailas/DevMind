@@ -1773,11 +1773,12 @@ namespace DevMind
                 // New file — no merge gate needed
                 if (!File.Exists(fullPath))
                 {
+                    CSharpSyntaxGate.Enforce(fullPath, null, fileContent);          // H-04
                     fileContent = TextFileFormat.WriteNew(fullPath, fileContent);   // H-30: repo line ending
                     _fileCache.Store(FileCacheKey(fullPath), fileContent);
                     int newFileLines = fileContent.Split('\n').Length;
                     var created = WriteEcho.Describe(fileNameOnly, fullPath, _shellRunner.WorkingDirectory,
-                                                     usedFallback: false, $"({newFileLines} lines)");
+                                                     MergeMode.CleanNoDivergence, $"({newFileLines} lines)");
                     AppendOutputLocal($"[FILE] Saved {created.Detail}\n", created.Color);
                     return fullPath;
                 }
@@ -1788,10 +1789,7 @@ namespace DevMind
 
                 MergeCheckResult merge = ThreeWayMergeCheck.CheckAndMerge(baseText, fileContent, currentText);
 
-                if (merge.UsedFallback)
-                {
-                    Trace.Event("merge_fallback", $"TUI SaveFileAsync: two-way fallback for \"{fileNameOnly}\" — no base cache entry. Overwrite detection only.");
-                }
+                MergeReport.TraceFallback("TUI SaveFileAsync", fileNameOnly, merge);
 
                 if (merge.HasConflicts)
                 {
@@ -1820,13 +1818,18 @@ namespace DevMind
 
                 // No conflicts — write the merged text
                 // Existing file: keep its BOM/encoding and dominant line ending.
+                CSharpSyntaxGate.Enforce(fullPath, currentText, merge.MergedText);   // H-04
                 string finalContent = TextFileFormat.WritePreserving(fullPath, merge.MergedText);
                 _fileCache.Store(FileCacheKey(fullPath), finalContent);
                 int savedLines = finalContent.Split('\n').Length;
                 var saved = WriteEcho.Describe(fileNameOnly, fullPath, _shellRunner.WorkingDirectory,
-                                               merge.UsedFallback, $"({savedLines} lines)");
+                                               merge.Mode, $"({savedLines} lines)");
                 AppendOutputLocal($"[FILE] Saved {saved.Detail}\n", saved.Color);
                 return fullPath;
+            }
+            catch (CSharpSyntaxGateException)
+            {
+                throw;   // H-04: the executor turns it into the tool error the model reads
             }
             catch (Exception ex)
             {
@@ -1873,6 +1876,7 @@ namespace DevMind
                     string dir = Path.GetDirectoryName(resolvedPath);
                     if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                         Directory.CreateDirectory(dir);
+                    CSharpSyntaxGate.Enforce(resolvedPath, null, content);          // H-04
                     content = TextFileFormat.WriteNew(resolvedPath, content);       // H-30: repo line ending
                     _fileCache.Store(FileCacheKey(resolvedPath), content);
                     AppendOutputLocal($"[APPEND] Created {fileNameOnly}\n", OutputColor.Success);
@@ -1893,10 +1897,7 @@ namespace DevMind
 
                 MergeCheckResult merge = ThreeWayMergeCheck.CheckAndMerge(baseText, proposedText, currentText);
 
-                if (merge.UsedFallback)
-                {
-                    Trace.Event("merge_fallback", $"TUI AppendFileAsync: two-way fallback for \"{fileNameOnly}\" — overwrite detection only.");
-                }
+                MergeReport.TraceFallback("TUI AppendFileAsync", fileNameOnly, merge);
 
                 if (merge.HasConflicts)
                 {
@@ -1923,12 +1924,17 @@ namespace DevMind
                     return null;
                 }
 
+                CSharpSyntaxGate.Enforce(resolvedPath, currentText, merge.MergedText);   // H-04
                 format.Write(resolvedPath, merge.MergedText);
                 _fileCache.Store(FileCacheKey(resolvedPath), merge.MergedText);
                 var appended = WriteEcho.Describe(fileNameOnly, resolvedPath, _shellRunner.WorkingDirectory,
-                                                  merge.UsedFallback);
+                                                  merge.Mode);
                 AppendOutputLocal($"[APPEND] Appended to {appended.Detail}\n", appended.Color);
                 return resolvedPath;
+            }
+            catch (CSharpSyntaxGateException)
+            {
+                throw;   // H-04: the executor turns it into the tool error the model reads
             }
             catch (Exception ex)
             {
@@ -2565,10 +2571,7 @@ namespace DevMind
 
                 MergeCheckResult merge = ThreeWayMergeCheck.CheckAndMerge(baseText, proposedText, currentText);
 
-                if (merge.UsedFallback)
-                {
-                    Trace.Event("merge_fallback", $"TUI ApplyResolvedPatchAsync: two-way fallback for \"{fileNameOnly}\" — overwrite detection only.");
-                }
+                MergeReport.TraceFallback("TUI ApplyResolvedPatchAsync", fileNameOnly, merge);
 
                 if (merge.HasConflicts)
                 {
@@ -2606,7 +2609,7 @@ namespace DevMind
                     // H-34: a non-landing edit is reported as what it is ("edit N did not land …"),
                     // never as a write failure the model might simply retry.
                     return Task.FromResult<(string, string)>((null,
-                        result.NotLanded ? result.Error : $"Write failed: {result.Error}"));
+                        result.NotLanded || result.Rejected ? result.Error : $"Write failed: {result.Error}"));
                 }
 
                 if (result.BackupPath != null)
@@ -2630,7 +2633,7 @@ namespace DevMind
                 // restores from it, and there is no operator command or tool that can. Naming a
                 // depth here told the model it held N reversals it had no way to spend.
                 var patched = WriteEcho.Describe(resolved.FullPath, resolved.FullPath,
-                                                 _shellRunner.WorkingDirectory, merge.UsedFallback);
+                                                 _shellRunner.WorkingDirectory, merge.Mode);
                 AppendOutputLocal($"[PATCH] Applied to {patched.Detail}\n", patched.Color);
 
                 // Show what changed, painted rather than printed

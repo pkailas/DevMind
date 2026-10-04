@@ -1,6 +1,11 @@
-// File: ThreeWayMergeCheck.cs  v1.0
+// File: ThreeWayMergeCheck.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
+//
+// v1.1 (H-05): the result says HOW it was reached (MergeMode). base == current is the clean,
+// normal case and is no longer reported as a fallback; MergeReport is the one place that
+// turns a genuine fallback into a transcript label and a trace event.
 
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using DiffPlex;
@@ -33,21 +38,27 @@ namespace DevMind
             string normProposed = Normalize(proposedText);
             string normCurrent = Normalize(currentText);
 
-            // Fallback detection: when no base cache entry exists, base == current,
-            // meaning we cannot distinguish "others changed it" from "nothing changed".
-            // This is effectively overwrite detection only — not a true three-way merge.
-            // The caller SHOULD log a warning when UsedFallback is true.
-            bool usedFallback = string.IsNullOrEmpty(baseText) || string.Equals(normBase, normCurrent, System.StringComparison.Ordinal);
-
-            if (usedFallback)
+            // No base cache entry: nothing to merge against, so this is overwrite detection
+            // only — a genuine fallback, reported as such by the caller.
+            if (string.IsNullOrEmpty(baseText))
             {
-                // Two-way fallback: no base available so we accept the proposed text directly.
-                // This is NOT conflict-free merging — it's blind acceptance with a flag.
                 return new MergeCheckResult
                 {
                     HasConflicts = false,
                     MergedText = proposedText,
-                    UsedFallback = true
+                    Mode = MergeMode.NoBase
+                };
+            }
+
+            // Base == current: nobody else changed the file since it was read, so the proposed
+            // text IS the merge. The normal case — not a fallback, no label (H-05).
+            if (string.Equals(normBase, normCurrent, StringComparison.Ordinal))
+            {
+                return new MergeCheckResult
+                {
+                    HasConflicts = false,
+                    MergedText = proposedText,
+                    Mode = MergeMode.CleanNoDivergence
                 };
             }
 
@@ -56,6 +67,7 @@ namespace DevMind
             // "oldText" = our changes (proposed), "newText" = their changes (current on disk)
             try
             {
+                DiffEngineHookForTest?.Invoke();
                 var differ = new ThreeWayDiffer();
                 var merge = differ.CreateMerge(normBase, normProposed, normCurrent,
                     ignoreWhiteSpace: false, ignoreCase: false, chunker: null);
@@ -82,7 +94,7 @@ namespace DevMind
                     {
                         HasConflicts = true,
                         Conflicts = conflicts,
-                        UsedFallback = false
+                        Mode = MergeMode.ThreeWay
                     };
                 }
 
@@ -96,21 +108,26 @@ namespace DevMind
                 {
                     HasConflicts = false,
                     MergedText = mergedText,
-                    UsedFallback = false
+                    Mode = MergeMode.ThreeWay
                 };
             }
-            catch (System.Exception)
+            catch (Exception ex)
             {
                 // If DiffPlex throws (edge cases), fall back to accepting proposed.
-                // Safe path — better to accept than to hard-block.
+                // Safe path — better to accept than to hard-block — and reported as a fallback.
                 return new MergeCheckResult
                 {
                     HasConflicts = false,
                     MergedText = proposedText,
-                    UsedFallback = true
+                    Mode = MergeMode.DiffEngineFailed,
+                    DiffEngineError = ex.GetType().Name
                 };
             }
         }
+
+        /// <summary>Test seam: invoked just before DiffPlex runs; a test makes it throw to force
+        /// the <see cref="MergeMode.DiffEngineFailed"/> path. Null in production.</summary>
+        internal static Action DiffEngineHookForTest;
 
         private static string Normalize(string text)
         {
@@ -125,6 +142,46 @@ namespace DevMind
             string firstLine = text.Split('\n')[0].Trim();
             if (firstLine.Length <= maxChars) return firstLine;
             return firstLine.Substring(0, maxChars) + "...";
+        }
+    }
+
+    /// <summary>
+    /// What a host says about a merge result: the transcript label and the trace event. One place,
+    /// so every save / append / patch path in every host reports a fallback the same way.
+    /// </summary>
+    public static class MergeReport
+    {
+        /// <summary>The trace event name — a stable constant (it was once the message text).</summary>
+        public const string FallbackTraceEvent = "merge_fallback";
+
+        public const string NoBaseLabel = " [no base: overwrite check only]";
+        public const string DiffEngineFailedLabel = " [merge engine failed: proposed text accepted]";
+
+        /// <summary>The suffix for a write's transcript line: empty for a clean or real three-way
+        /// merge, a label only for a genuine fallback.</summary>
+        public static string TranscriptLabel(MergeCheckResult merge) => merge?.Mode switch
+        {
+            MergeMode.NoBase => NoBaseLabel,
+            MergeMode.DiffEngineFailed => DiffEngineFailedLabel,
+            _ => "",
+        };
+
+        /// <summary>Emits <see cref="FallbackTraceEvent"/> for a genuine fallback; nothing otherwise.</summary>
+        /// <param name="site">The writing method, e.g. "SaveFileAsync" or "TUI ApplyResolvedPatchAsync".</param>
+        public static void TraceFallback(string site, string fileName, MergeCheckResult merge)
+        {
+            if (merge == null || !merge.UsedFallback) return;
+            string message = merge.Mode == MergeMode.NoBase
+                ? $"{site}: two-way fallback for \"{fileName}\" — no base cache entry. Overwrite detection only, not true three-way merge."
+                : $"{site}: merge engine failed ({merge.DiffEngineError}) for \"{fileName}\" — proposed text accepted unmerged.";
+            Trace.Event("info", FallbackTraceEvent, new Dictionary<string, object>
+            {
+                ["site"] = site,
+                ["file"] = fileName,
+                ["mode"] = merge.Mode.ToString(),
+                ["exception"] = merge.DiffEngineError,
+                ["message"] = message,
+            });
         }
     }
 }

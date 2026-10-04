@@ -18,8 +18,9 @@
 //   * Behaviourally, through a real patch on the Core host: the line still
 //     names the patched file, and no longer advertises a depth.
 //   * Structurally, on both hosts' sources: the message still interpolates
-//     resolved.FullPath AND still carries the "[two-way fallback]" suffix on
-//     the same emit, and no production source anywhere claims an undo depth.
+//     resolved.FullPath AND still carries the merge-fallback signal on the same
+//     emit (since H-05 the merge mode, labelled only for a genuine fallback), and
+//     no production source anywhere claims an undo depth.
 
 using System.Text;
 using Xunit;
@@ -117,9 +118,11 @@ namespace DevMind.Core.Tests
 
             Assert.Contains(emitter + "(", emit, StringComparison.Ordinal);
             Assert.Contains("resolved.FullPath", region, StringComparison.Ordinal);
+            // H-05: the signal is now the merge MODE — a label only for a genuine fallback
+            // (MergeReport.TranscriptLabel in the Core host, merge.Mode into WriteEcho in the TUI).
             Assert.True(
-                region.Contains("[two-way fallback]", StringComparison.Ordinal) ||
-                region.Contains("UsedFallback", StringComparison.Ordinal),
+                region.Contains("MergeReport.TranscriptLabel(merge)", StringComparison.Ordinal) ||
+                region.Contains("merge.Mode", StringComparison.Ordinal),
                 $"{relativePath}'s applied-patch message no longer signals a fallback merge.");
             Assert.DoesNotContain("undo depth", region, StringComparison.OrdinalIgnoreCase);
         }

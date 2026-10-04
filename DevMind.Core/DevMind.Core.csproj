@@ -19,6 +19,7 @@
     <!-- PDFium wrapper (MIT) for /image PDF-page rasterization — see PdfRasterizer.cs.
          Ships per-RID native pdfium; bundled by the self-contained single-file publish. -->
     <PackageReference Include="Docnet.Core" Version="2.6.0" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.9.0" />
     <PackageReference Include="ModelContextProtocol" Version="2.2.0" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
     <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.2" />

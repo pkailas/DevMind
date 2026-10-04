@@ -28,7 +28,7 @@ namespace DevMind.TUI.Tests
         public void AWriteInsideTheWorkingDirectoryIsTheShortNameAndASuccess()
         {
             var (detail, color) = WriteEcho.Describe(
-                "numbers.py", @"C:\work\repo\numbers.py", Work, usedFallback: false, "(16 lines)");
+                "numbers.py", @"C:\work\repo\numbers.py", Work, MergeMode.CleanNoDivergence, "(16 lines)");
 
             Assert.Equal("numbers.py (16 lines)", detail);
             Assert.Equal(OutputColor.Success, color);
@@ -38,7 +38,7 @@ namespace DevMind.TUI.Tests
         public void AWriteOutsideItCarriesTheFullPathAndTheWarning()
         {
             var (detail, color) = WriteEcho.Describe(
-                "x.txt", @"C:\Windows\Temp\x.txt", Work, usedFallback: false, "(2 lines)");
+                "x.txt", @"C:\Windows\Temp\x.txt", Work, MergeMode.CleanNoDivergence, "(2 lines)");
 
             Assert.Equal(@"C:\Windows\Temp\x.txt (2 lines) " + WriteEcho.OutsideNote, detail);
             Assert.Equal(OutputColor.Warning, color);
@@ -50,7 +50,7 @@ namespace DevMind.TUI.Tests
             // The bare name is exactly what made a misplaced write look like a correct one.
             var (detail, _) = WriteEcho.Describe(
                 "numbers.py", @"C:\Users\x\AppData\Local\Temp\devmind\session1\numbers.py",
-                Work, usedFallback: false);
+                Work, MergeMode.CleanNoDivergence);
 
             Assert.StartsWith(@"C:\Users\x\AppData\Local\Temp\devmind\session1\numbers.py", detail);
         }
@@ -59,9 +59,9 @@ namespace DevMind.TUI.Tests
         public void TheFallbackBadgeSaysWhatItMeans_NotWhatTheCodeCallsIt()
         {
             var (detail, color) = WriteEcho.Describe(
-                "numbers.py", @"C:\work\repo\numbers.py", Work, usedFallback: true, "(16 lines)");
+                "numbers.py", @"C:\work\repo\numbers.py", Work, MergeMode.NoBase, "(16 lines)");
 
-            Assert.Equal("numbers.py (16 lines) " + WriteEcho.FuzzyNote, detail);
+            Assert.Equal("numbers.py (16 lines) " + WriteEcho.NoBaseNote, detail);
             Assert.Equal(OutputColor.Warning, color);
             Assert.DoesNotContain("two-way", detail, StringComparison.Ordinal);
         }
@@ -70,10 +70,34 @@ namespace DevMind.TUI.Tests
         public void BothProblemsAtOnceAreBothStated()
         {
             var (detail, color) = WriteEcho.Describe(
-                "x.txt", @"C:\elsewhere\x.txt", Work, usedFallback: true);
+                "x.txt", @"C:\elsewhere\x.txt", Work, MergeMode.NoBase);
 
             Assert.Contains(WriteEcho.OutsideNote, detail, StringComparison.Ordinal);
-            Assert.Contains(WriteEcho.FuzzyNote, detail, StringComparison.Ordinal);
+            Assert.Contains(WriteEcho.NoBaseNote, detail, StringComparison.Ordinal);
+            Assert.Equal(OutputColor.Warning, color);
+        }
+
+        // H-05: base == current is the normal clean write, and a real three-way merge is a merge
+        // — neither is a fallback, so neither carries a note.
+        [Theory]
+        [InlineData(MergeMode.CleanNoDivergence)]
+        [InlineData(MergeMode.ThreeWay)]
+        public void ACleanOrRealMerge_CarriesNoNote(MergeMode mode)
+        {
+            var (detail, color) = WriteEcho.Describe(
+                "numbers.py", @"C:\work\repo\numbers.py", Work, mode, "(16 lines)");
+
+            Assert.Equal("numbers.py (16 lines)", detail);
+            Assert.Equal(OutputColor.Success, color);
+        }
+
+        [Fact]
+        public void AMergeEngineFailure_SaysSo()
+        {
+            var (detail, color) = WriteEcho.Describe(
+                "numbers.py", @"C:\work\repo\numbers.py", Work, MergeMode.DiffEngineFailed);
+
+            Assert.Equal("numbers.py " + WriteEcho.DiffEngineFailedNote, detail);
             Assert.Equal(OutputColor.Warning, color);
         }
 

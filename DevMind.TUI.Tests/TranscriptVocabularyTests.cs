@@ -92,8 +92,8 @@ namespace DevMind.TUI.Tests
             // and the translation turns the colour into the glyph. What the operator must
             // never see is "[two-way fallback]", which is what the code calls the condition
             // rather than what it means for them.
-            Assert.Equal("⚠ Write numbers.py (16 lines) (fuzzy merge — verify)",
-                Render("[FILE] Saved numbers.py (16 lines) (fuzzy merge — verify)", OutputColor.Warning));
+            Assert.Equal("⚠ Write numbers.py (16 lines) (no base: overwrite check only)",
+                Render("[FILE] Saved numbers.py (16 lines) (no base: overwrite check only)", OutputColor.Warning));
 
             Assert.Equal(@"⚠ Write C:\Windows\Temp\x.txt (2 lines) (outside working directory)",
                 Render(@"[FILE] Saved C:\Windows\Temp\x.txt (2 lines) (outside working directory)",

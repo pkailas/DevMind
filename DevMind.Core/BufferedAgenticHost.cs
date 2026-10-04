@@ -564,6 +564,7 @@ namespace DevMind
                 // New file — no merge gate needed
                 if (!File.Exists(fullPath))
                 {
+                    CSharpSyntaxGate.Enforce(fullPath, null, fileContent);          // H-04
                     fileContent = TextFileFormat.WriteNew(fullPath, fileContent);   // H-30: repo line ending
                     _fileCache.Store(FileCacheKey(fullPath), fileContent);
                     int newFileLines = fileContent.Split('\n').Length;
@@ -578,12 +579,7 @@ namespace DevMind
 
                 MergeCheckResult merge = ThreeWayMergeCheck.CheckAndMerge(baseText, fileContent, currentText);
 
-                if (merge.UsedFallback)
-                {
-                    // Two-way fallback: no cache entry existed — this is overwrite detection only,
-                    // NOT a true three-way merge. Log a warning to debug output.
-                    Trace.Event("merge_fallback", $"SaveFileAsync: two-way fallback for \"{fileNameOnly}\" — no base cache entry. Overwrite detection only, not true three-way merge.");
-                }
+                MergeReport.TraceFallback("SaveFileAsync", fileNameOnly, merge);
 
 
                 if (merge.HasConflicts)
@@ -617,12 +613,17 @@ namespace DevMind
 
                 // No conflicts — write the merged text
                 // Existing file: keep its BOM/encoding and dominant line ending.
+                CSharpSyntaxGate.Enforce(fullPath, currentText, merge.MergedText);   // H-04
                 string finalContent = TextFileFormat.WritePreserving(fullPath, merge.MergedText);
                 _fileCache.Store(FileCacheKey(fullPath), finalContent);
                 int lineCount = finalContent.Split('\n').Length;
-                AppendOutput($"[FILE] Saved {fileNameOnly} ({lineCount} lines){(merge.UsedFallback ? " [two-way fallback]" : "")}\n", OutputColor.Success);
+                AppendOutput($"[FILE] Saved {fileNameOnly} ({lineCount} lines){MergeReport.TranscriptLabel(merge)}\n", OutputColor.Success);
                 RecordAction("save", $"{fullPath} ({lineCount} lines)");
                 return fullPath;
+            }
+            catch (CSharpSyntaxGateException)
+            {
+                throw;   // H-04: the executor turns it into the tool error the model reads
             }
             catch (Exception ex)
             {
@@ -687,6 +688,7 @@ namespace DevMind
                     string dir = Path.GetDirectoryName(resolvedPath);
                     if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                         Directory.CreateDirectory(dir);
+                    CSharpSyntaxGate.Enforce(resolvedPath, null, content);          // H-04
                     content = TextFileFormat.WriteNew(resolvedPath, content);       // H-30: repo line ending
                     _fileCache.Store(FileCacheKey(resolvedPath), content);
                     AppendOutput($"[APPEND] Created {fileNameOnly}\n", OutputColor.Success);
@@ -708,10 +710,7 @@ namespace DevMind
 
                 MergeCheckResult merge = ThreeWayMergeCheck.CheckAndMerge(baseText, proposedText, currentText);
 
-                if (merge.UsedFallback)
-                {
-                    Trace.Event("merge_fallback", $"AppendFileAsync: two-way fallback for \"{fileNameOnly}\" — no base cache entry. Overwrite detection only.");
-                }
+                MergeReport.TraceFallback("AppendFileAsync", fileNameOnly, merge);
 
 
                 if (merge.HasConflicts)
@@ -741,11 +740,16 @@ namespace DevMind
                 }
 
                 // No conflicts — write the merged text
+                CSharpSyntaxGate.Enforce(resolvedPath, currentText, merge.MergedText);   // H-04
                 format.Write(resolvedPath, merge.MergedText);
                 _fileCache.Store(FileCacheKey(resolvedPath), merge.MergedText);
-                AppendOutput($"[APPEND] Appended to {fileNameOnly}{(merge.UsedFallback ? " [two-way fallback]" : "")}\n", OutputColor.Success);
+                AppendOutput($"[APPEND] Appended to {fileNameOnly}{MergeReport.TranscriptLabel(merge)}\n", OutputColor.Success);
                 RecordAction("append", resolvedPath);
                 return resolvedPath;
+            }
+            catch (CSharpSyntaxGateException)
+            {
+                throw;   // H-04: the executor turns it into the tool error the model reads
             }
             catch (Exception ex)
             {
@@ -1566,10 +1570,7 @@ namespace DevMind
 
                 MergeCheckResult merge = ThreeWayMergeCheck.CheckAndMerge(baseText, proposedText, currentText);
 
-                if (merge.UsedFallback)
-                {
-                    Trace.Event("merge_fallback", $"ApplyResolvedPatchAsync: two-way fallback for \"{fileNameOnly}\" — no base cache entry. Overwrite detection only.");
-                }
+                MergeReport.TraceFallback("ApplyResolvedPatchAsync", fileNameOnly, merge);
 
 
                 if (merge.HasConflicts)
@@ -1609,7 +1610,7 @@ namespace DevMind
                     // H-34: a non-landing edit is reported as what it is ("edit N did not land …"),
                     // never as a write failure the model might simply retry.
                     return Task.FromResult<(string, string)>((null,
-                        result.NotLanded ? result.Error : $"Write failed: {result.Error}"));
+                        result.NotLanded || result.Rejected ? result.Error : $"Write failed: {result.Error}"));
                 }
 
                 if (result.BackupPath != null)
@@ -1632,7 +1633,7 @@ namespace DevMind
                 // safety net that is only ever pushed to, evicted from, and drained — nothing
                 // restores from it, and there is no operator command or tool that can. Naming a
                 // depth here told the model it held N reversals it had no way to spend.
-                AppendOutput($"[PATCH] Applied to {resolved.FullPath}{(merge.UsedFallback ? " [two-way fallback]" : "")}\n",
+                AppendOutput($"[PATCH] Applied to {resolved.FullPath}{MergeReport.TranscriptLabel(merge)}\n",
                     OutputColor.Success);
                 RecordAction("patch", resolved.FullPath);
 

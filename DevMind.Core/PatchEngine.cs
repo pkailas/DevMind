@@ -1,5 +1,10 @@
-// File: PatchEngine.cs  v1.1
+// File: PatchEngine.cs  v1.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
+//
+// v1.2: H-04 — ApplyPatch refuses a .cs patch that adds a syntax error (CSharpSyntaxGate), before
+// anything is written. H-67 — a fuzzy apply that would duplicate a line is refused with the
+// candidate shown (FuzzyDuplication), and a structured file's no-fuzzy refusal names the closest
+// candidate and its similarity.
 
 using System;
 using System.Collections.Generic;
@@ -427,6 +432,78 @@ namespace DevMind
             return (bestStart, bestEnd, bestSim, secondStart, secondSim, null);
         }
 
+        /// <summary>
+        /// H-67: why applying <paramref name="replace"/> over the fuzzy span
+        /// [<paramref name="spanStart"/>, <paramref name="spanEnd"/>) of <paramref name="original"/>
+        /// would duplicate a line, or null when it would not. Lines are compared with ALL whitespace
+        /// removed, so a whitespace-drift fuzzy apply is never refused here, and only lines with a
+        /// letter or digit count ("}" or "]" legitimately repeat).
+        /// <list type="bullet">
+        /// <item>A line ends up more often than the edit means: the edit means
+        /// (in the file − in FIND + in REPLACE); the fuzzy span removes what IT holds instead. When
+        /// the span is the wrong neighbour, a FIND line the edit meant to replace survives and its
+        /// REPLACE copy is added — and a FIND line that does not match the file exactly, echoed in
+        /// REPLACE, is written in the model's (wrong) version.</item>
+        /// <item>A line ends up twice in a row where the file has no such pair (job-2146's newest
+        /// "// vX.Y.Z" header added a second time above itself).</item>
+        /// </list>
+        /// </summary>
+        public static string FuzzyDuplication(string original, int spanStart, int spanEnd, string find, string replace)
+        {
+            string result = original.Substring(0, spanStart) + replace + original.Substring(spanEnd);
+            string span = original.Substring(spanStart, spanEnd - spanStart);
+
+            List<string> origLines = LineKeys(original), resultLines = LineKeys(result);
+            List<string> findLines = LineKeys(find), replaceLines = LineKeys(replace);
+
+            // Checked first: it names the damage exactly as it would look (job-2146).
+            var adjacentBefore = new HashSet<string>(StringComparer.Ordinal);
+            for (int k = 0; k + 1 < origLines.Count; k++)
+                if (origLines[k] == origLines[k + 1]) adjacentBefore.Add(origLines[k]);
+            for (int k = 0; k + 1 < resultLines.Count; k++)
+                if (resultLines[k] == resultLines[k + 1] && MeaningfulLine(resultLines[k]) && !adjacentBefore.Contains(resultLines[k]))
+                    return $"the line \"{ShowLine(result, resultLines[k])}\" would appear twice in a row, which the file does not have now";
+
+            var keys = new HashSet<string>(findLines.Concat(replaceLines).Concat(LineKeys(span)).Where(MeaningfulLine),
+                StringComparer.Ordinal);
+            foreach (string key in keys)
+            {
+                int inOriginal = origLines.Count(k => k == key);
+                int inFind = findLines.Count(k => k == key);
+                int meant = inOriginal - inFind + replaceLines.Count(k => k == key);
+                int actual = resultLines.Count(k => k == key);
+                if (actual <= Math.Max(meant, inOriginal)) continue;
+
+                // A FIND line that is not in the file as written, echoed in the REPLACE: the edit
+                // would write the FIND's version of a line the file has differently.
+                if (inFind > inOriginal)
+                    return $"the FIND line \"{ShowLine(find, key)}\" is not in the file as written, and the REPLACE " +
+                           "would write that version of it";
+                return $"the line \"{ShowLine(result, key)}\" would appear {actual} time(s); the file has it {inOriginal} " +
+                       $"time(s) and this edit means {Math.Max(meant, 0)}";
+            }
+
+            return null;
+        }
+
+        private static List<string> LineKeys(string text)
+            => (text ?? "").Replace("\r\n", "\n").Split('\n').Select(l => Regex.Replace(l, @"\s+", "")).ToList();
+
+        private static bool MeaningfulLine(string key)
+            => key.Length >= 4 && key.Any(char.IsLetterOrDigit);
+
+        // The original form (trimmed) of the first line of text whose key is `key`.
+        private static string ShowLine(string text, string key)
+        {
+            foreach (string line in text.Replace("\r\n", "\n").Split('\n'))
+                if (Regex.Replace(line, @"\s+", "") == key)
+                {
+                    string t = line.Trim();
+                    return t.Length <= 100 ? t : t.Substring(0, 99) + "…";
+                }
+            return key;
+        }
+
         // ── Core operations ───────────────────────────────────────────────────
 
         /// <summary>
@@ -518,10 +595,22 @@ namespace DevMind
                     // a hard failure telling the agent to copy the FIND verbatim.
                     if (IsStructuredFormat(fileName))
                     {
+                        // H-67: name the nearest candidate and how close it is — for diagnosis
+                        // only; nothing is applied.
+                        string candidate = "";
+                        var near = FindFuzzyMatch(fileContent, findText, normFind);
+                        if (near != null && near.Value.origStart >= 0)
+                        {
+                            int nearLine = fileContent.Substring(0, near.Value.origStart).Count(c => c == '\n') + 1;
+                            candidate =
+                                $"  Closest candidate: line {nearLine} ({near.Value.similarity:P0} similarity) (spaces shown as '·', tabs as '→'):\n" +
+                                GetLineContext(fileContent, nearLine, 0, Math.Max(0, findText.Split('\n').Length - 1));
+                        }
                         reporter(
                             $"[PATCH] Block {i + 1}: FIND text not found exactly in {fileName}.\n" +
                             "  Fuzzy matching is disabled for this file type (.slnx/.sln/.csproj/.props/.targets/.xaml/.axaml/.json/.yml/.yaml/.xml/.resx/.config).\n" +
-                            "  → re-read the file and copy the FIND text verbatim.\n",
+                            candidate +
+                            "  → re-read the file and copy the FIND text verbatim (an exact FIND). Nothing was written.\n",
                             OutputColor.Error);
                         return null;
                     }
@@ -626,8 +715,29 @@ namespace DevMind
                                 : fuzzyFinalReplace.Substring(0, fuzzyFinalReplace.Length - 1);
                     }
 
-                    resolvedBlocks.Add((fuzzy.Value.origStart, fuzzy.Value.origEnd, fuzzyFinalReplace));
                     int fuzzyLine = fileContent.Substring(0, fuzzy.Value.origStart).Count(c => c == '\n') + 1;
+
+                    // H-67: a fuzzy window on near-identical neighbouring lines (stacked attributes,
+                    // stacked version-history comments) can land one line off, and the edit then
+                    // duplicates a line instead of replacing it (job-2146). Refuse that before
+                    // anything is written, and show the candidate.
+                    string duplication = FuzzyDuplication(fileContent, fuzzy.Value.origStart, fuzzy.Value.origEnd,
+                        findText, fuzzyFinalReplace);
+                    if (duplication != null)
+                    {
+                        int spanLines = fileContent.Substring(fuzzy.Value.origStart,
+                            fuzzy.Value.origEnd - fuzzy.Value.origStart).TrimEnd('\n').Count(c => c == '\n');
+                        reporter(
+                            $"[PATCH] Block {i + 1}: fuzzy match at line {fuzzyLine} ({fuzzy.Value.similarity:P0} similarity) refused — {duplication}.\n" +
+                            $"  Fuzzy candidate (spaces shown as '·', tabs as '→'):\n" +
+                            GetLineContext(fileContent, fuzzyLine, 1, spanLines + 1) +
+                            "  The FIND does not match the file exactly, and applying it to this near-match would duplicate a line.\n" +
+                            "  READ the file and copy the FIND text verbatim (an exact FIND). Nothing was written.\n",
+                            OutputColor.Error);
+                        return null;
+                    }
+
+                    resolvedBlocks.Add((fuzzy.Value.origStart, fuzzy.Value.origEnd, fuzzyFinalReplace));
                     reporter(
                         $"[PATCH] Block {i + 1}: Fuzzy match at line {fuzzyLine} ({fuzzy.Value.similarity:P0} similarity).\n",
                         OutputColor.Dim);
@@ -765,6 +875,11 @@ namespace DevMind
                 var updated = resolved.OriginalContent;
                 foreach (var (origStart, origEnd, finalReplace) in resolved.ResolvedBlocks)
                     updated = updated.Substring(0, origStart) + finalReplace + updated.Substring(origEnd);
+
+                // H-04: a .cs patch that adds a syntax error is refused before anything is written.
+                string syntaxRefusal = CSharpSyntaxGate.Check(resolved.FullPath, resolved.OriginalContent, updated);
+                if (syntaxRefusal != null)
+                    return new PatchApplyResult { Success = false, Rejected = true, Error = syntaxRefusal };
 
                 // Create backup before writing — non-fatal if it fails
                 string backupPath = null;

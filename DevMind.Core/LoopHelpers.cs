@@ -443,6 +443,10 @@ namespace DevMind
                   "(the working directory or the devmind output directory), or a write guard / " +
                   "pending merge conflict blocked it. Check the [SANDBOX] / [WRITE GUARD] / " +
                   "[MERGE CONFLICT] output.";
+            // H-04: a syntax refusal leaves the file exactly as it was — for an existing file the
+            // generic "does NOT exist" consequence would be false.
+            if (detail.Contains(CSharpSyntaxGate.Marker, StringComparison.Ordinal))
+                consequence = "The file on disk was NOT changed.";
             return $"[{tool.ToUpperInvariant()} FAILED: {whatHappened} for \"{target}\". {detail} {consequence}]";
         }
 

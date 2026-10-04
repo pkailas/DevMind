@@ -31,5 +31,12 @@ namespace DevMind
         /// is (not prefixed with "Write failed").
         /// </summary>
         public bool NotLanded { get; set; }
+
+        /// <summary>
+        /// H-04: true when nothing was written because the patched text would add a C# syntax
+        /// error (<see cref="CSharpSyntaxGate"/>). <see cref="Error"/> is the gate's message, meant
+        /// for the model as is.
+        /// </summary>
+        public bool Rejected { get; set; }
     }
 }
