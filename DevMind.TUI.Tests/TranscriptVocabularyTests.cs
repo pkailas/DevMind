@@ -69,6 +69,11 @@ namespace DevMind.TUI.Tests
         [Theory]
         [InlineData("[AGENTIC] Task complete.", OutputColor.Success, "● Task complete.")]
         [InlineData("[AGENTIC] Depth cap reached (5). Stopping.", OutputColor.Dim, "● Depth cap reached (5). Stopping.")]
+        // Depth-cap auto-extension (headless): both outcomes are loop events.
+        [InlineData("[AGENTIC] Depth cap reached (40) — still converging (2 failure(s) resolved, 9 mutation(s) in the last 30 iteration(s), latest build/test failing); extending to 60 (extension 1/2).",
+                    OutputColor.Dim, "● Depth cap reached (40) — still converging (2 failure(s) resolved, 9 mutation(s) in the last 30 iteration(s), latest build/test failing); extending to 60 (extension 1/2).")]
+        [InlineData("[AGENTIC] Depth cap reached (60) — not extending: extensions used up (2/2).",
+                    OutputColor.Dim, "● Depth cap reached (60) — not extending: extensions used up (2/2).")]
         [InlineData("[AGENTIC] Cancelled.", OutputColor.Dim, "● Cancelled.")]
         [InlineData("[CONTEXT] CRITICAL: Cannot fit in context window", OutputColor.Error, "● Context CRITICAL: Cannot fit in context window")]
         [InlineData("[DROPPED] 2 tool results", OutputColor.Dim, "● Context 2 tool results")]

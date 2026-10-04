@@ -134,6 +134,8 @@ namespace DevMind.McpServer
             [Description("Restrict the agent to no execution (default false): it may still build (dotnet build / run_build) for compile verification, but running executables, `dotnet run`/`dotnet exec`, the test suite (run_tests / dotnet test), and debug launch/attach are blocked at the harness. This is NOT a sandbox — it blocks a named set of execution invocations, not every conceivable way to start a process; use it to stop an agent from launching (or re-launching) something that hangs or spawns runaway children, not as a security boundary. Continuations inherit this setting.")] bool? no_execute = null,
             [Description("External MCP servers to give this agent, by their names under \"mcpServers\" in %APPDATA%\\devmind\\devmind.json (e.g. [\"comfy\"]). Omit for none — the default, with no change in behaviour. An unknown name rejects the start with the list of configured names. Each server is started before the agent's first request (60 s limit per server); one that fails to start does not fail the job — the agent runs without it, and devmind_task_result's \"mcp\" section reports requested / started / failed (with reason) / calls. The server's tools appear as mcp__<server>__<tool>, subject to its \"tools\" allowlist; its \"autoStart\" setting is ignored here. Servers stop when the job ends. Continuations inherit this list and start the servers again.")] string[]? mcp_servers = null,
             [Description("Let the harness turn thinking on by itself when the same test(s) fail three runs in a row (default true). It runs at effort \"medium\" and goes off again when the tests pass or after 15 iterations; each switch is journaled as kind \"harness_note\", and devmind_task_result reports auto_think_escalations and auto_think_iterations. Has no effect when `think` is on. false = never. Continuations inherit this setting.")] bool? auto_think = null,
+            [Description("When the job reaches max_depth while still converging (a failure resolved, or a green build/test after a change, at least 3 changes in the last 30 iterations, no repeating failure, context below the guard limit), raise its cap in place instead of stopping: same conversation, no context reset, no finish-up directive at the old cap (default true). Each extension adds max_depth/2 (at least 10) and may take the cap past 200. devmind_task_status shows effective_max_depth and depth_extensions_used; devmind_task_result lists depth_extensions. A caller override steer turns it off for the rest of the job turn. false = a fixed cap. Continuations inherit this setting.")] bool? auto_extend = null,
+            [Description("Most auto-extensions per job turn (default 2, range 0-10). Continuations inherit this setting.")] int? max_extensions = null,
             CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(prompt))
@@ -191,7 +193,9 @@ namespace DevMind.McpServer
                 showThinking: show_thinking,
                 mcpServers: mcpServers,
                 reasoningEffort: effort,
-                autoThink: auto_think ?? true);
+                autoThink: auto_think ?? true,
+                autoExtend: auto_extend ?? true,
+                maxExtensions: Math.Clamp(max_extensions ?? 2, 0, 10));
 
             const string startHint =
                 "Poll devmind_task_status with this job_id; fetch devmind_task_result when done.";
@@ -306,7 +310,8 @@ namespace DevMind.McpServer
             "the harness's own test run (verify_tests) passed — read it. " +
             "needs_input means " +
             "the agent paused with specific questions (in the result answer) — answer them via " +
-            "devmind_task_continue. Optional wait_seconds: when > 0, blocks until the job's state " +
+            "devmind_task_continue. effective_max_depth is the cap in force (max_depth plus any " +
+            "auto_extend extensions; depth_extensions_used counts them). Optional wait_seconds: when > 0, blocks until the job's state " +
             "CHANGES (e.g. running -> done/needs_input/failed) or that many seconds elapse, then " +
             "returns the same payload — a waiter gets the fresh state in one call instead of " +
             "re-polling. Omitted or 0 returns immediately (the default, unchanged); values above " +
@@ -353,6 +358,9 @@ namespace DevMind.McpServer
                 state = DisplayState(job),
                 incomplete_reasons = job.IsIncomplete ? job.IncompleteReasons() : null,
                 self_report_note = job.SelfReportNote,
+                max_depth = job.MaxDepth,
+                effective_max_depth = job.EffectiveMaxDepth,
+                depth_extensions_used = job.DepthExtensionsUsed,
                 queue_position = job.State == AgentJobState.Queued ? _jobs.QueuePosition(job) : (int?)null,
                 elapsed_seconds = elapsed,
                 working_dir = job.WorkingDirectory,
@@ -463,6 +471,9 @@ namespace DevMind.McpServer
                 tokens_in_new_partial = (bool?)(r?.TokensInNewPartial ?? false),
                 tokens_out = r?.TokensOut,
                 hit_depth_cap = r?.HitDepthCap ?? false,
+                max_depth = job.MaxDepth,
+                effective_max_depth = job.EffectiveMaxDepth,
+                depth_extensions = job.DepthExtensionsPayload(),
                 // Effective reasoning effort; null when thinking was off.
                 reasoning_effort = job.ReasoningEffort,
                 // H-58: harness-enabled thinking for repeated test failures (journal: harness_note).

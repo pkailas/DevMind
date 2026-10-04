@@ -1,4 +1,4 @@
-// File: HeadlessAgent.cs  v2.7
+// File: HeadlessAgent.cs  v2.8
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Headless agentic runner — the engine behind DevMind.McpServer's devmind_task_*
@@ -81,6 +81,17 @@ namespace DevMind
         public ApprovalMode ApprovalMode => ApprovalMode.Auto;
         public int    AgenticLoopMaxDepth      { get; set; } = 25;
         public int    AgenticContextLimitPercent { get; set; } = 78;
+
+        /// <summary>
+        /// Raise the depth cap in place when a turn reaches it still converging
+        /// (DepthAutoExtender). Default false: only the delegating job runner turns it on
+        /// (devmind_task_start auto_extend, default true there), so every other headless
+        /// path keeps a fixed cap.
+        /// </summary>
+        public bool   AutoExtendDepth          { get; set; } = false;
+
+        /// <summary>Most auto-extensions per turn (devmind_task_start max_extensions).</summary>
+        public int    MaxDepthExtensions       { get; set; } = 2;
     }
 
     /// <summary>Outcome of one headless agentic turn (task or continuation).</summary>
@@ -93,6 +104,11 @@ namespace DevMind
         public int Iterations { get; set; }
         public double ElapsedSeconds { get; set; }
         public bool HitDepthCap { get; set; }
+        /// <summary>The cap in force when the turn ended — the requested cap plus any
+        /// auto-extensions.</summary>
+        public int EffectiveMaxDepth { get; set; }
+        /// <summary>Auto-extensions granted this turn (empty when none, or auto-extend off).</summary>
+        public IReadOnlyList<DepthExtension> DepthExtensions { get; set; } = Array.Empty<DepthExtension>();
         public bool Cancelled { get; set; }
         /// <summary>True when the agent called ask_caller: the task is paused on
         /// questions only the caller can answer. Answer contains the questions and
@@ -355,6 +371,16 @@ namespace DevMind
             _testFailures = new RepeatedTestFailureGuard();
             _autoThink = new AutoThinkEscalation(_jobThinks, _options.AutoThink);
 
+            // Depth-cap auto-extension: per turn, sized from the cap this turn started with.
+            // The cap it raises is restored when the turn ends, so a reused session's next turn
+            // starts from its own requested cap.
+            int turnStartMaxDepth = _options.AgenticLoopMaxDepth;
+            int effectiveMaxDepth = turnStartMaxDepth;
+            _depthExtender = _options.AutoExtendDepth && turnStartMaxDepth > 0
+                ? new DepthAutoExtender(turnStartMaxDepth, _options.MaxDepthExtensions, SetMaxDepth)
+                : null;
+            _driver.DepthExtender = _depthExtender;
+
             // Turn clock: ONE increment per user turn, at the turn boundary — NOT inside the
             // agentic loop below. The loop re-triggers many iterations for a single turn and
             // they SHARE this turn (the contract at LlmClient.IncrementTurn: "once per
@@ -590,6 +616,9 @@ namespace DevMind
                 _driver.Liveness = null;
                 _llmClient.StreamDataReceived = null;
                 LastActivityUtc = DateTime.UtcNow;
+                effectiveMaxDepth = _options.AgenticLoopMaxDepth;
+                _options.AgenticLoopMaxDepth = turnStartMaxDepth;
+                _driver.DepthExtender = null;
 
                 // Close the steer window: atomically take the final pending steer AND clear
                 // the in-progress flag (one lock acquisition — see TakePendingSteerAndEndTurn).
@@ -624,6 +653,8 @@ namespace DevMind
             // lesson: a run that finished with a clean task_done ON the cap boundary
             // was mislabeled stopped_incomplete by the old iterations>=max check.
             result.HitDepthCap = lastTerminalReason == "depth_cap";
+            result.EffectiveMaxDepth = effectiveMaxDepth;
+            result.DepthExtensions = _depthExtender?.Extensions ?? Array.Empty<DepthExtension>();
 
             // A depth-cap exit truncates the model mid-thought; its last message can
             // claim failure that already resolved (or success that didn't). Field
@@ -632,7 +663,7 @@ namespace DevMind
             if (result.HitDepthCap)
             {
                 result.Answer =
-                    $"[INCOMPLETE — iteration cap ({_options.AgenticLoopMaxDepth}) reached; the text below is the " +
+                    $"[INCOMPLETE — iteration cap ({effectiveMaxDepth}) reached; the text below is the " +
                     "agent's LAST message, not a completion summary. It may be stale or cut off. Judge the actual " +
                     "state from the action journal and build_verification, or send devmind_task_continue to resume " +
                     "this conversation where it left off.]\n\n"
@@ -832,6 +863,15 @@ namespace DevMind
             _host.RecordSteer(pending.Message, pending.Mode, disp,
                 disp == SteerDisposition.Rejected ? "last_iteration" : null);
 
+            // A caller override wins over the harness's judgement that the job is converging:
+            // no auto-extension after it, for the rest of the turn.
+            if (disp == SteerDisposition.Consumed && pending.Mode == SteerMode.Override && _depthExtender != null
+                && _depthExtender.DisarmedReason == null)
+            {
+                _depthExtender.Disarm("a caller override steer redirected the job");
+                EmitToTurn("[STEER] override received — depth-cap auto-extension is off for the rest of this turn.\n");
+            }
+
             string modeTag = pending.Mode == SteerMode.Override ? "override" : "suggest";
             EmitToTurn(disp == SteerDisposition.Rejected
                 ? $"[STEER] {modeTag} REJECTED — last iteration, no iterations left to change course. {pending.Message}\n"
@@ -859,8 +899,26 @@ namespace DevMind
         /// </summary>
         internal int EvictedMessageCountForTest => _llmClient.EvictedMessageCountForTest;
 
-        /// <summary>Adjusts the per-turn iteration cap for a continuation.</summary>
+        /// <summary>Adjusts the per-turn iteration cap for a continuation. Also the path a
+        /// depth-cap auto-extension raises the cap through, mid-turn.</summary>
         public void SetMaxDepth(int maxDepth) => _options.AgenticLoopMaxDepth = maxDepth;
+
+        /// <summary>Re-syncs the depth-cap auto-extension settings on a REUSED (continuation)
+        /// session. Read at the start of each turn.</summary>
+        public void SetAutoExtendDepth(bool autoExtend, int maxExtensions)
+        {
+            _options.AutoExtendDepth = autoExtend;
+            _options.MaxDepthExtensions = maxExtensions;
+        }
+
+        /// <summary>The cap in force right now — the requested cap plus any auto-extension
+        /// granted in the running turn. Safe to read from another thread (status polling).</summary>
+        public int EffectiveMaxDepth => _options.AgenticLoopMaxDepth;
+
+        /// <summary>Auto-extensions granted in the running (or last) turn.</summary>
+        public int DepthExtensionsUsed => _depthExtender?.Count ?? 0;
+
+        private DepthAutoExtender _depthExtender;
 
         /// <summary>Re-syncs the no-execution guard on a REUSED (continuation) session. The
         /// job's flag wins: a continuation that opted in must block, and an inherited one

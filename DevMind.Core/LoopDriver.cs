@@ -1,4 +1,4 @@
-// File: LoopDriver.cs  v1.1
+// File: LoopDriver.cs  v1.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using System;
@@ -36,6 +36,13 @@ namespace DevMind
         /// <see cref="LlmClient.McpClients"/>, so an advertised tool can also run.
         /// </summary>
         public IMcpToolInvoker McpTools { get; set; }
+
+        /// <summary>
+        /// Depth-cap auto-extension for a headless job that reaches the cap still converging,
+        /// set per turn by HeadlessSession. Null (the default, and always for the TUI) means
+        /// the cap is fixed: finish-up directive, then depth_cap, exactly as before.
+        /// </summary>
+        public DepthAutoExtender DepthExtender { get; set; }
 
        // Same heuristic as the extension constant — gives slack for legitimate
         // progressive debugging cycles without masking genuine stuck loops.
@@ -261,9 +268,10 @@ namespace DevMind
                 }
 
                 // Update thrash-guard signature: does THIS failure look like the LAST one?
+                string sig = null;
                 if (turnHadError)
                 {
-                    string sig = NormalizeFailureSignature(
+                    sig = NormalizeFailureSignature(
                         result.Errors.Count > 0 ? result.Errors[0] : result.ShellOutput);
                     if (sig != null)
                     {
@@ -287,6 +295,12 @@ namespace DevMind
                     _state.RepeatedFailureCount = 0;
                     _state.ResearchNudgeIssued  = false;
                 }
+
+                // Convergence evidence for the depth-cap auto-extension (headless only).
+                DepthExtender?.Tracker.Observe(
+                    result.PatchesApplied + result.FilesCreated.Count + result.FilesAppended.Count
+                        + result.FilesDeleted.Count + result.FilesRenamed.Count,
+                    sig, result.ShellExitCode, result.LastShellCommand);
 
                 // ask_caller — the model is blocked and needs the caller's answer.
                 if (outcome.IsNeedsInput)
@@ -413,6 +427,13 @@ namespace DevMind
 
                 // Re-trigger: feed results back, let model decide next step
                 _state.AgenticDepth++;
+
+                // Depth-cap auto-extension (headless only): decided at the boundary that would
+                // send the finish-up directive below, so an extended job is never told to stop.
+                // On extension the cap moves and the == maxDepth branch below no longer matches.
+                if (DepthExtender != null && maxDepth > 0 && _state.AgenticDepth == maxDepth)
+                    maxDepth = DecideDepthExtension(maxDepth);
+
                 {
                     int agCtx  = _llmClient.ServerContextSize > 0 ? _llmClient.ServerContextSize : _llmClient.MaxPromptTokens;
                     int agUsed = _llmClient.LastContextUsed > 0 ? _llmClient.LastContextUsed : _llmClient.EstimateHistoryTokens();
@@ -569,6 +590,32 @@ namespace DevMind
                 }
                 return MakeTerminal(userMessage, assistantResponse, outcome, null, null);
             }
+        }
+
+        // Asks the extender whether to raise the cap; returns the cap now in force and writes
+        // the transcript line that says which way it went.
+        private int DecideDepthExtension(int maxDepth)
+        {
+            int ctxLimitPct = _options.AgenticContextLimitPercent;
+            int? usedPct = _llmClient.ServerContextSize > 0 && _llmClient.LastContextUsed > 0
+                ? (int)(_llmClient.LastContextUsed * 100L / _llmClient.ServerContextSize)
+                : null;
+
+            DepthExtensionDecision decision = DepthExtender.Decide(
+                _state.AgenticDepth, maxDepth, _state, usedPct, ctxLimitPct);
+            if (decision.Extended)
+            {
+                _agenticHost.AppendOutput(
+                    $"[AGENTIC] Depth cap reached ({maxDepth}) — still converging ({decision.Detail}); " +
+                    $"extending to {decision.NewCap} (extension {DepthExtender.Count}/{DepthExtender.MaxExtensions}).\n",
+                    OutputColor.Dim);
+                return decision.NewCap;
+            }
+
+            _agenticHost.AppendOutput(
+                $"[AGENTIC] Depth cap reached ({maxDepth}) — not extending: {decision.Detail}.\n",
+                OutputColor.Dim);
+            return maxDepth;
         }
 
         private LoopIterationResult MakeTerminal(

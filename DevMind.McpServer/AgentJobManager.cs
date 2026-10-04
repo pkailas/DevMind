@@ -59,6 +59,11 @@ namespace DevMind.McpServer
         /// (default true). Only matters when <see cref="Think"/> is off. A continuation inherits
         /// the parent's value.</summary>
         public bool AutoThink { get; init; } = true;
+        /// <summary>Depth-cap auto-extension: raise the cap in place when the job reaches it
+        /// still converging (default true). A continuation inherits the parent's value.</summary>
+        public bool AutoExtend { get; init; } = true;
+        /// <summary>Most auto-extensions per turn (default 2). Inherited like <see cref="AutoExtend"/>.</summary>
+        public int MaxExtensions { get; init; } = 2;
         /// <summary>Caller-imposed no-execution restriction for this task (default false):
         /// the agent may build but not run executables, tests, or a debugger. Continuations
         /// inherit this from their parent — a constraint set on turn 1 must not evaporate
@@ -190,6 +195,25 @@ namespace DevMind.McpServer
             && !SelfReportMakesIncomplete
                 ? SelfReportedIncomplete.Line
                 : null;
+
+        /// <summary>The cap in force: the finished turn's (requested cap plus extensions), the
+        /// live session's while it runs, otherwise the requested cap.</summary>
+        public int EffectiveMaxDepth =>
+            Result != null ? Result.EffectiveMaxDepth
+            : State == AgentJobState.Running && Session != null ? Session.EffectiveMaxDepth
+            : MaxDepth;
+
+        /// <summary>Depth-cap auto-extensions granted so far (live while running).</summary>
+        public int DepthExtensionsUsed =>
+            Result != null ? Result.DepthExtensions.Count
+            : State == AgentJobState.Running && Session != null ? Session.DepthExtensionsUsed
+            : 0;
+
+        /// <summary>depth_extensions for the result payload and sidecar.</summary>
+        public object[] DepthExtensionsPayload() =>
+            (Result?.DepthExtensions ?? Array.Empty<DepthExtension>())
+                .Select(e => (object)new { at_depth = e.AtDepth, new_cap = e.NewCap, signal_summary = e.SignalSummary })
+                .ToArray();
 
         /// <summary>Why the job is incomplete (empty when it isn't).</summary>
         public string[] IncompleteReasons()
@@ -563,7 +587,7 @@ namespace DevMind.McpServer
             bool allowCommit, bool verifyBuild, bool think = false, bool verifyTests = false,
             bool noExecute = false, bool runTestBaseline = true, bool? showThinking = null,
             IReadOnlyList<McpServerConfig>? mcpServers = null, string? reasoningEffort = null,
-            bool autoThink = true)
+            bool autoThink = true, bool autoExtend = true, int maxExtensions = 2)
         {
             var job = new AgentJob
             {
@@ -580,6 +604,8 @@ namespace DevMind.McpServer
                 // (never absent — the Qwen3.8 templates treat absent as xhigh).
                 ReasoningEffort = think ? DevMind.ReasoningEffort.NormalizeOrDefault(reasoningEffort) : null,
                 AutoThink = autoThink,
+                AutoExtend = autoExtend,
+                MaxExtensions = maxExtensions,
                 VerifyTests = verifyTests,
                 NoExecute = noExecute,
                 RunTestBaseline = runTestBaseline,
@@ -668,6 +694,8 @@ namespace DevMind.McpServer
                 // keep the parent's value, which is what the request actually sends).
                 ReasoningEffort = parent.ReasoningEffort,
                 AutoThink = parent.AutoThink, // inherited with Think (H-58)
+                AutoExtend = parent.AutoExtend,
+                MaxExtensions = parent.MaxExtensions,
                 NoExecute = ResolveContinuationNoExecute(parent.NoExecute, noExecute),
                 // Inherited like NoExecute. The parent's manager was disposed when the parent
                 // ended, so the worker starts these servers again for the continued turn.
@@ -891,6 +919,9 @@ namespace DevMind.McpServer
                             ReasoningEffort = job.ReasoningEffort ?? DevMind.ReasoningEffort.Default,
                             // H-58: the harness may turn thinking on for repeated test failures.
                             AutoThink = job.AutoThink,
+                            // Depth-cap auto-extension for a job still converging at the cap.
+                            AutoExtendDepth = job.AutoExtend,
+                            MaxDepthExtensions = job.MaxExtensions,
                             // DISPLAY switch (per-job, from show_thinking): streams the
                             // generated think blocks into the transcript. Tri-state — a
                             // non-null value wins over the DEVMIND_TASK_SHOW_THINKING env
@@ -911,6 +942,7 @@ namespace DevMind.McpServer
                     else
                     {
                         session.SetMaxDepth(job.MaxDepth);
+                        session.SetAutoExtendDepth(job.AutoExtend, job.MaxExtensions);
                         // A continuation's job may differ from the session it reuses
                         // (e.g. noExecute newly opted in), so re-sync the host guard.
                         session.SetNoExecute(job.NoExecute);
@@ -1234,6 +1266,9 @@ namespace DevMind.McpServer
                     tokens_in_new_partial = (bool?)(r?.TokensInNewPartial ?? false),
                     tokens_out = r?.TokensOut,
                     hit_depth_cap = r?.HitDepthCap ?? false,
+                    max_depth = job.MaxDepth,
+                    effective_max_depth = job.EffectiveMaxDepth,
+                    depth_extensions = job.DepthExtensionsPayload(),
                     auto_think_escalations = r?.AutoThinkEscalations ?? 0,
                     auto_think_iterations = r?.AutoThinkIterations ?? 0,
                     error = job.Error,
