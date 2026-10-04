@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>DevMind.TokenLedgerTray</RootNamespace>
+    <AssemblyName>TokenLedgerTray</AssemblyName>
+
+    <!-- Repo-wide Directory.Build.props sets TreatWarningsAsErrors. The tray is
+         the only Windows-UI project in the repo, so the SDK's WinForms analyzer
+         warnings (CA1416 platform-compat and friends) land on every call here.
+         The target framework is net10.0-windows, so the platform is guaranteed;
+         silencing the compatibility noise is deliberate, not an escape hatch. -->
+    <NoWarn>CA1416</NoWarn>
+
+    <!-- This project is deliberately NOT in DevMind.slnx: a Windows-only tray
+         app must not affect the main solution build. Build it by csproj path. -->
+  </PropertyGroup>
+
+</Project>
