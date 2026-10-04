@@ -18,6 +18,12 @@
     <!-- Fallbacks used when git is unavailable. -->
     <GitCommitCount>0</GitCommitCount>
     <GitShortHash></GitShortHash>
+
+    <!-- DevMind is English-only. Without this, every package's translated resource
+         assemblies (Microsoft.CodeAnalysis alone ships 13 languages) are copied to the
+         output and bundled into the single-file exes — ~17 MB each after Roslyn was
+         added for the H-04 syntax gate. -->
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
 
   <!-- Warnings are errors for every live project in the solution (this makes

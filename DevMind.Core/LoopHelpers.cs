@@ -445,7 +445,8 @@ namespace DevMind
                   "[MERGE CONFLICT] output.";
             // H-04: a syntax refusal leaves the file exactly as it was — for an existing file the
             // generic "does NOT exist" consequence would be false.
-            if (detail.Contains(CSharpSyntaxGate.Marker, StringComparison.Ordinal))
+            if (detail.Contains(CSharpSyntaxGate.Marker, StringComparison.Ordinal)
+                || detail.Contains(MergeReport.ConflictRefusedMarker, StringComparison.Ordinal))   // H-69
                 consequence = "The file on disk was NOT changed.";
             return $"[{tool.ToUpperInvariant()} FAILED: {whatHappened} for \"{target}\". {detail} {consequence}]";
         }

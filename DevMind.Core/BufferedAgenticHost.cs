@@ -581,6 +581,17 @@ namespace DevMind
 
                 MergeReport.TraceFallback("SaveFileAsync", fileNameOnly, merge);
 
+                if (merge.HasConflicts && RestrictWritesToWorkingDirectory)
+                {
+                    // H-69: a headless job has nobody to run /resolve, so a conflict refuses THIS
+                    // write only — file unchanged, the conflict shown to the model, nothing kept.
+                    string refusal = MergeReport.ConflictRefusal(fileNameOnly, merge);
+                    RecordAction(MergeReport.ConflictRefusedEvent, $"write refused: {fullPath}", success: false);
+                    MergeReport.TraceConflictRefused("SaveFileAsync", fileNameOnly, merge);
+                    AppendOutput($"[MERGE CONFLICT] Write to \"{fileNameOnly}\" refused — the file changed since it was read; nothing was written.\n", OutputColor.Error);
+                    throw new MergeConflictRefusedException(refusal);
+                }
+
 
                 if (merge.HasConflicts)
                 {
@@ -624,6 +635,10 @@ namespace DevMind
             catch (CSharpSyntaxGateException)
             {
                 throw;   // H-04: the executor turns it into the tool error the model reads
+            }
+            catch (MergeConflictRefusedException)
+            {
+                throw;   // H-69: the executor turns it into the tool error the model reads
             }
             catch (Exception ex)
             {
@@ -712,6 +727,17 @@ namespace DevMind
 
                 MergeReport.TraceFallback("AppendFileAsync", fileNameOnly, merge);
 
+                if (merge.HasConflicts && RestrictWritesToWorkingDirectory)
+                {
+                    // H-69: a headless job has nobody to run /resolve, so a conflict refuses THIS
+                    // write only — file unchanged, the conflict shown to the model, nothing kept.
+                    string refusal = MergeReport.ConflictRefusal(fileNameOnly, merge);
+                    RecordAction(MergeReport.ConflictRefusedEvent, $"append refused: {resolvedPath}", success: false);
+                    MergeReport.TraceConflictRefused("AppendFileAsync", fileNameOnly, merge);
+                    AppendOutput($"[MERGE CONFLICT] Append to \"{fileNameOnly}\" refused — the file changed since it was read; nothing was written.\n", OutputColor.Error);
+                    throw new MergeConflictRefusedException(refusal);
+                }
+
 
                 if (merge.HasConflicts)
                 {
@@ -750,6 +776,10 @@ namespace DevMind
             catch (CSharpSyntaxGateException)
             {
                 throw;   // H-04: the executor turns it into the tool error the model reads
+            }
+            catch (MergeConflictRefusedException)
+            {
+                throw;   // H-69: the executor turns it into the tool error the model reads
             }
             catch (Exception ex)
             {
@@ -1571,6 +1601,17 @@ namespace DevMind
                 MergeCheckResult merge = ThreeWayMergeCheck.CheckAndMerge(baseText, proposedText, currentText);
 
                 MergeReport.TraceFallback("ApplyResolvedPatchAsync", fileNameOnly, merge);
+
+                if (merge.HasConflicts && RestrictWritesToWorkingDirectory)
+                {
+                    // H-69: a headless job has nobody to run /resolve, so a conflict refuses THIS
+                    // write only — file unchanged, the conflict shown to the model, nothing kept.
+                    string refusal = MergeReport.ConflictRefusal(fileNameOnly, merge);
+                    RecordAction(MergeReport.ConflictRefusedEvent, $"patch refused: {resolved.FullPath}", success: false);
+                    MergeReport.TraceConflictRefused("ApplyResolvedPatchAsync", fileNameOnly, merge);
+                    AppendOutput($"[MERGE CONFLICT] Patch to \"{fileNameOnly}\" refused — the file changed since it was read; nothing was written.\n", OutputColor.Error);
+                    return Task.FromResult<(string, string)>((null, refusal));
+                }
 
 
                 if (merge.HasConflicts)

@@ -72,18 +72,15 @@ namespace DevMind.Core.Tests
         }
 
         [Fact]
-        public void Merge_RealDivergence_TodayAlwaysFallsBack_DiffPlexRejectsTheNullChunker_H69()
+        public void Merge_RealDivergence_IsAThreeWayMerge()
         {
-            // H-69 (found while fixing H-05): CreateMerge is called with chunker: null, which DiffPlex
-            // 1.9.0 rejects with ArgumentNullException, so EVERY real divergence has taken the
-            // proposed text unmerged since the merge gate was added. The old catch-all label hid it;
-            // now it is labelled. This pins today's behaviour — fixing H-69 must flip this test to
-            // MergeMode.ThreeWay with MergedText "A\nb\nC\n".
+            // H-69: CreateMerge used to get chunker: null, which DiffPlex 1.9.0 rejects, so every
+            // real divergence took the proposed text unmerged. With the line chunker it merges.
             var r = ThreeWayMergeCheck.CheckAndMerge("a\nb\nc\n", "A\nb\nc\n", "a\nb\nC\n");
-            Assert.Equal(MergeMode.DiffEngineFailed, r.Mode);
-            Assert.Equal("ArgumentNullException", r.DiffEngineError);
-            Assert.Equal("A\nb\nc\n", r.MergedText);
-            Assert.Equal(MergeReport.DiffEngineFailedLabel, MergeReport.TranscriptLabel(r));
+            Assert.Equal(MergeMode.ThreeWay, r.Mode);
+            Assert.Null(r.DiffEngineError);
+            Assert.Equal("A\nb\nC\n", r.MergedText);
+            Assert.Equal("", MergeReport.TranscriptLabel(r));
         }
 
         [Fact]

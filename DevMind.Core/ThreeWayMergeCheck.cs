@@ -1,14 +1,20 @@
-// File: ThreeWayMergeCheck.cs  v1.1
+// File: ThreeWayMergeCheck.cs  v1.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // v1.1 (H-05): the result says HOW it was reached (MergeMode). base == current is the clean,
 // normal case and is no longer reported as a fallback; MergeReport is the one place that
 // turns a genuine fallback into a transcript label and a trace event.
+//
+// v1.2 (H-69): CreateMerge was called with chunker: null, which DiffPlex 1.9.0 rejects
+// (ArgumentNullException) — so since the merge gate was added (3948341) no merge ever ran:
+// every real divergence took the proposed text unmerged and no conflict was ever detected.
+// The line chunker is passed now. MergeReport also owns the headless conflict refusal.
 
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using DiffPlex;
+using DiffPlex.Chunkers;
 
 namespace DevMind
 {
@@ -70,7 +76,7 @@ namespace DevMind
                 DiffEngineHookForTest?.Invoke();
                 var differ = new ThreeWayDiffer();
                 var merge = differ.CreateMerge(normBase, normProposed, normCurrent,
-                    ignoreWhiteSpace: false, ignoreCase: false, chunker: null);
+                    ignoreWhiteSpace: false, ignoreCase: false, chunker: LineChunker.Instance);
 
                 if (!merge.IsSuccessful && merge.ConflictBlocks != null && merge.ConflictBlocks.Count > 0)
                 {
@@ -81,9 +87,13 @@ namespace DevMind
                         // MergedStart is an index into MergedPieces — approximate line number
                         int lineNumber = block.MergedStart + 1; // 1-based
 
+                        var where = block.OriginalBlock;
                         conflicts.Add(new ConflictBlock
                         {
                             LineNumber = lineNumber,
+                            BaseLine = (where?.BaseStart ?? block.MergedStart) + 1,
+                            ProposedLine = (where?.OldStart ?? block.MergedStart) + 1,
+                            CurrentLine = (where?.NewStart ?? block.MergedStart) + 1,
                             BaseText = string.Join("\n", block.BasePieces),
                             ProposedText = string.Join("\n", block.OldPieces),  // our side
                             CurrentText = string.Join("\n", block.NewPieces)    // their side
@@ -145,6 +155,13 @@ namespace DevMind
         }
     }
 
+    /// <summary>H-69: a headless write refused because it conflicts with a change made on disk since the
+    /// file was read. The message is <see cref="MergeReport.ConflictRefusal"/>.</summary>
+    public sealed class MergeConflictRefusedException : InvalidOperationException
+    {
+        public MergeConflictRefusedException(string message) : base(message) { }
+    }
+
     /// <summary>
     /// What a host says about a merge result: the transcript label and the trace event. One place,
     /// so every save / append / patch path in every host reports a fallback the same way.
@@ -153,6 +170,70 @@ namespace DevMind
     {
         /// <summary>The trace event name — a stable constant (it was once the message text).</summary>
         public const string FallbackTraceEvent = "merge_fallback";
+
+        /// <summary>H-69: the journal kind and trace event for a write refused on a merge conflict
+        /// in a headless job.</summary>
+        public const string ConflictRefusedEvent = "merge_conflict_refused";
+
+        /// <summary>Starts every headless conflict refusal — lets a caller tell it from other write failures.</summary>
+        public const string ConflictRefusedMarker = "[MERGE-CONFLICT-REFUSED]";
+
+        /// <summary>The instruction that ends every refusal.</summary>
+        public const string ReReadInstruction =
+            "The file changed since you read it. Re-read it and redo your edit against the current content.";
+
+        private const int ConflictLinesShown = 4;
+        private const int ConflictLineWidth = 160;
+
+        /// <summary>
+        /// H-69: the tool error for a write refused on a merge conflict in a headless job — every
+        /// conflict block with base / proposed / on-disk text (a few numbered lines each), then the
+        /// re-read instruction. Nothing was written and no state is kept: the next write is
+        /// evaluated fresh.
+        /// </summary>
+        public static string ConflictRefusal(string fileName, MergeCheckResult merge)
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.Append(ConflictRefusedMarker).Append(' ').Append(fileName)
+              .Append(": your edit overlaps a change made to the file after you read it — nothing was written.\n");
+            int n = 0;
+            foreach (ConflictBlock c in merge?.Conflicts ?? new List<ConflictBlock>())
+            {
+                sb.Append($"Conflict {++n}:\n");
+                AppendSide(sb, "what you read (base)", c.BaseText, c.BaseLine);
+                AppendSide(sb, "your version", c.ProposedText, c.ProposedLine);
+                AppendSide(sb, "on disk now", c.CurrentText, c.CurrentLine);
+            }
+            sb.Append(ReReadInstruction);
+            return sb.ToString();
+        }
+
+        private static void AppendSide(System.Text.StringBuilder sb, string label, string text, int firstLine)
+        {
+            sb.Append("  ").Append(label).Append(":\n");
+            string[] lines = (text ?? "").Replace("\r\n", "\n").Split('\n');
+            if (lines.Length == 1 && lines[0].Length == 0)
+            {
+                sb.Append("    (nothing)\n");
+                return;
+            }
+            for (int k = 0; k < lines.Length && k < ConflictLinesShown; k++)
+            {
+                string line = lines[k].Length <= ConflictLineWidth ? lines[k] : lines[k].Substring(0, ConflictLineWidth - 1) + "…";
+                sb.Append("    ").Append((firstLine + k).ToString().PadLeft(5)).Append(": ").Append(line).Append('\n');
+            }
+            if (lines.Length > ConflictLinesShown)
+                sb.Append($"    … {lines.Length - ConflictLinesShown} more line(s)\n");
+        }
+
+        /// <summary>Emits <see cref="ConflictRefusedEvent"/> for a refused write.</summary>
+        public static void TraceConflictRefused(string site, string fileName, MergeCheckResult merge)
+            => Trace.Event("info", ConflictRefusedEvent, new Dictionary<string, object>
+            {
+                ["site"] = site,
+                ["file"] = fileName,
+                ["conflicts"] = merge?.Conflicts?.Count ?? 0,
+            });
 
         public const string NoBaseLabel = " [no base: overwrite check only]";
         public const string DiffEngineFailedLabel = " [merge engine failed: proposed text accepted]";

@@ -84,14 +84,14 @@ namespace DevMind.McpServer.Tests
         }
 
         [Theory]
-        [InlineData("COMMIT_MSG.txt")]
-        [InlineData("New.cs")]
-        [InlineData("new.ps1")]
-        public async Task WriteFile_NewFile_HasNoBom(string name)
+        [InlineData("COMMIT_MSG.txt", "fix: subject\n")]
+        [InlineData("New.cs", "class New { }\n")]       // valid C#: write_file now syntax-gates .cs (H-04)
+        [InlineData("new.ps1", "fix: subject\n")]
+        public async Task WriteFile_NewFile_HasNoBom(string name, string content)
         {
             string path = Path.Combine(_dir, name);
 
-            string r = await _tools.WriteFile(path, "fix: subject\n");
+            string r = await _tools.WriteFile(path, content);
 
             Assert.StartsWith("write_file: created", r);
             Assert.False(HasBom(path), "write_file put a BOM on a new file");

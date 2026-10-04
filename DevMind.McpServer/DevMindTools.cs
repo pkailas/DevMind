@@ -926,6 +926,13 @@ internal sealed class DevMindTools
                     if (existed && !overwrite)
                         return $"create_file: file already exists — {fullPath}. Use patch_file to edit it or write_file to overwrite.";
 
+                    // H-04: a .cs write that adds a syntax error is refused before anything is
+                    // written — the same gate as the agent hosts' save/append and patch_file.
+                    string? syntaxRefusal = CSharpSyntaxGate.Check(fullPath,
+                        existed ? PatchEngine.ReadFilePreservingEncoding(fullPath).content : null, content);
+                    if (syntaxRefusal != null)
+                        return $"{toolName}: failed — {syntaxRefusal}";
+
                     // Snapshot the original content before first mutation (for diff_file).
                     if (existed)
                         _svc.TrySnapshot(fullPath);

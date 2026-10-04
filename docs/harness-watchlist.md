@@ -93,8 +93,11 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   PatchEngine.ApplyPatch (shared by the headless host, the TUI host and MCP `patch_file`; result `Rejected`) and into
   SaveFileAsync / AppendFileAsync (new and existing file) of BOTH hosts — so it applies to the TUI too, where a refusal is a tool
   error the model reads like any other. The host lets the refusal through to the executor, so the model's tool result carries it
-  ("[CREATE_FILE FAILED: ... [SYNTAX-GATE] ... The file on disk was NOT changed.]"). Not covered: MCP `write_file` / `create_file`
-  (DevMindTools' own write path). Out of scope: `.cshtml` / `.razor` (a different parser).
+  ("[CREATE_FILE FAILED: ... [SYNTAX-GATE] ... The file on disk was NOT changed.]"). Out of scope: `.cshtml` / `.razor` (a different
+  parser).
+- **MCP write path (2026-10-04, 05b):** MCP `write_file` / `create_file` (DevMindTools.WriteFileCore — their own write code) now
+  run the same gate before anything is written: "write_file: failed — [SYNTAX-GATE] ...". MCP `append_file` is still ungated (not
+  in 05b's scope). Tests: McpWriteSyntaxGateTests; EditPreservesFormatTests' New.cs BOM case now writes valid C#. commit "H-69: real three-way merge; headless conflicts refuse one write; MCP write_file syntax gate; satellite trim".
 - **Size:** self-contained single-file publish (run-deploy.ps1 settings) grows 17.1 MB per exe: DevMind.TUI.exe 105,212,061 ->
   122,307,417 bytes, DevMind.McpServer.exe 102,179,596 -> 119,274,952 bytes. Both publishes succeed.
 - **Tests:** PatchSafetyTests `H04_*` — job-1652 replay (an insert lands inside DetailPage_ContainsMetadataAndImage; refused with
@@ -1332,5 +1335,27 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Not fixed here, on purpose:** passing LineChunker changes write behaviour — real merges, and real conflicts, which block every
   later write until `/resolve` — and a headless job has nobody to run `/resolve`. Needs a decision: what a delegated job does on a
   conflict (fail the write with the conflict as the tool error?).
-- **Pinned by:** PatchSafetyTests `Merge_RealDivergence_TodayAlwaysFallsBack_DiffPlexRejectsTheNullChunker_H69` (flip it when fixed).
-- **Status:** open — decision pending.
+- **Decision (Paul, 2026-10-04):** merge for real; in a headless job a conflict refuses that one write; the TUI keeps /resolve.
+- **Fix (2026-10-04):**
+  - ThreeWayMergeCheck passes `DiffPlex.Chunkers.LineChunker.Instance`: a change on disk in a different region than the agent's edit
+    now MERGES (both changes kept, no label); an overlapping change is a conflict. Conflict blocks now carry each side's start line.
+    The "[merge engine failed: proposed text accepted]" path stays for a genuine DiffPlex exception (no normal input reaches it).
+  - Headless (BufferedAgenticHost with RestrictWritesToWorkingDirectory — the existing headless switch, set only by HeadlessSession;
+    the CLI's ConsoleAgenticHost shares the class with it off): a conflict on save / append / patch refuses THAT write only — file
+    unchanged, nothing kept (no pending-conflict state), the next write evaluated fresh. The model's tool error
+    (`[MERGE-CONFLICT-REFUSED] ...`) shows each conflict block — what it read (base), its version, what is on disk now, up to 4
+    numbered lines each — and ends "The file changed since you read it. Re-read it and redo your edit against the current content."
+    Journal kind and trace event `merge_conflict_refused`; transcript "[MERGE CONFLICT] Write to "x" refused — ...".
+  - Interactive hosts (TUI, CLI) keep today's behaviour: pending-conflict state, later writes wait for /resolve.
+  - Base freshness: checked, no change needed. The base is the host's FileContentCache entry — stored by a full read, refreshed after
+    every own save / patch (the written text) and append (re-read first), and invalidated on read when the file changed on disk — so
+    the agent's own consecutive writes never conflict with themselves (test).
+  - Directory.Build.props: `<SatelliteResourceLanguages>en</SatelliteResourceLanguages>`. Single-file publish (run-deploy.ps1
+    settings): DevMind.TUI.exe 122,307,417 -> 111,873,596 bytes, DevMind.McpServer.exe 119,274,952 -> 108,878,692 bytes (each
+    -10.4 MB; +6.7 MB over the pre-Roslyn 105,212,061 / 102,179,596).
+- **Tests:** MergeConflictTests (clean three-way merge; conflict with each side's line numbers; genuine engine failure still labelled;
+  headless merge keeps both changes; headless save refused + the next write after a re-read lands; headless patch refused; the model's
+  tool result; the agent's own repeated writes never conflict; interactive pending state as before), TuiMergeConflictTests (TUI
+  pending state + /resolve), PatchSafetyTests' former H-69 pin flipped to `Merge_RealDivergence_IsAThreeWayMerge`. Mutation check:
+  `chunker: null` back fails `MergeConflictTests.ACleanThreeWayMerge_Merges` (and the other real-merge tests).
+- **Status:** fixed, pending deploy - commit "H-69: real three-way merge; headless conflicts refuse one write; MCP write_file syntax gate; satellite trim".
