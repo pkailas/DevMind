@@ -256,18 +256,46 @@ namespace DevMind.Core.Tests
             Assert.True(y.Decide(40, 40, new LoopState(), 95, 0).Extended);   // no limit configured
         }
 
+        // ── Reset (a caller override steer) ──────────────────────────────────────
+
         [Fact]
-        public void Disarm_BlocksEveryLaterExtension()
+        public void Reset_ForgetsTheWindow_TheOutstandingFailure_AndTheLatestBuild()
+        {
+            var t = Converging();
+            t.Observe(0, null, 0, "dotnet build");
+            Assert.True(t.MutationsInWindow > 0);
+
+            t.Reset();
+
+            Assert.Equal(0, t.MutationsInWindow);
+            Assert.Equal(0, t.ResolutionsInWindow);
+            Assert.Null(t.LatestBuildOrTestGreen);
+            Assert.Null(t.CurrentFailure);
+            Assert.Contains("in the last 0 iteration(s)", t.Summary());
+
+            // A failure after the reset is a first failure, not a resolution of the old one.
+            t.Observe(1, "error CS9999: new direction", 1, "dotnet build");
+            Assert.Equal(0, t.ResolutionsInWindow);
+        }
+
+        [Fact]
+        public void AfterAReset_ExtensionIsDeclined_UntilTheJobConvergesAgain()
         {
             var (x, applied) = Extender();
-            x.Disarm("a caller override steer redirected the job");
-            x.Disarm("ignored — the first reason is kept");
+            x.Tracker.Reset();
 
-            var d = x.Decide(40, 40, new LoopState(), null, 0);
+            var declined = x.Decide(40, 40, new LoopState(), null, 0);
+            Assert.False(declined.Extended);
+            Assert.StartsWith("no failure resolved", declined.Detail);
 
-            Assert.False(d.Extended);
-            Assert.Equal("a caller override steer redirected the job", d.Detail);
-            Assert.Empty(applied);
+            // Still armed: new evidence earns the extension.
+            for (int i = 0; i < 4; i++)
+            {
+                x.Tracker.Observe(1, null, null, "");
+                x.Tracker.Observe(0, $"error CS200{i}: after the redirect", 1, "dotnet build");
+            }
+            Assert.True(x.Decide(40, 40, new LoopState(), null, 0).Extended);
+            Assert.Equal(new[] { 60 }, applied);
         }
     }
 }

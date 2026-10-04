@@ -1,4 +1,4 @@
-// File: DepthAutoExtender.cs  v1.0
+// File: DepthAutoExtender.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Raises a headless job's depth cap in place when it reaches the cap still converging.
@@ -10,7 +10,7 @@
 // LoopDriver.DepthExtender, so its behaviour is unchanged.
 //
 // Extend iff ALL hold:
-//   a. auto-extension is armed and extensions granted < max_extensions
+//   a. extensions granted < max_extensions
 //   b. a failure was resolved in the window, OR the latest build/test is green and at
 //      least one mutation landed in the window
 //   c. at least MinMutations mutations in the window
@@ -19,6 +19,10 @@
 //   e. context usage below the context-guard limit, when one is configured and known
 // Extension size is the turn's ORIGINAL cap / 2, at least MinExtension. The devmind_task
 // 200 clamp applies to the requested max_depth only, so extensions may go past it.
+//
+// v1.1: a caller override steer no longer disarms extension. HeadlessSession resets the
+// tracker's window instead: evidence from before the redirect does not count, and the job
+// can still earn an extension by converging in its new direction.
 
 using System;
 using System.Collections.Generic;
@@ -79,7 +83,6 @@ namespace DevMind
         private readonly Action<int> _applyCap;
         private readonly List<DepthExtension> _extensions = new List<DepthExtension>();
         private readonly object _lock = new object();
-        private string _disarmedReason;
 
         /// <param name="originalMaxDepth">The turn's cap before any extension.</param>
         /// <param name="maxExtensions">Most extensions granted this turn.</param>
@@ -109,19 +112,6 @@ namespace DevMind
         /// <summary>A snapshot of the extensions granted so far.</summary>
         public IReadOnlyList<DepthExtension> Extensions { get { lock (_lock) return _extensions.ToArray(); } }
 
-        /// <summary>Non-null once <see cref="Disarm"/> has been called.</summary>
-        public string DisarmedReason { get { lock (_lock) return _disarmedReason; } }
-
-        /// <summary>
-        /// Stops any further extension this turn — a caller steer that overrides the job wins
-        /// over the harness's own judgement that the job is converging. Idempotent; the first
-        /// reason is kept.
-        /// </summary>
-        public void Disarm(string reason)
-        {
-            lock (_lock) _disarmedReason ??= string.IsNullOrWhiteSpace(reason) ? "disarmed" : reason;
-        }
-
         /// <summary>
         /// Decide at the cap. On extension the cap is raised through the apply callback and the
         /// extension is recorded; on a decline nothing changes.
@@ -149,8 +139,6 @@ namespace DevMind
         // when every condition holds.
         private string Check(LoopState state, int? contextUsedPercent, int contextLimitPercent)
         {
-            string disarmed = DisarmedReason;
-            if (disarmed != null) return disarmed;                                              // a
             int used = Count;
             if (used >= _maxExtensions) return $"extensions used up ({used}/{_maxExtensions})"; // a
 

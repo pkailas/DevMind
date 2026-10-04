@@ -1055,3 +1055,31 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   prompt asks for the marker; a missing task_done is still caught by H-20/H-52.
 - **Status:** fixed, pending deploy - commit "H-64: self-report detection uses the INCOMPLETE: marker only". Future idea: a
   fine-tuned local decision model (Laya) reading brief + answer as an advisory flag on top of the marker rule.
+
+### H-65 - Depth cap ends converging jobs; continuations re-read everything
+- **Symptom:** a delegated job mid build-and-fix, still making progress, stopped at max_depth with `depth_cap` (finish-up
+  directive at N-1, then stopped_incomplete / hit_depth_cap). The driver then had to devmind_task_continue, and the
+  continuation usually began with a context eviction, re-read the files and spent its budget before acting again.
+- **Fix:** depth-cap auto-extension for headless jobs (TUI unchanged).
+  - devmind_task_start `auto_extend` (default true) and `max_extensions` (default 2, clamped 0-10); continuations inherit both.
+    HeadlessOptions.AutoExtendDepth defaults to false, so only the MCP job runner turns it on.
+  - ConvergenceTracker (DevMind.Core): sliding window of the last 30 tool-call iterations, fed by LoopDriver. Counts mutations
+    landed (ExecutionResult: patches applied, files created/appended/deleted/renamed) and failure-signature resolutions (a
+    failure cleared by a clean run, or replaced by a DIFFERENT signature after a mutation; build failure -> test failure also
+    counts), plus the latest build/test outcome.
+  - DepthAutoExtender: decided at the boundary that would send the finish-up directive. Extends iff extensions < max, a
+    resolution (or a green build/test after a change) in the window, >= 3 mutations, no thrash state (RepeatedFailureCount < 3,
+    no research directive for the current signature), and context below the guard limit. Extension = original cap / 2 (min 10),
+    may go past the 200 clamp; the cap is raised via HeadlessSession.SetMaxDepth and no finish-up directive is sent. Each
+    decision writes one `[AGENTIC] Depth cap reached (N) — still converging (...); extending to M (extension k/max).` or
+    `... — not extending: <failed condition>.` line. HitDepthCap is still set only when the job finally stops on the cap.
+  - A consumed override steer resets the convergence window (evidence from before the redirect no longer counts); extension
+    stays armed (follow-up to b8c47aa).
+  - Reporting: devmind_task_status `max_depth` / `effective_max_depth` / `depth_extensions_used`; devmind_task_result and the
+    result sidecar `depth_extensions` ({at_depth, new_cap, signal_summary}).
+  - Tests: ConvergenceTrackerTests, HeadlessDepthAutoExtendTests (converging extended + max_extensions honoured, repeating
+    failure not extended, auto_extend off unchanged, override steer resets the window), DepthAutoExtendJobTests,
+    TranscriptVocabularyTests rows for the two new lines. Mutation check: sending the finish-up directive while extending fails
+    `Converging_IsExtended_FinishUpOnlyAtTheNewCap_AndMaxExtensionsHonoured`.
+- **Status:** fixed, pending deploy - commit b8c47aa (auto_extend / max_extensions, DepthAutoExtender + ConvergenceTracker),
+  override follow-up "Depth auto-extend: an override steer resets the convergence window instead of disarming".

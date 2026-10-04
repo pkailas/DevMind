@@ -6,7 +6,8 @@
 // A job that reaches max_depth while still converging gets its cap raised in place — no
 // finish-up directive at the old cap, no context reset — and the extension is recorded. A
 // job repeating one failure is not extended and behaves exactly as before; so does any job
-// with auto-extension off. A caller override steer turns it off for the rest of the turn.
+// with auto-extension off. A caller override steer resets the convergence window — progress
+// before the redirect no longer counts — and extension stays armed.
 //
 // The converging model is scripted against FakeSseServer as an edit / failing-build cycle:
 // create a file (a mutation), then run a "build" that fails with a NEW error each time —
@@ -170,7 +171,7 @@ namespace DevMind.Core.Tests
         }
 
         [Fact]
-        public async Task AnOverrideSteerDuringAnExtension_EndsAutoExtension_ForTheRestOfTheTurn()
+        public async Task AnOverrideSteerDuringAnExtension_ResetsTheConvergenceWindow_AndExtensionStaysArmed()
         {
             using var server = ConvergingModel();
             var transcript = new StringBuilder();
@@ -185,7 +186,7 @@ namespace DevMind.Core.Tests
             {
                 transcript.Append(t);
                 // Steer the moment the first extension is granted: the drain at the next
-                // boundary folds it (not the last iteration any more) and disarms the extender.
+                // boundary folds it (not the last iteration any more) and resets the window.
                 if (!steered && t.Contains("extending to 20", StringComparison.Ordinal))
                 {
                     steered = true;
@@ -197,15 +198,23 @@ namespace DevMind.Core.Tests
             Assert.True(steered);
             string log = transcript.ToString();
             Assert.Contains("[STEER] override folded into the prompt", log);
-            Assert.Contains("depth-cap auto-extension is off for the rest of this turn", log);
+            Assert.Contains("[STEER] override received — the depth-cap auto-extension convergence window was reset.", log);
 
-            // One extension only, although max_extensions allowed two and the job kept converging.
-            var ext = Assert.Single(result.DepthExtensions);
-            Assert.Equal(20, ext.NewCap);
-            Assert.Contains("[AGENTIC] Depth cap reached (20) — not extending: a caller override steer redirected the job.", log);
-            Assert.Equal(1, Occurrences(server.RequestBodies, FinishUp(20)));
+            // Still armed: the job kept converging after the redirect and earned the second
+            // extension — on evidence from iterations 11-20 only. Without the reset the window
+            // would hold all 20 iterations (9 resolved, 10 mutations).
+            Assert.Equal(2, result.DepthExtensions.Count);
+            Assert.Equal(20, result.DepthExtensions[0].NewCap);
+            var second = result.DepthExtensions[1];
+            Assert.Equal(20, second.AtDepth);
+            Assert.Equal(30, second.NewCap);
+            Assert.Contains("4 failure(s) resolved, 5 mutation(s) in the last 10 iteration(s)", second.SignalSummary);
+
+            Assert.Contains("[AGENTIC] Depth cap reached (30) — not extending: extensions used up (2/2).", log);
+            Assert.Equal(0, Occurrences(server.RequestBodies, FinishUp(20)));
+            Assert.Equal(1, Occurrences(server.RequestBodies, FinishUp(30)));
             Assert.True(result.HitDepthCap);
-            Assert.Equal(20, result.EffectiveMaxDepth);
+            Assert.Equal(30, result.EffectiveMaxDepth);
             Assert.Contains(result.Actions, a => a.Kind == "steer");
         }
     }

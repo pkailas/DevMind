@@ -863,13 +863,13 @@ namespace DevMind
             _host.RecordSteer(pending.Message, pending.Mode, disp,
                 disp == SteerDisposition.Rejected ? "last_iteration" : null);
 
-            // A caller override wins over the harness's judgement that the job is converging:
-            // no auto-extension after it, for the rest of the turn.
-            if (disp == SteerDisposition.Consumed && pending.Mode == SteerMode.Override && _depthExtender != null
-                && _depthExtender.DisarmedReason == null)
+            // A caller override changes the job's direction, so progress made before it is no
+            // evidence that the new direction is converging: the auto-extension window starts
+            // over. Extension stays armed — the job can earn it again from here.
+            if (disp == SteerDisposition.Consumed && pending.Mode == SteerMode.Override && _depthExtender != null)
             {
-                _depthExtender.Disarm("a caller override steer redirected the job");
-                EmitToTurn("[STEER] override received — depth-cap auto-extension is off for the rest of this turn.\n");
+                _depthExtender.Tracker.Reset();
+                EmitToTurn("[STEER] override received — the depth-cap auto-extension convergence window was reset.\n");
             }
 
             string modeTag = pending.Mode == SteerMode.Override ? "override" : "suggest";

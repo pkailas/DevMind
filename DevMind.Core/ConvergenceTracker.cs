@@ -132,6 +132,22 @@ namespace DevMind
             }
         }
 
+        /// <summary>
+        /// Forget everything observed so far: the window, the outstanding failure and the latest
+        /// build/test outcome. Called when a caller override steer redirects the job — progress
+        /// toward the old direction is no evidence that the new one is converging.
+        /// </summary>
+        public void Reset()
+        {
+            _recent.Clear();
+            MutationsInWindow = 0;
+            ResolutionsInWindow = 0;
+            LatestBuildOrTestGreen = null;
+            _currentFailure = null;
+            _currentFailureStage = Stage.None;
+            _mutationsSinceFailure = 0;
+        }
+
         /// <summary>One-line evidence summary for the transcript and the result.</summary>
         public string Summary()
         {
