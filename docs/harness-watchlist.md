@@ -154,7 +154,8 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Source:** tooling-path-gotchas.md: `$x = C:\...` (unquoted) gets rewritten into a command invocation. Quote paths.
 - **Proposed fix:** don't rewrite inside assignments; or document in the run_shell tool description.
 - **Status:** wontfix (2026-10-04) - not a harness defect. Plain PowerShell does the same: an unquoted path on the right of `=`
-  is parsed as a command (CommandNotFoundException). Follow-up: add "quote paths in assignments" to the run_shell tool description.
+  is parsed as a command (CommandNotFoundException). Follow-up done: "quote paths in assignments" added to both run_shell
+  descriptions (ToolRegistry.cs agent side, DevMindTools.cs MCP side), together with the H-63 Start-Process -Wait note.
 
 ### H-16 - patch_file: batch is all-or-nothing, very short FIND lines fail, and recall of a read handle is stale after a patch
 - **Source:** Verbella.VLink.Desktop\.devmind\memory\patch-file-failures.md (2026-09-01):

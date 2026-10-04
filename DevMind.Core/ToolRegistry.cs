@@ -111,6 +111,9 @@ namespace DevMind
                 "(dotnet build/test/restore/publish/pack/run/ef, msbuild, npm/pnpm/yarn install/ci/run/test/build, nuget restore, vstest.console), " +
                 "60s for everything else; pass timeout_seconds when a command legitimately needs longer. " +
                 "Use this for git commands, one-off scripts, and operations no other tool covers. " +
+                "Quote paths in assignments ($p = 'C:\\dir\\file.txt'): PowerShell runs an unquoted path as a command. " +
+                "Start-Process -Wait also waits for every descendant, including build servers (VBCSCompiler) that outlive dotnet build/publish, " +
+                "so run builds directly (& dotnet publish ...; check $LASTEXITCODE) rather than through Start-Process -Wait. " +
                 "Child processes started by the command are terminated when the call returns unless detach=true " +
                 "(e.g. Start-Process an app you check in a later call; stop it yourself when done). " +
                 "Do NOT use run_shell to list, search, or find files — use list_files for enumeration, " +

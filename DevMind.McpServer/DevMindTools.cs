@@ -1152,6 +1152,9 @@ internal sealed class DevMindTools
         "Cmd-style %VAR% is sugar for $env:VAR and follows PowerShell interpolation rules: " +
         "expanded at statement level and inside \"...\", left alone inside '...', here-strings " +
         "and comments — use single quotes for a literal %NAME%. " +
+        "Quote paths in assignments ($p = 'C:\\dir\\file.txt'): PowerShell runs an unquoted path as a command. " +
+        "Start-Process -Wait also waits for every descendant, including build servers (VBCSCompiler) that outlive dotnet " +
+        "build/publish, so run builds directly (& dotnet publish ...; check $LASTEXITCODE) rather than through Start-Process -Wait. " +
         "Child processes started by the command are terminated when the call returns unless " +
         "detach=true (e.g. Start-Process a GUI to inspect in a later call); a timeout or cancel " +
         "still kills the whole tree. " +
