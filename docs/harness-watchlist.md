@@ -147,12 +147,14 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Source:** DevMind\.devmind\memory\tooling-path-gotchas.md: `create_file` to an absolute path outside the working dir (e.g. %TEMP%)
   printed "[File created]" and did not write the file. Silent false success.
 - **Proposed fix:** refuse with the same "outside allowed write roots" error the MCP tools give, never report success.
-- **Status:** open (re-verify - may have been fixed when write-root checks were unified)
+- **Status:** open, watching - re-verified 2026-10-04 on 1.0.568: the MCP create_file refuses a %TEMP% path with a containment
+  error. The agent-side (headless) create_file path, where this was first seen, was not re-tested.
 
 ### H-15 - run_shell mangles unquoted Windows paths
 - **Source:** tooling-path-gotchas.md: `$x = C:\...` (unquoted) gets rewritten into a command invocation. Quote paths.
 - **Proposed fix:** don't rewrite inside assignments; or document in the run_shell tool description.
-- **Status:** open (re-verify)
+- **Status:** wontfix (2026-10-04) - not a harness defect. Plain PowerShell does the same: an unquoted path on the right of `=`
+  is parsed as a command (CommandNotFoundException). Follow-up: add "quote paths in assignments" to the run_shell tool description.
 
 ### H-16 - patch_file: batch is all-or-nothing, very short FIND lines fail, and recall of a read handle is stale after a patch
 - **Source:** Verbella.VLink.Desktop\.devmind\memory\patch-file-failures.md (2026-09-01):
@@ -170,7 +172,9 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   (`chr(39)`) and repr()-based verification.
 - **Proposed fix:** find where the tool layer unescapes/normalises content (JSON decode -> string -> file) and make it byte-exact; add a
   round-trip test with quote-heavy fixtures.
-- **Status:** open (re-verify against current build)
+- **Status:** open, watching - re-verified 2026-10-04 on 1.0.568: MCP create_file + a 2-edit patch_file with `'\''`, `''''`,
+  `\'`, `\"`, `\\` and backtick mixes landed byte-exact (no BOM added, LF kept). The agent path was not tested. On recurrence, pull
+  the raw tool-call arguments from the trace to tell model emission from tool corruption.
 
 ### H-18 - Older findings from DevMindTestBed\harness-findings.md (Aug 14, QuantEval runs) - status unknown, re-verify
 - **working_dir changes path resolution non-deterministically:** with working_dir = a subfolder, brief paths relative to the repo root
