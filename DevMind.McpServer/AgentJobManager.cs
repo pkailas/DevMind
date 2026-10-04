@@ -100,6 +100,16 @@ namespace DevMind.McpServer
         /// or the run was never performed). Harness-measured, like Tests.</summary>
         public TestVerification? BaselineTests;
 
+        /// <summary>H-45: the plain build run right before the baseline test run (null when no
+        /// baseline was due, or no build command resolved). When it failed, the baseline test
+        /// run is skipped: a `dotnet test` over a tree that does not compile runs only the
+        /// projects that build, and its total is a partial count (job-1859: delta +747, real +17).</summary>
+        public BuildVerification? BaselineBuild;
+
+        /// <summary>H-09: why test verification ran although verify_tests was off — the job
+        /// changed a build-affecting file. Null when it was not forced.</summary>
+        public string? TestsForcedReason;
+
         /// <summary>Whether the harness runs the test suite ONCE before the agent starts
         /// (so the result can report a real "before -> after" delta). Default true —
         /// "before-run"; callers with a slow suite opt out via "off". Only meaningful
@@ -377,6 +387,14 @@ namespace DevMind.McpServer
         /// Null = production path. Mirrors TestRunnerOverride.
         /// </summary>
         internal Func<string /*workingDirectory*/, CancellationToken, Task<BuildVerification?>>? BuildRunnerOverride { get; set; }
+
+        /// <summary>
+        /// Test seam for the H-45 build that runs right before the baseline test run. Separate
+        /// from <see cref="BuildRunnerOverride"/> so tests of the post-run build verification
+        /// keep their call counts. Null = production path (resolve and build; a temp dir with
+        /// no project resolves to no command, so the baseline runs as before).
+        /// </summary>
+        internal Func<string /*workingDirectory*/, CancellationToken, Task<BuildVerification?>>? BaselineBuildOverride { get; set; }
 
         /// <summary>
         /// Test seam, narrower than <see cref="BuildRunnerOverride"/>: only the process run is
@@ -899,10 +917,22 @@ namespace DevMind.McpServer
                     // number. "off" (RunTestBaseline false) skips the run entirely.
                     if (job.VerifyTests && job.RunTestBaseline)
                     {
-                        job.BaselineTests = await RunTestSuiteAsync(job).ConfigureAwait(false);
-                        var b = job.BaselineTests;
-                        job.AppendTail($"\n[job] test baseline: exit {b.ExitCode}, " +
-                            (b.Total.HasValue ? $"total {b.Total} (harness-measured)" : $"no parseable total ({b.ParseFailure})") + "\n");
+                        // H-45: build first. Only a build can say the tree does not compile
+                        // without mistaking a failing TEST for it, and a baseline over a broken
+                        // tree is a partial count, so it is not taken at all.
+                        job.BaselineBuild = await BaselineBuildAsync(job).ConfigureAwait(false);
+                        if (job.BaselineBuild is { Succeeded: false } failedBuild)
+                        {
+                            job.AppendTail($"\n[job] test baseline: skipped — baseline build failed (exit {failedBuild.ExitCode}: " +
+                                $"{TestVerificationPayload.FirstErrorExcerpt(failedBuild.OutputTail)})\n");
+                        }
+                        else
+                        {
+                            job.BaselineTests = await RunTestSuiteAsync(job).ConfigureAwait(false);
+                            var b = job.BaselineTests;
+                            job.AppendTail($"\n[job] test baseline: exit {b.ExitCode}, " +
+                                (b.Total.HasValue ? $"total {b.Total} (harness-measured)" : $"no parseable total ({b.ParseFailure})") + "\n");
+                        }
                     }
 
                     // Fresh task → new session; continuation → the parent's session
@@ -1038,11 +1068,25 @@ namespace DevMind.McpServer
                             : $"[job] build verification: {(job.Build.Succeeded ? "passed" : "failed")}\n");
                     }
 
-                    // Test verification (opt-in): only when the build verification did
-                    // not already fail — red tests on a broken build are noise.
-                    if (job.VerifyTests && terminalState == AgentJobState.Done && HasFileChanges(result)
+                    // H-09: verify_tests off, but the job changed a file that can change what
+                    // the tests see (Directory.Build.props, a .csproj, appsettings*.json, ...):
+                    // run the test verification anyway. job-1658 bumped the version in
+                    // Directory.Build.props with verify_tests off and a version assertion went
+                    // red unnoticed for two commits.
+                    string? forcedBy = !job.VerifyTests && terminalState == AgentJobState.Done
+                        ? FirstBuildAffectingChange(result)
+                        : null;
+
+                    // Test verification (opt-in, or forced above): only when the build
+                    // verification did not already fail — red tests on a broken build are noise.
+                    if ((job.VerifyTests || forcedBy != null) && terminalState == AgentJobState.Done && HasFileChanges(result)
                         && job.Build is not { Succeeded: false })
                     {
+                        if (forcedBy != null)
+                        {
+                            job.TestsForcedReason = $"build-affecting file changed: {forcedBy}";
+                            job.AppendTail($"\n[job] test verification: forced (build-affecting change: {forcedBy})\n");
+                        }
                         // Same as build: a real `dotnet test` can take a long time, so
                         // surface it in the tail while the job stays Running.
                         job.AppendTail("\n[job] test verification: running...\n");
@@ -1152,9 +1196,91 @@ namespace DevMind.McpServer
         /// </summary>
         public static bool IsJobActiveElsewhere() => ActiveJobMarkers.IsJobActiveElsewhere();
 
+        private static bool IsFileChange(HostAction a)
+            => a.Kind is "save" or "append" or "patch" or "delete" or "rename";
+
         private static bool HasFileChanges(HeadlessAgentResult result)
-            => result.Actions.Any(a =>
-                a.Kind is "save" or "append" or "patch" or "delete" or "rename");
+            => result.Actions.Any(IsFileChange);
+
+        /// <summary>
+        /// H-09: the file name of the first build-affecting file the job changed, or null. Read
+        /// from the same journal entries <see cref="HasFileChanges"/> counts — the path is the
+        /// entry's detail, less a "(N lines)" / "(new, N lines)" / "(created)" suffix; a rename
+        /// contributes both names.
+        /// </summary>
+        internal static string? FirstBuildAffectingChange(HeadlessAgentResult result)
+        {
+            foreach (HostAction a in result.Actions)
+            {
+                if (!IsFileChange(a) || !a.Success || string.IsNullOrWhiteSpace(a.Detail)) continue;
+                foreach (string part in a.Detail.Split(" → "))
+                {
+                    string path = JournalSuffix.Replace(part.Trim(), "");
+                    string name;
+                    try { name = Path.GetFileName(path); } catch { continue; }
+                    if (IsBuildAffecting(name)) return name;
+                }
+            }
+            return null;
+        }
+
+        private static readonly System.Text.RegularExpressions.Regex JournalSuffix = new(
+            @"\s+\((?:new, )?\d+ lines\)$|\s+\(created\)$", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+        /// <summary>Files whose change can alter what the tests build or see.</summary>
+        internal static bool IsBuildAffecting(string fileName)
+        {
+            if (string.IsNullOrEmpty(fileName)) return false;
+            string ext = Path.GetExtension(fileName);
+            return fileName.Equals("global.json", StringComparison.OrdinalIgnoreCase)
+                || (fileName.StartsWith("appsettings", StringComparison.OrdinalIgnoreCase)
+                    && ext.Equals(".json", StringComparison.OrdinalIgnoreCase))
+                || ext.Equals(".csproj", StringComparison.OrdinalIgnoreCase)
+                || ext.Equals(".props", StringComparison.OrdinalIgnoreCase)     // Directory.Build.props, Directory.Packages.props
+                || ext.Equals(".targets", StringComparison.OrdinalIgnoreCase)   // Directory.Build.targets
+                || ext.Equals(".slnx", StringComparison.OrdinalIgnoreCase)
+                || ext.Equals(".sln", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// H-45: a plain build of the working directory right before the baseline test run —
+        /// the resolved build command as-is (no -t:Rebuild: only the exit code matters here, and
+        /// `dotnet test` reuses the output). Null when no build command resolves; the baseline
+        /// then runs as before. Never throws.
+        /// </summary>
+        private async Task<BuildVerification?> BaselineBuildAsync(AgentJob job)
+        {
+            const int BuildTimeoutSeconds = 600;
+            const int TailChars = 2_000;
+
+            if (BaselineBuildOverride is { } baselineOverride)
+                return await baselineOverride(job.WorkingDirectory, job.Cts.Token).ConfigureAwait(false);
+
+            string command;
+            try { command = BuildCommandResolver.Resolve(job.WorkingDirectory, _ => { }); }
+            catch { return null; }
+            if (string.IsNullOrWhiteSpace(command)) return null;
+
+            try
+            {
+                var (output, exitCode) = await new ShellRunner(job.WorkingDirectory).ExecuteAsync(
+                    command, job.Cts.Token, BuildTimeoutSeconds).ConfigureAwait(false);
+                return new BuildVerification
+                {
+                    Command = command,
+                    ExitCode = exitCode,
+                    OutputTail = output.Length <= TailChars ? output : output.Substring(output.Length - TailChars),
+                };
+            }
+            catch (OperationCanceledException)
+            {
+                return null;   // cancelled: no verdict on the tree; the job is ending anyway
+            }
+            catch (Exception ex)
+            {
+                return new BuildVerification { Command = command, ExitCode = -1, OutputTail = $"baseline build crashed: {ex.Message}" };
+            }
+        }
 
         /// <summary>Runs `dotnet test` in the working directory (opt-in via verify_tests),
         /// and derives the total test count from the output it captured itself. Never

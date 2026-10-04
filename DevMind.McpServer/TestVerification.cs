@@ -141,12 +141,24 @@ namespace DevMind.McpServer
 
             int? baseline = null;
             string? baselineWhy;
+            string? baselineBuildError = null;
             var baseRun = job.BaselineTests;
-            if (baseRun == null)
+            if (job.BaselineBuild is { Succeeded: false } baselineBuild)
             {
-                // Reachable only when the before-run was skipped (test_baseline off)
-                // or the agent run never started it (job cancelled while queued).
-                baselineWhy = "baseline run skipped (test_baseline off or job did not reach the before-run)";
+                // H-45: the tree did not compile before the agent started. A `dotnet test` over
+                // it runs only the projects that build, so any count would be partial — none is
+                // taken, and none is reported.
+                baselineWhy = "baseline build failed";
+                baselineBuildError = FirstErrorExcerpt(baselineBuild.OutputTail);
+            }
+            else if (baseRun == null)
+            {
+                // Reachable when the before-run was skipped (test_baseline off), the agent run
+                // never started it (job cancelled while queued), or verify_tests was off and
+                // the run was forced afterwards (H-09) — there was never a before-run then.
+                baselineWhy = job.TestsForcedReason != null
+                    ? "verify_tests forced after the run; no before-run"
+                    : "baseline run skipped (test_baseline off or job did not reach the before-run)";
             }
             else if (baseRun.Total == null)
             {
@@ -181,6 +193,8 @@ namespace DevMind.McpServer
             // test can be legitimate. Report, do not block.
             int? testsRemoved = delta.HasValue ? Math.Max(0, -delta.Value) : null;
 
+            string baselineDetail = baselineBuildError != null ? $"{baselineWhy}: {baselineBuildError}" : baselineWhy ?? "";
+
             string note;
             if (delta.HasValue)
             {
@@ -190,11 +204,13 @@ namespace DevMind.McpServer
             }
             else if (after.Total.HasValue)
             {
-                note = $"harness-measured test counts: {after.Total} after; baseline unavailable ({baselineWhy}) — total reported, no delta claimed";
+                note = $"harness-measured test counts: {after.Total} after; baseline unavailable ({baselineDetail}) — total reported, no delta claimed";
             }
             else
             {
                 note = $"no harness-measured test total ({ReasonForMissingTotal(after)})";
+                if (baselineBuildError != null)
+                    note += $"; baseline unavailable ({baselineDetail})";
             }
 
             return new
@@ -210,7 +226,32 @@ namespace DevMind.McpServer
                 delta,
                 tests_removed = testsRemoved,
                 note,
+                // H-09: why the run happened although verify_tests was off; null when requested.
+                forced_reason = job.TestsForcedReason,
             };
+        }
+
+        private static readonly Regex CompilerError = new(
+            @"\berror\s+[A-Z]{2,}\d+\s*:", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+        /// <summary>
+        /// A short excerpt naming a failed build's first error: the first compiler/MSBuild error
+        /// line ("error CS1002:", "error MSB4018:"), else the first line mentioning "error", else
+        /// the first non-empty line. At most 200 characters.
+        /// </summary>
+        public static string FirstErrorExcerpt(string? output)
+        {
+            const int Max = 200;
+            if (string.IsNullOrWhiteSpace(output)) return "no build output";
+            string[] lines = output.Split('\n');
+            string? pick = null;
+            foreach (string l in lines) if (CompilerError.IsMatch(l)) { pick = l; break; }
+            if (pick == null)
+                foreach (string l in lines) if (l.Contains("error", StringComparison.OrdinalIgnoreCase)) { pick = l; break; }
+            if (pick == null)
+                foreach (string l in lines) if (l.Trim().Length > 0) { pick = l; break; }
+            string text = (pick ?? "").Trim();
+            return text.Length <= Max ? text : text.Substring(0, Max - 1) + "…";
         }
 
         private static string ReasonForMissingTotal(TestVerification run)

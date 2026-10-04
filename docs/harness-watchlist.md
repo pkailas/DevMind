@@ -125,12 +125,33 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **First seen:** 2026-09-23 - job-1658 (VersionMajorMinor bump in Directory.Build.props)
 - **Symptom:** job ran with `verify_tests` off; a hard-coded `"1.0"` assertion in `VersionSchemeTests` went red and stayed unnoticed for two commits.
 - **Proposed fix:** when the job touched build-affecting files (`Directory.Build.props`, `*.csproj`, `appsettings*.json`) turn test verification on regardless of the flag.
-- **Status:** open
+- **Fix (2026-10-04):** with verify_tests off, a Done job that changed a build-affecting file — `Directory.Build.props`,
+  `Directory.Build.targets`, `Directory.Packages.props`, `*.csproj`, `*.props`, `*.targets`, `global.json`, `appsettings*.json`,
+  `*.slnx`, `*.sln` — gets the test verification anyway (same gate otherwise: Done, build verification not failed). The file
+  list comes from the same journal entries HasFileChanges counts (save/append/patch/delete/rename, successful ones; a rename
+  contributes both names). test_verification carries `forced_reason` ("build-affecting file changed: <file>") and
+  baseline_unavailable_reason "verify_tests forced after the run; no before-run"; the tail gets
+  "[job] test verification: forced (build-affecting change: <file>)". A red forced run makes the job stopped_incomplete
+  (test_verification_failed) like a requested one.
+- **H-31/H-43 gate unchanged, on purpose:** a forced green run does NOT excuse an INCOMPLETE: line — `HarnessTestVerified` still
+  requires verify_tests. With verify_tests off the agent was told to run the suite itself, so its declared gap stands.
+  Pinned by `AForcedGreenRun_DoesNotExcuseAnIncompleteDeclaration`.
+- **Tests:** BaselineBuildAndForcedTestsTests (`VerifyTestsOff_ButDirectoryBuildPropsChanged_ForcesTestVerification`,
+  `VerifyTestsOff_AndOnlyACsFileChanged_RunsNoTests`, `VerifyTestsOn_IsUnchanged_NoForcedReason`, `IsBuildAffecting`,
+  `FirstBuildAffectingChange_ReadsTheJournalDetailShapes`).
+- **Status:** fixed, pending deploy - commit "H-45/H-09: no baseline on a broken build; forced test verification on
+  build-affecting changes; close H-10".
 
 ### H-10 - Harness test/build verification can be ambiguous
 - **First seen:** 2026-09-23 - job-1652 result text ended with "build verification: running... test verification: running..." while state was already `done`.
 - **Proposed fix:** don't flip to `done` until verification has finished; include the verification outcome in the same payload.
-- **Status:** open
+- **Confirmed (2026-10-04):** already fixed in code. AgentJobManager's worker holds the job in Running through build and test
+  verification and publishes the terminal state at one place, after both (`job.State = terminalState`); the only other state
+  writes are Queued→Cancelled (cancel before start) and Failed on a crash. The H-09 forced test run sits inside the same block,
+  so it also settles before Done. The tail closes each "running..." line with its verdict (H-43). No code change.
+- **Status:** fixed - covered by AgentJobVerificationRaceTests (`DoneJob_NeverServesTestVerificationNull_MidVerification`,
+  `VerifyBuildTrue_BuildSettlesBeforeTests_AndBothAreFinal`); confirmed in commit "H-45/H-09: no baseline on a broken build;
+  forced test verification on build-affecting changes; close H-10".
 
 ---
 
@@ -626,7 +647,22 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   the continuation's baseline run measured only the Core tests (101) and the result reported `delta +747`. The real change was +17.
 - **Fix:** if the baseline build fails, set `baseline_unavailable_reason: "baseline build failed"` and `delta: null` instead of
   reporting a partial count.
-- **Status:** open.
+- **Done (2026-10-04):** the harness now runs a plain build (the resolved build command, no -t:Rebuild) right before the baseline
+  `dotnet test`. If it fails, the baseline test run is skipped: baseline_total null, delta null, baseline_unavailable_reason
+  "baseline build failed", and the note carries the first error ("baseline build failed: <file>(l,c): error CS0103: ...").
+  The tail says "[job] test baseline: skipped — baseline build failed (exit N: <first error>)". No build command resolved →
+  the baseline runs as before.
+- **Detection choice:** an explicit build, not a scan of the test run's output. `dotnet test` exits non-zero for a failing
+  test exactly as for a compile error, and a failing test's message can quote compiler text (DevMind's own tests assert on
+  "error CS..." strings), so an output scan could take a red test for a broken build. A build never runs tests. RunTestSuiteAsync
+  does not build first (H-11 changed run_tests, not the harness suite run); `dotnet test` then reuses the build's output, so
+  the extra cost is an up-to-date check.
+- **Tests:** BaselineBuildAndForcedTestsTests (`BaselineOnATreeThatDoesNotCompile_IsNotTaken_NoPartialCount`,
+  `ABaselineWithFailingTests_OnATreeThatBuilds_IsARealCount` — its failure message quotes "error CS0103",
+  `FirstErrorExcerpt_NamesTheCompilerError`). Mutation check: disabling the build-failed branch fails
+  `BaselineOnATreeThatDoesNotCompile_IsNotTaken_NoPartialCount`.
+- **Status:** fixed, pending deploy - commit "H-45/H-09: no baseline on a broken build; forced test verification on
+  build-affecting changes; close H-10".
 
 ### H-46 - Nudge when the agent reads build output to explain a failure
 - **First seen:** 2026-10-01, job-1859: twice spent stretches grepping `*.deps.json` and listing bin/ while the cause was a
