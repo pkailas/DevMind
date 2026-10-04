@@ -623,7 +623,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Fix:** the shell guard (which already blocks Stop-Process) refuses `git stash|checkout|switch|reset|clean|restore|add|commit|
   rebase|merge` in delegated jobs unless allow_commit is set, with a message: "read-only git only (status, diff, log, show)".
   Prompt rule added 2026-10-01.
-- **Status:** fixed, pending deploy - commit "H-48: shell guard blocks mutating git in delegated jobs". Rule: `GitWriteGuard.Classify`
+- **Status:** fixed, deployed 1.0.574 (2026-10-04) - commit "H-48: shell guard blocks mutating git in delegated jobs". Rule: `GitWriteGuard.Classify`
   (one git lexer, now with an `allowCommit` flag threaded through `IsBlockedHeadlessCommand` and `BufferedAgenticHost.AllowCommit`,
   set from the job's allow_commit) refuses git subcommands that change the repo, index, refs or working tree: stash (not `stash
   list|show`), checkout, switch, reset, clean, restore, add, rm, mv, commit, rebase, merge, cherry-pick, revert, am, apply, pull,
@@ -992,7 +992,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Proposed fix:** only treat a brief item as optional when "optional" qualifies the task itself ("optional:", "(optional)",
   "if time permits", "nice to have" at the start of an item), not when it is an adjective on a noun inside the item; or have
   the nudge ask the agent to confirm instead of instructing it to drop the item.
-- **Status:** fixed, pending deploy - commit "H-62: optional-work guard only fires on item-level qualifiers". Rule: a
+- **Status:** fixed, deployed 1.0.574 (2026-10-04) - commit "H-62: optional-work guard only fires on item-level qualifiers". Rule: a
   brief item (one SplitSentences sentence) is optional only when "optional" is its first word (after a "2." / "b)" /
   "Step N:" prefix, or as "Optional:" after a short label), or it carries "(optional)" / "[optional]", "if quick", "nice
   to have", "skip this if" or "if time permits"; "optional" as an adjective on a noun no longer counts, and the nudge now
