@@ -76,9 +76,14 @@ the job pattern in `AgentTaskTools` / `AgentJobManager`:
   thrash. The queue is in-process; a server restart loses it (acceptable — the
   client re-submits). `devmind_task_result` falls back to the on-disk
   transcript when the job is no longer in memory.
-- A `_active.json` marker is written while a job runs; on status queries,
-  `CheckStaleActiveMarker` detects jobs that died mid-run (server killed) and
-  reports them honestly instead of showing them running forever.
+- A per-job `_active_<job_id>.json` marker is written while the job runs and
+  removed when it ends; each server writes and clears only its own jobs' markers
+  (several servers share the tasks folder). On startup, and on a status/result
+  query for an unknown job, markers whose process is gone (pid dead, or reused —
+  the marker records the process start time) are swept: the job gets a
+  `stopped_incomplete` / `server_restart` result sidecar if it has none, so it is
+  reported as having died with its server instead of showing as running forever.
+  A legacy `_active.json` from an older server is read, never written.
 - Display state maps to caller trust: `done` only when the work is actually
   trustworthy — a depth-capped run or failed build verification surfaces as
   `stopped_incomplete`.

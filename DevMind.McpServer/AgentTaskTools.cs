@@ -138,90 +138,93 @@ namespace DevMind.McpServer
             [Description("Most auto-extensions per job turn (default 2, range 0-10). Continuations inherit this setting.")] int? max_extensions = null,
             CancellationToken cancellationToken = default)
         {
-            if (string.IsNullOrWhiteSpace(prompt))
-                return Err("prompt is required.");
-            if (string.IsNullOrWhiteSpace(working_dir) || !Path.IsPathRooted(working_dir))
-                return Err("working_dir must be an absolute path.");
-            if (!Directory.Exists(working_dir))
-                return Err($"working_dir does not exist: {working_dir}");
-            if (LooksLikeRepositoryContainer(working_dir))
-                return Err(
-                    $"working_dir looks like a folder that contains repositories, not a repository: {working_dir}. " +
-                    "An agent rooted here has no project to build and no solution to search, and its relative paths " +
-                    "resolve against a tree holding none of its work. Pass the specific repository instead.");
-            string baseline = string.IsNullOrWhiteSpace(test_baseline) ? "before-run" : test_baseline;
-            if (baseline != "before-run" && baseline != "off")
-                return Err($"test_baseline must be \"before-run\" or \"off\" (got \"{test_baseline}\").");
-
-            string? effortError = ResolveReasoningEffort(reasoning_effort, out string effort);
-            if (effortError != null)
-                return Err(effortError);
-
-            // Resolved now, not when the job runs: a typo is the caller's to fix, while they are
-            // still here. Reads devmind.json only — nothing starts until the job does.
-            IReadOnlyList<McpServerConfig> mcpServers = Array.Empty<McpServerConfig>();
-            if (mcp_servers is { Length: > 0 })
+            return await TracedAsync("devmind_task_start", null, async () =>
             {
-                var resolved = AgentJobManager.ResolveMcpServers(
-                    mcp_servers, McpServerConfig.Load(msg => Console.Error.WriteLine($"[McpServer] Warning: {msg}")),
-                    out string? mcpError);
-                if (resolved == null)
-                    return Err(mcpError!);
-                mcpServers = resolved;
-            }
+                if (string.IsNullOrWhiteSpace(prompt))
+                    return Err("prompt is required.");
+                if (string.IsNullOrWhiteSpace(working_dir) || !Path.IsPathRooted(working_dir))
+                    return Err("working_dir must be an absolute path.");
+                if (!Directory.Exists(working_dir))
+                    return Err($"working_dir does not exist: {working_dir}");
+                if (LooksLikeRepositoryContainer(working_dir))
+                    return Err(
+                        $"working_dir looks like a folder that contains repositories, not a repository: {working_dir}. " +
+                        "An agent rooted here has no project to build and no solution to search, and its relative paths " +
+                        "resolve against a tree holding none of its work. Pass the specific repository instead.");
+                string baseline = string.IsNullOrWhiteSpace(test_baseline) ? "before-run" : test_baseline;
+                if (baseline != "before-run" && baseline != "off")
+                    return Err($"test_baseline must be \"before-run\" or \"off\" (got \"{test_baseline}\").");
 
-            // Fail fast when the model server is down — better than a queued job that
-            // dies minutes later.
-            string? health = await ProbeModelServerAsync(cancellationToken).ConfigureAwait(false);
-            if (health != null)
-                return Err(health);
+                string? effortError = ResolveReasoningEffort(reasoning_effort, out string effort);
+                if (effortError != null)
+                    return Err(effortError);
 
-            int maxDepth = ClampMaxDepth(max_depth, out string? depthNotice);
-
-            var job = _jobs.Start(
-                prompt, working_dir,
-                maxDepth: maxDepth,
-                timeoutMinutes: Math.Clamp(timeout_minutes ?? DefaultStallMinutes, 1, 240),
-                allowCommit: allow_commit ?? false,
-                verifyBuild: verify_build ?? true,
-                // show_thinking and reasoning_effort each imply think: asking to see, or to
-                // tune, reasoning that is never generated would be a silent no-op.
-                think: (think ?? false) || show_thinking == true || !string.IsNullOrWhiteSpace(reasoning_effort),
-                verifyTests: verify_tests ?? false,
-                noExecute: no_execute ?? false,
-                runTestBaseline: baseline != "off",
-                showThinking: show_thinking,
-                mcpServers: mcpServers,
-                reasoningEffort: effort,
-                autoThink: auto_think ?? true,
-                autoExtend: auto_extend ?? true,
-                maxExtensions: Math.Clamp(max_extensions ?? 2, 0, 10));
-
-            const string startHint =
-                "Poll devmind_task_status with this job_id; fetch devmind_task_result when done.";
-
-            return JsonSerializer.Serialize(depthNotice == null
-                ? (object)new
+                // Resolved now, not when the job runs: a typo is the caller's to fix, while they are
+                // still here. Reads devmind.json only — nothing starts until the job does.
+                IReadOnlyList<McpServerConfig> mcpServers = Array.Empty<McpServerConfig>();
+                if (mcp_servers is { Length: > 0 })
                 {
-                    job_id = job.Id,
-                    state = "queued",
-                    queue_position = _jobs.QueuePosition(job),
-                    endpoint = _jobs.EndpointUrl,
-                    max_depth = maxDepth,
-                    reasoning_effort = job.ReasoningEffort,
-                    hint = startHint,
+                    var resolved = AgentJobManager.ResolveMcpServers(
+                        mcp_servers, McpServerConfig.Load(msg => Console.Error.WriteLine($"[McpServer] Warning: {msg}")),
+                        out string? mcpError);
+                    if (resolved == null)
+                        return Err(mcpError!);
+                    mcpServers = resolved;
                 }
-                : new
-                {
-                    job_id = job.Id,
-                    state = "queued",
-                    queue_position = _jobs.QueuePosition(job),
-                    endpoint = _jobs.EndpointUrl,
-                    max_depth = maxDepth,
-                    reasoning_effort = job.ReasoningEffort,
-                    max_depth_notice = depthNotice,
-                    hint = startHint,
-                }, JsonOpts);
+
+                // Fail fast when the model server is down — better than a queued job that
+                // dies minutes later.
+                string? health = await ProbeModelServerAsync(cancellationToken).ConfigureAwait(false);
+                if (health != null)
+                    return Err(health);
+
+                int maxDepth = ClampMaxDepth(max_depth, out string? depthNotice);
+
+                var job = _jobs.Start(
+                    prompt, working_dir,
+                    maxDepth: maxDepth,
+                    timeoutMinutes: Math.Clamp(timeout_minutes ?? DefaultStallMinutes, 1, 240),
+                    allowCommit: allow_commit ?? false,
+                    verifyBuild: verify_build ?? true,
+                    // show_thinking and reasoning_effort each imply think: asking to see, or to
+                    // tune, reasoning that is never generated would be a silent no-op.
+                    think: (think ?? false) || show_thinking == true || !string.IsNullOrWhiteSpace(reasoning_effort),
+                    verifyTests: verify_tests ?? false,
+                    noExecute: no_execute ?? false,
+                    runTestBaseline: baseline != "off",
+                    showThinking: show_thinking,
+                    mcpServers: mcpServers,
+                    reasoningEffort: effort,
+                    autoThink: auto_think ?? true,
+                    autoExtend: auto_extend ?? true,
+                    maxExtensions: Math.Clamp(max_extensions ?? 2, 0, 10));
+
+                const string startHint =
+                    "Poll devmind_task_status with this job_id; fetch devmind_task_result when done.";
+
+                return JsonSerializer.Serialize(depthNotice == null
+                    ? (object)new
+                    {
+                        job_id = job.Id,
+                        state = "queued",
+                        queue_position = _jobs.QueuePosition(job),
+                        endpoint = _jobs.EndpointUrl,
+                        max_depth = maxDepth,
+                        reasoning_effort = job.ReasoningEffort,
+                        hint = startHint,
+                    }
+                    : new
+                    {
+                        job_id = job.Id,
+                        state = "queued",
+                        queue_position = _jobs.QueuePosition(job),
+                        endpoint = _jobs.EndpointUrl,
+                        max_depth = maxDepth,
+                        reasoning_effort = job.ReasoningEffort,
+                        max_depth_notice = depthNotice,
+                        hint = startHint,
+                    }, JsonOpts);
+            }).ConfigureAwait(false);
         }
 
         [McpServerTool(Name = "devmind_task_continue")]
@@ -247,54 +250,57 @@ namespace DevMind.McpServer
             [Description("Stream the model's think blocks into the job's transcript as it reasons. Omitted = inherit the parent task's setting, including an inherited omission (the DEVMIND_TASK_SHOW_THINKING environment variable then applies, as for the parent). Explicit true or false takes precedence over the environment variable for this continuation. DISPLAY only — requires the parent's `think` (which the continuation also inherits) to have any effect. To turn reasoning on for the continuation, start a fresh task with `think` and `show_thinking` set.")] bool? show_thinking = null,
             CancellationToken cancellationToken = default)
         {
-            string baseline = string.IsNullOrWhiteSpace(test_baseline) ? "before-run" : test_baseline;
-            if (baseline != "before-run" && baseline != "off")
-                return Err($"test_baseline must be \"before-run\" or \"off\" (got \"{test_baseline}\").");
+            return await TracedAsync("devmind_task_continue", job_id, async () =>
+            {
+                string baseline = string.IsNullOrWhiteSpace(test_baseline) ? "before-run" : test_baseline;
+                if (baseline != "before-run" && baseline != "off")
+                    return Err($"test_baseline must be \"before-run\" or \"off\" (got \"{test_baseline}\").");
 
-            string? health = await ProbeModelServerAsync(cancellationToken).ConfigureAwait(false);
-            if (health != null)
-                return Err(health);
+                string? health = await ProbeModelServerAsync(cancellationToken).ConfigureAwait(false);
+                if (health != null)
+                    return Err(health);
 
-            int maxDepth = ClampMaxDepth(max_depth, out string? depthNotice);
+                int maxDepth = ClampMaxDepth(max_depth, out string? depthNotice);
 
-            var job = _jobs.Continue(
-                job_id,
-                string.IsNullOrWhiteSpace(prompt) ? "Continue the task from where you left off." : prompt,
-                maxDepth: maxDepth,
-                timeoutMinutes: Math.Clamp(timeout_minutes ?? DefaultStallMinutes, 1, 240),
-                verifyBuild: verify_build ?? true,
-                out string error,
-                verifyTests: verify_tests ?? false,
-                noExecute: no_execute,
-                runTestBaseline: baseline != "off",
-                showThinking: show_thinking);
+                var job = _jobs.Continue(
+                    job_id,
+                    string.IsNullOrWhiteSpace(prompt) ? "Continue the task from where you left off." : prompt,
+                    maxDepth: maxDepth,
+                    timeoutMinutes: Math.Clamp(timeout_minutes ?? DefaultStallMinutes, 1, 240),
+                    verifyBuild: verify_build ?? true,
+                    out string error,
+                    verifyTests: verify_tests ?? false,
+                    noExecute: no_execute,
+                    runTestBaseline: baseline != "off",
+                    showThinking: show_thinking);
 
-            if (job == null)
-                return Err(error);
+                if (job == null)
+                    return Err(error);
 
-            const string continueHint =
-                "Poll devmind_task_status with the NEW job_id; the conversation context carried over.";
+                const string continueHint =
+                    "Poll devmind_task_status with the NEW job_id; the conversation context carried over.";
 
-            return JsonSerializer.Serialize(depthNotice == null
-                ? (object)new
-                {
-                    job_id = job.Id,
-                    parent_job_id = job_id,
-                    state = "queued",
-                    queue_position = _jobs.QueuePosition(job),
-                    max_depth = maxDepth,
-                    hint = continueHint,
-                }
-                : new
-                {
-                    job_id = job.Id,
-                    parent_job_id = job_id,
-                    state = "queued",
-                    queue_position = _jobs.QueuePosition(job),
-                    max_depth = maxDepth,
-                    max_depth_notice = depthNotice,
-                    hint = continueHint,
-                }, JsonOpts);
+                return JsonSerializer.Serialize(depthNotice == null
+                    ? (object)new
+                    {
+                        job_id = job.Id,
+                        parent_job_id = job_id,
+                        state = "queued",
+                        queue_position = _jobs.QueuePosition(job),
+                        max_depth = maxDepth,
+                        hint = continueHint,
+                    }
+                    : new
+                    {
+                        job_id = job.Id,
+                        parent_job_id = job_id,
+                        state = "queued",
+                        queue_position = _jobs.QueuePosition(job),
+                        max_depth = maxDepth,
+                        max_depth_notice = depthNotice,
+                        hint = continueHint,
+                    }, JsonOpts);
+            }).ConfigureAwait(false);
         }
 
         [McpServerTool(Name = "devmind_task_status")]
@@ -337,6 +343,10 @@ namespace DevMind.McpServer
             if (job == null)
             {
                 var (diedMidRun, startedAt) = CheckStaleActiveMarker(job_id);
+                // H-03: the sweep above turned a dead server's marker into a server_restart
+                // sidecar — report the job from it, with the note that it died with the server.
+                if (SidecarSaysServerRestart(job_id))
+                    return TranscriptFallback(job_id);
                 if (diedMidRun)
                     return Err(
                         $"Job {job_id} was RUNNING when its server process died or was killed" +
@@ -674,43 +684,97 @@ namespace DevMind.McpServer
             => JsonSerializer.Serialize(new { error = message }, JsonOpts);
 
         /// <summary>
-        /// Detects a job that died mid-run: the _active.json marker is written while a
-        /// job executes and cleared on every graceful finish — so a marker naming this
-        /// job whose pid is no longer alive means the server was killed or crashed
-        /// WHILE the job was running. Turns "unknown job_id" into an honest answer.
+        /// Detects a job that died mid-run. Each running job has its own marker
+        /// (_active_&lt;id&gt;.json, cleared on every graceful finish), so a marker whose owning
+        /// process is gone means the server was killed or crashed WHILE the job ran. The H-03
+        /// sweep runs first: it records such a job as a server_restart result sidecar and
+        /// removes the marker. A marker it could not remove still reports the death here.
         /// </summary>
         private static (bool DiedMidRun, string? StartedAtUtc) CheckStaleActiveMarker(string jobId)
         {
+            try { ActiveJobMarkers.SweepDeadMarkers(); } catch { /* best-effort */ }
             try
             {
-                string markerPath = Path.Combine(AgentJobManager.TranscriptDir, "_active.json");
-                if (!File.Exists(markerPath))
-                    return (false, null);
-
-                using var doc = JsonDocument.Parse(File.ReadAllText(markerPath));
-                var root = doc.RootElement;
-                if (!root.TryGetProperty("job_id", out var idEl)
-                    || !string.Equals(idEl.GetString(), jobId, StringComparison.OrdinalIgnoreCase))
-                {
-                    return (false, null);
-                }
-
-                int pid = root.TryGetProperty("pid", out var pidEl) ? pidEl.GetInt32() : 0;
-                bool alive = false;
-                try
-                {
-                    alive = pid > 0 && !System.Diagnostics.Process.GetProcessById(pid).HasExited;
-                }
-                catch { /* GetProcessById throws when the pid is gone — that IS the signal */ }
-                if (alive)
-                    return (false, null); // another live server process is running it right now
-
-                string? started = root.TryGetProperty("started_at_utc", out var s) ? s.GetString() : null;
-                return (true, started);
+                var marker = ActiveJobMarkers.ReadAll().FirstOrDefault(
+                    m => string.Equals(m.JobId, jobId, StringComparison.OrdinalIgnoreCase));
+                if (marker == null || ActiveJobMarkers.IsOwnerAlive(marker))
+                    return (false, null); // no marker, or another live server is running it now
+                return (true, marker.StartedAtUtc);
             }
             catch
             {
                 return (false, null);
+            }
+        }
+
+        /// <summary>True when the job's result sidecar records that it died with its server (H-03).</summary>
+        private static bool SidecarSaysServerRestart(string jobId)
+        {
+            try
+            {
+                string path = ActiveJobMarkers.SidecarPath(jobId);
+                if (!File.Exists(path)) return false;
+                using var doc = JsonDocument.Parse(File.ReadAllText(path));
+                return doc.RootElement.TryGetProperty("incomplete_reasons", out var reasons)
+                    && reasons.ValueKind == JsonValueKind.Array
+                    && reasons.EnumerateArray().Any(r => r.ValueKind == JsonValueKind.String
+                        && r.GetString() == ActiveJobMarkers.ServerRestartReason);
+            }
+            catch { return false; }
+        }
+
+        // ── Tool-call tracing (H-02) ─────────────────────────────────────────
+        // mcp.tool.begin / mcp.tool.end around devmind_task_start and _continue, through the
+        // server's existing trace (DevMind.Trace; DEVMIND_TRACE_* env vars). A future hang
+        // then shows whether the call reached this process at all. The sink is a seam so a
+        // test can observe the events; tracing must never break a tool call.
+
+        internal static Action<string, string, IDictionary<string, object?>> TraceSink =
+            (level, name, data) => DevMind.Trace.Event(level, name, data!);
+
+        private static void EmitTrace(string name, IDictionary<string, object?> data)
+        {
+            try { TraceSink("info", name, data); } catch { /* never break the tool */ }
+        }
+
+        private static async Task<string> TracedAsync(string tool, string? jobIdIn, Func<Task<string>> body)
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            EmitTrace("mcp.tool.begin", new Dictionary<string, object?> { ["tool"] = tool, ["job_id"] = jobIdIn });
+
+            string? result = null;
+            string? thrown = null;
+            try
+            {
+                result = await body().ConfigureAwait(false);
+                return result;
+            }
+            catch (Exception ex)
+            {
+                thrown = $"{ex.GetType().Name}: {ex.Message}";
+                throw;
+            }
+            finally
+            {
+                string? jobId = null, error = thrown;
+                if (result != null)
+                {
+                    try
+                    {
+                        using var doc = JsonDocument.Parse(result);
+                        if (doc.RootElement.TryGetProperty("job_id", out var id)) jobId = id.GetString();
+                        if (doc.RootElement.TryGetProperty("error", out var err)) error = err.GetString();
+                    }
+                    catch { /* not JSON — leave both null */ }
+                }
+                EmitTrace("mcp.tool.end", new Dictionary<string, object?>
+                {
+                    ["tool"] = tool,
+                    ["job_id"] = jobId,
+                    ["parent_job_id"] = tool == "devmind_task_continue" ? jobIdIn : null,
+                    ["error"] = error,
+                    ["elapsed_ms"] = sw.ElapsedMilliseconds,
+                });
             }
         }
 
@@ -732,18 +796,29 @@ namespace DevMind.McpServer
         {
             const int TailChars = 4_000;
 
+            // Sweep first (H-03): a job whose server died under it gets its server_restart
+            // sidecar now, so the sidecar branch below can serve it.
+            var (diedMidRun, startedAtUtc) = CheckStaleActiveMarker(jobId);
+
             // 1) Result sidecar — authoritative.
             try
             {
                 string sidecarPath = Path.Combine(AgentJobManager.TranscriptDir, $"{jobId}.result.json");
                 if (File.Exists(sidecarPath))
                 {
+                    bool diedWithServer = SidecarSaysServerRestart(jobId);
                     using var doc = JsonDocument.Parse(File.ReadAllText(sidecarPath));
                     return JsonSerializer.Serialize(new
                     {
-                        recovered_from = "result sidecar (server restarted or job evicted — this is the persisted final result)",
+                        recovered_from = diedWithServer
+                            ? "result sidecar written when this job's dead server was detected (it never finished)"
+                            : "result sidecar (server restarted or job evicted — this is the persisted final result)",
                         can_continue = false,
-                        note = "The conversation is NOT continuable across restarts — start a fresh task with a continuation brief.",
+                        note = diedWithServer
+                            ? "This job DIED WITH ITS SERVER: the server process exited while the job was running, so " +
+                              "there is no final answer, action journal or verification. It is NOT continuable — start a " +
+                              "fresh task with a continuation brief (the transcript_path below shows how far it got)."
+                            : "The conversation is NOT continuable across restarts — start a fresh task with a continuation brief.",
                         result = doc.RootElement.Clone(),
                     }, JsonOpts);
                 }
@@ -758,8 +833,6 @@ namespace DevMind.McpServer
                     .ToArray();
             }
             catch { matches = Array.Empty<FileInfo>(); }
-
-            var (diedMidRun, startedAtUtc) = CheckStaleActiveMarker(jobId);
 
             if (matches.Length == 0)
             {

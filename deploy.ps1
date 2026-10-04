@@ -194,41 +194,50 @@ to discard them (a .bak is kept). Nothing was published.
     }
 
     # ---- 3. refuse to kill a live job ----------------------------------------
-    # AgentJobManager writes %TEMP%\devmind\tasks\_active.json for exactly as long as a
-    # delegated job is executing, and its own comment (AgentJobManager.cs:714) records
-    # why it exists: a deploy once killed a live job by guessing from transcript silence
-    # and CPU load, both of which lie - think blocks are transcript-silent and generation
-    # is GPU-bound. The marker is the positive signal, so check it before stopping anything.
+    # AgentJobManager writes one marker per running delegated job,
+    # %TEMP%\devmind\tasks\_active_<job_id>.json, for exactly as long as the job is executing
+    # (H-66; older servers wrote a single _active.json, still matched below). It exists because
+    # a deploy once killed a live job by guessing from transcript silence and CPU load, both of
+    # which lie - think blocks are transcript-silent and generation is GPU-bound. The markers
+    # are the positive signal, so check every one before stopping anything.
     Step "Checking for a running delegated job..."
     $tasksDir = if ($env:DEVMIND_TASKS_DIR) { $env:DEVMIND_TASKS_DIR } else { Join-Path $env:TEMP 'devmind\tasks' }
-    $marker   = Join-Path $tasksDir '_active.json'
+    $markers  = @(Get-ChildItem -Path $tasksDir -Filter '_active*.json' -File -ErrorAction SilentlyContinue)
 
-    if (-not (Test-Path $marker)) {
-        Write-Host "  none running" -ForegroundColor DarkGray
-    } else {
+    $live = @()
+    foreach ($marker in $markers) {
         $active = $null
-        try { $active = Get-Content $marker -Raw | ConvertFrom-Json } catch { }
+        try { $active = Get-Content $marker.FullName -Raw | ConvertFrom-Json } catch { }
 
         if (-not $active -or -not $active.pid) {
             # Unreadable marker: treat as stale rather than blocking forever on a corrupt file.
-            Write-Host "  marker present but unreadable - treating as stale: $marker" -ForegroundColor Yellow
+            Write-Host "  marker present but unreadable - treating as stale: $($marker.FullName)" -ForegroundColor Yellow
+            continue
         }
-        else {
-            # A marker outlives a crashed server, so the pid decides, not the file's existence.
-            $owner = Get-Process -Id $active.pid -ErrorAction SilentlyContinue
-            if (-not $owner) {
-                Write-Host ("  stale marker from dead PID {0} (job {1}) - ignoring" -f $active.pid, $active.job_id) -ForegroundColor DarkGray
-            }
-            elseif (-not $Force) {
-                Write-Host ("  job      : {0}" -f $active.job_id)       -ForegroundColor Yellow
-                Write-Host ("  pid      : {0} ({1})" -f $active.pid, $owner.ProcessName) -ForegroundColor Yellow
-                Write-Host ("  started  : {0} UTC" -f $active.started_at_utc) -ForegroundColor Yellow
-                Write-Host ("  work dir : {0}" -f $active.working_dir)  -ForegroundColor Yellow
-                Fail "a delegated job is running. Stopping the server now would kill it mid-task. Wait for it to finish, or re-run with -Force to kill it deliberately."
-            }
-            else {
-                Write-Host ("  -Force: killing live job {0} (PID {1})" -f $active.job_id, $active.pid) -ForegroundColor Red
-            }
+        # A marker outlives a crashed server, so the pid decides, not the file's existence.
+        $owner = Get-Process -Id $active.pid -ErrorAction SilentlyContinue
+        if (-not $owner) {
+            Write-Host ("  stale marker from dead PID {0} (job {1}) - ignoring" -f $active.pid, $active.job_id) -ForegroundColor DarkGray
+            continue
+        }
+        $live += [pscustomobject]@{ Marker = $active; Owner = $owner }
+    }
+
+    if ($live.Count -eq 0) {
+        Write-Host "  none running" -ForegroundColor DarkGray
+    }
+    elseif (-not $Force) {
+        foreach ($l in $live) {
+            Write-Host ("  job      : {0}" -f $l.Marker.job_id)       -ForegroundColor Yellow
+            Write-Host ("  pid      : {0} ({1})" -f $l.Marker.pid, $l.Owner.ProcessName) -ForegroundColor Yellow
+            Write-Host ("  started  : {0} UTC" -f $l.Marker.started_at_utc) -ForegroundColor Yellow
+            Write-Host ("  work dir : {0}" -f $l.Marker.working_dir)  -ForegroundColor Yellow
+        }
+        Fail "a delegated job is running. Stopping the server now would kill it mid-task. Wait for it to finish, or re-run with -Force to kill it deliberately."
+    }
+    else {
+        foreach ($l in $live) {
+            Write-Host ("  -Force: killing live job {0} (PID {1})" -f $l.Marker.job_id, $l.Marker.pid) -ForegroundColor Red
         }
     }
 

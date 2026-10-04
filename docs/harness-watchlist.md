@@ -43,13 +43,41 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Suspect:** the continuation path blocks before enqueueing - possibly the `verify_tests` + `test_baseline: before-run` default running the full suite synchronously inside the call while the parent's tree did not compile.
 - **Proposed fix:** enqueue first and return the new job id immediately; run any baseline inside the job. Add `mcp.tool.begin/end` trace events around continue.
 - **Workaround:** start a fresh task with a continuation brief.
-- **Status:** open
+- **Investigation (2026-10-04):** the suspect does not hold in current code. `TaskContinue` (AgentTaskTools.cs) awaits only
+  `ProbeModelServerAsync` (HttpClient Timeout 5 s) before `AgentJobManager.Continue`, which takes the lock, sets
+  `parent.ContinuedByJobId` and enqueues synchronously; the test baseline already runs inside the job on the worker, not in the
+  call. A call that reached the manager could not stall for 4 minutes and could not leave `continued_by` null. The Sep 23
+  symptom (4-min timeout, parent `continued_by: null`) therefore means the call never reached the manager — consistent with the
+  client-side MCP stall seen when the Claude Desktop conversation is not in the foreground.
+- **Tracing added:** `mcp.tool.begin` / `mcp.tool.end` around `devmind_task_start` and `devmind_task_continue` through the
+  existing `DevMind.Trace` JSONL trace (`DEVMIND_TRACE_ENABLED=true` + `DEVMIND_TRACE_DIR`): tool, job_id (continue: the parent
+  on begin), the new job_id or the error on end, elapsed_ms. A future hang shows whether the call arrived at all. Tests:
+  `ActiveJobMarkerTests.StartAndContinue_EmitBeginAndEnd_OnSuccess` / `_OnError`.
+- **Status:** closed - not reproducible in current code; evidence above; tracing added (commit "H-03/H-66: per-job active
+  markers and dead-server sweep; H-02 tracing").
 
 ### H-03 - Server restart mid-job makes the job non-continuable
 - **First seen:** 2026-09-23 - job-1653
 - **Symptom:** result came back "recovered from result sidecar ... NOT continuable across restarts". The restart happened while the job was running.
 - **Proposed fix:** persist enough conversation state to resume, or at minimum mark the result `stopped_incomplete: server_restart` with the last iteration number so the driver knows why.
-- **Status:** open
+- **Fix (2026-10-04, the minimum):** the conversation is still not resumable; the job is now reported honestly.
+  - On AgentJobManager startup, and lazily when devmind_task_status / _result is asked about a job this process does not know,
+    `ActiveJobMarkers.SweepDeadMarkers` looks at every active-job marker whose owner is dead. If the job has no result sidecar it
+    writes one: state `stopped_incomplete`, incomplete_reasons `["server_restart"]`, error "server process <pid> exited while
+    the job was running", started_at_utc from the marker, ended_at_utc = detection time (with `ended_at_note` saying so),
+    working_dir, transcript_path, can_continue false, and `iterations` = the last `[AGENTIC] Iteration N/M — used / ctx (p%)`
+    line in the transcript (that exact shape only; null when none can be read — never a guess). Then it deletes the marker. A
+    job that already wrote its own sidecar keeps it unchanged. A marker whose owner is alive is never touched.
+  - status / result for such a job serve the sidecar with the note "This job DIED WITH ITS SERVER ... NOT continuable — start a
+    fresh task with a continuation brief".
+  - Pid reuse: markers record the owner's process start time (`process_start_utc`); a live pid whose start time differs by more
+    than 2 s is an unrelated process and the marker counts as dead. Legacy markers without the field use the pid check alone.
+  - Depends on H-66 (per-job markers); before it, a crash after another process cleared the shared marker left nothing to detect.
+  - Tests: ActiveJobMarkerTests (`Sweep_DeadMarkerWithNoSidecar_...`, `Sweep_NoReadableIterationLine_LeavesIterationsNull`,
+    `Sweep_LeavesALiveProcessesMarkerUntouched`, `Sweep_DeadMarkerWithAnExistingSidecar_...`,
+    `APidReusedByAnUnrelatedProcess_CountsAsDead`, `ParseLastIteration_RequiresTheDriversExactLine`,
+    `StatusAndResult_ForAJobThatDiedWithItsServer_ReportItFromTheSidecar`).
+- **Status:** fixed, pending deploy - commit "H-03/H-66: per-job active markers and dead-server sweep; H-02 tracing".
 
 ### H-04 - Patch anchor lands inside the wrong member / duplicates a method
 - **First seen:** 2026-09-23 - job-1652 (AdminUiPagesTests.cs)
@@ -1083,3 +1111,24 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
     `Converging_IsExtended_FinishUpOnlyAtTheNewCap_AndMaxExtensionsHonoured`.
 - **Status:** fixed, pending deploy - commit b8c47aa (auto_extend / max_extensions, DepthAutoExtender + ConvergenceTracker),
   override follow-up "Depth auto-extend: an override steer resets the convergence window instead of disarming".
+
+### H-66 - The active-job marker is shared across server processes
+- **Found:** 2026-10-04, while fixing H-03 (code review, no incident id). Several McpServer processes run on BEAST at once (the
+  `_idAllocLock` comment records three live), all writing the same `TranscriptDir`. There was ONE marker, `_active.json`.
+- **Bug:** process A finishing a job deleted process B's marker (job end and graceful shutdown both deleted the one file). B's
+  running job then read as "not active elsewhere", so A's patch-backup sweep at startup (Program.cs, the only caller of
+  `IsJobActiveElsewhere`) could delete backups B's job still owned, deploy.ps1 and dm-watch reported idle while B ran, and a job
+  that died after its marker was clobbered was never detected (H-03). A second job start also overwrote a running job's marker.
+- **Fix:** one marker per job, `{TranscriptDir}\_active_<job_id>.json` (same fields, plus `process_start_utc` for H-03's pid-reuse
+  check), in the new `ActiveJobMarkers`. A job writes and clears only its own; graceful shutdown clears only this manager's jobs.
+  `IsJobActiveElsewhere()` = any marker whose owner is alive and is not this process. A legacy `_active.json` is still read
+  (treated like any other marker) and never written. deploy.ps1 (refuses to stop a server with a live job) and dist\dm-watch.ps1
+  (BUSY header) now read every `_active*.json`, which also matches markers from older servers; docs\MCP-Developer-Guide.md
+  updated.
+- **Tests:** ActiveJobMarkerTests (`JobEnd_ClearsOnlyItsOwnMarker_NeverAnotherServersMarker` — a real job ends next to a live
+  other process's marker, and a second manager starts up beside it; `IsJobActiveElsewhere_AnotherLiveProcessesMarker_IsTrue` /
+  `_OwnProcessesMarker_IsFalse` / `_DeadProcessesMarker_IsFalse`; `ALegacyMarker_IsRead_LikeAnyOther`;
+  `ALegacyMarker_IsNeverWritten`). The existing JobEndPatchBackupTests marker tests still pass on the legacy file name.
+  Mutation check: making a job's end delete every `_active*.json` fails `JobEnd_ClearsOnlyItsOwnMarker_NeverAnotherServersMarker`.
+- **Status:** fixed, pending deploy - commit "H-03/H-66: per-job active markers and dead-server sweep; H-02 tracing". deploy.ps1
+  and dm-watch.ps1 changes take effect on the next run (dm-watch from dist\ is the live copy).

@@ -507,6 +507,10 @@ namespace DevMind.McpServer
             // (WriteActiveMarker, WriteResultSidecar) are themselves best-effort, so a
             // failure here must never take the manager down with it.
             try { Directory.CreateDirectory(TranscriptDir); } catch { /* best-effort */ }
+            // H-03: a job whose server died under it left its marker behind. Record it as
+            // stopped_incomplete / server_restart and remove the marker. Markers of jobs
+            // another live process is running are never touched.
+            try { ActiveJobMarkers.SweepDeadMarkers(); } catch { /* best-effort */ }
             _workerTask = Task.Run(WorkerLoopAsync);
         }
 
@@ -879,7 +883,7 @@ namespace DevMind.McpServer
                     TranscriptDir,
                     $"{job.Id}-{DateTime.Now:yyyyMMdd-HHmmss}.log");
 
-                WriteActiveMarker(job, transcriptPath);
+                ActiveJobMarkers.Write(job, transcriptPath);
 
                 // Per JOB, not per session: disposed in the finally below whatever the terminal
                 // state, while the session it was attached to lives on for a continuation.
@@ -1084,7 +1088,7 @@ namespace DevMind.McpServer
                     }
 
                     job.EndedAtUtc = DateTime.UtcNow;
-                    ClearActiveMarker();
+                    ActiveJobMarkers.Clear(job.Id);   // this job's marker only (H-66)
                     WriteResultSidecar(job);
 
                     // Drop the turn's PATCH backups now the job is over, WITHOUT ending
@@ -1134,69 +1138,19 @@ namespace DevMind.McpServer
             catch (OperationCanceledException) { /* turn ended first */ }
         }
 
-        // ── Active-job marker ────────────────────────────────────────────────
-        // %TEMP%\devmind\tasks\_active.json exists exactly while a job is
-        // executing — a positive "DM is busy" signal for external tooling
-        // (dm-watch, deploy scripts). Transcript silence and CPU load both lie
-        // (think blocks are transcript-silent; generation is GPU-bound): a
-        // deploy killed a live job on those heuristics. Check the marker, and
-        // verify its pid is alive before trusting a leftover after a crash.
-
-        private static string ActiveMarkerPath => Path.Combine(TranscriptDir, "_active.json");
-
-        private static void WriteActiveMarker(AgentJob job, string transcriptPath)
-        {
-            try
-            {
-                Directory.CreateDirectory(TranscriptDir);
-                File.WriteAllText(ActiveMarkerPath, System.Text.Json.JsonSerializer.Serialize(new
-                {
-                    job_id = job.Id,
-                    state = "running",
-                    pid = Environment.ProcessId,
-                    working_dir = job.WorkingDirectory,
-                    started_at_utc = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss"),
-                    transcript = transcriptPath,
-                }));
-            }
-            catch { /* marker is best-effort — never fail the job over it */ }
-        }
-
-        private static void ClearActiveMarker()
-        {
-            try { File.Delete(ActiveMarkerPath); } catch { }
-        }
+        // ── Active-job markers ───────────────────────────────────────────────
+        // One marker per running job, {TranscriptDir}\_active_<job_id>.json — see
+        // ActiveJobMarkers. Several servers share TranscriptDir, so each writes and
+        // clears only its own jobs' markers (H-66).
 
         /// <summary>
-        /// True when the active-job marker names a LIVE process other than this one — a
+        /// True when any active-job marker names a LIVE process other than this one — a
         /// second server, or a job still running under a previous one. Callers that clean
         /// up shared temp state (patch backups, transcripts) use this to stay off files
-        /// another agent may still own. A marker whose pid is dead is a leftover from a
-        /// crash and reports false, which is the whole reason the pid is written.
+        /// another agent may still own. A marker whose owner is dead is a leftover from a
+        /// crash and does not count, which is the whole reason the pid is written.
         /// </summary>
-        public static bool IsJobActiveElsewhere()
-        {
-            try
-            {
-                if (!File.Exists(ActiveMarkerPath)) return false;
-
-                using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(ActiveMarkerPath));
-                if (!doc.RootElement.TryGetProperty("pid", out var pidElement)
-                    || !pidElement.TryGetInt32(out int pid))
-                    return false;
-
-                if (pid == Environment.ProcessId) return false;
-
-                using var owner = System.Diagnostics.Process.GetProcessById(pid);
-                return !owner.HasExited;
-            }
-            catch
-            {
-                // Unreadable, malformed, or a pid no process holds — treat the marker as
-                // stale rather than blocking cleanup on it forever.
-                return false;
-            }
-        }
+        public static bool IsJobActiveElsewhere() => ActiveJobMarkers.IsJobActiveElsewhere();
 
         private static bool HasFileChanges(HeadlessAgentResult result)
             => result.Actions.Any(a =>
@@ -1392,7 +1346,11 @@ namespace DevMind.McpServer
                 }
             }
             try { _workerTask.Wait(TimeSpan.FromSeconds(2)); } catch { }
-            ClearActiveMarker(); // graceful shutdown — don't leave a stale busy signal
+            // Graceful shutdown — don't leave a stale busy signal. Only this manager's jobs:
+            // another process's marker is its own business (H-66).
+            List<string> ownIds;
+            lock (_lock) ownIds = _jobs.Keys.ToList();
+            foreach (string id in ownIds) ActiveJobMarkers.Clear(id);
             _shutdownCts.Dispose();
         }
     }

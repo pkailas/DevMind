@@ -8,22 +8,28 @@
 #   Ctrl+C              stop watching (does not affect the running job)
 
 $dir = Join-Path $env:TEMP 'devmind\tasks'
-$marker = Join-Path $dir '_active.json'
 
 Write-Host "dm-watch — following DevMind task transcripts in $dir" -ForegroundColor Cyan
 Write-Host "Ctrl+C to stop (the task keeps running).`n" -ForegroundColor DarkGray
 
-# _active.json exists exactly while a job is executing (written/removed by the
-# MCP server, 1.0.308+). Its pid tells us whether a leftover marker is stale.
+# _active_<job_id>.json exists exactly while that job is executing (written/removed by
+# the MCP server; one per job since H-66 — older servers wrote a single _active.json,
+# which the filter below still matches). Its pid tells us whether a leftover is stale.
 function Get-ActiveState {
-    if (-not (Test-Path $marker)) { return 'idle' }
-    try {
-        $m = Get-Content $marker -Raw | ConvertFrom-Json
-        if (Get-Process -Id $m.pid -ErrorAction SilentlyContinue) {
-            return "BUSY: $($m.job_id) (since $($m.started_at_utc)Z)"
-        }
-        return 'idle (stale marker — server crashed?)'
-    } catch { return 'unknown' }
+    $markers = @(Get-ChildItem -Path $dir -Filter '_active*.json' -File -ErrorAction SilentlyContinue)
+    if ($markers.Count -eq 0) { return 'idle' }
+    $busy = @(); $stale = 0; $unreadable = 0
+    foreach ($f in $markers) {
+        try {
+            $m = Get-Content $f.FullName -Raw | ConvertFrom-Json
+            if (Get-Process -Id $m.pid -ErrorAction SilentlyContinue) {
+                $busy += "$($m.job_id) (since $($m.started_at_utc)Z)"
+            } else { $stale++ }
+        } catch { $unreadable++ }
+    }
+    if ($busy.Count -gt 0) { return "BUSY: $($busy -join ', ')" }
+    if ($stale -gt 0) { return 'idle (stale marker — server crashed?)' }
+    return 'unknown'
 }
 
 # Print a completion line for a finished job: local time, final state, iterations, elapsed,
