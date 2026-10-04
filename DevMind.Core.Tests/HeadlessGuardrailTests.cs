@@ -63,6 +63,127 @@ namespace DevMind.Core.Tests
             Assert.Equal(blocked, BufferedAgenticHost.IsBlockedHeadlessCommand(command, out _));
         }
 
+        // ── H-48: mutating git is refused in delegated jobs ──────────────────
+
+        private static bool GitBlocked(string command, bool allowCommit = false)
+            => BufferedAgenticHost.IsBlockedHeadlessCommand(command, out _, null, allowCommit);
+
+        [Theory]
+        [InlineData("git stash")]
+        [InlineData("git checkout main")]
+        [InlineData("git switch main")]
+        [InlineData("git reset HEAD~1")]
+        [InlineData("git clean -fd")]
+        [InlineData("git restore a.cs")]
+        [InlineData("git add .")]
+        [InlineData("git rm a.cs")]
+        [InlineData("git mv a.cs b.cs")]
+        [InlineData("git commit -m x")]
+        [InlineData("git rebase main")]
+        [InlineData("git merge main")]
+        [InlineData("git cherry-pick 1a2b3c4")]
+        [InlineData("git revert 1a2b3c4")]
+        [InlineData("git am 0001-fix.patch")]
+        [InlineData("git apply fix.patch")]
+        [InlineData("git pull")]
+        [InlineData("git push")]
+        [InlineData("git fetch origin")]
+        [InlineData("git tag v1.0")]
+        [InlineData("git tag -d v1.0")]
+        [InlineData("git branch newb")]
+        [InlineData("git branch -D old")]
+        [InlineData("git branch -m old new")]
+        [InlineData("git worktree add ../wt")]
+        [InlineData("git gc")]
+        [InlineData("git prune")]
+        [InlineData("git update-ref refs/heads/x 1a2b3c4")]
+        [InlineData("git config user.name x")]
+        public void MutatingGit_IsBlocked(string command)
+        {
+            Assert.True(GitBlocked(command));
+        }
+
+        [Theory]
+        [InlineData("git -C sub stash")]
+        [InlineData("git --no-pager -c core.pager=less stash")]
+        [InlineData("git --git-dir=.git --work-tree=. stash")]
+        [InlineData("git.exe stash")]
+        [InlineData("\"C:\\Program Files\\Git\\cmd\\git.exe\" stash")]
+        [InlineData("& 'C:\\Program Files\\Git\\cmd\\git.exe' stash pop")]
+        [InlineData("cmd /c \"git stash\"")]
+        [InlineData("powershell -Command \"git stash\"")]
+        [InlineData("git stash; dotnet test; git stash pop")]   // job-1862
+        public void MutatingGit_IsBlocked_PastGlobalOptionsAndWrappers(string command)
+        {
+            Assert.True(GitBlocked(command));
+        }
+
+        [Theory]
+        [InlineData("git status")]
+        [InlineData("git diff HEAD -- a.cs")]
+        [InlineData("git log --oneline -5")]
+        [InlineData("git --no-pager log -3")]
+        [InlineData("git show HEAD:a.cs")]
+        [InlineData("git blame a.cs")]
+        [InlineData("git ls-files")]
+        [InlineData("git ls-tree HEAD")]
+        [InlineData("git rev-parse HEAD")]
+        [InlineData("git rev-list --count HEAD")]
+        [InlineData("git cat-file -p HEAD")]
+        [InlineData("git describe --tags")]
+        [InlineData("git shortlog -sn")]
+        [InlineData("git grep TODO")]
+        [InlineData("git branch")]
+        [InlineData("git branch --list")]
+        [InlineData("git branch -a")]
+        [InlineData("git branch -v")]
+        [InlineData("git remote -v")]
+        [InlineData("git config --get user.name")]
+        [InlineData("git config --list")]
+        [InlineData("git tag")]
+        [InlineData("git tag -l \"v1.*\"")]
+        [InlineData("git stash list")]
+        public void ReadOnlyGit_IsAllowed(string command)
+        {
+            Assert.False(GitBlocked(command));
+        }
+
+        [Fact]
+        public void MutatingGit_ReasonNamesReadOnlyGitAndOwner()
+        {
+            Assert.True(BufferedAgenticHost.IsBlockedHeadlessCommand("git stash", out string? reason));
+            Assert.Equal(
+                "read-only git only in delegated jobs (status, diff, log, show, blame, ls-files...); Paul owns commits",
+                reason);
+        }
+
+        [Fact]
+        public void AddAndCommit_BlockedWithoutAllowCommit_AllowedWithIt()
+        {
+            Assert.True(GitBlocked("git add . ; git commit -m x", allowCommit: false));
+            Assert.False(GitBlocked("git add . ; git commit -m x", allowCommit: true));
+        }
+
+        [Theory]
+        [InlineData("git push")]
+        [InlineData("git stash")]
+        [InlineData("git reset HEAD~1")]
+        [InlineData("git branch newb")]
+        public void AllowCommit_StillBlocksEverythingButAddAndCommit(string command)
+        {
+            Assert.True(GitBlocked(command, allowCommit: true));
+        }
+
+        [Fact]
+        public async Task RestrictedHost_BlocksGitStash()
+        {
+            var host = new BufferedAgenticHost(_dir) { RestrictWritesToWorkingDirectory = true };
+            var (exitCode, output) = await ((IAgenticHost)host).RunShellAsync("git stash");
+
+            Assert.Equal(1, exitCode);
+            Assert.Contains("read-only git only in delegated jobs", output);
+        }
+
         [Fact]
         public async Task RestrictedHost_BlocksGitRestore_WithModelVisibleGuidance()
         {

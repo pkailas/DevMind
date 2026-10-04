@@ -202,6 +202,8 @@ namespace DevMind
                 // and ordinary jobs are untouched). Enforced at the host's three spawn
                 // surfaces; the system prompt below steers the model away first.
                 NoExecute = noExecute,
+                // H-48: the shell guard refuses mutating git; allow_commit lets add/commit through.
+                AllowCommit = allowCommit,
                 NearlineCache = _llmClient.NearlineCache, // for the recall_cache tool
             };
             _callbacks = new HeadlessLoopCallbacks(_llmClient);

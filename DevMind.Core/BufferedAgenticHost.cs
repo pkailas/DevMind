@@ -175,6 +175,13 @@ namespace DevMind
         public bool RestrictWritesToWorkingDirectory { get; set; }
 
         /// <summary>
+        /// The delegating caller set allow_commit (H-48): the headless shell guard then lets
+        /// <c>git add</c> / <c>git commit</c> through. Every other mutating git command stays
+        /// blocked. Only consulted when <see cref="RestrictWritesToWorkingDirectory"/> is on.
+        /// </summary>
+        public bool AllowCommit { get; set; }
+
+        /// <summary>
         /// When true (set only by headless delegation that requested no_execute), this
         /// host refuses to spawn a process on any of its execution surfaces: run_shell
         /// commands matching the <c>LoopHelpers.IsExecutableCommand</c> denylist, run_tests
@@ -220,8 +227,14 @@ namespace DevMind
         /// file inside <paramref name="workingDirectory"/> is blocked (<see cref="GitWriteGuard"/>);
         /// the old test ("git show" plus any "&gt;" anywhere) blocked regexes and quoted strings.
         /// </para>
+        /// <para>
+        /// H-48: git subcommands that change the repo, index, refs or working tree (stash, checkout,
+        /// reset, commit, push, branch creation, config writes, ...) are refused too — job-1862 ran
+        /// <c>git stash</c> / <c>git stash pop</c> around a base-suite run. <paramref name="allowCommit"/>
+        /// lets add/commit through.
+        /// </para>
         /// </summary>
-        internal static bool IsBlockedHeadlessCommand(string command, out string reason, string workingDirectory = null)
+        internal static bool IsBlockedHeadlessCommand(string command, out string reason, string workingDirectory = null, bool allowCommit = false)
         {
             reason = null;
             if (string.IsNullOrWhiteSpace(command)) return false;
@@ -238,7 +251,7 @@ namespace DevMind
                 return true;
             }
 
-            reason = GitWriteGuard.Classify(command, workingDirectory);
+            reason = GitWriteGuard.Classify(command, workingDirectory, allowCommit);
             if (reason != null) return true;
 
             if (has("taskkill") || has("stop-process") || has("kill -9"))
@@ -459,10 +472,16 @@ namespace DevMind
             }
 
             if (RestrictWritesToWorkingDirectory
-                && IsBlockedHeadlessCommand(command, out string blockReason, _shellRunner.WorkingDirectory))
+                && IsBlockedHeadlessCommand(command, out string blockReason, _shellRunner.WorkingDirectory, AllowCommit))
             {
                 RecordAction("blocked", $"shell ({blockReason}): {command}", success: false);
                 AppendOutput($"[SHELL GUARD] Blocked ({blockReason}): {command}\n", OutputColor.Error);
+                if (blockReason == GitWriteGuard.MutationReason)
+                    return (1,
+                        $"[BLOCKED] This command is not allowed in delegated tasks: {blockReason}. " +
+                        "Do NOT stash, switch branches, reset, commit or otherwise change the repository — " +
+                        "the delegating caller handles version control. To compare against the base, read it " +
+                        "instead: `git diff`, `git log`, or `git show <rev>:<path>` to the console or a variable.");
                 return (1,
                     $"[BLOCKED] This command is not allowed in delegated tasks: {blockReason}. " +
                     "Do NOT restore files from git history (it can destroy uncommitted work from " +

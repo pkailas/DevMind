@@ -52,11 +52,18 @@ namespace DevMind.Core.Tests
         [InlineData("git show HEAD:a.cs > C:\\elsewhere\\a.cs")]
         [InlineData("git diff HEAD -- a.cs > a.patch")]            // not object content
         [InlineData("$h = git show HEAD:a.cs; $h = 'x'; Set-Content a.cs $h")] // reassigned, no longer git content
-        [InlineData("git checkout main")]
-        [InlineData("git checkout -b feature")]
         public void ReadOnlyOrOutsideTheWorkingDir_IsAllowed(string command)
         {
             Assert.Null(Blocked(command));
+        }
+
+        // Not restores, so H-59 let them through; H-48 refuses every branch switch in a delegated job.
+        [Theory]
+        [InlineData("git checkout main")]
+        [InlineData("git checkout -b feature")]
+        public void BranchCheckout_IsBlockedAsMutation(string command)
+        {
+            Assert.Equal(GitWriteGuard.MutationReason, Blocked(command));
         }
 
         [Theory]

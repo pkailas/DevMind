@@ -33,6 +33,36 @@ namespace DevMind
     {
         public const string WriteReason = "writes git object content over working-tree files";
         public const string RestoreReason = "restores/discards working-tree files from git";
+        public const string MutationReason =
+            "read-only git only in delegated jobs (status, diff, log, show, blame, ls-files...); Paul owns commits";
+
+        // H-48: subcommands that change the repo, index, refs or working tree in every form.
+        // add/commit are allowed when the job has allow_commit; tag/branch/config/remote/stash/
+        // worktree are decided per form (their list/read forms are allowed) in GitCall.IsMutation.
+        private static readonly HashSet<string> MutatingSubcommands = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "checkout", "switch", "reset", "clean", "restore", "rm", "mv", "rebase", "merge", "cherry-pick",
+            "revert", "am", "apply", "pull", "push", "fetch", "gc", "prune", "update-ref",
+            "submodule", "bisect", "notes", "update-index", "filter-branch", "symbolic-ref", "sparse-checkout",
+            "init", "clone", "read-tree", "checkout-index", "replace",
+        };
+
+        // Read options of tag/branch/config whose value is the next word, not a ref or key to write.
+        private static readonly HashSet<string> ListValueOptions = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--sort", "--format",
+        };
+        private static readonly HashSet<string> ConfigValueOptions = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "-f", "--file", "--blob", "--type", "--default",
+        };
+
+        // Wrappers whose quoted argument is a command line of its own: cmd /c "...", powershell -Command "...".
+        private static readonly HashSet<string> CmdShells = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "cmd", "cmd.exe" };
+        private static readonly HashSet<string> PsShells = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "powershell", "powershell.exe", "pwsh", "pwsh.exe",
+        };
 
         private static readonly HashSet<string> Writers = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -65,13 +95,18 @@ namespace DevMind
 
         /// <summary>
         /// The block reason for <paramref name="command"/>, or null when it does not write git
-        /// object content onto, or restore, working-tree files.
+        /// object content onto, or restore, working-tree files, and runs no mutating git
+        /// subcommand (H-48; add/commit pass when <paramref name="allowCommit"/>).
         /// </summary>
-        public static string Classify(string command, string workingDirectory)
+        public static string Classify(string command, string workingDirectory, bool allowCommit = false)
+        {
+            string dir = SafeFull(workingDirectory) ?? SafeFull(Directory.GetCurrentDirectory());
+            return Classify(command, dir, dir, allowCommit);
+        }
+
+        private static string Classify(string command, string baseDir, string root, bool allowCommit)
         {
             if (string.IsNullOrWhiteSpace(command)) return null;
-            string baseDir = SafeFull(workingDirectory) ?? SafeFull(Directory.GetCurrentDirectory());
-            string root = baseDir;
             var tainted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             foreach (string statement in SplitTopLevel(command, statements: true))
@@ -99,10 +134,18 @@ namespace DevMind
                         continue;
                     }
 
+                    string inner = WrappedCommand(words);
+                    if (inner != null)
+                    {
+                        string nested = Classify(inner, baseDir, root, allowCommit);
+                        if (nested != null) return nested;
+                    }
+
                     GitCall git = null;
                     foreach (int at in CommandStarts(words))
                         if ((git = ParseGit(words, at)) != null) break;
                     if (git != null && git.IsRestore) return RestoreReason;
+                    if (git != null && git.IsMutation(allowCommit)) return MutationReason;
 
                     bool isSource = (git != null && git.ProducesObjectContent) || ReferencesAny(stages[i], tainted);
                     if (isSource && sourceAt < 0) sourceAt = i;
@@ -153,6 +196,70 @@ namespace DevMind
                         || (positional.Count == 1 && positional[0].StartsWith("head", StringComparison.OrdinalIgnoreCase));
                 }
             }
+
+            /// <summary>H-48: does this call change the repo, index, refs or working tree?</summary>
+            public bool IsMutation(bool allowCommit)
+            {
+                if (Sub is "add" or "commit") return !allowCommit;
+                if (MutatingSubcommands.Contains(Sub)) return true;
+                switch (Sub)
+                {
+                    case "stash":    // "git stash" alone is "git stash push"
+                        return !(Args.Count > 0 && Args[0] is "list" or "show");
+                    case "worktree":
+                        return !(Args.Count > 0 && Args[0] == "list");
+                    case "remote":   // "git remote", "-v", "show", "get-url" read
+                        return Positionals().FirstOrDefault() is string r && r is not ("show" or "get-url");
+                    case "tag":
+                        return HasAny("-d", "--delete", "-a", "--annotate", "-s", "--sign", "-u", "-f", "--force", "-m", "-F", "-e", "--edit")
+                            || (Positionals().Any() && !HasAny("-l", "--list", "-v", "--verify"));
+                    case "branch":
+                        return HasAny("-d", "-D", "--delete", "-m", "-M", "--move", "-c", "-C", "--copy", "-f", "--force",
+                                      "-u", "--set-upstream-to", "--unset-upstream", "--edit-description", "--track", "-t")
+                            || Args.Any(a => a.StartsWith("--set-upstream-to=", StringComparison.Ordinal))
+                            || (Positionals().Any() && !HasAny("-l", "--list"));
+                    case "config":   // --get* / -l / --list and the "get"/"list" verbs read; one key alone reads it
+                        if (Args.Any(a => a.StartsWith("--get", StringComparison.Ordinal)) || HasAny("-l", "--list")) return false;
+                        if (HasAny("--unset", "--unset-all", "--add", "--replace-all", "--rename-section", "--remove-section", "-e", "--edit"))
+                            return true;
+                        List<string> pos = Positionals().ToList();
+                        if (pos.Count > 0 && pos[0] is "get" or "list") return false;
+                        return pos.Count >= 2 || (pos.Count > 0 && pos[0] is "set" or "unset" or "rename-section" or "remove-section" or "edit");
+                    default:
+                        return false;
+                }
+            }
+
+            private bool HasAny(params string[] flags) => Args.Any(a => flags.Contains(a, StringComparer.Ordinal));
+
+            // Non-option arguments; an option that takes a separate value skips it.
+            private IEnumerable<string> Positionals()
+            {
+                for (int i = 0; i < Args.Count; i++)
+                {
+                    string a = Args[i];
+                    if (ListValueOptions.Contains(a) || (Sub == "config" && ConfigValueOptions.Contains(a))) { i++; continue; }
+                    if (a.StartsWith("-", StringComparison.Ordinal)) continue;
+                    yield return a;
+                }
+            }
+        }
+
+        /// <summary>The command line inside a <c>cmd /c "..."</c> or <c>powershell -Command "..."</c>
+        /// stage (quotes already removed by <see cref="Words"/>), or null.</summary>
+        private static string WrappedCommand(List<string> words)
+        {
+            if (words.Count < 3) return null;
+            bool cmd = CmdShells.Contains(words[0]);
+            bool ps = PsShells.Contains(words[0]);
+            if (!cmd && !ps) return null;
+            for (int i = 1; i < words.Count - 1; i++)
+            {
+                string w = words[i].ToLowerInvariant();
+                if (cmd ? w is "/c" or "/k" : w is "-c" or "-command" or "-com" or "-comm" or "-comma" or "-comman")
+                    return string.Join(" ", words.Skip(i + 1));
+            }
+            return null;
         }
 
         /// <summary>Indexes of words in command position: the first word, and any word right after
@@ -165,14 +272,17 @@ namespace DevMind
 
         private static GitCall ParseGit(List<string> words, int start)
         {
+            // "git", "git.exe", or a (quoted) path to one: C:\Program Files\Git\cmd\git.exe
             string exe = words[start];
-            if (!(exe.Equals("git", StringComparison.OrdinalIgnoreCase) || exe.Equals("git.exe", StringComparison.OrdinalIgnoreCase)))
+            string name = exe.Substring(exe.LastIndexOfAny(new[] { '\\', '/' }) + 1);
+            if (!(name.Equals("git", StringComparison.OrdinalIgnoreCase) || name.Equals("git.exe", StringComparison.OrdinalIgnoreCase)))
                 return null;
             int i = start + 1;
             // Global options before the subcommand: -C <dir>, -c <k=v>, --no-pager, --git-dir=...
+            // (or --git-dir / --work-tree / --namespace with the value as the next word).
             while (i < words.Count && words[i].StartsWith("-"))
             {
-                if (words[i] is "-C" or "-c") i++;
+                if (words[i] is "-C" or "-c" or "--git-dir" or "--work-tree" or "--namespace") i++;
                 i++;
             }
             if (i >= words.Count) return null;

@@ -622,7 +622,25 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Fix:** the shell guard (which already blocks Stop-Process) refuses `git stash|checkout|switch|reset|clean|restore|add|commit|
   rebase|merge` in delegated jobs unless allow_commit is set, with a message: "read-only git only (status, diff, log, show)".
   Prompt rule added 2026-10-01.
-- **Status:** open.
+- **Status:** fixed, pending deploy - commit "H-48: shell guard blocks mutating git in delegated jobs". Rule: `GitWriteGuard.Classify`
+  (one git lexer, now with an `allowCommit` flag threaded through `IsBlockedHeadlessCommand` and `BufferedAgenticHost.AllowCommit`,
+  set from the job's allow_commit) refuses git subcommands that change the repo, index, refs or working tree: stash (not `stash
+  list|show`), checkout, switch, reset, clean, restore, add, rm, mv, commit, rebase, merge, cherry-pick, revert, am, apply, pull,
+  push, fetch, gc, prune, update-ref, worktree (not `worktree list`), tag/branch create-delete-rename forms, config writes, remote
+  add/remove/set-url etc., plus submodule, bisect, notes, update-index, filter-branch, symbolic-ref, sparse-checkout, init, clone,
+  read-tree, checkout-index and replace. Reads pass: status, diff, log, show (H-59 write rule unchanged), blame, ls-files, ls-tree,
+  rev-parse, rev-list, cat-file, describe, shortlog, grep, bare/`--list`/`-a`/`-v` branch, bare/`-l` tag, `remote -v`, `config
+  --get*`/`--list`. With allow_commit only add and commit are let through. The subcommand is found past `-C <dir>`, `-c k=v`,
+  `--no-pager`, `--git-dir`/`--work-tree`, for `git`, `git.exe` or a quoted path to git.exe, and inside `cmd /c "..."` /
+  `powershell -Command "..."` (the wrapped line is re-classified, so a redirect of `git show` inside one is now caught as well).
+  Reason: "read-only git only in delegated jobs (status, diff, log, show, blame, ls-files...); Paul owns commits"; the
+  [BLOCKED] text points the agent at `git diff` / `git show` for base comparisons. Restore/write cases keep RestoreReason /
+  WriteReason. `git checkout main` and `git checkout -b feature`, previously allowed under H-59, are now blocked.
+  Tests (HeadlessGuardrailTests): `MutatingGit_IsBlocked` (one case per subcommand), `MutatingGit_IsBlocked_PastGlobalOptionsAndWrappers`
+  (incl. `git -C sub stash`, `cmd /c "git stash"`, job-1862), `ReadOnlyGit_IsAllowed` (incl. `git --no-pager log`, `git branch`,
+  `git config --get user.name`), `MutatingGit_ReasonNamesReadOnlyGitAndOwner`, `AddAndCommit_BlockedWithoutAllowCommit_AllowedWithIt`,
+  `AllowCommit_StillBlocksEverythingButAddAndCommit` (incl. `git push`), `RestrictedHost_BlocksGitStash`; GitWriteGuardTests:
+  `BranchCheckout_IsBlockedAsMutation`, H-59 `git show` cases unchanged.
 
 ### H-49 - think:true silently ran at reasoning effort xhigh
 - **First seen:** 2026-10-01, after the switch to Strata (Qwen3.8-Flash-Next). Its chat template (and the Qwen3.8-27B one)
