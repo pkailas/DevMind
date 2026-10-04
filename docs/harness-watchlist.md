@@ -973,7 +973,13 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Proposed fix:** only treat a brief item as optional when "optional" qualifies the task itself ("optional:", "(optional)",
   "if time permits", "nice to have" at the start of an item), not when it is an adjective on a noun inside the item; or have
   the nudge ask the agent to confirm instead of instructing it to drop the item.
-- **Status:** open.
+- **Status:** fixed, pending deploy - commit "H-62: optional-work guard only fires on item-level qualifiers". Rule: a
+  brief item (one SplitSentences sentence) is optional only when "optional" is its first word (after a "2." / "b)" /
+  "Step N:" prefix, or as "Optional:" after a short label), or it carries "(optional)" / "[optional]", "if quick", "nice
+  to have", "skip this if" or "if time permits"; "optional" as an adjective on a noun no longer counts, and the nudge now
+  quotes the first 80 chars of the item. Tests (HarnessNudgesTests): `Detector_Job2140_OptionalSettingsFile_IsRequiredWork`,
+  `Detector_ItemLevelQualifier_IsOptional`, `Detector_OptionalAsAdjectiveOrNegated_IsRequiredWork`,
+  `SpendGuard_MessageQuotesTheItem`, `OptionalWorkMessage_QuotesAtMost80CharsOfTheItem`.
 
 ### H-63 - Foreground run_shell that starts a long-lived GUI child blocks the device bridge until the timeout
 - **First seen:** 2026-10-04 (driver-side run_shell, not a delegated job). Running Install-TokenLedgerTray.ps1 in the

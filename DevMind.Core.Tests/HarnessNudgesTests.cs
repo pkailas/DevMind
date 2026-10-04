@@ -44,6 +44,65 @@ namespace DevMind.Core.Tests
             Assert.Empty(HarnessNudges.FindOptionalItems(brief));
         }
 
+        // ── H-62: only item-level qualifiers mark an item optional ──────────
+
+        [Theory]
+        [InlineData("Optional: add a tray tooltip")]
+        [InlineData("- (optional) write a README")]
+        [InlineData("Add retries [optional]")]
+        [InlineData("nice to have: colour output")]
+        [InlineData("Settings: (optional) read a TokenLedgerTray.json")]
+        [InlineData("Settings: Optional: read a TokenLedgerTray.json")]
+        [InlineData("Step 4: optional - add a tray tooltip")]
+        [InlineData("2) Optional: add a tray tooltip")]
+        [InlineData("Add a tray tooltip if time permits")]
+        public void Detector_ItemLevelQualifier_IsOptional(string line)
+        {
+            Assert.Single(HarnessNudges.FindOptionalItems("Fix the dialog layout.\n" + line));
+        }
+
+        [Fact]
+        public void Detector_Job2140_OptionalSettingsFile_IsRequiredWork()
+        {
+            // "optional" describes the FILE (absent at runtime is fine); reading it is required.
+            Assert.Empty(HarnessNudges.FindOptionalItems(
+                "Fix the dialog layout.\nSettings: optional TokenLedgerTray.json next to the exe ... Missing file = defaults"));
+        }
+
+        [Theory]
+        [InlineData("Accept an optional parameter for the path")]
+        [InlineData("this is not optional: log errors")]
+        [InlineData("Non-optional: log errors")]
+        [InlineData("Load the optional settings file")]
+        public void Detector_OptionalAsAdjectiveOrNegated_IsRequiredWork(string line)
+        {
+            Assert.Empty(HarnessNudges.FindOptionalItems("Fix the dialog layout.\n" + line));
+        }
+
+        [Fact]
+        public void SpendGuard_MessageQuotesTheItem()
+        {
+            var nudges = new HarnessNudges();
+            nudges.AddBrief(Brief1698);
+            List<string> fired = new List<string>();
+            for (int i = 0; i < HarnessNudges.OptionalWindow; i++)
+                fired = nudges.ObserveIteration(OnOptional, "");
+
+            Assert.Contains(
+                "This item was marked optional in the brief (\"Optional: add a test that asserts the private designer field",
+                Assert.Single(fired));
+        }
+
+        [Fact]
+        public void OptionalWorkMessage_QuotesAtMost80CharsOfTheItem()
+        {
+            string item = "Optional: " + new string('x', 200);
+            string message = HarnessNudges.OptionalWorkMessage(item);
+
+            Assert.Contains("(\"" + item.Substring(0, HarnessNudges.OptionalQuoteLength) + "...\")", message);
+            Assert.DoesNotContain(item.Substring(0, HarnessNudges.OptionalQuoteLength + 1), message);
+        }
+
         [Fact]
         public void Detector_KeywordsExcludeWordsSharedWithRequiredWork()
         {
@@ -82,8 +141,8 @@ namespace DevMind.Core.Tests
                 Assert.Empty(nudges.ObserveIteration(OnOptional, ""));
 
             var fired = Assert.Single(nudges.ObserveIteration(OnOptional, ""));
-            Assert.StartsWith(HarnessNudges.OptionalWorkMessage, fired);
-            Assert.Contains("InternalsVisibleTo", fired);
+            Assert.StartsWith("This item was marked optional in the brief (\"Optional: add a test", fired);
+            Assert.EndsWith("Drop it and continue with the required work.", fired);
 
             for (int i = 0; i < 2 * HarnessNudges.OptionalWindow; i++)
                 Assert.Empty(nudges.ObserveIteration(OnOptional, ""));   // once per item
@@ -193,8 +252,9 @@ namespace DevMind.Core.Tests
         [Fact]
         public void Fold_FramesTheNudgeAsTheHarness()
         {
-            string folded = HarnessNudgeEvidence.Fold("Continue.", HarnessNudges.OptionalWorkMessage);
-            Assert.Equal("Continue.\n\n[HARNESS GUARD] " + HarnessNudges.OptionalWorkMessage, folded);
+            string nudge = HarnessNudges.OptionalWorkMessage("Optional: add a tray tooltip");
+            string folded = HarnessNudgeEvidence.Fold("Continue.", nudge);
+            Assert.Equal("Continue.\n\n[HARNESS GUARD] " + nudge, folded);
         }
 
         // ── H-25 prompt rule ─────────────────────────────────────────────────

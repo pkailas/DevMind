@@ -101,17 +101,34 @@ namespace DevMind
         /// <summary>Iterations whose tool output carries the same compile error before the nudge.</summary>
         public const int CompileErrorRepeats = 3;
 
-        public const string OptionalWorkMessage =
-            "This item was marked optional in the brief. Drop it and continue with the required work.";
+        /// <summary>Longest stretch of the item quoted in the optional-work nudge.</summary>
+        public const int OptionalQuoteLength = 80;
+
+        /// <summary>The optional-work nudge, quoting the item so the agent can judge the call.</summary>
+        public static string OptionalWorkMessage(string item)
+        {
+            string quote = item.Length <= OptionalQuoteLength ? item : item.Substring(0, OptionalQuoteLength).TrimEnd() + "...";
+            return "This item was marked optional in the brief (\"" + quote + "\"). Drop it and continue with the required work.";
+        }
 
         public const string RepeatedCompileErrorMessage =
             "The same compile error has repeated three times — stop and re-read the declaration you are " +
             "calling; do not attribute it to the toolchain.";
 
-        // "optional" as a word ("Optional:", "(optional)"), not "optionally"; "not optional" and
-        // "non-optional" are required work, so they are excluded.
+        // H-62: the marker must qualify the ITEM, not a noun inside it - "optional TokenLedgerTray.json"
+        // (job-2140) or "an optional parameter" is required work. Matched against one item as
+        // SplitSentences yields it (bullet already stripped):
+        //  - "optional" as the item's first word, after any "2." / "b)" / "Step 3:" prefix;
+        //  - "Optional:" after a short leading label ("Settings: Optional: ..."); a bare adjective
+        //    after the label ("Settings: optional X.json") does not count;
+        //  - "(optional)" / "[optional]" anywhere;
+        //  - "if quick", "nice to have", "skip this if", "if time permits" anywhere (they qualify work).
+        // Anchoring keeps "not optional" / "non-optional" out; "optionally" never matches.
         private static readonly Regex OptionalMarker = new Regex(
-            @"(?<!\bnot\s)(?<!\bnon-)\boptional\b|\bif quick\b|\bnice[\s-]to[\s-]have\b|\bskip this if\b",
+            @"^(?:\d+[.)]\s*|[a-z]\)\s*|step\s+\d+\s*[:.)-]\s*)?" +
+            @"(?:optional\b|(?:[A-Za-z][\w.-]*\s+){0,2}[A-Za-z][\w.-]*:\s*optional\s*:)" +
+            @"|\(optional\)|\[optional\]" +
+            @"|\bif quick\b|\bnice[\s-]to[\s-]have\b|\bskip this if\b|\bif time permits\b",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
         private static readonly Regex Word = new Regex(@"[A-Za-z_][A-Za-z0-9_.]*[A-Za-z0-9_]", RegexOptions.Compiled);
@@ -140,8 +157,9 @@ namespace DevMind
         public IReadOnlyList<OptionalBriefItem> OptionalItems => _items;
 
         /// <summary>
-        /// Finds the sentences of <paramref name="brief"/> that carry an optional marker
-        /// ("optional", "if quick", "nice to have", "skip this if"), with their keywords.
+        /// Finds the sentences of <paramref name="brief"/> that carry an item-level optional marker
+        /// ("Optional: ...", "(optional)", "if quick", "nice to have", "skip this if", "if time
+        /// permits"; not "optional" as an adjective on a noun - H-62), with their keywords.
         /// </summary>
         public static List<OptionalBriefItem> FindOptionalItems(string brief)
         {
@@ -196,7 +214,7 @@ namespace DevMind
                 window.Enqueue(item.IsReferencedBy(agentText));
                 while (window.Count > OptionalWindow) window.Dequeue();
                 if (window.Count == OptionalWindow && window.All(b => b) && _optionalFired.Add(item))
-                    nudges.Add(OptionalWorkMessage + "\nOptional item: \"" + item.Sentence + "\"");
+                    nudges.Add(OptionalWorkMessage(item.Sentence));
             }
 
             // One count per iteration per error key: a single dotnet build prints each error
