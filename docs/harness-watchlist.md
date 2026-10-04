@@ -35,7 +35,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Symptom:** the agent's final message lists brief steps under "NOT DONE / caller must finish" (or says a fix is "not verified"), yet the job ends `state: done`, `incomplete_reasons: null`.
 - **Why it matters:** the driver has to read every final message to catch it; `done` is supposed to mean trustworthy-as-is.
 - **Proposed fix:** scan the final answer for explicit incompleteness markers ("NOT DONE", "not verified", "caller must", "did not run", "hit the iteration cap") and set `stopped_incomplete` with reason `self_reported_incomplete`, keeping the text.
-- **Status:** fixed, pending deploy - commit "H-01: detect bulleted INCOMPLETE markers; classify the returned final answer" (follow-up to b1df22d; the fix and this line are the same commit, so it cannot name its own hash). Verify on the next job that ends with an INCOMPLETE list.
+- **Status:** fixed, deployed 1.0.568 (2026-10-04) - commit "H-01: detect bulleted INCOMPLETE markers; classify the returned final answer" (follow-up to b1df22d; the fix and this line are the same commit, so it cannot name its own hash). Verify on the next job that ends with an INCOMPLETE list.
 
 ### H-02 - `devmind_task_continue` times out without starting a job
 - **First seen:** 2026-09-23 - job-1643 (two attempts, ~4 min each)
@@ -82,14 +82,14 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   `BinaryOutputMask.Collapse` in AgenticExecutor.WithBuildHints (run_shell / run_build / run_tests tool results) replaces a region
   of >=16 control chars (bridging printable gaps of <=8, control chars >=50% of it) with "[... N bytes of binary data ...]". Text,
   non-ASCII letters, box-drawing and ANSI-coloured output are untouched. The live transcript still shows the raw bytes (the host
-  streams it before the executor sees the output). Pending deploy.
+  streams it before the executor sees the output). Deployed 1.0.568 (2026-10-04).
 - **Status:** open (binary part fixed)
 
 ### H-08 - `run_tests` has no `--blame-hang` option
 - **First seen:** 2026-09-23 - job-1652 ("run_tests tool has no arg for them")
 - **Symptom:** briefs require `--blame-hang --blame-hang-timeout 45s --blame-hang-dump-type none` (testhost hangs seen Sep 18); the tool can't pass them, so agents skip the guard or fall back to shell.
 - **Proposed fix:** always add the blame-hang flags in `run_tests` (configurable timeout), or accept extra args.
-- **Status:** fixed, pending deploy - commit "H-11: run_tests builds before testing (+ blame-hang)": every run_tests (headless, TUI and
+- **Status:** fixed, deployed 1.0.568 (2026-10-04) - commit "H-11: run_tests builds before testing (+ blame-hang)": every run_tests (headless, TUI and
   the MCP tool) now carries `--blame-hang --blame-hang-timeout 45s --blame-hang-dump-type none` (DotnetTestCommand.BlameHangArgs; fixed
   45s, not configurable yet).
 
@@ -123,7 +123,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   test's own `html.Contains("0 MB")` matching Disk free values like "58,030 MB". Stale builds happen (above) AND get over-diagnosed.
 - **Also seen in job-1672/1673:** `devmind_task_continue` worked immediately this time (H-02 did not reproduce); the agent used the new
   prompt rules (checked DLL timestamps before rebuilding, stopped with ask_caller on a genuine-looking contradiction).
-- **Status:** fixed, pending deploy - commit "H-11: run_tests builds before testing (+ blame-hang)". `--no-build` dropped: the one
+- **Status:** fixed, deployed 1.0.568 (2026-10-04) - commit "H-11: run_tests builds before testing (+ blame-hang)". `--no-build` dropped: the one
   command line now comes from `DotnetTestCommand` (DevMind.Core) for BufferedAgenticHost, TuiAgenticHost and the MCP run_tests tool, so
   `dotnet test` incrementally builds the test project and its references first; a build failure is the tool result. Tool descriptions
   say so. Smoke-run of the exact line on DevMind.Cli.Tests: build + 20/20 with the Blame collector active.
@@ -139,7 +139,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   "0 Warning(s)" while a `--no-incremental` rebuild showed 45 pre-existing warnings (up-to-date projects are not recompiled).
 - **Proposed fix:** build_verification uses a full rebuild (or at least reports that the count is incremental). Already listed in the
   parked tool audit ("build_verification -> .slnx detection + full-rebuild warning counts").
-- **Status:** fixed, pending deploy - with H-32: harness build verification of a plain `dotnet build` is now a `-t:Rebuild` with a
+- **Status:** fixed, deployed 1.0.568 (2026-10-04) - with H-32: harness build verification of a plain `dotnet build` is now a `-t:Rebuild` with a
   verified warning count (reproduced 2026-09-27: a scratch .slnx with one CS0168 printed "1 Warning(s)", then "0 Warning(s)" on the
   next incremental build; -t:Rebuild and --no-incremental both re-emit it).
 
@@ -197,7 +197,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   - *Build hint:* run_shell / run_build / run_tests output gets one `[HINT] CS1503/CS1929 on an Assert.* call ...` line when such an
     error's source line contains `Assert.` (`BuildErrorHints`, rows are {Codes, LinePredicate, Message}; Razor hints not added yet).
   - Not covered: the caller-facing `build_verification.output_tail` in devmind_task_result (agent never reads it).
-- **Status:** fixed, pending deploy - commit "harness: xUnit message-argument lint on test-file writes + CS1503/CS1929 build hint"
+- **Status:** fixed, deployed 1.0.568 (2026-10-04) - commit "harness: xUnit message-argument lint on test-file writes + CS1503/CS1929 build hint"
   (the fix and this line are the same commit, so it cannot name its own hash)
 
 ### H-20 - "Run/exec command succeeded - treating as task complete" still ends real jobs (implicit-done fallback)
@@ -218,7 +218,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   `HadFileMutationThisTurn` / `RunExecSucceededThisTurn` gate flags went with it. Safety net in `AgentJob`: a `done` job whose answer
   is empty after stripping harness status lines (`[CONTEXT]`/`[TOOL_USE]`/`[LLM]`/`[AGENTIC]`) is `stopped_incomplete` with reason
   `no_final_answer` - job-1693's verbatim answer is a test case.
-- **Status:** fixed, pending deploy - commit "H-20: no implicit done for headless jobs; empty answer is incomplete". Verify on the
+- **Status:** fixed, deployed 1.0.568 (2026-10-04) - commit "H-20: no implicit done for headless jobs; empty answer is incomplete". Verify on the
   next job that runs a `dotnet run` probe mid-research.
 
 ### H-21 - run_shell rewrites `&&` inside quoted content and here-strings
@@ -232,7 +232,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Fix:** `ShellRunner.TranslateChainOperators` rewrites ` && ` only in statement-level code; quoted strings, here-strings and
   comments pass through verbatim. The rewrite is kept (not removed): run_shell runs Windows PowerShell 5.1, where `&&` is a parse
   error. The MCP run_shell description now says so.
-- **Status:** fixed in 739af47, pending deploy
+- **Status:** fixed in 739af47, deployed 1.0.568 (2026-10-04)
 
 ### H-22 - write_file/create_file emit a UTF-8 BOM on new files
 - **First seen:** 2026-09-26 - driver session on the PSCP connector jobs (jobs 1697-1702).
@@ -243,7 +243,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Fix:** the MCP write_file/create_file and append_file new-file branches now write UTF-8 without BOM for every extension (the
   per-extension rule and `IsScriptFileExtension` are gone). Existing files already kept their BOM or lack of one via
   `TextFileFormat`; the Core/TUI hosts and PatchEngine already wrote new files BOM-less.
-- **Status:** fixed, pending deploy - commit "fix(files): write UTF-8 without BOM unless the file already had one" (the fix and
+- **Status:** fixed, deployed 1.0.568 (2026-10-04) - commit "fix(files): write UTF-8 without BOM unless the file already had one" (the fix and
   this line are the same commit, so it cannot name its own hash)
 
 ### H-23 - devmind_task_status `wait_seconds=60` always fails over the remote-devices bridge
@@ -253,7 +253,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Proposed fix:** clamp `wait_seconds` to 55 in the tool (and say so in its description).
 - **Fix:** `AgentJobManager.MaxWaitSeconds` 60 -> 55; the tool and parameter descriptions say "clamped to 55 (leaves headroom
   under a 60 s transport timeout)".
-- **Status:** fixed, pending deploy - commit "fix(mcp): clamp task_status wait_seconds to 55 for 60 s transports" (the fix and
+- **Status:** fixed, deployed 1.0.568 (2026-10-04) - commit "fix(mcp): clamp task_status wait_seconds to 55 for 60 s transports" (the fix and
   this line are the same commit, so it cannot name its own hash)
 
 ### H-24 - Child processes started by run_shell die when the call returns
@@ -270,7 +270,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   run_shell takes `detach` (boolean, default false) -> ToolCallMapper (`ResponseBlock.ShellDetach`) -> AgenticExecutor ->
   `IAgenticHost.RunShellAsync(command, timeoutSeconds, detach = false)` -> BufferedAgenticHost (headless jobs) / TuiAgenticHost ->
   `ShellRunner.ExecuteAsync(..., detach)`. Existing calls are unchanged (new trailing optional parameter).
-- **Status:** fixed, pending deploy - commit "feat(shell): run_shell detach option; document child-process lifetime" (the fix and
+- **Status:** fixed, deployed 1.0.568 (2026-10-04) - commit "feat(shell): run_shell detach option; document child-process lifetime" (the fix and
   this line are the same commit, so it cannot name its own hash)
 
 ### H-25 - Agent attributes its own compile errors to the toolchain
@@ -288,7 +288,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   not counted (LSP diagnostics carry no stable CS code). (prompt) `HeadlessAgent.NoToolchainQuirkRule` in the built-in headless
   rules: never blame a compiler/SDK/toolchain "quirk" without a minimal repro that excludes your own code; after two attempts,
   report the cause as unknown.
-- **Status:** fixed, pending deploy - commit "feat(harness): optional-work spend guard and repeated-compile-error nudge; no-quirk rule" (the fix and this line are the same commit, so
+- **Status:** fixed, deployed 1.0.568 (2026-10-04) - commit "feat(harness): optional-work spend guard and repeated-compile-error nudge; no-quirk rule" (the fix and this line are the same commit, so
   it cannot name its own hash)
 
 ### H-26 - Rabbit hole on work the brief marked optional
@@ -305,7 +305,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   next prompt gets "[HARNESS GUARD] This item was marked optional in the brief. Drop it and continue with the required work." with
   the sentence quoted. Once per item per session (continuation prompts are scanned too). The repeated-compile-error half is the
   H-25 nudge. New heuristic - the thrash guard matches failure signatures, not keywords, so there was nothing to reuse.
-- **Status:** fixed, pending deploy - same commit as H-25
+- **Status:** fixed, deployed 1.0.568 (2026-10-04) - same commit as H-25
 
 ### H-27 - run_shell expands %VAR% inside quoted content and comments
 - **First seen:** 2026-09-26 - found while fixing H-21 (same defect class, the next lines of `ShellRunner.ExecuteAsync`).
@@ -317,7 +317,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   `$env:VAR`, so it follows PowerShell interpolation rules: expanded at statement level and inside `"..."` (the existing
   `"%USERNAME%"` guardrail test still pins this), left alone inside `'...'`, here-strings and comments - single quotes give a
   literal `%NAME%`. The MCP run_shell description says so.
-- **Status:** fixed, pending deploy - commit "fix(shell): expand %VAR% only outside quoted content; share the shell tokenizer" (the
+- **Status:** fixed, deployed 1.0.568 (2026-10-04) - commit "fix(shell): expand %VAR% only outside quoted content; share the shell tokenizer" (the
   fix and this line are the same commit, so it cannot name its own hash)
 
 ### H-28 - Runaway shell call can't be interrupted by an override steer; one long timeout for every command
@@ -349,7 +349,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 
   The old classifier accepted only 0 and 128, so 255 (job-1713) and 1 (reproduced) became "Failed to reap". The job object was
   meant to be the authoritative kill but only ran implicitly (handle close) after the taskkill verdict.
-- **Status:** fixed, pending deploy - commit "H-29: one reap per call, job object first, verdict by what survived". The racing early
+- **Status:** fixed, deployed 1.0.568 (2026-10-04) - commit "H-29: one reap per call, job object first, verdict by what survived". The racing early
   kill is gone (the cancel wakes the reap immediately anyway). ReapCall: TerminateJobObject is the primary kill; taskkill runs only
   without a job (degraded path), for a detach call's full reap (its children broke away from the job), and as a second attempt on
   survivors. The verdict is liveness - the job's live PID list plus the root process (without a job: the PIDs taskkill named that are
@@ -363,7 +363,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Second hit:** job-1715 - SlashCompletion.cs, SlashCompletionPopup.cs, SlashCompletionTests.cs.
 - **Proposed fix:** for a new file, pick the dominant line ending of sibling files in the same folder (or .gitattributes /
   core.autocrlf), falling back to CRLF on Windows.
-- **Status:** fixed, pending deploy - commit "H-30: new files take the repo's line ending". Rule (NewFileLineEnding, via
+- **Status:** fixed, deployed 1.0.568 (2026-10-04) - commit "H-30: new files take the repo's line ending". Rule (NewFileLineEnding, via
   TextFileFormat.WriteNew on every new-file path): .gitattributes eol= for the path (-text/binary = as given) > .sh is LF > dominant
   ending of up to 10 neighbouring files (same extension, then any, in the folder, then its parent) > CRLF on Windows; the content is
   normalised fully. core.autocrlf and $GIT_DIR/info/attributes are not read. No BOM on new files, as before.
@@ -377,7 +377,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   commit." Harness build + tests green (1849/1849).
 - **Proposed fix:** don't flag when harness verification ran and passed for the same claim, or narrow the phrase list so "not run by
   me" followed by "harness verifies" doesn't count.
-- **Status:** fixed, pending deploy - commit 3f4af9b, tightened by "H-31: only a green harness TEST run outweighs a phrase-only
+- **Status:** fixed, deployed 1.0.568 (2026-10-04) - commit 3f4af9b, tightened by "H-31: only a green harness TEST run outweighs a phrase-only
   self-report". Rule: an INCOMPLETE: marker always makes the job stopped_incomplete; a phrase-only hit is outweighed only by a green
   harness TEST run (verify_tests on, harness build and test verification both green) - then the job is `done` and the line is returned
   as `self_report_note`. A green build alone does not outweigh it ("The core defect is NOT fixed" still compiles). The phrase list is
@@ -389,7 +389,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   instruction, then reported "0 warnings". The driver re-ran with -t:Rebuild both times (0/0, so no harm this time).
 - **Proposed fix:** have build_verification itself run -t:Rebuild (or a clean build) when warning counts matter, so the agent's
   choice doesn't decide whether warnings are visible. See H-13.
-- **Status:** fixed, pending deploy - commit "H-32: harness build verification runs a full rebuild". Rule (VerificationBuild): when the
+- **Status:** fixed, deployed 1.0.568 (2026-10-04) - commit "H-32: harness build verification runs a full rebuild". Rule (VerificationBuild): when the
   resolved build command is a single plain `dotnet build`, the harness verifies with `-t:Rebuild` and reports warning_count_verified =
   true plus warning_count parsed from that run; a command that is already a rebuild (-t:Rebuild / --no-incremental) runs unchanged and
   counts as verified; DEVMIND_BUILD_COMMAND overrides, other build systems, custom targets and composite commands run unchanged and
@@ -419,7 +419,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   edit 1. The first apply had refreshed the cache, so base == current and the merge gate took its two-way fallback: hence
   `[two-way fallback]` on both lines. Reproduced exactly (PatchLandingTests.TwoPatchesToTheSameFile_InOneIteration_BothLand failed on
   the old code with the same transcript and applied=2, errors=0). The agent's "find text didn't match" diagnosis was a guess.
-- **Status:** fixed, pending deploy - commit "H-34: patches rebase onto the current file and are verified after the write". In
+- **Status:** fixed, deployed 1.0.568 (2026-10-04) - commit "H-34: patches rebase onto the current file and are verified after the write". In
   PatchEngine.ApplyPatch (shared by the agent host, the TUI host and MCP patch_file): if the file changed since the patch was resolved,
   its FIND/REPLACE pairs are re-resolved against the current content (exact only; otherwise PATCH-FAILED, nothing written). After the
   write the file is re-read and each edit's REPLACE must be at the position it targeted (a pure deletion must lower the deleted text's
@@ -428,7 +428,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **First seen:** long-standing (user: "pretty much always"); confirmed 2026-09-27 in a plan-mode run.
 - **Fix:** ac4965f - when the terminal iteration already drew >= 40 visible prose chars, task_done's summary collapses to one dim
   line and is parked for Ctrl+O / /expand; ask_caller never collapses; history unchanged.
-- **Status:** fixed, pending deploy check
+- **Status:** fixed, deployed 1.0.568 (2026-10-04); live check pending
 
 ### H-36 - TUI intermittently drops the first character of a prompt
 - **Seen:** 2026-09-27 twice. ~15:47 local: "create a file hello.txt containing hi" was echoed and SAVED to history as
@@ -449,7 +449,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Decision (Paul):** a job that is progressing is already bounded by max_depth; the timeout exists to catch hangs. Replace the
   wall-clock kill with a STALL timeout: kill only when no iteration has completed (and no tool call has returned) for N minutes.
   No absolute wall-clock cap.
-- **Status:** fixed, pending deploy - commit "H-37: delegated jobs time out on a stall, not on wall-clock time". The
+- **Status:** fixed, deployed 1.0.568 (2026-10-04) - commit "H-37: delegated jobs time out on a stall, not on wall-clock time". The
   wall-clock CancelAfter is gone. A watchdog runs for the agent turn only and cancels when the job's JobLiveness record
   shows no progress for timeout_minutes (the name is kept; it is now the stall window, default 10, range 1-240).
   Progress events: every SSE data chunk the model server streams (text, think and tool-call argument deltas; not
@@ -476,7 +476,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   and pinned by `McpServerConfigTests.TuiConfig_save_round_trips_the_block_verbatim`. It only helps once deployed.
 - **Watch:** after deploy, confirm the `comfy` entry survives a `/mode` toggle. The same trap applies to ANY future key
   added to devmind.json by hand without a TuiConfig property.
-- **Status:** fixed in source, pending deploy
+- **Status:** fixed, deployed 1.0.568 (2026-10-04)
 
 ### H-40 - Claude Code's LSP index stays stale after a package restore and after out-of-editor edits
 - **First seen:** 2026-09-29, during MCP client parts 1 and 2. `dotnet add package ModelContextProtocol` restored
@@ -503,7 +503,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Fix:** the executor's `McpCall` case journals every call that runs — ok, error or timeout alike — as kind `mcp`.
   It writes through an `IActionJournal` capability that `BufferedAgenticHost` implements. The detail is
   `server.tool {args≤500} → outcome, N chars, S.s s` (see docs/mcp-client.md).
-- **Status:** fixed, pending deploy. Verify: a job with mcp_servers shows one `mcp` action per call.
+- **Status:** fixed, deployed 1.0.568 (2026-10-04). Verify: a job with mcp_servers shows one `mcp` action per call.
 
 ### H-42 - A crashed MCP server was relaunched silently
 - **First seen:** 2026-09-29, job-1740: the job's comfy-mcp (PID 49700) was killed mid-job. The next `mcp__comfy__which`
@@ -515,7 +515,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
     row…`), once, not per call.
   - The TUI prints notices to the transcript. Headless sessions write them to the job transcript and journal them as
     `mcp_restart`.
-- **Status:** fixed, pending deploy. Verify: kill a job's MCP server mid-job and look for the line and the
+- **Status:** fixed, deployed 1.0.568 (2026-10-04). Verify: kill a job's MCP server mid-job and look for the line and the
   `mcp_restart` action.
 
 ### H-43 - "INCOMPLETE: none" still trips self_reported_incomplete when followed by text or a bullet
@@ -629,7 +629,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   inherit it. The start response and devmind_task_result echo it (null when thinking is off). devmind.json
   `reasoningEffort` sets the default for MCP jobs and the TUI. With thinking off, the request is unchanged:
   `{enable_thinking:false}`.
-- **Status:** fixed, pending deploy (commit "Default reasoning_effort to medium when thinking is on; add reasoning_effort
+- **Status:** fixed, deployed 1.0.568 (2026-10-04) (commit "Default reasoning_effort to medium when thinking is on; add reasoning_effort
   to devmind_task_start"). Verify: a think:true job's request carries `"reasoning_effort":"medium"`.
 
 ### H-50 - Nudge when the agent pages shell output instead of reading the file
@@ -666,7 +666,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   fires). `AgentJob.IsIncomplete` / `IncompleteReasons()` extend H-20's path: `stopped_incomplete` with `ended_without_task_done`.
   Tests: `NarrationStallPerStallTests` (job-1974/1975 narration verbatim); removing the reset fails
   `SecondNarrationStall_AfterAToolCall_GetsItsOwnRePrompt_AndReachesTaskDone`.
-- **Status:** fixed, pending deploy - commit "H-52: stall guards per stall; a job ending without task_done is stopped_incomplete".
+- **Status:** fixed, deployed 1.0.568 (2026-10-04) - commit "H-52: stall guards per stall; a job ending without task_done is stopped_incomplete".
 
 ### H-53 - Missing or misnamed tool arguments surface as raw null exceptions
 - **First seen:** 2026-10-02, VLink.Warehouses jobs 1971-1977: `[READ ERROR] : Value cannot be null. (Parameter 'key')` and
@@ -684,7 +684,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   `LoopHelpers.BuildToolResultContent`). An unknown tool name now gets `[TOOL ERROR] Unknown tool call: x` as its result instead of
   `[Executed]`. Second safeguard: `AgenticExecutor` (read/grep/diff/create/append/delete) and `BufferedAgenticHost` (save/append/read)
   report "no file name was provided" instead of the exception.
-- **Status:** fixed, pending deploy - commit "H-53/H-54/H-55: tool argument errors are reported, patch edits validated, per-call
+- **Status:** fixed, deployed 1.0.568 (2026-10-04) - commit "H-53/H-54/H-55: tool argument errors are reported, patch edits validated, per-call
   read results". Tests: `ToolArgumentValidationTests`.
 
 ### H-54 - patch_file edits with the wrong keys are skipped silently
@@ -698,7 +698,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   an empty `find`, a non-object item, an empty array or non-JSON. There is no fallback to the top-level find/replace when `edits`
   was given, and no aliases. Without `edits`, `find` and `replace` are both required. `ToolCallMapperTests` pinned the old fallback;
   it now pins the error.
-- **Status:** fixed, pending deploy - same commit as H-53. (Known aliases are accepted since H-56; the error now fires only for
+- **Status:** fixed, deployed 1.0.568 (2026-10-04) - same commit as H-53. (Known aliases are accepted since H-56; the error now fires only for
   genuinely unknown keys.)
 
 ### H-55 - A grep and a read of the same file in one turn return the same result
@@ -724,7 +724,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   - Also: plan mode's `[PATCH-REFUSED:...]` was missing from the patch result's error filter, so the model was told the find-text
     matched nothing.
   Tests: `PerCallToolResultTests` (patch then read, read then patch, two patches of one file, two create_files one of which fails).
-- **Status:** fixed, pending deploy - commits "H-53/H-54/H-55: ..." and "H-55: per-call results for patch and write tools; calls
+- **Status:** fixed, deployed 1.0.568 (2026-10-04) - commits "H-53/H-54/H-55: ..." and "H-55: per-call results for patch and write tools; calls
   run in call order".
 
 ### H-56 - patch_file called with other editors' key names costs an iteration each time
@@ -739,7 +739,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   old_text->find, new_text->replace (4 keys)` (`ToolCallResult.ArgumentNote` -> `ResponseBlock.ArgumentNote`, recorded by
   `AgenticExecutor` through `IActionJournal`; the TUI has no journal). Watch the count: if it stays high, the schema or prompt is
   fighting the model's training and the descriptions may need the aliases spelt out.
-- **Status:** fixed, pending deploy - commit "H-56: patch_file accepts common find/replace key aliases". Tests:
+- **Status:** fixed, deployed 1.0.568 (2026-10-04) - commit "H-56: patch_file accepts common find/replace key aliases". Tests:
   `ToolArgumentValidationTests` (H-56 section, mutation-checked: disabling the rename fails all 15).
 
 ### H-57 - After one override steer the model re-acknowledges it every turn
@@ -756,7 +756,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   the model copied its own previous replies, which all opened with the acknowledgement.
 - **Fix (framing only, injection unchanged):** the override framing now ends "Acknowledge once, then continue; do not restate
   this instruction." Suggest framing is unchanged (job-2108's suggest steer at ~line 1420 was acknowledged once).
-- **Status:** fixed, pending deploy - commit "H-57: override steer asks for a single acknowledgement". Tests:
+- **Status:** fixed, deployed 1.0.568 (2026-10-04) - commit "H-57: override steer asks for a single acknowledgement". Tests:
   `SteerInjectionTests.ConsumedOverride_IsInTheNextRequestOnce_AndNeverReSentAsANewMessage` (the steer appears exactly once in
   the request that consumes it, in the newest user message; the next request still has one copy, in history, and its newest
   user message is the re-trigger; mutation-checked - a mailbox that does not clear on Take sends two copies and fails it);
@@ -787,7 +787,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   thinking. Not when the job was started with `think: true` (its own effort stands), nor with the new `devmind_task_start`
   flag `auto_think: false` (default true; continuations inherit it). `devmind_task_result` (and the result sidecar) report
   `auto_think_escalations` and `auto_think_iterations` (requests sent with harness-enabled thinking).
-- **Status:** fixed, pending deploy - commit "H-58: note and auto-think on repeated identical test failures". Tests:
+- **Status:** fixed, deployed 1.0.568 (2026-10-04) - commit "H-58: note and auto-think on repeated identical test failures". Tests:
   `RepeatedTestFailureTests` - parser (VSTest normal/minimal, MTP, build-only output), guard (3 runs -> one note; changed set
   and passing run reset; filtered re-run counts; same set never noted twice), escalation decisions, and three runs through
   the real headless loop (thinking on in exactly request 4 then off when the tests pass; on for exactly 15 requests under a
@@ -824,7 +824,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Limits:** lexing is approximate (no brace or here-string tracking). A write via a tool the guard does not know
   (`Copy-Item` of a file written to %TEMP%, `cmd /c` with a redirect inside quotes) is not caught. That is the same trust
   boundary as before: shell commands are not sandboxed.
-- **Status:** fixed (2026-10-02), pending deploy.
+- **Status:** fixed (2026-10-02), deployed 1.0.568 (2026-10-04).
 
 ### H-60 - list_files with "**/" in the directory part ignores the rest of the pattern
 - **First seen:** 2026-10-02, job-2112 (iterations ~6-8, VLink.Warehouses). `list_files "**/ConfigPages/*.cs"` and
@@ -843,7 +843,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Tests:** `ListFilesGlobTests` on a temp tree: `**/X/*.cs` (only files directly under any X), `a/**/X/*.cs`, `**/*.cs`
   (all, bin pruned), `a/*/X/*.cs` (one level), backslash + `./` prefix, missing prefix → no matches, `recursive: false`
   ignored, absolute prefix, unchanged `*.cs` / `a/X/*.cs`, and find_in_files with the same glob.
-- **Status:** fixed (2026-10-02), pending deploy.
+- **Status:** fixed (2026-10-02), deployed 1.0.568 (2026-10-04).
 
 ## Parked
 
@@ -883,7 +883,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   **Detector fixed** - commit "H-01: 'INCOMPLETE: none' is not incomplete" (SelfReportedIncompleteDetector v1.2): a marker whose
   text is only none / nothing / n/a / na / - / (em/en) dash, case-insensitive, optionally emphasised with trailing punctuation, is
   NOT incomplete; "INCOMPLETE: none of the tests ran" still is. An empty marker counts only as a header over a list (first item
-  quoted, unless that item is itself "none"); an empty marker with no list under it declares nothing. Pending deploy.
+  quoted, unless that item is itself "none"); an empty marker with no list under it declares nothing. Deployed.
 - **H-01 false positive #2 (2026-09-25, job-1686, after deploy of 90d5365):** a fully finished job (tests 473/75 green, clean build)
   ended stopped_incomplete / self_reported_incomplete because its summary contained the markdown HEADER "## Caller must know" (a
   notes section) - the backup phrase list matches "caller must" anywhere. Suggested fix: apply the phrase list only to lines that are
@@ -892,7 +892,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   **Fixed** - commit "H-01: headers and 'caller must' no longer trigger self_reported_incomplete" (SelfReportedIncompleteDetector
   v1.3): markdown ATX header lines (# to ######) are skipped by the phrase list (the INCOMPLETE: marker still counts in a header), and
   "caller must" is dropped from the phrase list ("INCOMPLETE: caller must run the migration" still fires via the marker). job-1686's
-  verbatim answer is a fixture and now ends `done`. Pending deploy.
+  verbatim answer is a fixture and now ends `done`. Deployed.
 - **H-17 recurrence (2026-09-25, job-1690):** the agent's first patch to AdminUiPagesTests.cs corrupted a PRE-EXISTING line (164) -
   "double-quote mangled" in its own words - CS1010 "Newline in constant". It fixed it itself within 2 iterations. Evidence that the
   quote corruption also hits lines adjacent to the edit, not only the new content.
@@ -927,7 +927,7 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   write_file/append_file forced BOM-less for scripts and ADDED a BOM to every other file. Now an EXISTING file keeps its BOM (any
   extension) and its dominant line ending (`TextFileFormat`, DevMind.Core) on patch_file, create_file/write_file overwrite, append_file
   and /resolve accept_proposed, in BufferedAgenticHost, TuiAgenticHost and the MCP tools. New files: unchanged per-tool behaviour.
-  Pending deploy.
+  Deployed.
 - **Test-helper bugs mistaken for product bugs** (2026-09-24, job-1670): a non-verbatim interpolated string with doubled quotes
   (`$"title=\"\"{x}\"\""`) produced a regex that could never match; the failure message itself printed the correct element. Agents should
   read their own assertion's pattern when the "actual" in the message looks right.
