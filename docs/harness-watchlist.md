@@ -1321,7 +1321,34 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Proposed fix:** classify a verification failure whose only diagnostics are MSB3021/3026/3027/3061 as
   `build_verification_locked` (environmental), name the locking processes from the message, and don't count those
   warnings as build_warnings.
-- **Status:** open.
+- **Message shape (real, SDK 10.0.302, from job-2152):** one line per diagnostic, e.g.
+  `...targets(5096,5): warning MSB3026: Could not copy "<src>" to "<dst>". Beginning retry 10 in 1000ms. The process cannot access
+  the file '<dst>' because it is being used by another process. The file is locked by: "devenv.exe (116488),
+  VLink.PDFSanitizerConfig.exe (83868)" [<proj>]`; MSB3027 "... Exceeded retry count of 10. Failed. The file is locked by: "…"";
+  MSB3021 "Unable to copy file ... being used by another process." (no locked-by list); MSB3061 "Unable to delete file "…". Access to
+  the path '…' is denied. The file is locked by: "VLink.PDFSanitizerConfig.exe (83868)"". Output that went through a console arrives
+  wrapped mid-diagnostic (the transcript's MSB3061 lines), so a diagnostic is read up to its closing " [<proj>]".
+- **Fix (2026-10-04):** `BuildLockDiagnostics` (Core) reads the FULL rebuild output: lock codes MSB3021/3026/3027/3061, the locking
+  processes ("name (pid)", distinct), counts of lock warnings / lock errors / other errors — inline diagnostics only (MSBuild repeats
+  them all after "Build FAILED." / "Build succeeded."). `BuildVerification` gains LockedBy, LockWarningCount, LockErrorCount
+  (+ OtherErrorCount, quoted lock / error lines).
+  - Lock warnings are subtracted from WarningCount and dropped from the quoted warning lines, so they never make `build_warnings`; a
+    build that succeeded with lock warnings only is not incomplete, and the payload still shows `locked_by`. The tail says
+    "[verification] File locks: N warning(s) and M error(s) not counted against the code — locked by …".
+  - Failed with EVERY error a lock error -> `build_verification_locked` + "build output is locked by <processes> — close them and re-run
+    verification — this is the environment, not the code". Any non-lock error -> `build_verification_failed` as before, followed by
+    the real error lines, then the lock lines (only when locks are present; otherwise the reasons are unchanged).
+  - build_verification payload (result + sidecar): `locked`, `locked_by`, `lock_warning_count`, `lock_error_count`.
+  - Not green (H-31/H-43): a locked verification keeps `Succeeded == false` (exit code non-zero), so test verification is skipped
+    (gate `Build is not { Succeeded: false }`) and `HarnessTestVerified` is false — an INCOMPLETE: line is never excused by it. No
+    extra wiring needed; pinned by a test.
+  - No retry: a debug session holding the output will still hold it a few seconds later, and a retry doubles a slow rebuild for
+    nothing. The reason line tells the driver what to close.
+- **Tests:** BuildLockDiagnosticsTests (job-2152's verbatim lines incl. the console-wrapped MSB3061), BuildLockVerificationTests (51
+  MSB3026 + exit 0 -> done, no build_warnings, locked_by; only MSB3027/MSB3021 errors -> build_verification_locked, no test run, not
+  verified-green; CS0103 + locks -> build_verification_failed, CS error then lock lines; CS8618 + lock warnings -> warning_count 1).
+  Mutation check: counting lock warnings again fails `FiftyOneLockWarnings_AndExit0_AreNotBuildWarnings_TheJobIsDone`.
+- **Status:** fixed, pending deploy - commit "H-68: file-lock diagnostics in build verification are the environment, not the code".
 
 ### H-69 - The three-way merge never merges: DiffPlex rejects the null chunker
 - **Found:** 2026-10-04, while fixing H-05 (the new merge-mode test for a real divergence came back DiffEngineFailed).

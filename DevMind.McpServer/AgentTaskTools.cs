@@ -507,6 +507,13 @@ namespace DevMind.McpServer
                     // false, so the tail cannot read as a warning check that happened.
                     warning_count_verified = job.Build.WarningCountVerified,
                     warning_count = job.Build.WarningCount,
+                    // H-68: file locks (a debug session holding the output) are the environment:
+                    // reported here, never counted as the code's warnings; a build that failed only on
+                    // them reads build_verification_locked, not build_verification_failed.
+                    locked = job.Build.FailedOnlyOnLocks,
+                    locked_by = job.Build.LockedBy,
+                    lock_warning_count = job.Build.LockWarningCount,
+                    lock_error_count = job.Build.LockErrorCount,
                     output_tail = job.Build.OutputTail,
                 },
                 test_verification = TestVerificationPayload.Create(job),

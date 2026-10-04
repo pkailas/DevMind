@@ -225,6 +225,13 @@ namespace DevMind.McpServer
                 .Select(e => (object)new { at_depth = e.AtDepth, new_cap = e.NewCap, signal_summary = e.SignalSummary })
                 .ToArray();
 
+        /// <summary>H-68: the reason line for a verification that failed only on file locks.</summary>
+        internal static string LockedReason(BuildVerification build)
+        {
+            string who = build.LockedBy.Count > 0 ? string.Join(", ", build.LockedBy) : "another process (MSBuild did not name it)";
+            return $"build output is locked by {who} — close them and re-run verification — this is the environment, not the code";
+        }
+
         /// <summary>Why the job is incomplete (empty when it isn't).</summary>
         public string[] IncompleteReasons()
         {
@@ -233,7 +240,25 @@ namespace DevMind.McpServer
             if (Result?.NeedsInput ?? false) reasons.Add("needs_input");
             if (Result?.ThrashStopped ?? false) reasons.Add("thrashing");
             if (Result?.HitDepthCap ?? false) reasons.Add("hit_depth_cap");
-            if (Build is { Succeeded: false }) reasons.Add("build_verification_failed");
+            if (Build is { Succeeded: false } failed)
+            {
+                if (failed.FailedOnlyOnLocks)
+                {
+                    // H-68: every error was a file lock held by something else — the environment.
+                    reasons.Add("build_verification_locked");
+                    reasons.Add(LockedReason(failed));
+                }
+                else
+                {
+                    reasons.Add("build_verification_failed");
+                    // With locks in the mix, the real errors first, then the lock lines.
+                    if (failed.LockLines.Count > 0)
+                    {
+                        reasons.AddRange(failed.OtherErrorLines);
+                        reasons.AddRange(failed.LockLines);
+                    }
+                }
+            }
             if (Tests is { Succeeded: false }) reasons.Add("test_verification_failed");
             if (HasVerifiedBuildWarnings)
             {
@@ -343,6 +368,32 @@ namespace DevMind.McpServer
         /// <summary>The first few distinct warning lines from the FULL output of a verified
         /// rebuild (empty otherwise) — quoted in incomplete_reasons under build_warnings.</summary>
         public IReadOnlyList<string> WarningLines { get; init; } = Array.Empty<string>();
+
+        // ── H-68: file locks — the environment, not the code ──
+
+        /// <summary>Processes MSBuild named as holding the files ("name (pid)"), distinct.</summary>
+        public IReadOnlyList<string> LockedBy { get; init; } = Array.Empty<string>();
+
+        /// <summary>Lock diagnostics emitted as warnings (MSB3026 copy retries, …) — NOT counted in
+        /// <see cref="WarningCount"/>.</summary>
+        public int LockWarningCount { get; init; }
+
+        /// <summary>Lock diagnostics emitted as errors (MSB3027 / MSB3021 / MSB3061).</summary>
+        public int LockErrorCount { get; init; }
+
+        /// <summary>Errors that are not lock errors.</summary>
+        public int OtherErrorCount { get; init; }
+
+        /// <summary>A few lock diagnostic lines and a few non-lock error lines, for the reasons.</summary>
+        public IReadOnlyList<string> LockLines { get; init; } = Array.Empty<string>();
+        public IReadOnlyList<string> OtherErrorLines { get; init; } = Array.Empty<string>();
+
+        /// <summary>
+        /// The build failed and EVERY error was a file lock: the code was not judged at all. Still not
+        /// a green build — <see cref="Succeeded"/> stays false, so test verification is skipped and the
+        /// H-31 / H-43 green-test excuse can never apply.
+        /// </summary>
+        public bool FailedOnlyOnLocks => !Succeeded && LockErrorCount > 0 && OtherErrorCount == 0;
     }
 
     /// <summary>One-at-a-time headless-agent job queue with bounded result retention.</summary>
@@ -1365,6 +1416,11 @@ namespace DevMind.McpServer
                         // build does not re-emit warnings for up-to-date projects.
                         warning_count_verified = job.Build.WarningCountVerified,
                         warning_count = job.Build.WarningCount,
+                        // H-68: file locks, reported apart from the warnings and errors of the code.
+                        locked = job.Build.FailedOnlyOnLocks,
+                        locked_by = job.Build.LockedBy,
+                        lock_warning_count = job.Build.LockWarningCount,
+                        lock_error_count = job.Build.LockErrorCount,
                         output_tail = job.Build.OutputTail,
                     },
                     test_verification = TestVerificationPayload.Create(job),
@@ -1428,6 +1484,12 @@ namespace DevMind.McpServer
                 int? warnings = plan.FullRebuild ? VerificationBuild.ParseWarningCount(output) : null;
                 bool verified = warnings != null;
 
+                // H-68: file-lock diagnostics are the environment (a debug session holding the
+                // output), not the agent's code — they are reported, not counted as warnings.
+                BuildLockReport locks = BuildLockDiagnostics.Analyze(output);
+                if (warnings is int all)
+                    warnings = Math.Max(0, all - locks.LockWarningCount);
+
                 // The warning_count_verified flag is a sibling field; the "N Warning(s)" lives
                 // here in the tail, which is what a model actually reads as prose. Keep the
                 // verdict WITH the text it qualifies, or a reader takes the count at face value
@@ -1435,6 +1497,10 @@ namespace DevMind.McpServer
                 tail += verified
                     ? $"\n[verification] Full rebuild: warning count is verified - {warnings} warning(s).\n"
                     : BuildWarningCountDisclaimer;
+                if (locks.LockWarningCount + locks.LockErrorCount > 0)
+                    tail += $"[verification] File locks: {locks.LockWarningCount} warning(s) and {locks.LockErrorCount} error(s) " +
+                            "not counted against the code — locked by " +
+                            (locks.LockedBy.Count > 0 ? string.Join(", ", locks.LockedBy) : "another process") + ".\n";
                 return new BuildVerification
                 {
                     Command = command,
@@ -1443,8 +1509,17 @@ namespace DevMind.McpServer
                     WarningCountVerified = verified,
                     WarningCount = warnings,
                     WarningLines = verified && warnings > 0
-                        ? VerificationBuild.ExtractWarningLines(output, MaxQuotedWarningLines)
+                        ? VerificationBuild.ExtractWarningLines(output, int.MaxValue)
+                            .Where(l => !BuildLockDiagnostics.IsLockLine(l))
+                            .Take(MaxQuotedWarningLines)
+                            .ToList()
                         : Array.Empty<string>(),
+                    LockedBy = locks.LockedBy,
+                    LockWarningCount = locks.LockWarningCount,
+                    LockErrorCount = locks.LockErrorCount,
+                    OtherErrorCount = locks.OtherErrorCount,
+                    LockLines = locks.LockLines,
+                    OtherErrorLines = locks.OtherErrorLines,
                 };
             }
             catch (Exception ex)
