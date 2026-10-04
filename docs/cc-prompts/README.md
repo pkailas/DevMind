@@ -12,8 +12,8 @@ commit before the next starts (several touch the same files). Each prompt update
 | 05 | 05-H04-H05-H67-patch-safety.md | H-04 Roslyn parse check on .cs edits, H-67 fuzzy patches on structured files, H-05 `[two-way fallback]` label only on a real fallback | done — 4938f74 (found H-69: the three-way merge never ran — DiffPlex null chunker; decided - see 05b) |
 | 06 | 06-H07-shell-output.md | H-07 shell output: UTF-8 wrapper encoding, inline stdout+stderr | done — f753fda |
 | 05b | 05b-H69-merge-conflicts.md | H-69 real three-way merge (LineChunker); headless conflict = refuse one write + re-read instruction; MCP write_file/create_file syntax gate; SatelliteResourceLanguages=en | done — 2a0673a |
-| 07 | 07-H68-build-locks.md | H-68 build verification failing on user file locks → classify as environmental (build_verification_locked) | pending |
+| 07 | 07-H68-build-locks.md | H-68 build verification failing on user file locks → classify as environmental (build_verification_locked) | done — 3ee6690 (+ f784954: MCP append_file syntax gate) |
 
-Run next: 07.
+Run next: none — every prompt in this batch is done.
 
 Nothing in this batch is deployed. Deploy once after the batch (run-deploy.ps1), then live-check each item.

@@ -41,6 +41,11 @@ blamed on the agent.
 - A real warning (CS8618) plus lock warnings → WarningCount counts only the CS8618.
 - Process-name parsing against the real MSBuild message shape (use an actual captured line in the test).
 
+## Loose end from 05b (small, separate commit is fine)
+MCP append_file (DevMind.McpServer\DevMindTools.cs) still skips the C# syntax gate — 05b gated only write_file/create_file (noted
+under H-04 in the watchlist). Apply the same CSharpSyntaxGate check to append_file on .cs files, with the same refusal text, plus a
+test (broken append refused / file unchanged; valid append written; non-.cs untouched). Update the H-04 note.
+
 ## Done means
 - Rebuild 0 errors / 0 warnings; dotnet test with --blame-hang --blame-hang-timeout 45s --blame-hang-dump-type none, all green; report counts.
 - Mutation check: count lock warnings as normal warnings again and confirm the 51-warning test fails by name; restore.
