@@ -1032,4 +1032,5 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   cannot tell "skipped what was asked" from "did what was asked".
 - **Decision (Paul, 2026-10-04):** drop the weak phrase list. A job is self_reported_incomplete only on an explicit
   `INCOMPLETE:` declaration (existing marker rules, incl. the "none" all-clear); a missing task_done stays covered by H-20/H-52.
-- **Status:** open.
+- **Status:** parked (2026-10-04) - CC prompt written in chat, not yet run. Future idea: a fine-tuned local decision model
+  (Laya) reading brief + answer as an advisory flag on top of the marker rule.
