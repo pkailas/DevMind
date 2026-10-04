@@ -1168,3 +1168,23 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   Mutation check: making a job's end delete every `_active*.json` fails `JobEnd_ClearsOnlyItsOwnMarker_NeverAnotherServersMarker`.
 - **Status:** fixed, pending deploy - commit "H-03/H-66: per-job active markers and dead-server sweep; H-02 tracing". deploy.ps1
   and dm-watch.ps1 changes take effect on the next run (dm-watch from dist\ is the live copy).
+
+### H-67 - Patches on code occasionally add stray characters or duplicate a line
+- **First seen:** 2026-10-04, VLink.PDFSanitizer jobs. job-2143: a `[Fuzzy ⚠]` 99% patch of a `[LoggerMessage]` attribute wrote
+  `)]]` (one bracket too many) at two sites, giving CS1519; the agent caught it in its own build. job-2146: two patches to
+  MainWindow.xaml.cs left the newest `// vX.Y.Z` header line duplicated; the agent noticed and removed it both times.
+- **Pattern:** both happened on near-identical neighbouring lines (attribute blocks, stacked version-history comments) — the
+  same family as the open fuzzy-match items (fuzzy applied to structured files; exact match losing to a fuzzy runner-up).
+- **Proposed fix:** don't auto-apply a fuzzy match to C#/XAML; on any fuzzy apply, re-read the patched region and fail the
+  patch if the result contains the FIND's neighbourhood twice or the bracket balance changed.
+- **Status:** open.
+
+### H-68 - Harness build verification fails on files locked by the user's running app
+- **First seen:** 2026-10-04, job-2152 (VLink.PDFSanitizer config app). The code was clean (the agent proved 0/0 with an
+  alternate OutputPath), but the post-run verification Rebuild hit MSB3026/MSB3061 locks held by the user's debug session
+  (VLink.PDFSanitizerConfig.exe, devenv) and orphaned Microsoft.UI.Xaml.Markup.Compiler processes, so the job ended
+  stopped_incomplete with "51 warnings". Related to the env-vs-code distinction asked for earlier (Sep 1 notes, H-10).
+- **Proposed fix:** classify a verification failure whose only diagnostics are MSB3021/3026/3027/3061 as
+  `build_verification_locked` (environmental), name the locking processes from the message, and don't count those
+  warnings as build_warnings.
+- **Status:** open.
