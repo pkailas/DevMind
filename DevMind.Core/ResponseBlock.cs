@@ -37,6 +37,7 @@ namespace DevMind
                                                       // FileName doubles as FindSymbol's optional scope hint —
                                                       // a file or directory inside the solution to search.
        public string Url        { get; set; }        // for WebFetch — URL to fetch
+        public int    FetchOffset { get; set; }       // for WebFetch — character offset of the page to return (0 = start)
         public string SqlQuery   { get; set; }        // for RunSql — SQL statement
         public string SqlConnString { get; set; }     // for RunSql — explicit inline connection string (used verbatim; never logged/persisted raw)
         public string SqlConnName { get; set; }       // for RunSql — connection string name/key

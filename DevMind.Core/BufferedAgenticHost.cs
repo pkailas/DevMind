@@ -1107,10 +1107,10 @@ namespace DevMind
             return await WebTools.WebSearchAsync(query, maxResults, CancellationToken);
         }
 
-       async Task<string> IAgenticHost.WebFetchAsync(string url)
+       async Task<string> IAgenticHost.WebFetchAsync(string url, int offset)
         {
-            AppendOutput($"[WEB] fetch: {url}\n", OutputColor.Dim);
-            return await WebTools.WebFetchAsync(url, CancellationToken);
+            AppendOutput(offset > 0 ? $"[WEB] fetch: {url} (offset {offset})\n" : $"[WEB] fetch: {url}\n", OutputColor.Dim);
+            return await WebTools.WebFetchAsync(url, offset, CancellationToken);
         }
 
         // ── IAgenticHost Learn tools (delegate to shared Core LearnTools) ─────────────

@@ -1,4 +1,4 @@
-// File: WebTools.cs  v2.0
+// File: WebTools.cs  v2.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Shared web_search / web_fetch implementation used by the McpServer tools and the
@@ -8,6 +8,10 @@
 // Both tools depend on self-hosted services and fail gracefully when unreachable:
 //   web_search -> SearXNG   at DEVMIND_SEARCH_URL (default http://vard-nas:8180)
 //   web_fetch  -> fetcher   at DEVMIND_FETCH_URL  (default http://vard-nas:8181)
+//
+// web_fetch returns 8,000-char pages: an offset argument reads further, and the full content
+// is cached per URL (FetchCache, 15 min) so paging does not re-fetch. Its deadline is
+// DEVMIND_FETCH_TIMEOUT_SECONDS (default 180, clamped 10..600).
 //
 // Observability: both methods emit trace events via DevMind.Trace.Event():
 //   web_search.*  — result, error, timeout, cancelled, exception
@@ -35,8 +39,28 @@ namespace DevMind
     public static class WebTools
     {
         private const int SearchTimeoutSeconds = 15;
-        private const int FetchTimeoutSeconds  = 45;
         private const int ThinContentThreshold = 200;
+
+        // web_fetch deadline: DEVMIND_FETCH_TIMEOUT_SECONDS, read per call like DEVMIND_FETCH_URL.
+        // The fetcher converts PDFs/Office docs through Docling (~1 page/s) and can fall back to a
+        // headless-browser render after a plain GET (30 s + 45 s), so the old fixed 45 s could
+        // never fit a long document.
+        internal const int DefaultFetchTimeoutSeconds = 180;
+        internal const int MinFetchTimeoutSeconds = 10;
+        internal const int MaxFetchTimeoutSeconds = 600;
+
+        /// <summary>Characters web_fetch returns per call; the rest is read by paging with offset.</summary>
+        public const int FetchPageChars = 8000;
+
+        /// <summary>Full fetched content per URL, so paging (offset &gt; 0) does not re-fetch.</summary>
+        internal static readonly FetchCache FetchContentCache = new FetchCache();
+
+        /// <summary>DEVMIND_FETCH_TIMEOUT_SECONDS as an effective deadline: unset or not an
+        /// integer gives the default, anything else is clamped to 10..600.</summary>
+        internal static int ResolveFetchTimeoutSeconds(string raw)
+            => int.TryParse(raw, out int s)
+                ? Math.Clamp(s, MinFetchTimeoutSeconds, MaxFetchTimeoutSeconds)
+                : DefaultFetchTimeoutSeconds;
 
         // Single shared HttpClient for the whole process — creating one per request leaks
         // sockets (connections linger in TIME_WAIT and can exhaust ephemeral ports under load).
@@ -208,13 +232,25 @@ namespace DevMind
         }
 
         /// <summary>
-        /// Fetch a URL via the local fetcher service and return its content as clean
-        /// text, capped at 8,000 characters.
+        /// Fetch a URL via the local fetcher service and return one page of its content as
+        /// clean text: characters [offset, offset + 8,000), with a footer naming the next
+        /// offset while more remains. offset 0 always fetches fresh; offset &gt; 0 is served
+        /// from the per-URL cache when the content is still there, and re-fetched otherwise.
         /// </summary>
         public static async Task<string> WebFetchAsync(
-            string url, CancellationToken cancellationToken = default)
+            string url, int offset = 0, CancellationToken cancellationToken = default)
         {
             var sw = System.Diagnostics.Stopwatch.StartNew();
+            if (offset < 0) offset = 0;
+            int timeoutSeconds = ResolveFetchTimeoutSeconds(
+                Environment.GetEnvironmentVariable("DEVMIND_FETCH_TIMEOUT_SECONDS"));
+
+            if (offset > 0 && url != null && FetchContentCache.TryGet(url, out string cached))
+            {
+                TraceFetchResult(url, null, sw.ElapsedMilliseconds, cached, offset, cacheHit: true);
+                return FormatFetchPage(url, cached, offset);
+            }
+
             try
             {
                 string fetcherUrl = Environment.GetEnvironmentVariable("DEVMIND_FETCH_URL")
@@ -227,7 +263,7 @@ namespace DevMind
                     "application/json");
 
                 using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                timeoutCts.CancelAfter(TimeSpan.FromSeconds(FetchTimeoutSeconds));
+                timeoutCts.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
                 using var response = await _http.PostAsync(endpoint, payload, timeoutCts.Token).ConfigureAwait(false);
                 string json = await response.Content.ReadAsStringAsync(timeoutCts.Token).ConfigureAwait(false);
 
@@ -291,36 +327,16 @@ namespace DevMind
                             ["content_len"] = 0,
                             ["thin"] = true,
                             ["truncated"] = false,
+                            ["offset"] = offset,
+                            ["cache_hit"] = false,
                         });
                         return $"[web_fetch] No content extracted from {url}";
                     }
 
-                    bool isThin = content.Length < ThinContentThreshold;
-
-                    // Cap at 8000 chars to avoid flooding context.
-                    const int Cap = 8000;
-                    bool capped = content.Length > Cap;
-                    string output = capped ? content.Substring(0, Cap) : content;
-
-                    DmTrace.Event("info", "web_fetch.result", new Dictionary<string, object>
-                    {
-                        ["url"] = url,
-                        ["status"] = (int)response.StatusCode,
-                        ["elapsed_ms"] = elapsedMs,
-                        ["content_len"] = content.Length,
-                        ["thin"] = isThin,
-                        ["truncated"] = capped,
-                    });
-
-                    if (capped)
-                    {
-                        output = $"{output}\n\n[web_fetch: content truncated at {Cap} chars]";
-                    }
-                    if (isThin)
-                    {
-                        output = $"{output}\n\n[web_fetch warning: only {content.Length} chars extracted from {url} — the page may require JavaScript rendering, or the fetcher may have been served a bot-check shell. Treat this content as possibly incomplete.]";
-                    }
-                    return output;
+                    // Only a real page is cached — never an error or an empty extraction.
+                    FetchContentCache.Put(url, content);
+                    TraceFetchResult(url, (int)response.StatusCode, elapsedMs, content, offset, cacheHit: false);
+                    return FormatFetchPage(url, content, offset);
                 }
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
@@ -330,9 +346,11 @@ namespace DevMind
                 {
                     ["url"] = url,
                     ["elapsed_ms"] = elapsedMs,
-                    ["timeout_s"] = FetchTimeoutSeconds,
+                    ["timeout_s"] = timeoutSeconds,
+                    ["offset"] = offset,
                 });
-                return $"[web_fetch error] Timed out after {FetchTimeoutSeconds}s fetching {url}";
+                return $"[web_fetch error] Timed out after {timeoutSeconds}s fetching {url} " +
+                       "(the limit is DEVMIND_FETCH_TIMEOUT_SECONDS)";
             }
             catch (OperationCanceledException)
             {
@@ -385,6 +403,115 @@ namespace DevMind
                 });
                 // Unclassified: we do not know the cause — say so rather than implying one.
                 return $"[web_fetch error] Unclassified error (cause undetermined): {ex.Message}";
+            }
+        }
+
+        private static void TraceFetchResult(string url, int? status, long elapsedMs, string content, int offset, bool cacheHit)
+        {
+            DmTrace.Event("info", "web_fetch.result", new Dictionary<string, object>
+            {
+                ["url"] = url,
+                ["status"] = status,
+                ["elapsed_ms"] = elapsedMs,
+                ["content_len"] = content.Length,
+                ["thin"] = content.Length < ThinContentThreshold,
+                ["truncated"] = offset + FetchPageChars < content.Length,
+                ["offset"] = offset,
+                ["cache_hit"] = cacheHit,
+            });
+        }
+
+        /// <summary>
+        /// One page of <paramref name="content"/> starting at <paramref name="offset"/>, with the
+        /// footer that tells the model where it is: "continue at offset=N" while more remains,
+        /// "end of content" on a later last page, nothing when the whole text fit at offset 0.
+        /// </summary>
+        internal static string FormatFetchPage(string url, string content, int offset)
+        {
+            int total = content.Length;
+            if (offset >= total)
+                return $"[web_fetch: offset {offset} is past the end of the content ({total} chars)]";
+
+            int end = Math.Min(total, offset + FetchPageChars);
+            // Never split a surrogate pair across two pages.
+            if (end < total && end - offset > 1 && char.IsHighSurrogate(content[end - 1])) end--;
+
+            string output = content.Substring(offset, end - offset);
+            if (end < total)
+                output += $"\n\n[web_fetch: showing characters {offset}-{end} of {total}. " +
+                          $"Call web_fetch again with the same url and offset={end} to continue.]";
+            else if (offset > 0)
+                output += $"\n\n[web_fetch: end of content (characters {offset}-{total} of {total})]";
+
+            if (offset == 0 && total < ThinContentThreshold)
+                output += $"\n\n[web_fetch warning: only {total} chars extracted from {url} — the page may require JavaScript rendering, or the fetcher may have been served a bot-check shell. Treat this content as possibly incomplete.]";
+            return output;
+        }
+
+        /// <summary>
+        /// Process-wide cache of full web_fetch content per URL: 15-minute TTL, at most 64 entries
+        /// (the oldest is evicted), thread-safe. It lives here, in the one static class every
+        /// host calls, so the TUI, headless jobs and the MCP server tool all page the same way;
+        /// each process has its own. Tests reset it with <see cref="Clear"/> and drive expiry
+        /// through <see cref="Clock"/>.
+        /// </summary>
+        internal sealed class FetchCache
+        {
+            internal static readonly TimeSpan Ttl = TimeSpan.FromMinutes(15);
+            internal const int MaxEntries = 64;
+
+            private readonly object _gate = new object();
+            private readonly Dictionary<string, (string Content, DateTime StoredUtc)> _entries =
+                new Dictionary<string, (string, DateTime)>(StringComparer.Ordinal);
+
+            /// <summary>UTC clock; tests replace it to expire entries without waiting.</summary>
+            internal Func<DateTime> Clock { get; set; } = () => DateTime.UtcNow;
+
+            internal int Count { get { lock (_gate) return _entries.Count; } }
+
+            internal bool TryGet(string url, out string content)
+            {
+                lock (_gate)
+                {
+                    if (_entries.TryGetValue(url, out var e))
+                    {
+                        if (Clock() - e.StoredUtc < Ttl)
+                        {
+                            content = e.Content;
+                            return true;
+                        }
+                        _entries.Remove(url);
+                    }
+                    content = null;
+                    return false;
+                }
+            }
+
+            internal void Put(string url, string content)
+            {
+                if (url == null || string.IsNullOrWhiteSpace(content)) return;
+                lock (_gate)
+                {
+                    _entries[url] = (content, Clock());
+                    while (_entries.Count > MaxEntries)
+                    {
+                        string oldest = null;
+                        DateTime oldestAt = DateTime.MaxValue;
+                        foreach (var kv in _entries)
+                            if (kv.Value.StoredUtc < oldestAt) { oldest = kv.Key; oldestAt = kv.Value.StoredUtc; }
+                        _entries.Remove(oldest);
+                    }
+                }
+            }
+
+            /// <summary>Empties the cache and restores the real clock.</summary>
+            internal void Clear()
+            {
+                lock (_gate)
+                {
+                    _entries.Clear();
+                    Clock = () => DateTime.UtcNow;
+                }
             }
         }
     }

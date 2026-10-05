@@ -159,6 +159,7 @@ They're listed here so you can read the transcript:
 | `DEVMIND_CONTEXT_STRATEGY` | Context-management policy (`transformer`/`hybrid`/`auto`) |
 | `DEVMIND_HISTORY_*` | Session-history store configuration (SqlServer/Sqlite/Null) |
 | `DEVMIND_SEARCH_URL` / `DEVMIND_FETCH_URL` | Self-hosted SearXNG / fetcher endpoints for the web tools |
+| `DEVMIND_FETCH_TIMEOUT_SECONDS` | web_fetch deadline in seconds (default 180, clamped 10–600) |
 | `DEVMIND_LEARN_URL` | Microsoft Learn MCP endpoint for the learn_* doc tools (default: Microsoft-hosted, no setup) |
 | `DEVMIND_TUI_VERBOSE` | Show the full tool/loop firehose in the transcript |
 

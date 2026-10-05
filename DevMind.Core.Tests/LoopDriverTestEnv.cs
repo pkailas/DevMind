@@ -173,7 +173,9 @@ namespace DevMind.Core.Tests
         public Task<string> HoverAsync(string filename, int line, int character) => Task.FromResult("");
         public Task<string> FindSymbolAsync(string query, int maxResults, string language, string path) => Task.FromResult("");
         public Task<string> WebSearchAsync(string query, int? maxResults) => Task.FromResult("");
-        public Task<string> WebFetchAsync(string url) => Task.FromResult("");
+        /// <summary>What <see cref="WebFetchAsync"/> answers for (url, offset). Default "".</summary>
+        public Func<string, int, string> WebFetch { get; set; } = (_, _) => "";
+        public Task<string> WebFetchAsync(string url, int offset) => Task.FromResult(WebFetch(url, offset));
         public Task<string> LearnSearchAsync(string query, int? maxResults) => Task.FromResult("");
         public Task<string> LearnFetchAsync(string url) => Task.FromResult("");
         public Task<string> LearnCodeSearchAsync(string query, int? maxResults) => Task.FromResult("");

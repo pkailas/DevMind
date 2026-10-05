@@ -582,7 +582,10 @@ namespace DevMind
                     return new ResponseBlock
                     {
                         Type = BlockType.WebFetch,
-                        Url = GetArg(tc, "url")
+                        Url = GetArg(tc, "url"),
+                        FetchOffset = GetIntArg(tc, "offset"),
+                        // Two pages of one URL in a turn share the url; the call id keeps them apart.
+                        ToolCallId = tc.ResultId
                     };
 
                 case "learn_search":

@@ -345,9 +345,14 @@ namespace DevMind
                 Optional("max_results", "integer", "Maximum number of results to return (default 10, max 20).")));
 
            tools.Add(MakeTool("web_fetch",
-                "Fetch a URL and return its content as clean text. HTML is stripped to readable text. " +
-                "Use for reading documentation pages, GitHub files, API references, or vendor support articles.",
-                Required("url", "string", "URL to fetch.")));
+                "Fetch a URL and return its content as clean text. HTML is stripped to readable text; " +
+                "PDFs and Office documents are converted to Markdown. " +
+                "Use for reading documentation pages, GitHub files, API references, papers, or vendor support articles. " +
+                "Returns at most 8,000 characters per call. When more remains, the result ends with " +
+                "\"[web_fetch: showing characters A-B of N. Call web_fetch again with the same url and offset=B to continue.]\" — " +
+                "call again with that offset to read the next page (later pages come from a short-lived cache, not a re-fetch).",
+                Required("url", "string", "URL to fetch."),
+                Optional("offset", "integer", "Character offset to start from (default 0). Use the offset named in the previous page's footer.")));
 
             // ── Microsoft Learn tools (learn.microsoft.com via the hosted Learn MCP server) ──
             tools.Add(MakeTool("learn_search",

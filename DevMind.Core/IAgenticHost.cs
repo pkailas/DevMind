@@ -279,9 +279,11 @@ namespace DevMind
 
         /// <summary>
         /// Fetches a URL via the configured fetcher service (DEVMIND_FETCH_URL) and
-        /// returns its content as clean text, or an error message.
+        /// returns one 8,000-char page of its content as clean text, starting at character
+        /// <paramref name="offset"/> and footed with the next offset while more remains, or an
+        /// error message.
         /// </summary>
-        Task<string> WebFetchAsync(string url);
+        Task<string> WebFetchAsync(string url, int offset);
 
         /// <summary>
         /// Searches official Microsoft documentation (learn.microsoft.com) via the Learn MCP server.

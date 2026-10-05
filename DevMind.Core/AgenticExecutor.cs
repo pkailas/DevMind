@@ -730,9 +730,15 @@ namespace DevMind
                    case BlockType.WebFetch:
                         try
                         {
-                            string fetchContent = await _host.WebFetchAsync(block.Url);
+                            string fetchContent = await _host.WebFetchAsync(block.Url, block.FetchOffset);
                             if (fetchContent != null)
-                                result.ToolResultContents[block.Url ?? ""] = fetchContent;
+                            {
+                                // Two pages of one URL in a turn must not overwrite each other:
+                                // the call id is authoritative (H-55), and the url+offset key keeps
+                                // the per-turn map (training log, fallback lookup) distinct too.
+                                result.ToolResultContents[LoopHelpers.WebFetchResultKey(block.Url, block.FetchOffset)] = fetchContent;
+                                RecordCallResult(result, block, fetchContent);
+                            }
                         }
                         catch (Exception ex)
                         {
@@ -956,7 +962,8 @@ namespace DevMind
         /// handled here: LlmClient.AddToolResultMessage nearline-caps every tool result over
         /// its ingest threshold (8,000 chars by default) to an excerpt + recall_cache handle +
         /// a full spill file, which keeps the whole text recoverable. web_fetch's own 8,000-char
-        /// hard cut is deliberately not copied: it would throw that recoverable text away. This
+        /// paging is deliberately not copied: an MCP tool has no offset to page with, so a cut
+        /// would throw that recoverable text away. This
         /// only stops a runaway server from pushing megabytes into the cache and the spill.
         /// </summary>
         internal const int MaxMcpResultChars = 200_000;

@@ -121,6 +121,15 @@ namespace DevMind
         }
 
         /// <summary>
+        /// web_fetch's ToolResultContents key: the url for the first page (the key it always had),
+        /// "url @offset=N" for a later page, so two pages of one URL in a turn stay distinct.
+        /// Nothing parses this key back into a URL; it labels the result (training log) and is
+        /// the fallback lookup when a call has no id.
+        /// </summary>
+        public static string WebFetchResultKey(string url, int offset)
+            => offset > 0 ? $"{url ?? ""} @offset={offset}" : url ?? "";
+
+        /// <summary>
         /// Builds the result content string for a single tool call based on the execution result.
         /// </summary>
         public static string BuildToolResultContent(ToolCallResult tc, ExecutionResult result,
@@ -352,6 +361,17 @@ namespace DevMind
                     }
 
                 case "web_fetch":
+                    {
+                        // Normally answered above from ToolResultsByCallId; this is the fallback.
+                        string url = tc.Arguments?.TryGetValue("url", out string wu) == true ? wu : null;
+                        int offset = tc.Arguments?.TryGetValue("offset", out string wo) == true
+                                     && int.TryParse(wo, out int o) ? o : 0;
+                        if (url != null && result.ToolResultContents != null &&
+                            result.ToolResultContents.TryGetValue(WebFetchResultKey(url, offset), out string webContent))
+                            return webContent;
+                        return "[Fetched content not available]";
+                    }
+
                 case "learn_fetch":
                     {
                         string key = tc.Arguments?.TryGetValue("url", out string u) == true ? u : null;
@@ -497,7 +517,7 @@ namespace DevMind
             sb.Append("- Saving cross-session knowledge: `save_memory` / `recall_memory` / `list_memory_topics` / `search_memory` (grep across all topics)\n");
             sb.Append("- Reference lookup (RAG over ingested docs): `query_library` — framework/API questions (hooks rules, TS patterns) before guessing\n");
             sb.Append("- Code intelligence (semantic): `get_diagnostics` (errors without a build), `go_to_definition`, `find_references`, `hover`, `find_symbol` (symbol search across one solution — the session's, unless you pass a path inside another)\n");
-            sb.Append("- Web: `web_search` (docs, APIs, error messages), `web_fetch` (read a URL as text)\n");
+            sb.Append("- Web: `web_search` (docs, APIs, error messages), `web_fetch` (read a URL as text, 8,000 chars per call; pass the footer's offset to read on)\n");
             sb.Append("- Microsoft Learn: `learn_search` (authoritative .NET/C#/Azure/SQL docs), `learn_fetch` (read a learn.microsoft.com page as markdown), `learn_code_search` (official code samples). Prefer over web_search for Microsoft API questions.\n");
             sb.Append("- Finishing: `task_done` (complete) / `ask_caller` (blocked — pause and ask the caller)\n\n");
 

@@ -231,6 +231,12 @@ SearXNG is queried as
 have the **JSON output format enabled** in its settings. Results are capped at
 20, default 10.
 
+`web_fetch` waits `DEVMIND_FETCH_TIMEOUT_SECONDS` for the fetcher (default 180,
+clamped to 10–600; PDF/Office conversion runs at roughly a page a second). It
+returns 8,000 characters per call with a footer naming the `offset` of the next
+page; the full text is cached per URL for 15 minutes, so later pages are not
+re-fetched. Offset 0 always fetches fresh.
+
 **Reference deployment** — both services run as Docker containers on a
 Synology NAS (`vard-nas`), so they're up 24/7 regardless of which workstation
 is using DevMind:

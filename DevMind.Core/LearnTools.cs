@@ -127,7 +127,7 @@ namespace DevMind
                 if (string.IsNullOrWhiteSpace(content))
                     return $"[learn_fetch] No content extracted from {url}";
 
-                // Cap at 8000 chars to avoid flooding context (same convention as web_fetch).
+                // Cap at 8000 chars to avoid flooding context (web_fetch's page size; learn_fetch does not page).
                 const int Cap = 8000;
                 bool capped = content.Length > Cap;
                 string output = capped ? content.Substring(0, Cap) : content;

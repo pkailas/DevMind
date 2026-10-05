@@ -148,8 +148,9 @@ because they are host-agnostic.
 - **Size.** Oversize handling is left to the existing ingest cap in
   `LlmClient.AddToolResultMessage`. Above 8,000 chars, a result becomes a head/tail excerpt
   plus a `recall_cache` handle, and the full text is spilled to disk.
-- web_fetch's own 8,000-char hard cut was not copied, because it would throw away text the
-  ingest cap keeps recoverable. The executor adds only a 200,000-char safety ceiling, with a
+- web_fetch's own 8,000-char pages (read on with its `offset` argument) were not copied: an MCP
+  tool has no offset to page with, and a cut would throw away text the ingest cap keeps
+  recoverable. The executor adds only a 200,000-char safety ceiling, with a
   `[MCP: result truncated …]` note.
 - **Errors.** Error text (`[MCP ERROR]`, or `[MCP TOOL ERROR]` for a tool's own error result)
   goes to `result.Errors` and is also what the model receives. The loop never gets an exception.
