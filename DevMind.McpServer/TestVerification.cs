@@ -322,7 +322,10 @@ namespace DevMind.McpServer
                 // failed_tests is empty when the after-run passed; baseline_failed_tests is
                 // null when there was no before-run and empty when it passed.
                 failed_tests = after.FailedTests,
+                // H-62: how many names were cut past the 25 (0 when none; baseline null with no before-run).
+                failed_tests_truncated = after.FailedTestsTruncated,
                 baseline_failed_tests = baseRun?.FailedTests,
+                baseline_failed_tests_truncated = baseRun?.FailedTestsTruncated,
             };
         }
 

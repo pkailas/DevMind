@@ -7,11 +7,13 @@
 using System;
 using System.Collections.Generic;
 using System.Data;
+using System.Data.Common;
 using System.IO;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Data.SqlClient;
+using Microsoft.Data.Sqlite;
 
 namespace DevMind
 {
@@ -94,8 +96,7 @@ namespace DevMind
 
             try
             {
-                using var connection = new SqlConnection(connectionString);
-                connection.Open();
+                using DbConnection connection = OpenConnection(connectionString);
                 connectionOpened = true; // connection is good — caller may cache it for the session
 
                 using var transaction = connection.BeginTransaction();
@@ -156,7 +157,7 @@ namespace DevMind
                     throw;
                 }
             }
-            catch (SqlException ex)
+            catch (DbException ex)
             {
                 return $"[SQL ERROR] {ex.Message}";
             }
@@ -164,6 +165,76 @@ namespace DevMind
             {
                 return $"[ERROR] {ex.Message}";
             }
+        }
+
+        /// <summary>The database engine a connection string is for.</summary>
+        public enum SqlProvider { SqlServer, Sqlite }
+
+        // Keys only a SQL Server connection string carries; any one of them keeps it on SqlClient.
+        private static readonly string[] _sqlServerOnlyKeys =
+        {
+            "server", "address", "addr", "network address", "initial catalog", "database",
+            "integrated security", "trusted_connection", "user id", "uid", "encrypt",
+            "trustservercertificate", "multipleactiveresultsets", "application name",
+        };
+
+        private static readonly string[] _sqliteFileExtensions = { ".db", ".sqlite", ".sqlite3" };
+
+        /// <summary>
+        /// H-62: SQLite only when the string is clearly SQLite — a <c>Filename</c> key (SqlClient
+        /// rejects it outright), or a <c>Data Source</c> of <c>:memory:</c> or a path ending in
+        /// .db / .sqlite / .sqlite3 — and it names no SQL-Server-only key. Everything else stays
+        /// SQL Server, as before: "Data Source=nonexistent-test" is a server name. Never throws.
+        /// </summary>
+        public static SqlProvider DetectProvider(string connectionString)
+        {
+            if (string.IsNullOrWhiteSpace(connectionString)) return SqlProvider.SqlServer;
+            var builder = new DbConnectionStringBuilder();
+            try { builder.ConnectionString = connectionString; }
+            catch (ArgumentException) { return SqlProvider.SqlServer; }
+
+            foreach (string key in _sqlServerOnlyKeys)
+                if (builder.ContainsKey(key)) return SqlProvider.SqlServer;
+
+            if (builder.ContainsKey("filename")) return SqlProvider.Sqlite;
+
+            string source = (builder.TryGetValue("data source", out object ds) ? ds as string
+                           : builder.TryGetValue("datasource", out object ds2) ? ds2 as string
+                           : null)?.Trim();
+            if (string.IsNullOrEmpty(source)) return SqlProvider.SqlServer;
+            if (source.Equals(":memory:", StringComparison.OrdinalIgnoreCase)) return SqlProvider.Sqlite;
+            foreach (string ext in _sqliteFileExtensions)
+                if (source.EndsWith(ext, StringComparison.OrdinalIgnoreCase)) return SqlProvider.Sqlite;
+            return SqlProvider.SqlServer;
+        }
+
+        /// <summary>
+        /// Opens the connection for <see cref="DetectProvider"/>'s provider. SQLite is always
+        /// opened Mode=ReadOnly — whatever the string or allow_write says — so run_sql can neither
+        /// write to a SQLite file nor create one that does not exist.
+        /// </summary>
+        private static DbConnection OpenConnection(string connectionString)
+        {
+            DbConnection connection;
+            if (DetectProvider(connectionString) == SqlProvider.Sqlite)
+            {
+                var sqlite = new SqliteConnectionStringBuilder(connectionString) { Mode = SqliteOpenMode.ReadOnly };
+                connection = new SqliteConnection(sqlite.ToString());
+            }
+            else
+            {
+                connection = new SqlConnection(connectionString);
+            }
+            try
+            {
+                connection.Open();
+            }
+            catch
+            {
+                connection.Dispose();
+                throw;
+            }
+            return connection;
         }
 
         /// <summary>
@@ -196,7 +267,7 @@ namespace DevMind
                 var cell = columns[i].PadRight(widths[i]);
                 header.Append(cell).Append(" | ");
                 separator.Append(new string('-', widths[i] + 2)).Append(" | ");
-            }
+            }
             sb.AppendLine(header.ToString());
             sb.AppendLine(separator.ToString());
 

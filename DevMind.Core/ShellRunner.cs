@@ -143,6 +143,10 @@ namespace DevMind
                 // named "%TEMP%" inside the repo. Treated as sugar for $env:VAR, so it
                 // follows PowerShell interpolation rules (H-27).
                 command = ExpandCmdStyleEnvironmentVariables(command);
+
+                // `> null` is a redirect to a FILE named "null" in PowerShell (job-2167 left a
+                // 3-byte BOM-only "null" in the repo); the model meant $null (H-62).
+                command = RewriteNullRedirects(command);
             }
 
             // Multi-line test is computed on the ORIGINAL command, before wrapping,
@@ -1004,6 +1008,26 @@ namespace DevMind
             return RewriteSpans(command,
                 kind => kind == ShellSpanKind.Code || kind == ShellSpanKind.DoubleQuoted,
                 Environment.ExpandEnvironmentVariables);
+        }
+
+        // A redirect operator (>, >>, 2>, *>, 3>> ...) whose target is a bare null / nul word.
+        // The lookahead keeps real file names out: null.txt, nullable, nul\x, null-out.
+        private static readonly Regex NullRedirect = new(
+            @"((?:[1-6*])?>>?)[ \t]*(?:null|nul)(?![\w.\-\\/:$])",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+
+        /// <summary>
+        /// H-62: rewrites a redirect to a bare <c>null</c> or <c>nul</c> into one to <c>$null</c>.
+        /// In PowerShell <c>&gt; null</c> creates a file named "null" in the working directory
+        /// (job-2167), and cmd's <c>&gt;nul</c> fails with an Out-File "device" error; both mean
+        /// "discard". Code spans only — a quoted <c>'null'</c> target is left as written.
+        /// </summary>
+        internal static string RewriteNullRedirects(string command)
+        {
+            if (string.IsNullOrEmpty(command) || command.IndexOf('>') < 0)
+                return command;
+            return RewriteSpans(command, kind => kind == ShellSpanKind.Code,
+                code => NullRedirect.Replace(code, "$1 $$null"));
         }
 
         private static string RewriteSpans(string command, Func<ShellSpanKind, bool> applies, Func<string, string> rewrite)

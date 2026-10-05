@@ -452,7 +452,9 @@ namespace DevMind.McpServer
              "tokens_out (completion tokens). All null when the server reported no usage. " +
              "test_verification (when verify_tests ran) carries failed_tests — the after-run's failed tests " +
              "by fully-qualified name, first 25, empty when it passed — and baseline_failed_tests — the " +
-             "harness's before-run's, null when there was no before-run, empty when it passed.")]
+             "harness's before-run's, null when there was no before-run, empty when it passed. " +
+             "failed_tests_truncated / baseline_failed_tests_truncated count the names cut past the 25 " +
+             "(0 when none; the baseline one is null when there was no before-run).")]
         public Task<string> TaskResult(
             [Description("The job_id returned by devmind_task_start.")] string job_id,
             CancellationToken cancellationToken = default)

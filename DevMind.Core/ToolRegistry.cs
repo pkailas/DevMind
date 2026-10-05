@@ -373,6 +373,9 @@ namespace DevMind
             // ── run_sql ────────────────────────────────────────────────────
             tools.Add(MakeTool("run_sql",
                 "Execute a read-only SQL query against a database. " +
+                "Providers: SQL Server, and SQLite when the connection string is clearly SQLite (a Filename key, or a " +
+                "Data Source of :memory: or a .db / .sqlite / .sqlite3 file) — SQLite is always opened read-only and a " +
+                "missing file is not created. Any other string is treated as SQL Server. " +
                 "Only SELECT statements are allowed by default. " +
                 "Results are returned as a compact text table. " +
                 "If the query returns more rows than maxRows, only the first maxRows are shown " +
