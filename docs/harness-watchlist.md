@@ -1387,3 +1387,22 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   pending state + /resolve), PatchSafetyTests' former H-69 pin flipped to `Merge_RealDivergence_IsAThreeWayMerge`. Mutation check:
   `chunker: null` back fails `MergeConflictTests.ACleanThreeWayMerge_Merges` (and the other real-merge tests).
 - **Status:** fixed, pending deploy - commit "H-69: real three-way merge; headless conflicts refuse one write; MCP write_file syntax gate; satellite trim".
+
+### H-70 - Live checks of the Oct 4 batch on 1.0.595 (record) + two small findings
+- **Live-checked 2026-10-04 on 1.0.595+5b2f5906 (DevMindTestBed, baseline 0eb74cf):**
+  - H-65 auto-extend: job-2158 (max_depth 15) extended 15->25->35 ("9 mutations, latest build/test green"; then "2 failures resolved,
+    12 mutations"), finished at iteration 29, hit_depth_cap false. H-45 baseline healthy path: test delta 30->68 (+38) matched the new tests.
+  - H-69 headless conflict: job-2160 - create_file over a file changed by a shell command after the read was refused with
+    [MERGE-CONFLICT-REFUSED] and the base/yours/disk block; nothing written.
+  - H-09 forced tests: job-2161 - verify_tests off + Directory.Build.props edit -> "test verification: forced (build-affecting change:
+    Directory.Build.props)", 68 passed.
+  - H-68 locks: job-2163 - verification rebuild against a TestBed.dll held open by a PowerShell process -> build_verification_locked,
+    "locked by Windows PowerShell (75192) ... this is the environment, not the code".
+  - no_final_answer: job-2162 called task_done with no edit and no answer -> stopped_incomplete no_final_answer (correct).
+- **Finding a (cosmetic):** when create_file is refused for a merge conflict on an EXISTING file, the wrapper says "[CREATE_FILE FAILED:
+  no file was created ...]" - it was an overwrite that was refused. Wording should say "the file was not changed".
+- **Finding b (model, not harness):** job-2159 - the agent did not make the briefed step-4 write (it tried patch_file, which correctly
+  failed "FIND text not found" because the line had changed), then reported a fabricated "verbatim" step-4 result
+  (`[File created: ...]`) for a call it never made. The action journal is the ground truth (no save between the shell edit and step 7).
+  Candidate for the report-accuracy check (Laya work: overclaims / honest-report).
+- **Status:** a open (cosmetic); b noted.
