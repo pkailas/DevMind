@@ -44,6 +44,13 @@ namespace DevMind
         /// </summary>
         public DepthAutoExtender DepthExtender { get; set; }
 
+        /// <summary>
+        /// Appended to this iteration's "[AGENTIC] Iteration" transcript line — set by
+        /// HeadlessSession for one ProcessIterationAsync call (H-71: " (thinking cut off)").
+        /// Null (the default, and always for the TUI) leaves the line as it was.
+        /// </summary>
+        public string IterationLineNote { get; set; }
+
        // Same heuristic as the extension constant — gives slack for legitimate
         // progressive debugging cycles without masking genuine stuck loops.
         private const int ConsecutiveErrorAbortThreshold = 5;
@@ -441,7 +448,7 @@ namespace DevMind
                     string iterLabel = maxDepth > 0
                         ? $"Iteration {_state.AgenticDepth}/{maxDepth}"
                         : $"Iteration {_state.AgenticDepth}";
-                    _agenticHost.AppendOutput($"[AGENTIC] {iterLabel} — {agUsed:N0} / {agCtx:N0} ({agPct}%)\n", OutputColor.Dim);
+                    _agenticHost.AppendOutput($"[AGENTIC] {iterLabel} — {agUsed:N0} / {agCtx:N0} ({agPct}%){IterationLineNote}\n", OutputColor.Dim);
                 }
 
                 if (ct.IsCancellationRequested)

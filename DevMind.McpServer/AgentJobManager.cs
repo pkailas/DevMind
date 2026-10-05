@@ -59,6 +59,10 @@ namespace DevMind.McpServer
         /// (default true). Only matters when <see cref="Think"/> is off. A continuation inherits
         /// the parent's value.</summary>
         public bool AutoThink { get; init; } = true;
+        /// <summary>H-71: after a response whose reasoning the thinking budget cut off, send the
+        /// next request a one-shot note quoting its tail (default true). Cut-offs are counted
+        /// either way. A continuation inherits the parent's value unless it sets its own.</summary>
+        public bool CarryCutoffReasoning { get; init; } = true;
         /// <summary>Depth-cap auto-extension: raise the cap in place when the job reaches it
         /// still converging (default true). A continuation inherits the parent's value.</summary>
         public bool AutoExtend { get; init; } = true;
@@ -660,7 +664,8 @@ namespace DevMind.McpServer
             bool allowCommit, bool verifyBuild, bool think = false, bool verifyTests = false,
             bool noExecute = false, bool runTestBaseline = true, bool? showThinking = null,
             IReadOnlyList<McpServerConfig>? mcpServers = null, string? reasoningEffort = null,
-            bool autoThink = true, bool autoExtend = true, int maxExtensions = 2)
+            bool autoThink = true, bool autoExtend = true, int maxExtensions = 2,
+            bool carryCutoffReasoning = true)
         {
             var job = new AgentJob
             {
@@ -677,6 +682,7 @@ namespace DevMind.McpServer
                 // (never absent — the Qwen3.8 templates treat absent as xhigh).
                 ReasoningEffort = think ? DevMind.ReasoningEffort.NormalizeOrDefault(reasoningEffort) : null,
                 AutoThink = autoThink,
+                CarryCutoffReasoning = carryCutoffReasoning,
                 AutoExtend = autoExtend,
                 MaxExtensions = maxExtensions,
                 VerifyTests = verifyTests,
@@ -713,7 +719,7 @@ namespace DevMind.McpServer
         /// </summary>
         public AgentJob? Continue(string parentJobId, string prompt, int maxDepth, int timeoutMinutes,
             bool verifyBuild, out string error, bool verifyTests = false, bool? noExecute = null,
-            bool runTestBaseline = true, bool? showThinking = null)
+            bool runTestBaseline = true, bool? showThinking = null, bool? carryCutoffReasoning = null)
         {
             error = null!;
             AgentJob parent;
@@ -767,6 +773,7 @@ namespace DevMind.McpServer
                 // keep the parent's value, which is what the request actually sends).
                 ReasoningEffort = parent.ReasoningEffort,
                 AutoThink = parent.AutoThink, // inherited with Think (H-58)
+                CarryCutoffReasoning = carryCutoffReasoning ?? parent.CarryCutoffReasoning, // H-71
                 AutoExtend = parent.AutoExtend,
                 MaxExtensions = parent.MaxExtensions,
                 NoExecute = ResolveContinuationNoExecute(parent.NoExecute, noExecute),
@@ -1005,6 +1012,9 @@ namespace DevMind.McpServer
                             ReasoningEffort = job.ReasoningEffort ?? DevMind.ReasoningEffort.Default,
                             // H-58: the harness may turn thinking on for repeated test failures.
                             AutoThink = job.AutoThink,
+                            // H-71: carry a thinking-budget cut-off into the next request.
+                            CarryCutoffReasoning = job.CarryCutoffReasoning,
+                            ReasoningCutoffMarkers = LoadReasoningCutoffMarkers(),
                             // Depth-cap auto-extension for a job still converging at the cap.
                             AutoExtendDepth = job.AutoExtend,
                             MaxDepthExtensions = job.MaxExtensions,
@@ -1042,6 +1052,7 @@ namespace DevMind.McpServer
                         // rebuilds the addendum from _options every turn — a stale regime
                         // would misinstruct the agent on turn N+1.
                         session.SetHarnessVerifiesTests(job.VerifyTests);
+                        session.SetCarryCutoffReasoning(job.CarryCutoffReasoning);
                     }
 
                     // External MCP servers (mcp_servers): started and awaited BEFORE the first
@@ -1368,6 +1379,14 @@ namespace DevMind.McpServer
             }
         }
 
+        /// <summary>H-71: devmind.json "reasoningCutoffMarkers" (null = the built-in default).
+        /// A config that cannot be read falls back to the default rather than failing the job.</summary>
+        private static IReadOnlyList<string>? LoadReasoningCutoffMarkers()
+        {
+            try { return TuiConfig.Load().ReasoningCutoffMarkers; }
+            catch { return null; }
+        }
+
         /// <summary>
         /// Persists a finished job's outcome next to its transcript
         /// ({TranscriptDir}\{id}.result.json) so devmind_task_result can serve REAL
@@ -1408,6 +1427,10 @@ namespace DevMind.McpServer
                     reasoning_effort = job.ReasoningEffort,
                     auto_think_escalations = r?.AutoThinkEscalations ?? 0,
                     auto_think_iterations = r?.AutoThinkIterations ?? 0,
+                    // H-71: thinking-budget cut-offs and the notes that carried them forward.
+                    think_budget_cutoffs = r?.ThinkBudgetCutoffs ?? 0,
+                    reasoning_carry_notes = r?.ReasoningCarryNotes ?? 0,
+                    reasoning_carry_escalations = r?.ReasoningCarryEscalations ?? 0,
                     error = job.Error,
                     transcript_path = r?.TranscriptPath,
                     parent_job_id = job.ParentJobId,

@@ -51,6 +51,17 @@ namespace DevMind
         /// </summary>
         public bool   AutoThink                { get; set; } = true;
         /// <summary>
+        /// H-71: after a response whose reasoning the thinking budget cut off, the next request
+        /// carries a one-shot harness note quoting the tail of that reasoning. False = cut-offs
+        /// are still counted, no note is sent (devmind_task_start carry_cutoff_reasoning=false).
+        /// </summary>
+        public bool   CarryCutoffReasoning     { get; set; } = true;
+        /// <summary>
+        /// H-71: the cut-off markers (devmind.json "reasoningCutoffMarkers"). Null =
+        /// <see cref="ReasoningCutoff.DefaultMarkers"/>; empty = detection off.
+        /// </summary>
+        public IReadOnlyList<string> ReasoningCutoffMarkers { get; set; }
+        /// <summary>
         /// Whether the JOB HARNESS runs the test suite over the solution after the agent
         /// stops (MCP verify_tests). Decides which test-verification regime is written
         /// into the headless addendum: harness-on tells the agent NOT to run the full
@@ -151,6 +162,13 @@ namespace DevMind
         public int AutoThinkEscalations { get; set; }
         /// <summary>H-58: model requests this turn sent with harness-enabled thinking.</summary>
         public int AutoThinkIterations { get; set; }
+
+        /// <summary>H-71: responses this turn whose reasoning the thinking budget cut off.</summary>
+        public int ThinkBudgetCutoffs { get; set; }
+        /// <summary>H-71: harness notes this turn that carried a cut-off thought into the next request.</summary>
+        public int ReasoningCarryNotes { get; set; }
+        /// <summary>H-71: of those notes, the ones escalated (third consecutive cut-off or later).</summary>
+        public int ReasoningCarryEscalations { get; set; }
     }
 
     /// <summary>
@@ -296,6 +314,8 @@ namespace DevMind
         // a de-escalation, and every new turn, restores exactly what the caller chose.
         private RepeatedTestFailureGuard _testFailures = new RepeatedTestFailureGuard();
         private AutoThinkEscalation _autoThink;
+        // H-71: reasoning cut off by the thinking budget, carried into the next request. Per turn.
+        private ReasoningCutoffCarry _cutoffCarry;
         private bool _jobThinks;
         private string _jobEffort;
 
@@ -371,6 +391,10 @@ namespace DevMind
             _options.ReasoningEffort = _jobEffort;
             _testFailures = new RepeatedTestFailureGuard();
             _autoThink = new AutoThinkEscalation(_jobThinks, _options.AutoThink);
+            _cutoffCarry = new ReasoningCutoffCarry(
+                ReasoningCutoff.ResolveMarkers(_options.ReasoningCutoffMarkers), _options.CarryCutoffReasoning);
+            // A note built on the previous turn's last iteration was never sent; it stays there.
+            _llmClient.SetNextRequestNote(null);
 
             // Depth-cap auto-extension: per turn, sized from the cap this turn started with.
             // The cap it raises is restored when the turn ends, so a reused session's next turn
@@ -403,6 +427,8 @@ namespace DevMind
             // which is what a thrash-stopped job used to return as its "answer" (job-1384).
             string lastProse = "";
             string lastRepeatedFailure = null;
+            // H-71: the note the last response's cut-off reasoning produced, sent with the next request.
+            ReasoningCarryNote carryNote = null;
 
 
             // DEVMIND_TASK_SHOW_THINKING=1 streams the model's think tokens into the
@@ -469,6 +495,9 @@ namespace DevMind
                     // No-op when no steer is pending.
                     DrainSteerIntoPrompt(ref currentPrompt);
                     _autoThink.OnRequest();
+                    InjectCarryNote(ref carryNote);
+                    // Read now: ObserveTestRuns may switch thinking for the request after this one.
+                    bool thinkingThisRequest = _options.ShowLlmThinking;
 
                     await _llmClient.SendMessageAsync(
                         currentPrompt,
@@ -532,6 +561,8 @@ namespace DevMind
                         if (!string.IsNullOrWhiteSpace(prose)) lastProse = prose;
                     }
 
+                    carryNote = ObserveReasoningCutoff(thinkingThisRequest);
+
                     LoopIterationResult iter;
                     try
                     {
@@ -542,6 +573,10 @@ namespace DevMind
                     {
                         result.Cancelled = true;
                         break;
+                    }
+                    finally
+                    {
+                        _driver.IterationLineNote = null;
                     }
                     liveness?.Tick($"iteration {result.Iterations} completed");
 
@@ -649,6 +684,9 @@ namespace DevMind
             result.TokensOut = tokenUsage.TotalCompletionTokens();
             result.AutoThinkEscalations = _autoThink.Escalations;
             result.AutoThinkIterations = _autoThink.Iterations;
+            result.ThinkBudgetCutoffs = _cutoffCarry.Cutoffs;
+            result.ReasoningCarryNotes = _cutoffCarry.NotesInjected;
+            result.ReasoningCarryEscalations = _cutoffCarry.Escalations;
             // HitDepthCap means the loop stopped BECAUSE of the cap (LoopDriver's
             // depth-cap terminal), not that the counter happened to reach it. Field
             // lesson: a run that finished with a clean task_done ON the cap boundary
@@ -850,6 +888,32 @@ namespace DevMind
             }
         }
 
+        // H-71: read the response just received for a thinking-budget cut-off. Marks this
+        // iteration's transcript line and returns the note for the next request (null when
+        // there is none). Inline <think> text stands in when the backend sent no reasoning_content.
+        private ReasoningCarryNote ObserveReasoningCutoff(bool thinkingThisRequest)
+        {
+            string reasoning = _llmClient.LastReasoning;
+            if (string.IsNullOrEmpty(reasoning))
+                reasoning = ReasoningCutoff.InlineThinkText(_llmClient.LastAssistantText);
+
+            ReasoningCarryNote note = _cutoffCarry.Observe(reasoning, thinkingThisRequest, out bool cutOff);
+            _driver.IterationLineNote = cutOff ? " (thinking cut off)" : null;
+            return note;
+        }
+
+        // H-71: hand the pending carry note to the client for the request about to be sent —
+        // one request only, never stored in history — and journal it as a harness note.
+        private void InjectCarryNote(ref ReasoningCarryNote carryNote)
+        {
+            if (carryNote == null) return;
+            _llmClient.SetNextRequestNote(carryNote.Text);
+            _cutoffCarry.RecordInjected(carryNote);
+            _host.RecordHarnessNote(carryNote.Detail);
+            EmitToTurn($"[GUARD] harness note injected at this iteration boundary. {carryNote.Text}\n");
+            carryNote = null;
+        }
+
         // Fold the pending steer (if any) into the prompt about to be sent this iteration.
         // The decision lives in Steer (pure/testable); this method only wires it to the
         // state, the audit journal, and the transcript. An override on the last iteration
@@ -901,6 +965,10 @@ namespace DevMind
         /// </summary>
         internal int EvictedMessageCountForTest => _llmClient.EvictedMessageCountForTest;
 
+        /// <summary>Test seam — the content of every message in the client's stored history
+        /// (H-71: the carry note must never be one of them).</summary>
+        internal IReadOnlyList<string> HistoryContentsForTest => _llmClient.HistoryContentsForTest;
+
         /// <summary>Adjusts the per-turn iteration cap for a continuation. Also the path a
         /// depth-cap auto-extension raises the cap through, mid-turn.</summary>
         public void SetMaxDepth(int maxDepth) => _options.AgenticLoopMaxDepth = maxDepth;
@@ -950,6 +1018,13 @@ namespace DevMind
         public void SetHarnessVerifiesTests(bool harnessVerifiesTests)
         {
             _options.HarnessVerifiesTests = harnessVerifiesTests;
+        }
+
+        /// <summary>H-71: re-syncs carry_cutoff_reasoning on a REUSED (continuation) session,
+        /// whose job may set it differently from the parent. Read at the start of each turn.</summary>
+        public void SetCarryCutoffReasoning(bool carryCutoffReasoning)
+        {
+            _options.CarryCutoffReasoning = carryCutoffReasoning;
         }
 
         /// <summary>

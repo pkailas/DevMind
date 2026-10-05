@@ -125,6 +125,13 @@ namespace DevMind
         [JsonPropertyName("reasoningEffort")]
         public string ReasoningEffort { get; set; } = null;
 
+        /// <summary>H-71: text that marks reasoning cut off by the backend's thinking budget,
+        /// matched case-insensitively in a delegated job's captured reasoning. Null (absent) =
+        /// the built-in default (<see cref="DevMind.ReasoningCutoff.DefaultMarkers"/>); an
+        /// explicit empty array turns detection off. Null is omitted on write.</summary>
+        [JsonPropertyName("reasoningCutoffMarkers")]
+        public List<string> ReasoningCutoffMarkers { get; set; } = null;
+
         /// <summary>Additional directories the MCP server may write under, on top of the
         /// working directory and any --dir / DEVMIND_ALLOWED_WRITE_ROOTS startup roots.
         /// Absolute paths only. Re-read by the reload_write_roots MCP tool, so entries
@@ -226,6 +233,16 @@ namespace DevMind
 
                 if (root.TryGetProperty("reasoningEffort", out var re) && re.ValueKind == JsonValueKind.String)
                     config.ReasoningEffort = re.GetString();
+
+                if (root.TryGetProperty("reasoningCutoffMarkers", out var rcm) && rcm.ValueKind == JsonValueKind.Array)
+                {
+                    config.ReasoningCutoffMarkers = new List<string>();
+                    foreach (var el in rcm.EnumerateArray())
+                    {
+                        if (el.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(el.GetString()))
+                            config.ReasoningCutoffMarkers.Add(el.GetString());
+                    }
+                }
 
                 if (root.TryGetProperty("allowedWriteRoots", out var awr) && awr.ValueKind == JsonValueKind.Array)
                 {

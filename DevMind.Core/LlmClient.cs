@@ -140,6 +140,8 @@ namespace DevMind
 
         private string _taskScratchpad = "";
         private const int ScratchpadMaxTokens = 200;
+        // H-71: a one-shot harness note for the next request only (SetNextRequestNote).
+        private string _pendingHarnessNote;
 
         /// <summary>Floor for the watermark a forced compaction may drive itself to.</summary>
         private const int MinForcedWatermarkPct = 5;
@@ -228,6 +230,17 @@ namespace DevMind
         /// clock governs.
         /// </summary>
         internal int EvictedMessageCountForTest => _droppedMessageCount;
+
+        /// <summary>Test seam: the content of every message in the stored history, in order.</summary>
+        internal IReadOnlyList<string> HistoryContentsForTest
+        {
+            get
+            {
+                var contents = new List<string>(_conversationHistory.Count);
+                foreach (var m in _conversationHistory) contents.Add(m.Content);
+                return contents;
+            }
+        }
 
         /// <summary>
         /// Test seam (visible via InternalsVisibleTo) — the compaction counters the thrash
@@ -1028,6 +1041,11 @@ namespace DevMind
             if (taskScratchpad != null)
                 _taskScratchpad = taskScratchpad.Trim();
 
+            // H-71: the harness note queued for this request is taken now, so it travels with
+            // this send only — whatever happens to the send, the next one does not repeat it.
+            string harnessNote = _pendingHarnessNote;
+            _pendingHarnessNote = null;
+
             // Ensure context-size detection has completed before computing budget math.
             // If detection is still in-flight (common on the first message after launch),
             // wait up to 5 seconds. If it times out or the send is cancelled first,
@@ -1318,7 +1336,7 @@ namespace DevMind
                 // was, so the error handling directly below is reached unchanged.
                 using var response = await PostWithOverflowRecoveryAsync(
                     modelName, forceToolChoiceRequired, maxTokens, url, onToken,
-                    cancellationToken).ConfigureAwait(false);
+                    cancellationToken, harnessNote).ConfigureAwait(false);
 
                 // Surface the request URL and the server's error body instead of a bare status
                 // code. EnsureSuccessStatusCode() throws "Response status code does not indicate
@@ -1781,7 +1799,8 @@ namespace DevMind
             int maxTokens,
             string url,
             Action<string> onToken,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            string harnessNote = null)
         {
             int reclaimedOnRetry = 0;
 
@@ -1794,7 +1813,19 @@ namespace DevMind
                 // argument rather than a convenience.
                 InsertScratchpadMessage();
 
-                string requestJson = BuildRequestJson(modelName, forceToolChoiceRequired, maxTokens);
+                // The H-71 note is on the wire for this request and nowhere else: inserted
+                // beside the scratchpad, and out of history again as soon as the payload is
+                // built, so no compaction pass and no later request ever sees it.
+                InsertHarnessNoteMessage(harnessNote);
+                string requestJson;
+                try
+                {
+                    requestJson = BuildRequestJson(modelName, forceToolChoiceRequired, maxTokens);
+                }
+                finally
+                {
+                    RemoveHarnessNoteMessage();
+                }
 
                 var request = new HttpRequestMessage(HttpMethod.Post, url)
                 {
@@ -1920,6 +1951,34 @@ namespace DevMind
 
             int index = Math.Max(1, _conversationHistory.Count - 1);
             _conversationHistory.Insert(index, ChatMessage.Scratchpad(_taskScratchpad, _currentTurn));
+        }
+
+        /// <summary>
+        /// H-71: queues a harness note for the NEXT request only. It is placed like the
+        /// scratchpad — immediately before the last message — and never stored in history:
+        /// the request after that one does not carry it. Null or blank clears a queued note.
+        /// </summary>
+        public void SetNextRequestNote(string note)
+            => _pendingHarnessNote = string.IsNullOrWhiteSpace(note) ? null : note;
+
+        /// <summary>Inserts the one-shot harness note, if any, immediately before the last message.</summary>
+        private void InsertHarnessNoteMessage(string note)
+        {
+            if (string.IsNullOrWhiteSpace(note)) return;
+            if (_conversationHistory.Count == 0) return;
+
+            int index = Math.Max(1, _conversationHistory.Count - 1);
+            _conversationHistory.Insert(index, ChatMessage.HarnessNote(note, _currentTurn));
+        }
+
+        /// <summary>Removes the one-shot harness note from history.</summary>
+        private void RemoveHarnessNoteMessage()
+        {
+            for (int i = _conversationHistory.Count - 1; i >= 0; i--)
+            {
+                if (_conversationHistory[i].IsHarnessNote)
+                    _conversationHistory.RemoveAt(i);
+            }
         }
 
         /// <summary>
@@ -5039,10 +5098,21 @@ namespace DevMind
         internal static ChatMessage Scratchpad(string content, int turn)
             => new ChatMessage("user", $"--- CURRENT SCRATCHPAD ---\n{content}\n---", turn, isScratchpad: true);
 
-        private ChatMessage(string role, string content, int turn, bool isScratchpad)
+        /// <summary>
+        /// True for the H-71 one-shot harness note. Like <see cref="IsScratchpad"/>, a structural
+        /// marker: the note is in history only while its request is being serialized.
+        /// </summary>
+        public bool IsHarnessNote { get; }
+
+        /// <summary>Builds the one-shot harness note — role <c>user</c>, for the reasons given at <see cref="Scratchpad"/>.</summary>
+        internal static ChatMessage HarnessNote(string content, int turn)
+            => new ChatMessage("user", content, turn, isScratchpad: false, isHarnessNote: true);
+
+        private ChatMessage(string role, string content, int turn, bool isScratchpad, bool isHarnessNote = false)
             : this(role, content, turn)
         {
             IsScratchpad = isScratchpad;
+            IsHarnessNote = isHarnessNote;
         }
 
         /// <summary>

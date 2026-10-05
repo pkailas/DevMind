@@ -32,6 +32,18 @@ namespace DevMind.McpServer
 
         /// <summary>timeout_minutes, shared by devmind_task_start and devmind_task_continue.
         /// The parameter name predates H-37: it is now a STALL window, not a wall-clock limit.</summary>
+        /// <summary>carry_cutoff_reasoning on devmind_task_start (H-71).</summary>
+        internal const string CarryCutoffReasoningDescription =
+            "When the backend's thinking budget cuts the model's reasoning off mid-thought (detected by the " +
+            "cut-off text in its reasoning; devmind.json reasoningCutoffMarkers), send the NEXT request a " +
+            "one-shot harness note quoting the last ~600 characters of that reasoning and telling the agent to " +
+            "decide it or settle it with a quick experiment, and to record the decision in its scratchpad " +
+            "(default true). The note is never stored in the conversation; on the third cut-off in a row it " +
+            "tells the agent to stop deliberating and run an experiment. Each note is journaled as kind " +
+            "harness_note; devmind_task_result reports think_budget_cutoffs (counted even when this is false), " +
+            "reasoning_carry_notes and reasoning_carry_escalations. No effect when thinking is off. " +
+            "Continuations inherit this setting.";
+
         internal const string TimeoutMinutesDescription =
             "Stall timeout in minutes (default 10, range 1-240). The job is cancelled only when the agent has made " +
             "NO progress for this long - no streamed model output, no tool call starting or returning, no shell " +
@@ -136,6 +148,7 @@ namespace DevMind.McpServer
             [Description("Let the harness turn thinking on by itself when the same test(s) fail three runs in a row (default true). It runs at effort \"medium\" and goes off again when the tests pass or after 15 iterations; each switch is journaled as kind \"harness_note\", and devmind_task_result reports auto_think_escalations and auto_think_iterations. Has no effect when `think` is on. false = never. Continuations inherit this setting.")] bool? auto_think = null,
             [Description("When the job reaches max_depth while still converging (a failure resolved, or a green build/test after a change, at least 3 changes in the last 30 iterations, no repeating failure, context below the guard limit), raise its cap in place instead of stopping: same conversation, no context reset, no finish-up directive at the old cap (default true). Each extension adds max_depth/2 (at least 10) and may take the cap past 200. devmind_task_status shows effective_max_depth and depth_extensions_used; devmind_task_result lists depth_extensions. A caller override steer resets the convergence window (progress before the redirect no longer counts) but leaves extension on. false = a fixed cap. Continuations inherit this setting.")] bool? auto_extend = null,
             [Description("Most auto-extensions per job turn (default 2, range 0-10). Continuations inherit this setting.")] int? max_extensions = null,
+            [Description(CarryCutoffReasoningDescription)] bool? carry_cutoff_reasoning = null,
             CancellationToken cancellationToken = default)
         {
             return await TracedAsync("devmind_task_start", null, async () =>
@@ -197,7 +210,8 @@ namespace DevMind.McpServer
                     reasoningEffort: effort,
                     autoThink: auto_think ?? true,
                     autoExtend: auto_extend ?? true,
-                    maxExtensions: Math.Clamp(max_extensions ?? 2, 0, 10));
+                    maxExtensions: Math.Clamp(max_extensions ?? 2, 0, 10),
+                    carryCutoffReasoning: carry_cutoff_reasoning ?? true);
 
                 const string startHint =
                     "Poll devmind_task_status with this job_id; fetch devmind_task_result when done.";
@@ -248,6 +262,7 @@ namespace DevMind.McpServer
             [Description("Baseline mode for the structural test delta (default \"before-run\": the harness runs the suite ONCE before this continuation's agent starts. \"off\": skip the before-run and report only the after total. Only takes effect when verify_tests is on.")] string? test_baseline = null,
             [Description("Restrict this continuation to no execution (default: inherit the parent task's setting). When inherited or set, running executables, the test suite, and debug launch/attach are blocked at the harness; builds stay allowed. Cannot be used to relax a parent's restriction — start a fresh task for that.")] bool? no_execute = null,
             [Description("Stream the model's think blocks into the job's transcript as it reasons. Omitted = inherit the parent task's setting, including an inherited omission (the DEVMIND_TASK_SHOW_THINKING environment variable then applies, as for the parent). Explicit true or false takes precedence over the environment variable for this continuation. DISPLAY only — requires the parent's `think` (which the continuation also inherits) to have any effect. To turn reasoning on for the continuation, start a fresh task with `think` and `show_thinking` set.")] bool? show_thinking = null,
+            [Description("Carry reasoning cut off by the thinking budget into the next request (see devmind_task_start carry_cutoff_reasoning). Omitted = inherit the parent task's setting.")] bool? carry_cutoff_reasoning = null,
             CancellationToken cancellationToken = default)
         {
             return await TracedAsync("devmind_task_continue", job_id, async () =>
@@ -272,7 +287,8 @@ namespace DevMind.McpServer
                     verifyTests: verify_tests ?? false,
                     noExecute: no_execute,
                     runTestBaseline: baseline != "off",
-                    showThinking: show_thinking);
+                    showThinking: show_thinking,
+                    carryCutoffReasoning: carry_cutoff_reasoning);
 
                 if (job == null)
                     return Err(error);
@@ -454,7 +470,11 @@ namespace DevMind.McpServer
              "by fully-qualified name, first 25, empty when it passed — and baseline_failed_tests — the " +
              "harness's before-run's, null when there was no before-run, empty when it passed. " +
              "failed_tests_truncated / baseline_failed_tests_truncated count the names cut past the 25 " +
-             "(0 when none; the baseline one is null when there was no before-run).")]
+             "(0 when none; the baseline one is null when there was no before-run). " +
+             "think_budget_cutoffs counts this turn's responses whose reasoning the backend's thinking budget " +
+             "cut off; reasoning_carry_notes counts the harness notes (journal kind harness_note) that carried " +
+             "such a thought into the next request, and reasoning_carry_escalations the ones sent on a third or " +
+             "later consecutive cut-off. All 0 when thinking was off.")]
         public Task<string> TaskResult(
             [Description("The job_id returned by devmind_task_start.")] string job_id,
             CancellationToken cancellationToken = default)
@@ -494,6 +514,10 @@ namespace DevMind.McpServer
                 // H-58: harness-enabled thinking for repeated test failures (journal: harness_note).
                 auto_think_escalations = r?.AutoThinkEscalations ?? 0,
                 auto_think_iterations = r?.AutoThinkIterations ?? 0,
+                // H-71: thinking-budget cut-offs and the notes that carried them forward.
+                think_budget_cutoffs = r?.ThinkBudgetCutoffs ?? 0,
+                reasoning_carry_notes = r?.ReasoningCarryNotes ?? 0,
+                reasoning_carry_escalations = r?.ReasoningCarryEscalations ?? 0,
                 error = job.Error,
                 transcript_path = r?.TranscriptPath,
                 parent_job_id = job.ParentJobId,
