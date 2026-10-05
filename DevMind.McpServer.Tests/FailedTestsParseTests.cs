@@ -1,7 +1,7 @@
 // File: FailedTestsParseTests.cs  v1.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
-// H-61: the harness keeps the NAMES of the failing tests from its own test runs.
+// H-72: the harness keeps the NAMES of the failing tests from its own test runs.
 // job-2164's baseline was red, its after-run green, and four reruns passed — the
 // result said only "baseline test run had failing tests (exit code 1)", so the
 // flaky test could not be named.
@@ -13,7 +13,7 @@
 //   * FailedTestsPayloadTests — failed_tests / baseline_failed_tests and the
 //     baseline_unavailable_reason suffix.
 //   * FailedTestsJobTests — end-to-end through the worker loop and the
-//     TestRunnerOverride seam, plus a pre-H-61 sidecar served by devmind_task_result.
+//     TestRunnerOverride seam, plus a pre-H-72 sidecar served by devmind_task_result.
 
 using System.Text.Json;
 using Xunit;
@@ -166,7 +166,7 @@ namespace DevMind.McpServer.Tests
         private static JsonElement Payload(TestVerification after, TestVerification? baseline) =>
             JsonSerializer.SerializeToElement(TestVerificationPayload.Create(new AgentJob
             {
-                Id = "job-h61",
+                Id = "job-h72",
                 Prompt = "p",
                 WorkingDirectory = @"C:\temp\hermetic",
                 State = AgentJobState.Done,
@@ -236,7 +236,7 @@ namespace DevMind.McpServer.Tests
 
         public FailedTestsJobTests()
         {
-            _dir = Path.Combine(Path.GetTempPath(), $"devmind_h61_job_{Guid.NewGuid():N}");
+            _dir = Path.Combine(Path.GetTempPath(), $"devmind_h72_job_{Guid.NewGuid():N}");
             _tasksDir = Path.Combine(_dir, "tasks");
             Directory.CreateDirectory(_tasksDir);
             _priorEndpoint = Environment.GetEnvironmentVariable("DEVMIND_ENDPOINT");
@@ -307,12 +307,12 @@ namespace DevMind.McpServer.Tests
         }
 
         [Fact]
-        public async Task PreH61Sidecar_LoadsWithoutTheNewFields()
+        public async Task PreH72Sidecar_LoadsWithoutTheNewFields()
         {
-            // A sidecar as written before H-61: test_verification without failed_tests or
+            // A sidecar as written before H-72: test_verification without failed_tests or
             // baseline_failed_tests.
             const string oldSidecar = """
-                {"job_id":"job-preh61","state":"done","incomplete_reasons":[],"answer":"done","actions":[],
+                {"job_id":"job-preh72","state":"done","incomplete_reasons":[],"answer":"done","actions":[],
                  "iterations":3,"elapsed_seconds":12.5,"working_dir":"C:\\temp\\hermetic",
                  "ended_at_utc":"2026-10-01 10:00:00","build_verification":null,
                  "test_verification":{"command":"dotnet test","succeeded":true,"exit_code":0,"output_tail":"...",
@@ -321,10 +321,10 @@ namespace DevMind.McpServer.Tests
                    "delta":0,"tests_removed":0,"note":"n","forced_reason":null},
                  "mcp":null}
                 """;
-            File.WriteAllText(Path.Combine(AgentJobManager.TranscriptDir, "job-preh61.result.json"), oldSidecar);
+            File.WriteAllText(Path.Combine(AgentJobManager.TranscriptDir, "job-preh72.result.json"), oldSidecar);
 
             using var mgr = new AgentJobManager();
-            using var doc = JsonDocument.Parse(await new AgentTaskTools(mgr).TaskResult("job-preh61", CancellationToken.None));
+            using var doc = JsonDocument.Parse(await new AgentTaskTools(mgr).TaskResult("job-preh72", CancellationToken.None));
             var tv = doc.RootElement.GetProperty("result").GetProperty("test_verification");
             Assert.Equal(37, tv.GetProperty("total").GetInt32());
             Assert.False(tv.TryGetProperty("failed_tests", out _));

@@ -181,7 +181,7 @@ namespace DevMind
         private static readonly string[] _sqliteFileExtensions = { ".db", ".sqlite", ".sqlite3" };
 
         /// <summary>
-        /// H-62: SQLite only when the string is clearly SQLite — a <c>Filename</c> key (SqlClient
+        /// H-73: SQLite only when the string is clearly SQLite — a <c>Filename</c> key (SqlClient
         /// rejects it outright), or a <c>Data Source</c> of <c>:memory:</c> or a path ending in
         /// .db / .sqlite / .sqlite3 — and it names no SQL-Server-only key. Everything else stays
         /// SQL Server, as before: "Data Source=nonexistent-test" is a server name. Never throws.

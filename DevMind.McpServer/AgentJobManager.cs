@@ -1421,7 +1421,7 @@ namespace DevMind.McpServer
                     max_depth = job.MaxDepth,
                     effective_max_depth = job.EffectiveMaxDepth,
                     depth_extensions = job.DepthExtensionsPayload(),
-                    // H-62: the live result's thinking settings — absent from sidecars before, so a
+                    // H-73: the live result's thinking settings — absent from sidecars before, so a
                     // result read back after a restart lost them. reasoning_effort is null when off.
                     think = job.Think,
                     reasoning_effort = job.ReasoningEffort,

@@ -1406,3 +1406,43 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   (`[File created: ...]`) for a call it never made. The action journal is the ground truth (no save between the shell edit and step 7).
   Candidate for the report-accuracy check (Laya work: overclaims / honest-report).
 - **Status:** a open (cosmetic); b noted.
+
+### H-71 - Reasoning cut off by the thinking budget is lost; the next iteration re-opens the same question
+- **First seen:** 2026-10-05, V4W jobs with think on at effort medium. Reasoning is kept out of history on purpose (LlmClient
+  streams reasoning_content to onToken / LastReasoning, not into the stored assistant message), so when the backend's budget cuts
+  the model off mid-debate it goes straight to a tool call having recorded nothing. Cut-off iterations / total: job-2165 22/94,
+  job-2170 25/99, job-2171 19/72 (the same test-host question re-debated across many iterations until a caller steer broke the
+  loop), job-2173 14/47. A captured Strata stream shows the cut-off sentence ("I have thought about this long enough; time to
+  give my answer.") arrives as the last reasoning_content deltas, then content follows - it never reaches history.
+- **Fix:** after a response whose reasoning contains a marker (devmind.json "reasoningCutoffMarkers", default ["I have thought
+  about this long enough"], case-insensitive, thinking on only), the NEXT request alone carries a [harness] note quoting the last
+  ~600 chars of that reasoning (cut to a line/sentence start, marker excluded) and asking for a one-line 'Decision: ...' or
+  'Testing: ...' in the scratchpad. The 3rd consecutive cut-off adds "Stop deliberating and run an experiment now"; an uncut
+  response resets the streak. The note is inserted beside the scratchpad and removed as soon as the request JSON is built (never
+  in history). devmind_task_start / devmind_task_continue `carry_cutoff_reasoning` (default true, inherited); journal kind
+  harness_note; "(thinking cut off)" on the transcript's iteration line; result + sidecar think_budget_cutoffs,
+  reasoning_carry_notes, reasoning_carry_escalations. Tests: ReasoningCutoffCarryTests, H71ReasoningCarryJobTests.
+- **Status:** fixed, not yet deployed - commit 4d7ecab "H-71: carry a thinking-budget cut-off into the next iteration".
+
+### H-72 - Harness test verification reports counts but not which tests failed
+- **Fix:** the baseline and after-run test verifications parse the failed tests' fully-qualified names from the full
+  `dotnet test` output (xUnit "[FAIL]" and vstest "Failed ... [n ms]", deduplicated, first-seen order, first 25 plus a dropped
+  count). The transcript names them, test_verification gains failed_tests / baseline_failed_tests, and a red baseline's
+  baseline_unavailable_reason ends with "- failing: A, B". Parser fixtures captured from a real failing run on BEAST
+  (Fixtures\dotnet-test-fail-*.txt; the captured test names keep their `H61.Fixture.*` namespace). Tests: FailedTestsParseTests.
+- **Note:** the commit message says H-61 for historical reasons (that number is the open model-behaviour item above); code
+  comments were renumbered to H-72.
+- **Status:** fixed - commit 0485eba "H-61: keep the names of failing tests from the harness's test runs".
+
+### H-73 - run_sql cannot open SQLite; a `> null` redirect leaves a file named null; sidecar drops thinking settings; truncated failed-test names uncounted
+- **Fix (one batch):**
+  - run_sql (SqlExecutor) opens a clearly-SQLite connection string (Filename key, or a Data Source of :memory: or a
+    .db/.sqlite/.sqlite3 file) through Microsoft.Data.Sqlite, always Mode=ReadOnly; everything else stays SQL Server (job-2166).
+  - ShellRunner rewrites a PowerShell redirect to a bare null / nul into $null (job-2167's `> null` left a 3-byte BOM-only "null"
+    file in the repo).
+  - The result sidecar persists think and reasoning_effort, matching the live result.
+  - test_verification gains failed_tests_truncated / baseline_failed_tests_truncated (follow-up to H-72).
+  - Tests: SqlExecutorSqliteTests, ShellRunnerNullRedirectTests, H73HarnessFixesTests.
+- **Note:** the commit message says H-62 for historical reasons (that number is the optional-item guard above, 6dc13d7); code
+  comments and the test class were renumbered to H-73.
+- **Status:** fixed - commit 321b678 "H-62: SQLite in run_sql, null-redirect rewrite, sidecar thinking fields, failed-test truncation counts".

@@ -1,7 +1,7 @@
 // File: ShellRunnerNullRedirectTests.cs  v1.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
-// H-62: job-2167's agent ran
+// H-73: job-2167's agent ran
 //   try { [Reflection.Assembly]::LoadWithPartialName("Microsoft.Extensions.Configuration") > null; "ok" } catch { "no" }
 // In PowerShell `> null` redirects to a FILE named "null" — with the Out-File utf8 default
 // the empty output became a 3-byte BOM-only file in the repo root. A redirect to a bare
@@ -44,7 +44,7 @@ namespace DevMind.Core.Tests
         [Fact]
         public async Task RealRun_LeavesNoNullOrNulFileInTheWorkingDirectory()
         {
-            string dir = Path.Combine(Path.GetTempPath(), $"devmind_h62_null_{Guid.NewGuid():N}");
+            string dir = Path.Combine(Path.GetTempPath(), $"devmind_h73_null_{Guid.NewGuid():N}");
             Directory.CreateDirectory(dir);
             try
             {

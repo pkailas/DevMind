@@ -1,7 +1,7 @@
 // File: SqlExecutorSqliteTests.cs  v1.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
-// H-62: run_sql (SqlExecutor) sent every connection string to SqlClient. In job-2166 the
+// H-73: run_sql (SqlExecutor) sent every connection string to SqlClient. In job-2166 the
 // agent pointed it at the VLink test SQLite database four ways and burned ~4 iterations on
 // SQL Server "server was not found" errors and "Keyword not supported: 'filename'". A clearly
 // SQLite string now opens through Microsoft.Data.Sqlite, always Mode=ReadOnly.
@@ -18,7 +18,7 @@ namespace DevMind.Core.Tests
 
         public SqlExecutorSqliteTests()
         {
-            _dir = Path.Combine(Path.GetTempPath(), $"devmind_h62_sqlite_{Guid.NewGuid():N}");
+            _dir = Path.Combine(Path.GetTempPath(), $"devmind_h73_sqlite_{Guid.NewGuid():N}");
             Directory.CreateDirectory(_dir);
             _db = Path.Combine(_dir, "test.db");
             using var conn = new SqliteConnection($"Data Source={_db}");

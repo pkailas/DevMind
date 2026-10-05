@@ -39,7 +39,7 @@ namespace DevMind.McpServer
         /// <summary>Why <see cref="Total"/> is null (null when Total is known).</summary>
         public string? ParseFailure { get; init; }
 
-        /// <summary>H-61: fully-qualified names of the tests this run reported as failed,
+        /// <summary>H-72: fully-qualified names of the tests this run reported as failed,
         /// first-seen order, at most <see cref="FailedTestsParse.MaxNames"/>. Empty when none.</summary>
         public IReadOnlyList<string> FailedTests { get; init; } = Array.Empty<string>();
 
@@ -84,7 +84,7 @@ namespace DevMind.McpServer
     }
 
     /// <summary>
-    /// H-61: the names of the failed tests in `dotnet test` output. Never throws.
+    /// H-72: the names of the failed tests in `dotnet test` output. Never throws.
     ///
     /// The two formats a .NET 10 / xUnit v2 run prints on this machine for one failure
     /// (captured from an actual run, not guessed — see the Fixtures\dotnet-test-fail-*.txt):
@@ -270,7 +270,7 @@ namespace DevMind.McpServer
                     : $"baseline test run had failing tests (exit code {baseRun.ExitCode}) — structural before-count, suite already red before this task";
             }
 
-            // H-61: name the tests that were red before the agent started, so a flaky one can
+            // H-72: name the tests that were red before the agent started, so a flaky one can
             // be told apart from one the task broke.
             if (baselineWhy != null && baseRun is { Succeeded: false, FailedTests.Count: > 0 })
                 baselineWhy += $" — failing: {baseRun.FailedTestsSummary(MaxReasonNames)}";
@@ -318,11 +318,11 @@ namespace DevMind.McpServer
                 note,
                 // H-09: why the run happened although verify_tests was off; null when requested.
                 forced_reason = job.TestsForcedReason,
-                // H-61: fully-qualified names parsed from each run's full output (first 25).
+                // H-72: fully-qualified names parsed from each run's full output (first 25).
                 // failed_tests is empty when the after-run passed; baseline_failed_tests is
                 // null when there was no before-run and empty when it passed.
                 failed_tests = after.FailedTests,
-                // H-62: how many names were cut past the 25 (0 when none; baseline null with no before-run).
+                // H-73: how many names were cut past the 25 (0 when none; baseline null with no before-run).
                 failed_tests_truncated = after.FailedTestsTruncated,
                 baseline_failed_tests = baseRun?.FailedTests,
                 baseline_failed_tests_truncated = baseRun?.FailedTestsTruncated,

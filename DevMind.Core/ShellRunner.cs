@@ -145,7 +145,7 @@ namespace DevMind
                 command = ExpandCmdStyleEnvironmentVariables(command);
 
                 // `> null` is a redirect to a FILE named "null" in PowerShell (job-2167 left a
-                // 3-byte BOM-only "null" in the repo); the model meant $null (H-62).
+                // 3-byte BOM-only "null" in the repo); the model meant $null (H-73).
                 command = RewriteNullRedirects(command);
             }
 
@@ -1017,7 +1017,7 @@ namespace DevMind
             RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
 
         /// <summary>
-        /// H-62: rewrites a redirect to a bare <c>null</c> or <c>nul</c> into one to <c>$null</c>.
+        /// H-73: rewrites a redirect to a bare <c>null</c> or <c>nul</c> into one to <c>$null</c>.
         /// In PowerShell <c>&gt; null</c> creates a file named "null" in the working directory
         /// (job-2167), and cmd's <c>&gt;nul</c> fails with an Out-File "device" error; both mean
         /// "discard". Code spans only — a quoted <c>'null'</c> target is left as written.

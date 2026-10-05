@@ -1,7 +1,7 @@
-// File: H62HarnessFixesTests.cs  v1.0
+// File: H73HarnessFixesTests.cs  v1.0
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
-// H-62, the McpServer-side items:
+// H-73, the McpServer-side items:
 //   * a job's harness steps (baseline build, baseline `dotnet test`, after-run) leave no
 //     file named null / nul in the working directory — through the TestRunnerOverride seam
 //     AND through the real ShellRunner path (job-2167's stray "null" turned out to be the
@@ -9,7 +9,7 @@
 //     harness never adds one);
 //   * the result sidecar persists think and reasoning_effort, so devmind_task_result
 //     served from disk matches the live result;
-//   * failed_tests_truncated / baseline_failed_tests_truncated (follow-up to H-61).
+//   * failed_tests_truncated / baseline_failed_tests_truncated (follow-up to H-72).
 
 using System.Text.Json;
 using Xunit;
@@ -17,7 +17,7 @@ using Xunit;
 namespace DevMind.McpServer.Tests
 {
     [Collection(ProcessEnvironmentCollection.Name)]
-    public sealed class H62HarnessFixesTests : IDisposable
+    public sealed class H73HarnessFixesTests : IDisposable
     {
         private readonly string _dir;
         private readonly string _work;
@@ -26,9 +26,9 @@ namespace DevMind.McpServer.Tests
         private readonly string? _priorServerType;
         private readonly string? _priorTasksDir;
 
-        public H62HarnessFixesTests()
+        public H73HarnessFixesTests()
         {
-            _dir = Path.Combine(Path.GetTempPath(), $"devmind_h62_{Guid.NewGuid():N}");
+            _dir = Path.Combine(Path.GetTempPath(), $"devmind_h73_{Guid.NewGuid():N}");
             _work = Path.Combine(_dir, "work");
             _tasksDir = Path.Combine(_dir, "tasks");
             Directory.CreateDirectory(_work);
@@ -111,7 +111,7 @@ namespace DevMind.McpServer.Tests
         {
             var job = new AgentJob
             {
-                Id = "job-h62think",
+                Id = "job-h73think",
                 Prompt = "p",
                 WorkingDirectory = @"C:\temp\hermetic",
                 State = AgentJobState.Done,
@@ -134,7 +134,7 @@ namespace DevMind.McpServer.Tests
         {
             var job = new AgentJob
             {
-                Id = "job-h62nothink",
+                Id = "job-h73nothink",
                 Prompt = "p",
                 WorkingDirectory = @"C:\temp\hermetic",
                 State = AgentJobState.Done,
@@ -143,7 +143,7 @@ namespace DevMind.McpServer.Tests
             AgentJobManager.WriteResultSidecar(job);
 
             using var doc = JsonDocument.Parse(File.ReadAllText(
-                Path.Combine(AgentJobManager.TranscriptDir, "job-h62nothink.result.json")));
+                Path.Combine(AgentJobManager.TranscriptDir, "job-h73nothink.result.json")));
             Assert.False(doc.RootElement.GetProperty("think").GetBoolean());
             Assert.Equal(JsonValueKind.Null, doc.RootElement.GetProperty("reasoning_effort").ValueKind);
         }
@@ -155,7 +155,7 @@ namespace DevMind.McpServer.Tests
         {
             var job = new AgentJob
             {
-                Id = "job-h62trunc",
+                Id = "job-h73trunc",
                 Prompt = "p",
                 WorkingDirectory = @"C:\temp\hermetic",
                 State = AgentJobState.Done,
@@ -170,7 +170,7 @@ namespace DevMind.McpServer.Tests
 
             AgentJobManager.WriteResultSidecar(job);
             using var doc = JsonDocument.Parse(File.ReadAllText(
-                Path.Combine(AgentJobManager.TranscriptDir, "job-h62trunc.result.json")));
+                Path.Combine(AgentJobManager.TranscriptDir, "job-h73trunc.result.json")));
             var tv = doc.RootElement.GetProperty("test_verification");
             Assert.Equal(5, tv.GetProperty("failed_tests_truncated").GetInt32());
             Assert.Equal(5, tv.GetProperty("baseline_failed_tests_truncated").GetInt32());
@@ -181,7 +181,7 @@ namespace DevMind.McpServer.Tests
         {
             var job = new AgentJob
             {
-                Id = "job-h62trunc0",
+                Id = "job-h73trunc0",
                 Prompt = "p",
                 WorkingDirectory = @"C:\temp\hermetic",
                 State = AgentJobState.Done,
