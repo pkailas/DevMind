@@ -1,0 +1,17 @@
+  Determining projects to restore...
+  All projects are up-to-date for restore.
+  FailFixture -> C:\temp\h61_failfixture\bin\Debug\net10.0\FailFixture.dll
+Test run for C:\temp\h61_failfixture\bin\Debug\net10.0\FailFixture.dll (.NETCoreApp,Version=v10.0)
+A total of 1 test files matched the specified pattern.
+[xUnit.net 00:00:00.11]     H61.Fixture.SingleFailure.BreaksOnPurpose [FAIL]
+  Failed H61.Fixture.SingleFailure.BreaksOnPurpose [2 ms]
+  Error Message:
+   Assert.Equal() Failure: Values differ
+Expected: 1
+Actual:   2
+  Stack Trace:
+     at H61.Fixture.SingleFailure.BreaksOnPurpose() in C:\temp\h61_failfixture\FailTests.cs:line 6
+   at System.Reflection.MethodBaseInvoker.InterpretedInvoke_Method(Object obj, IntPtr* args)
+   at System.Reflection.MethodBaseInvoker.InvokeWithNoArgs(Object obj, BindingFlags invokeAttr)
+
+Failed!  - Failed:     1, Passed:     1, Skipped:     0, Total:     2, Duration: 14 ms - FailFixture.dll (net10.0)

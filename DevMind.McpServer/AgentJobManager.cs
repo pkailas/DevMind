@@ -982,7 +982,8 @@ namespace DevMind.McpServer
                             job.BaselineTests = await RunTestSuiteAsync(job).ConfigureAwait(false);
                             var b = job.BaselineTests;
                             job.AppendTail($"\n[job] test baseline: exit {b.ExitCode}, " +
-                                (b.Total.HasValue ? $"total {b.Total} (harness-measured)" : $"no parseable total ({b.ParseFailure})") + "\n");
+                                (b.Total.HasValue ? $"total {b.Total} (harness-measured)" : $"no parseable total ({b.ParseFailure})") +
+                                (b.FailedTests.Count > 0 ? $"; failed: {b.FailedTestsSummary()}" : "") + "\n");
                         }
                     }
 
@@ -1143,7 +1144,8 @@ namespace DevMind.McpServer
                         job.AppendTail("\n[job] test verification: running...\n");
                         job.Tests = await RunTestSuiteAsync(job).ConfigureAwait(false);
                         job.AppendTail($"[job] test verification: {(job.Tests.Succeeded ? "passed" : "failed")}" +
-                            $"{(job.Tests.Total is int total ? $" ({total} tests)" : "")}\n");
+                            $"{(job.Tests.Total is int total ? $" ({total} tests)" : "")}" +
+                            $"{(!job.Tests.Succeeded && job.Tests.FailedTests.Count > 0 ? $"; failed: {job.Tests.FailedTestsSummary()}" : "")}\n");
                     }
 
                     // Publish the terminal state. Invariant this line guards: a job

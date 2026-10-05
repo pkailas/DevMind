@@ -1,0 +1,244 @@
+Test run for C:\temp\h61_failfixture\bin\Debug\net10.0\FailFixture.dll (.NETCoreApp,Version=v10.0)
+A total of 1 test files matched the specified pattern.
+[xUnit.net 00:00:00.11]     H61.Fixture.ManyFailures.Fails(i: 2) [FAIL]
+[xUnit.net 00:00:00.12]     H61.Fixture.ManyFailures.Fails(i: 30) [FAIL]
+[xUnit.net 00:00:00.12]     H61.Fixture.ManyFailures.Fails(i: 23) [FAIL]
+[xUnit.net 00:00:00.12]     H61.Fixture.ManyFailures.Fails(i: 3) [FAIL]
+[xUnit.net 00:00:00.12]     H61.Fixture.ManyFailures.Fails(i: 12) [FAIL]
+[xUnit.net 00:00:00.12]     H61.Fixture.ManyFailures.Fails(i: 28) [FAIL]
+[xUnit.net 00:00:00.12]     H61.Fixture.ManyFailures.Fails(i: 10) [FAIL]
+[xUnit.net 00:00:00.12]     H61.Fixture.ManyFailures.Fails(i: 4) [FAIL]
+[xUnit.net 00:00:00.12]     H61.Fixture.ManyFailures.Fails(i: 7) [FAIL]
+  Failed H61.Fixture.ManyFailures.Fails(i: 2) [1 ms]
+  Error Message:
+   row 2
+  Stack Trace:
+     at H61.Fixture.ManyFailures.Fails(Int32 i) in C:\temp\h61_failfixture\FailTests.cs:line 21
+   at System.Reflection.MethodBaseInvoker.InterpretedInvoke_Method(Object obj, IntPtr* args)
+   at System.Reflection.MethodBaseInvoker.InvokeDirectByRefWithFewArgs(Object obj, Span`1 copyOfArgs, BindingFlags invokeAttr)
+  Failed H61.Fixture.ManyFailures.Fails(i: 30) [< 1 ms]
+  Error Message:
+   row 30
+  Stack Trace:
+     at H61.Fixture.ManyFailures.Fails(Int32 i) in C:\temp\h61_failfixture\FailTests.cs:line 21
+   at InvokeStub_ManyFailures.Fails(Object, Span`1)
+   at System.Reflection.MethodBaseInvoker.InvokeWithOneArg(Object obj, BindingFlags invokeAttr, Binder binder, Object[] parameters, CultureInfo culture)
+  Failed H61.Fixture.ManyFailures.Fails(i: 23) [< 1 ms]
+  Error Message:
+   row 23
+  Stack Trace:
+     at H61.Fixture.ManyFailures.Fails(Int32 i) in C:\temp\h61_failfixture\FailTests.cs:line 21
+   at InvokeStub_ManyFailures.Fails(Object, Span`1)
+   at System.Reflection.MethodBaseInvoker.InvokeWithOneArg(Object obj, BindingFlags invokeAttr, Binder binder, Object[] parameters, CultureInfo culture)
+  Failed H61.Fixture.ManyFailures.Fails(i: 3) [< 1 ms]
+  Error Message:
+   row 3
+  Stack Trace:
+     at H61.Fixture.ManyFailures.Fails(Int32 i) in C:\temp\h61_failfixture\FailTests.cs:line 21
+   at InvokeStub_ManyFailures.Fails(Object, Span`1)
+   at System.Reflection.MethodBaseInvoker.InvokeWithOneArg(Object obj, BindingFlags invokeAttr, Binder binder, Object[] parameters, CultureInfo culture)
+  Failed H61.Fixture.ManyFailures.Fails(i: 12) [< 1 ms]
+  Error Message:
+   row 12
+  Stack Trace:
+     at H61.Fixture.ManyFailures.Fails(Int32 i) in C:\temp\h61_failfixture\FailTests.cs:line 21
+   at InvokeStub_ManyFailures.Fails(Object, Span`1)
+   at System.Reflection.MethodBaseInvoker.InvokeWithOneArg(Object obj, BindingFlags invokeAttr, Binder binder, Object[] parameters, CultureInfo culture)
+  Failed H61.Fixture.ManyFailures.Fails(i: 28) [< 1 ms]
+  Error Message:
+   row 28
+  Stack Trace:
+     at H61.Fixture.ManyFailures.Fails(Int32 i) in C:\temp\h61_failfixture\FailTests.cs:line 21
+   at InvokeStub_ManyFailures.Fails(Object, Span`1)
+   at System.Reflection.MethodBaseInvoker.InvokeWithOneArg(Object obj, BindingFlags invokeAttr, Binder binder, Object[] parameters, CultureInfo culture)
+  Failed H61.Fixture.ManyFailures.Fails(i: 10) [< 1 ms]
+  Error Message:
+   row 10
+  Stack Trace:
+     at H61.Fixture.ManyFailures.Fails(Int32 i) in C:\temp\h61_failfixture\FailTests.cs:line 21
+   at InvokeStub_ManyFailures.Fails(Object, Span`1)
+   at System.Reflection.MethodBaseInvoker.InvokeWithOneArg(Object obj, BindingFlags invokeAttr, Binder binder, Object[] parameters, CultureInfo culture)
+  Failed H61.Fixture.ManyFailures.Fails(i: 4) [< 1 ms]
+  Error Message:
+   row 4
+  Stack Trace:
+     at H61.Fixture.ManyFailures.Fails(Int32 i) in C:\temp\h61_failfixture\FailTests.cs:line 21
+   at InvokeStub_ManyFailures.Fails(Object, Span`1)
+   at System.Reflection.MethodBaseInvoker.InvokeWithOneArg(Object obj, BindingFlags invokeAttr, Binder binder, Object[] parameters, CultureInfo culture)
+  Failed H61.Fixture.ManyFailures.Fails(i: 7) [< 1 ms]
+  Error Message:
+   row 7
+  Stack Trace:
+     at H61.Fixture.ManyFailures.Fails(Int32 i) in C:\temp\h61_failfixture\FailTests.cs:line 21
+   at InvokeStub_ManyFailures.Fails(Object, Span`1)
+   at System.Reflection.MethodBaseInvoker.InvokeWithOneArg(Object obj, BindingFlags invokeAttr, Binder binder, Object[] parameters, CultureInfo culture)
+[xUnit.net 00:00:00.14]     H61.Fixture.ManyFailures.Fails(i: 11) [FAIL]
+[xUnit.net 00:00:00.14]     H61.Fixture.ManyFailures.Fails(i: 1) [FAIL]
+[xUnit.net 00:00:00.14]     H61.Fixture.ManyFailures.Fails(i: 13) [FAIL]
+[xUnit.net 00:00:00.14]     H61.Fixture.ManyFailures.Fails(i: 14) [FAIL]
+[xUnit.net 00:00:00.14]     H61.Fixture.ManyFailures.Fails(i: 20) [FAIL]
+[xUnit.net 00:00:00.14]     H61.Fixture.ManyFailures.Fails(i: 26) [FAIL]
+[xUnit.net 00:00:00.14]     H61.Fixture.ManyFailures.Fails(i: 17) [FAIL]
+[xUnit.net 00:00:00.14]     H61.Fixture.ManyFailures.Fails(i: 9) [FAIL]
+[xUnit.net 00:00:00.14]     H61.Fixture.ManyFailures.Fails(i: 6) [FAIL]
+  Failed H61.Fixture.ManyFailures.Fails(i: 11) [< 1 ms]
+  Error Message:
+   row 11
+  Stack Trace:
+     at H61.Fixture.ManyFailures.Fails(Int32 i) in C:\temp\h61_failfixture\FailTests.cs:line 21
+   at InvokeStub_ManyFailures.Fails(Object, Span`1)
+   at System.Reflection.MethodBaseInvoker.InvokeWithOneArg(Object obj, BindingFlags invokeAttr, Binder binder, Object[] parameters, CultureInfo culture)
+  Failed H61.Fixture.ManyFailures.Fails(i: 1) [< 1 ms]
+  Error Message:
+   row 1
+  Stack Trace:
+     at H61.Fixture.ManyFailures.Fails(Int32 i) in C:\temp\h61_failfixture\FailTests.cs:line 21
+   at InvokeStub_ManyFailures.Fails(Object, Span`1)
+   at System.Reflection.MethodBaseInvoker.InvokeWithOneArg(Object obj, BindingFlags invokeAttr, Binder binder, Object[] parameters, CultureInfo culture)
+  Failed H61.Fixture.ManyFailures.Fails(i: 13) [< 1 ms]
+  Error Message:
+   row 13
+  Stack Trace:
+     at H61.Fixture.ManyFailures.Fails(Int32 i) in C:\temp\h61_failfixture\FailTests.cs:line 21
+   at InvokeStub_ManyFailures.Fails(Object, Span`1)
+   at System.Reflection.MethodBaseInvoker.InvokeWithOneArg(Object obj, BindingFlags invokeAttr, Binder binder, Object[] parameters, CultureInfo culture)
+  Failed H61.Fixture.ManyFailures.Fails(i: 14) [< 1 ms]
+  Error Message:
+   row 14
+  Stack Trace:
+     at H61.Fixture.ManyFailures.Fails(Int32 i) in C:\temp\h61_failfixture\FailTests.cs:line 21
+   at InvokeStub_ManyFailures.Fails(Object, Span`1)
+   at System.Reflection.MethodBaseInvoker.InvokeWithOneArg(Object obj, BindingFlags invokeAttr, Binder binder, Object[] parameters, CultureInfo culture)
+  Failed H61.Fixture.ManyFailures.Fails(i: 20) [< 1 ms]
+  Error Message:
+   row 20
+  Stack Trace:
+     at H61.Fixture.ManyFailures.Fails(Int32 i) in C:\temp\h61_failfixture\FailTests.cs:line 21
+   at InvokeStub_ManyFailures.Fails(Object, Span`1)
+   at System.Reflection.MethodBaseInvoker.InvokeWithOneArg(Object obj, BindingFlags invokeAttr, Binder binder, Object[] parameters, CultureInfo culture)
+  Failed H61.Fixture.ManyFailures.Fails(i: 26) [< 1 ms]
+  Error Message:
+   row 26
+  Stack Trace:
+     at H61.Fixture.ManyFailures.Fails(Int32 i) in C:\temp\h61_failfixture\FailTests.cs:line 21
+   at InvokeStub_ManyFailures.Fails(Object, Span`1)
+   at System.Reflection.MethodBaseInvoker.InvokeWithOneArg(Object obj, BindingFlags invokeAttr, Binder binder, Object[] parameters, CultureInfo culture)
+  Failed H61.Fixture.ManyFailures.Fails(i: 17) [< 1 ms]
+  Error Message:
+   row 17
+  Stack Trace:
+     at H61.Fixture.ManyFailures.Fails(Int32 i) in C:\temp\h61_failfixture\FailTests.cs:line 21
+   at InvokeStub_ManyFailures.Fails(Object, Span`1)
+   at System.Reflection.MethodBaseInvoker.InvokeWithOneArg(Object obj, BindingFlags invokeAttr, Binder binder, Object[] parameters, CultureInfo culture)
+  Failed H61.Fixture.ManyFailures.Fails(i: 9) [< 1 ms]
+  Error Message:
+   row 9
+  Stack Trace:
+     at H61.Fixture.ManyFailures.Fails(Int32 i) in C:\temp\h61_failfixture\FailTests.cs:line 21
+   at InvokeStub_ManyFailures.Fails(Object, Span`1)
+   at System.Reflection.MethodBaseInvoker.InvokeWithOneArg(Object obj, BindingFlags invokeAttr, Binder binder, Object[] parameters, CultureInfo culture)
+  Failed H61.Fixture.ManyFailures.Fails(i: 6) [< 1 ms]
+  Error Message:
+   row 6
+  Stack Trace:
+     at H61.Fixture.ManyFailures.Fails(Int32 i) in C:\temp\h61_failfixture\FailTests.cs:line 21
+   at InvokeStub_ManyFailures.Fails(Object, Span`1)
+   at System.Reflection.MethodBaseInvoker.InvokeWithOneArg(Object obj, BindingFlags invokeAttr, Binder binder, Object[] parameters, CultureInfo culture)
+[xUnit.net 00:00:00.14]     H61.Fixture.ManyFailures.Fails(i: 29) [FAIL]
+[xUnit.net 00:00:00.14]     H61.Fixture.ManyFailures.Fails(i: 21) [FAIL]
+[xUnit.net 00:00:00.14]     H61.Fixture.ManyFailures.Fails(i: 27) [FAIL]
+[xUnit.net 00:00:00.14]     H61.Fixture.ManyFailures.Fails(i: 25) [FAIL]
+[xUnit.net 00:00:00.14]     H61.Fixture.ManyFailures.Fails(i: 16) [FAIL]
+[xUnit.net 00:00:00.14]     H61.Fixture.ManyFailures.Fails(i: 24) [FAIL]
+[xUnit.net 00:00:00.14]     H61.Fixture.ManyFailures.Fails(i: 8) [FAIL]
+[xUnit.net 00:00:00.14]     H61.Fixture.ManyFailures.Fails(i: 5) [FAIL]
+[xUnit.net 00:00:00.14]     H61.Fixture.ManyFailures.Fails(i: 15) [FAIL]
+  Failed H61.Fixture.ManyFailures.Fails(i: 29) [< 1 ms]
+  Error Message:
+   row 29
+  Stack Trace:
+     at H61.Fixture.ManyFailures.Fails(Int32 i) in C:\temp\h61_failfixture\FailTests.cs:line 21
+   at InvokeStub_ManyFailures.Fails(Object, Span`1)
+   at System.Reflection.MethodBaseInvoker.InvokeWithOneArg(Object obj, BindingFlags invokeAttr, Binder binder, Object[] parameters, CultureInfo culture)
+  Failed H61.Fixture.ManyFailures.Fails(i: 21) [< 1 ms]
+  Error Message:
+   row 21
+  Stack Trace:
+     at H61.Fixture.ManyFailures.Fails(Int32 i) in C:\temp\h61_failfixture\FailTests.cs:line 21
+   at InvokeStub_ManyFailures.Fails(Object, Span`1)
+   at System.Reflection.MethodBaseInvoker.InvokeWithOneArg(Object obj, BindingFlags invokeAttr, Binder binder, Object[] parameters, CultureInfo culture)
+  Failed H61.Fixture.ManyFailures.Fails(i: 27) [< 1 ms]
+  Error Message:
+   row 27
+  Stack Trace:
+     at H61.Fixture.ManyFailures.Fails(Int32 i) in C:\temp\h61_failfixture\FailTests.cs:line 21
+   at InvokeStub_ManyFailures.Fails(Object, Span`1)
+   at System.Reflection.MethodBaseInvoker.InvokeWithOneArg(Object obj, BindingFlags invokeAttr, Binder binder, Object[] parameters, CultureInfo culture)
+  Failed H61.Fixture.ManyFailures.Fails(i: 25) [< 1 ms]
+  Error Message:
+   row 25
+  Stack Trace:
+     at H61.Fixture.ManyFailures.Fails(Int32 i) in C:\temp\h61_failfixture\FailTests.cs:line 21
+   at InvokeStub_ManyFailures.Fails(Object, Span`1)
+   at System.Reflection.MethodBaseInvoker.InvokeWithOneArg(Object obj, BindingFlags invokeAttr, Binder binder, Object[] parameters, CultureInfo culture)
+  Failed H61.Fixture.ManyFailures.Fails(i: 16) [< 1 ms]
+  Error Message:
+   row 16
+  Stack Trace:
+     at H61.Fixture.ManyFailures.Fails(Int32 i) in C:\temp\h61_failfixture\FailTests.cs:line 21
+   at InvokeStub_ManyFailures.Fails(Object, Span`1)
+   at System.Reflection.MethodBaseInvoker.InvokeWithOneArg(Object obj, BindingFlags invokeAttr, Binder binder, Object[] parameters, CultureInfo culture)
+  Failed H61.Fixture.ManyFailures.Fails(i: 24) [< 1 ms]
+  Error Message:
+   row 24
+  Stack Trace:
+     at H61.Fixture.ManyFailures.Fails(Int32 i) in C:\temp\h61_failfixture\FailTests.cs:line 21
+   at InvokeStub_ManyFailures.Fails(Object, Span`1)
+   at System.Reflection.MethodBaseInvoker.InvokeWithOneArg(Object obj, BindingFlags invokeAttr, Binder binder, Object[] parameters, CultureInfo culture)
+  Failed H61.Fixture.ManyFailures.Fails(i: 8) [< 1 ms]
+  Error Message:
+   row 8
+  Stack Trace:
+     at H61.Fixture.ManyFailures.Fails(Int32 i) in C:\temp\h61_failfixture\FailTests.cs:line 21
+   at InvokeStub_ManyFailures.Fails(Object, Span`1)
+   at System.Reflection.MethodBaseInvoker.InvokeWithOneArg(Object obj, BindingFlags invokeAttr, Binder binder, Object[] parameters, CultureInfo culture)
+  Failed H61.Fixture.ManyFailures.Fails(i: 5) [< 1 ms]
+  Error Message:
+   row 5
+  Stack Trace:
+     at H61.Fixture.ManyFailures.Fails(Int32 i) in C:\temp\h61_failfixture\FailTests.cs:line 21
+   at InvokeStub_ManyFailures.Fails(Object, Span`1)
+   at System.Reflection.MethodBaseInvoker.InvokeWithOneArg(Object obj, BindingFlags invokeAttr, Binder binder, Object[] parameters, CultureInfo culture)
+  Failed H61.Fixture.ManyFailures.Fails(i: 15) [< 1 ms]
+  Error Message:
+   row 15
+[xUnit.net 00:00:00.14]     H61.Fixture.ManyFailures.Fails(i: 19) [FAIL]
+[xUnit.net 00:00:00.14]     H61.Fixture.ManyFailures.Fails(i: 18) [FAIL]
+  Stack Trace:
+[xUnit.net 00:00:00.14]     H61.Fixture.ManyFailures.Fails(i: 22) [FAIL]
+     at H61.Fixture.ManyFailures.Fails(Int32 i) in C:\temp\h61_failfixture\FailTests.cs:line 21
+   at InvokeStub_ManyFailures.Fails(Object, Span`1)
+   at System.Reflection.MethodBaseInvoker.InvokeWithOneArg(Object obj, BindingFlags invokeAttr, Binder binder, Object[] parameters, CultureInfo culture)
+  Failed H61.Fixture.ManyFailures.Fails(i: 19) [< 1 ms]
+  Error Message:
+   row 19
+  Stack Trace:
+     at H61.Fixture.ManyFailures.Fails(Int32 i) in C:\temp\h61_failfixture\FailTests.cs:line 21
+   at InvokeStub_ManyFailures.Fails(Object, Span`1)
+   at System.Reflection.MethodBaseInvoker.InvokeWithOneArg(Object obj, BindingFlags invokeAttr, Binder binder, Object[] parameters, CultureInfo culture)
+  Failed H61.Fixture.ManyFailures.Fails(i: 18) [< 1 ms]
+  Error Message:
+   row 18
+  Stack Trace:
+     at H61.Fixture.ManyFailures.Fails(Int32 i) in C:\temp\h61_failfixture\FailTests.cs:line 21
+   at InvokeStub_ManyFailures.Fails(Object, Span`1)
+   at System.Reflection.MethodBaseInvoker.InvokeWithOneArg(Object obj, BindingFlags invokeAttr, Binder binder, Object[] parameters, CultureInfo culture)
+  Failed H61.Fixture.ManyFailures.Fails(i: 22) [< 1 ms]
+  Error Message:
+   row 22
+  Stack Trace:
+     at H61.Fixture.ManyFailures.Fails(Int32 i) in C:\temp\h61_failfixture\FailTests.cs:line 21
+   at InvokeStub_ManyFailures.Fails(Object, Span`1)
+   at System.Reflection.MethodBaseInvoker.InvokeWithOneArg(Object obj, BindingFlags invokeAttr, Binder binder, Object[] parameters, CultureInfo culture)
+
+Failed!  - Failed:    30, Passed:     0, Skipped:     0, Total:    30, Duration: 38 ms - FailFixture.dll (net10.0)

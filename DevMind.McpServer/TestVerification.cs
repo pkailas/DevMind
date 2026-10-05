@@ -39,6 +39,13 @@ namespace DevMind.McpServer
         /// <summary>Why <see cref="Total"/> is null (null when Total is known).</summary>
         public string? ParseFailure { get; init; }
 
+        /// <summary>H-61: fully-qualified names of the tests this run reported as failed,
+        /// first-seen order, at most <see cref="FailedTestsParse.MaxNames"/>. Empty when none.</summary>
+        public IReadOnlyList<string> FailedTests { get; init; } = Array.Empty<string>();
+
+        /// <summary>How many further failed-test names were dropped past the cap.</summary>
+        public int FailedTestsTruncated { get; init; }
+
         public bool Succeeded => Raw.Succeeded;
         public string Command => Raw.Command;
         public int ExitCode => Raw.ExitCode;
@@ -46,19 +53,97 @@ namespace DevMind.McpServer
 
         /// <summary>Builds the verification from a finished run: keeps the last
         /// ~2 KB as the tail (unchanged from the old behavior) and parses the
-        /// total from the FULL output (a project's summary line can fall outside
-        /// the tail on a multi-project run).</summary>
+        /// total and the failed-test names from the FULL output (a project's
+        /// summary line, or a failure, can fall outside the tail).</summary>
         public static TestVerification FromRun(string command, int exitCode, string output)
         {
             const int TailChars = 2_000;
             string tail = output.Length <= TailChars ? output : output.Substring(output.Length - TailChars);
             var (total, why) = TestSummaryParse.Parse(output);
+            var (failed, truncated) = FailedTestsParse.Parse(output);
             return new TestVerification
             {
                 Raw = new BuildVerification { Command = command, ExitCode = exitCode, OutputTail = tail },
                 Total = total,
                 ParseFailure = total == null ? why : null,
+                FailedTests = failed,
+                FailedTestsTruncated = truncated,
             };
+        }
+
+        /// <summary>"A, B, C" of the short names, then "+N more" when more failed than are
+        /// listed. <paramref name="max"/> limits how many names are listed (null = all kept).</summary>
+        public string FailedTestsSummary(int? max = null)
+        {
+            int shown = max is int m ? Math.Min(m, FailedTests.Count) : FailedTests.Count;
+            var names = new List<string>(shown);
+            for (int i = 0; i < shown; i++) names.Add(FailedTestsParse.ShortName(FailedTests[i]));
+            int more = FailedTests.Count - shown + FailedTestsTruncated;
+            return string.Join(", ", names) + (more > 0 ? $" +{more} more" : "");
+        }
+    }
+
+    /// <summary>
+    /// H-61: the names of the failed tests in `dotnet test` output. Never throws.
+    ///
+    /// The two formats a .NET 10 / xUnit v2 run prints on this machine for one failure
+    /// (captured from an actual run, not guessed — see the Fixtures\dotnet-test-fail-*.txt):
+    ///   [xUnit.net 00:00:00.27]     H61.Fixture.SingleFailure.BreaksOnPurpose [FAIL]
+    ///     Failed H61.Fixture.SingleFailure.BreaksOnPurpose [2 ms]
+    /// A theory row carries its arguments in both: "RejectsArg(n: 1, s: \"a\") [&lt; 1 ms]".
+    /// The vstest line must END in its duration bracket, which is what keeps out the
+    /// summary ("Failed!  - Failed: 1, ...") and the SDK's "Failed to load prune package
+    /// data ..." info line.
+    /// </summary>
+    internal static class FailedTestsParse
+    {
+        /// <summary>Names kept per run; the rest are only counted.</summary>
+        public const int MaxNames = 25;
+
+        private static readonly Regex VsTestLine = new(
+            @"^\s*Failed\s+(.+?)\s+\[(?:<\s*)?\d[\w\s.:]*\]\s*$",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+        private static readonly Regex XunitLine = new(
+            @"^\s*\[xUnit\.net\s+[\d:.]+\]\s+(.+?)\s+\[FAIL\]\s*$",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+        /// <summary>Distinct failed-test names in first-seen order (at most
+        /// <see cref="MaxNames"/>) and how many distinct names past that were dropped.</summary>
+        public static (IReadOnlyList<string> names, int truncated) Parse(string? output)
+        {
+            var kept = new List<string>();
+            int truncated = 0;
+            if (string.IsNullOrEmpty(output)) return (kept, 0);
+            try
+            {
+                var seen = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var rawLine in output.Split('\n'))
+                {
+                    string line = rawLine.TrimEnd('\r');
+                    var m = XunitLine.Match(line);
+                    if (!m.Success) m = VsTestLine.Match(line);
+                    if (!m.Success) continue;
+                    string name = m.Groups[1].Value.Trim();
+                    if (name.Length == 0 || !seen.Add(name)) continue;
+                    if (kept.Count < MaxNames) kept.Add(name);
+                    else truncated++;
+                }
+            }
+            catch { /* never throws — whatever parsed so far stands */ }
+            return (kept, truncated);
+        }
+
+        /// <summary>"Ns.Class.Method(args)" → "Class.Method(args)". Arguments are kept so two
+        /// theory rows stay distinguishable.</summary>
+        public static string ShortName(string fullName)
+        {
+            int paren = fullName.IndexOf('(');
+            string head = paren < 0 ? fullName : fullName.Substring(0, paren);
+            string args = paren < 0 ? "" : fullName.Substring(paren);
+            int last = head.LastIndexOf('.');
+            int prev = last > 0 ? head.LastIndexOf('.', last - 1) : -1;
+            return (prev < 0 ? head : head.Substring(prev + 1)) + args;
         }
     }
 
@@ -185,6 +270,11 @@ namespace DevMind.McpServer
                     : $"baseline test run had failing tests (exit code {baseRun.ExitCode}) — structural before-count, suite already red before this task";
             }
 
+            // H-61: name the tests that were red before the agent started, so a flaky one can
+            // be told apart from one the task broke.
+            if (baselineWhy != null && baseRun is { Succeeded: false, FailedTests.Count: > 0 })
+                baselineWhy += $" — failing: {baseRun.FailedTestsSummary(MaxReasonNames)}";
+
             int? delta = after.Total.HasValue && baseline.HasValue
                 ? after.Total.Value - baseline.Value
                 : null;
@@ -228,8 +318,16 @@ namespace DevMind.McpServer
                 note,
                 // H-09: why the run happened although verify_tests was off; null when requested.
                 forced_reason = job.TestsForcedReason,
+                // H-61: fully-qualified names parsed from each run's full output (first 25).
+                // failed_tests is empty when the after-run passed; baseline_failed_tests is
+                // null when there was no before-run and empty when it passed.
+                failed_tests = after.FailedTests,
+                baseline_failed_tests = baseRun?.FailedTests,
             };
         }
+
+        /// <summary>Failed-test names quoted in baseline_unavailable_reason.</summary>
+        private const int MaxReasonNames = 5;
 
         private static readonly Regex CompilerError = new(
             @"\berror\s+[A-Z]{2,}\d+\s*:", RegexOptions.Compiled | RegexOptions.CultureInvariant);
