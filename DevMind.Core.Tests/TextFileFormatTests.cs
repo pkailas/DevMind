@@ -87,14 +87,39 @@ namespace DevMind.Core.Tests
             Assert.Equal("1\n2\n3", TextFileFormat.Detect(lf).NormalizeLineEndings("1\r\n2\n3"));
         }
 
-        [Fact]
-        public void WritePreserving_NewFile_IsWrittenAsGiven_WithoutBom()
+        // A new file goes through TextFileFormat.WriteNew: no BOM (H-22), line ending chosen by
+        // NewFileLineEnding (H-30). This test predates H-30 and used to expect the text written
+        // as given; H-30 made new files take the repo's ending, defaulting to the platform's.
+        // The file sits in an empty folder of its own fake repo, so no .gitattributes and no
+        // neighbouring file (H-30 also samples the parent folder — %TEMP% itself, before this
+        // isolation) can pick the ending: the platform default applies deterministically.
+        private string IsolatedNewFilePath(string name)
         {
-            string path = Path.Combine(_dir, "new.ps1");
+            string repo = Path.Combine(_dir, "repo");
+            Directory.CreateDirectory(Path.Combine(repo, ".git"));
+            Directory.CreateDirectory(Path.Combine(repo, "empty"));
+            return Path.Combine(repo, "empty", name);
+        }
+
+        [Fact]
+        public void WritePreserving_NewFile_IsWrittenWithoutBom_ContentIntact()
+        {
+            string path = IsolatedNewFilePath("new.ps1");
             TextFileFormat.WritePreserving(path, "a\nb\n");
 
             Assert.False(HasBom(path));
-            Assert.Equal("a\nb\n", Text(path));
+            Assert.Equal("a\nb\n", Text(path).Replace("\r\n", "\n"));
+        }
+
+        [Fact]
+        public void WritePreserving_NewFile_TakesThePlatformLineEnding_PerH30()
+        {
+            string path = IsolatedNewFilePath("new.ps1");
+            string written = TextFileFormat.WritePreserving(path, "a\nb\n");
+
+            string nl = OperatingSystem.IsWindows() ? "\r\n" : "\n";
+            Assert.Equal($"a{nl}b{nl}", Text(path));
+            Assert.Equal(Text(path), written);   // the returned text is what is on disk
         }
 
         // ── patch_file (the job-1676 path) ────────────────────────────────────────

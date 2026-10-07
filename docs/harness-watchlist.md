@@ -485,6 +485,10 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   TextFileFormat.WriteNew on every new-file path): .gitattributes eol= for the path (-text/binary = as given) > .sh is LF > dominant
   ending of up to 10 neighbouring files (same extension, then any, in the folder, then its parent) > CRLF on Windows; the content is
   normalised fully. core.autocrlf and $GIT_DIR/info/attributes are not read. No BOM on new files, as before.
+- **Test follow-up (2026-10-07):** TextFileFormatTests.WritePreserving_NewFile_IsWrittenAsGiven_WithoutBom (from b38cad0, which
+  predates this rule) still expected new files written as given; b7326a4 changed WriteNew and left it. It failed or passed
+  depending on the text files in %TEMP% (the neighbour rule samples the parent folder). H-30 is the intended behaviour, so the
+  test was split: no BOM with content intact (endings normalised), and the platform ending in an isolated empty repo folder.
 
 ### H-31 - self_reported_incomplete fires on a finished job ("not run by me - the harness verifies it")
 - **First seen:** 2026-09-27 - job-1714 ended `stopped_incomplete`, reason `self_reported_incomplete`, quoting the line "The full
