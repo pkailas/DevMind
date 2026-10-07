@@ -120,7 +120,9 @@ namespace DevMind.McpServer
             "Delegate a whole coding task to DevMind's local agent (runs on a local GPU model at zero " +
             "API cost). The agent works autonomously inside working_dir: it reads files, edits, runs " +
             "shell/build/test commands, and iterates until done. Returns a job_id immediately — poll " +
-            "devmind_task_status, then fetch devmind_task_result. Jobs run one at a time. Write the " +
+            "devmind_task_status, then fetch devmind_task_result. Jobs run one at a time across the whole " +
+            "machine — every DevMind server process (conversation) shares one job slot on the model; a job " +
+            "waiting for another conversation's job stays queued and devmind_task_status shows waiting_for. Write the " +
             "prompt like a task brief for a junior developer: include the goal, relevant file paths, " +
             "and how to verify success. Do not edit files under working_dir while the job runs. " +
             "Estimate max_depth to the task size (verify ~25, single-file feature ~40, cross-cutting " +
@@ -333,7 +335,12 @@ namespace DevMind.McpServer
             "needs_input means " +
             "the agent paused with specific questions (in the result answer) — answer them via " +
             "devmind_task_continue. effective_max_depth is the cap in force (max_depth plus any " +
-            "auto_extend extensions; depth_extensions_used counts them). Optional wait_seconds: when > 0, blocks until the job's state " +
+            "auto_extend extensions; depth_extensions_used counts them). A queued job that is waiting for the " +
+            "machine-wide job slot shows waiting_for: {reason (machine_slot_held | earlier_job_waiting), job_id, pid, " +
+            "since, other_process, ahead}; the stall timeout does not run while it waits. A job id owned by ANOTHER " +
+            "DevMind server process (another conversation) is answered read-only from its state file, with " +
+            "other_process true and owner_pid; \"orphaned\" means its server exited before it finished. " +
+            "Optional wait_seconds: when > 0, blocks until the job's state " +
             "CHANGES (e.g. running -> done/needs_input/failed) or that many seconds elapse, then " +
             "returns the same payload — a waiter gets the fresh state in one call instead of " +
             "re-polling. Omitted or 0 returns immediately (the default, unchanged); values above " +
@@ -358,6 +365,17 @@ namespace DevMind.McpServer
             }
             if (job == null)
             {
+                // H-74: another server process's job — answer from its state file. A running job
+                // whose server died falls through to the H-03 server_restart path below.
+                JobStateRecord? other = JobStateFiles.Read(job_id);
+                if (other != null && other.IsOtherProcess && !(other.EffectiveState == "orphaned" && other.State == "running"))
+                {
+                    _ = await AgentJobManager.WaitForStateChangeAsync(
+                        () => JobStateFiles.Read(job_id)?.EffectiveState ?? other.EffectiveState,
+                        wait_seconds ?? 0, cancellationToken).ConfigureAwait(false);
+                    return OtherProcessStatus(JobStateFiles.Read(job_id) ?? other);
+                }
+
                 var (diedMidRun, startedAt) = CheckStaleActiveMarker(job_id);
                 // H-03: the sweep above turned a dead server's marker into a server_restart
                 // sidecar — report the job from it, with the note that it died with the server.
@@ -388,6 +406,7 @@ namespace DevMind.McpServer
                 effective_max_depth = job.EffectiveMaxDepth,
                 depth_extensions_used = job.DepthExtensionsUsed,
                 queue_position = job.State == AgentJobState.Queued ? _jobs.QueuePosition(job) : (int?)null,
+                waiting_for = job.State == AgentJobState.Queued ? job.WaitingFor?.Payload() : null,
                 elapsed_seconds = elapsed,
                 working_dir = job.WorkingDirectory,
                 error = job.Error,
@@ -395,25 +414,21 @@ namespace DevMind.McpServer
             }, JsonOpts);
         }
 
-        /// <summary>"done" only when the work is actually trustworthy — a depth-capped or
-        /// verification-failed job reports stopped_incomplete instead (field lesson: "done"
-        /// with a broken build was built upon). A job paused on ask_caller reports
-        /// needs_input: the agent has specific questions — answer them via
-        /// devmind_task_continue (the conversation keeps full context).</summary>
-        private static string DisplayState(AgentJob job)
-            => (job.Result?.NeedsInput ?? false) && job.State == AgentJobState.Done
-                ? "needs_input"
-                : job.IsIncomplete ? "stopped_incomplete" : job.State.ToString().ToLowerInvariant();
+        /// <summary>See <see cref="AgentJob.DisplayState"/>.</summary>
+        private static string DisplayState(AgentJob job) => job.DisplayState;
 
         [McpServerTool(Name = "devmind_task_list")]
         [Description(
             "List DevMind delegated tasks: every job known to the running server (id, state, prompt " +
-            "snippet, timings, whether its conversation can still be continued) plus recent transcript " +
+            "snippet, timings, whether its conversation can still be continued), the queued, running and " +
+            "retained jobs of every OTHER DevMind server process on this machine (other_process true, " +
+            "owner_pid; \"orphaned\" = its server exited before it finished), plus recent transcript " +
             "files on disk, which survive server restarts. Call this FIRST in a new conversation to " +
             "rediscover job ids from earlier work.")]
         public Task<string> TaskList(CancellationToken cancellationToken = default)
         {
-            var jobs = _jobs.List().Select(j => new
+            List<AgentJob> own = _jobs.List();
+            var jobs = own.Select(j => (object)new
             {
                 job_id = j.Id,
                 state = DisplayState(j),
@@ -425,7 +440,32 @@ namespace DevMind.McpServer
                 continued_by = j.ContinuedByJobId,
                 can_continue = j.Session != null && j.ContinuedByJobId == null
                     && j.State is AgentJobState.Done or AgentJobState.Failed or AgentJobState.Cancelled,
+                waiting_for = j.State == AgentJobState.Queued ? j.WaitingFor?.Payload() : null,
             }).ToList();
+
+            // H-74: jobs other server processes own, from their state files.
+            List<JobStateRecord> others;
+            try
+            {
+                var ownIds = new HashSet<string>(own.Select(j => j.Id), StringComparer.OrdinalIgnoreCase);
+                others = JobStateFiles.OtherProcessJobs(ownIds);
+            }
+            catch { others = new List<JobStateRecord>(); }
+            jobs.AddRange(others.Select(r => (object)new
+            {
+                job_id = r.JobId,
+                state = r.EffectiveState,
+                prompt_snippet = r.PromptSnippet,
+                working_dir = r.WorkingDir,
+                queued_at_utc = r.QueuedUtc,
+                started_at_utc = r.StartedUtc,
+                ended_at_utc = r.EndedUtc,
+                parent_job_id = r.ParentJobId,
+                other_process = true,
+                owner_pid = r.Pid,
+                can_continue = false,
+                waiting_for = r.State == "queued" && r.EffectiveState != "orphaned" ? r.WaitingFor : null,
+            }));
 
             object[] transcripts;
             try
@@ -447,12 +487,16 @@ namespace DevMind.McpServer
             return Task.FromResult(JsonSerializer.Serialize(new
             {
                 jobs,
-                note = jobs.Count == 0
+                note = (others.Count > 0
+                    ? "Entries with other_process true belong to another DevMind server process (another " +
+                      "conversation): read-only here — status and result work, steer/cancel/continue only from " +
+                      "the conversation that started them. "
+                    : "") + (own.Count == 0
                     ? "No jobs in this server process (it may have restarted — live job state is in-memory). " +
                       "Job ids are unique across restarts; pass an old id to devmind_task_result to recover " +
                       "its persisted result sidecar, or read a transcript file below with read_file."
                     : "Job ids are unique across restarts. Finished jobs persist a result sidecar + transcript " +
-                      "on disk; live conversations still die with the process.",
+                      "on disk; live conversations still die with the process."),
                 recent_transcripts = transcripts,
             }, JsonOpts));
         }
@@ -481,7 +525,15 @@ namespace DevMind.McpServer
         {
             var job = _jobs.Get(job_id);
             if (job == null)
+            {
+                // H-74: another live server's job that has not finished has no result yet.
+                JobStateRecord? other = JobStateFiles.Read(job_id);
+                if (other != null && other.IsOtherProcess && !other.IsTerminal && other.OwnerAlive)
+                    return Task.FromResult(Err(
+                        $"Job {job_id} is still {other.State} in another DevMind server process (pid {other.Pid}) — " +
+                        "poll devmind_task_status; its result is readable here once it finishes."));
                 return Task.FromResult(TranscriptFallback(job_id));
+            }
 
             if (job.State is AgentJobState.Queued or AgentJobState.Running)
                 return Task.FromResult(Err($"Job {job_id} is still {job.State.ToString().ToLowerInvariant()} — poll devmind_task_status."));
@@ -558,7 +610,14 @@ namespace DevMind.McpServer
         {
             var job = _jobs.Get(job_id);
             if (job == null)
+            {
+                JobStateRecord? other = JobStateFiles.Read(job_id);
+                if (other != null && other.IsOtherProcess)
+                    return Task.FromResult(Err(
+                        $"Job {job_id} belongs to another DevMind server process (pid {other.Pid}, state " +
+                        $"{other.EffectiveState}) — cancel it from the conversation that started it."));
                 return Task.FromResult(Err($"Unknown job_id: {job_id}."));
+            }
 
             bool cancelled = _jobs.Cancel(job_id);
             return Task.FromResult(JsonSerializer.Serialize(new
@@ -814,11 +873,64 @@ namespace DevMind.McpServer
             }
         }
 
-        private static string Snippet(string text, int max)
+        private static string Snippet(string text, int max) => AgentJob.Snippet(text, max);
+
+        /// <summary>
+        /// H-74: devmind_task_status for a job another server process owns, from its state
+        /// file — read-only (steer, cancel and continue stay with the owning conversation).
+        /// </summary>
+        private static string OtherProcessStatus(JobStateRecord r)
         {
-            if (string.IsNullOrEmpty(text)) return "";
-            string flat = text.Replace("\r", " ").Replace("\n", " ").Trim();
-            return flat.Length <= max ? flat : flat.Substring(0, max) + "…";
+            const int TailChars = 4_000;
+            string state = r.EffectiveState;
+
+            DateTime? started = JobProcess.ParseUtc(r.StartedUtc);
+            DateTime? ended = JobProcess.ParseUtc(r.EndedUtc);
+            double? elapsed = started is DateTime s
+                ? Math.Round(((ended ?? DateTime.UtcNow) - s).TotalSeconds, 0)
+                : null;
+
+            string? tail = null;
+            if (!string.IsNullOrWhiteSpace(r.TranscriptPath))
+            {
+                try
+                {
+                    using var fs = new FileStream(r.TranscriptPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                    using var reader = new StreamReader(fs);
+                    string content = reader.ReadToEnd();
+                    tail = content.Length <= TailChars ? content : content.Substring(content.Length - TailChars);
+                }
+                catch { /* not written yet, or gone */ }
+            }
+
+            string note = state switch
+            {
+                "orphaned" => $"Its server process (pid {r.Pid}) exited before the job started; it will never run. Re-delegate it.",
+                "queued" or "running" => $"This job belongs to another DevMind server process (pid {r.Pid}, another conversation). " +
+                    "Read-only here: steer, cancel or continue it from the conversation that started it.",
+                _ => "This job belongs to another DevMind server process. Fetch its result with devmind_task_result " +
+                    "(served from its result sidecar); continue it only from the conversation that started it.",
+            };
+
+            return JsonSerializer.Serialize(new
+            {
+                job_id = r.JobId,
+                state,
+                other_process = true,
+                owner_pid = r.Pid,
+                queue_position = (int?)null,
+                waiting_for = r.State == "queued" && state != "orphaned" ? r.WaitingFor : null,
+                queued_at_utc = r.QueuedUtc,
+                started_at_utc = r.StartedUtc,
+                ended_at_utc = r.EndedUtc,
+                elapsed_seconds = elapsed,
+                working_dir = r.WorkingDir,
+                prompt_snippet = r.PromptSnippet,
+                error = r.Error,
+                transcript_path = r.TranscriptPath,
+                transcript_tail = tail,
+                note,
+            }, JsonOpts);
         }
 
         /// <summary>

@@ -27,7 +27,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -56,16 +55,6 @@ namespace DevMind.McpServer
         /// <summary>The incomplete_reasons code for a job whose server died under it.</summary>
         public const string ServerRestartReason = "server_restart";
 
-        // How far a recorded process start time may differ from the live one and still be
-        // the same process (the value is written with whole-second precision).
-        private static readonly TimeSpan StartTimeTolerance = TimeSpan.FromSeconds(2);
-
-        private static readonly Lazy<DateTime?> OwnStartUtc = new(() =>
-        {
-            try { return Process.GetCurrentProcess().StartTime.ToUniversalTime(); }
-            catch { return null; }
-        });
-
         // LoopDriver's per-iteration line: "[AGENTIC] Iteration 7/40 — 12,345 / 262,144 (4%)".
         // The full shape is required — a looser match could read the model's own prose.
         private static readonly Regex IterationLine = new(
@@ -86,7 +75,7 @@ namespace DevMind.McpServer
                     job_id = job.Id,
                     state = "running",
                     pid = Environment.ProcessId,
-                    process_start_utc = OwnStartUtc.Value?.ToString("yyyy-MM-dd HH:mm:ss"),
+                    process_start_utc = JobProcess.OwnStartUtc?.ToString("yyyy-MM-dd HH:mm:ss"),
                     working_dir = job.WorkingDirectory,
                     started_at_utc = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss"),
                     transcript = transcriptPath,
@@ -127,10 +116,7 @@ namespace DevMind.McpServer
                     root.TryGetProperty(name, out var el) && el.ValueKind == JsonValueKind.String ? el.GetString() : null;
 
                 int pid = root.TryGetProperty("pid", out var pidEl) && pidEl.TryGetInt32(out int p) ? p : 0;
-                DateTime? processStart = DateTime.TryParse(Str("process_start_utc"),
-                    System.Globalization.CultureInfo.InvariantCulture,
-                    System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal,
-                    out DateTime ps) ? ps : null;
+                DateTime? processStart = JobProcess.ParseUtc(Str("process_start_utc"));
 
                 return new ActiveJobMarker
                 {
@@ -154,24 +140,7 @@ namespace DevMind.McpServer
         /// alive and, when the marker recorded it, its start time matches (pid reuse).
         /// </summary>
         public static bool IsOwnerAlive(ActiveJobMarker marker)
-        {
-            if (marker.Pid <= 0) return false;
-            try
-            {
-                using var owner = Process.GetProcessById(marker.Pid);
-                if (owner.HasExited) return false;
-                if (marker.ProcessStartUtc is DateTime recorded)
-                {
-                    DateTime actual = owner.StartTime.ToUniversalTime();
-                    if ((actual - recorded).Duration() > StartTimeTolerance) return false;
-                }
-                return true;
-            }
-            catch
-            {
-                return false; // GetProcessById throws when no process holds the pid
-            }
-        }
+            => JobProcess.IsAlive(marker.Pid, marker.ProcessStartUtc);
 
         /// <summary>True when any marker names a live process other than this one.</summary>
         public static bool IsJobActiveElsewhere()

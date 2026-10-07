@@ -1446,3 +1446,45 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Note:** the commit message says H-62 for historical reasons (that number is the optional-item guard above, 6dc13d7); code
   comments and the test class were renumbered to H-73.
 - **Status:** fixed - commit 321b678 "H-62: SQLite in run_sql, null-redirect rewrite, sidecar thinking fields, failed-test truncation counts".
+
+### H-74 - Jobs from two conversations ran on the GPU at the same time
+- **First seen:** 2026-10-07. "Jobs run one at a time" was an in-process queue, and Claude Desktop runs one DevMind.McpServer
+  process per conversation (plus the Cowork pool). Two conversations each ran a job at once on the single GPU behind
+  DEVMIND_ENDPOINT; the GPU was shared, MCP calls timed out, and devmind_task_list in one process never showed the other's
+  job (job-2210) although its transcript was in %TEMP%\devmind\tasks.
+- **Fix:**
+  - Machine-wide slot (MachineJobSlot): an exclusive handle on %LOCALAPPDATA%\devmind\job-slot.lock (DevMindPaths.JobSlotLockPath;
+    DEVMIND_JOB_SLOT_LOCK overrides), opened ReadWrite + FileShare.Read; a second open fails with a sharing violation = busy. The
+    holder writes pid, process start, job id, prompt snippet, working dir and acquired time into the file; release clears it and
+    closes the handle. The OS closes a dead process's handle, so a killed server never leaves the slot stuck (verified by a test
+    that kills a child process holding the lock). Not a named Mutex (thread-affine) or Semaphore (outlives its holder).
+  - The in-process queue keeps its order; the job at its head also takes the slot before it starts and holds it for its whole
+    lifetime (test baseline, agent turn, build/test verification; released after the sidecar and state file are written).
+  - While waiting: state stays "queued", polled every 2 s; devmind_task_status shows queue_position plus waiting_for {reason
+    machine_slot_held | earlier_job_waiting, job_id, pid, since, other_process, ahead}. The stall watchdog starts only with the
+    agent turn, so the wait never counts against timeout_minutes. devmind_task_cancel ends the wait; the slot is never taken.
+  - Fairness (the gray item): polling alone is not FIFO - the process that just released the slot always wins, since its next job
+    tries at once while the others are mid-poll. Chosen: a cheap ticket scheme. The waiter at the head of each process's queue
+    holds "<lock>.tickets\<queued ticks>-<pid>-<job id>.ticket", opened DeleteOnClose (a dead waiter's ticket vanishes with its
+    handle; tickets of dead pids are also ignored and deleted); only the first ticket may take the slot. Result: FIFO by queue time
+    across processes. A ticket that cannot be created falls back to plain polling (exclusion still holds).
+  - Visibility (JobStateFiles): every job writes {TasksDir}\<job_id>.state.json (pid + process start, display state,
+    queued/started/ended, prompt snippet, working dir, transcript, waiting_for) on each state change. devmind_task_list merges in
+    other processes' jobs (other_process true, owner_pid; queued/running under a dead pid = "orphaned", listed for 24 h).
+    devmind_task_status on another process's job id answers read-only from its state file (with the transcript tail);
+    devmind_task_result serves its sidecar once finished, or says it is still running in pid N; devmind_task_cancel says to cancel
+    it from the owning conversation.
+  - Job ids (VERIFY): already unique across processes and restarts - NextJobId does a read-increment-write of _jobcounter.txt
+    under a FileShare.None handle. The one gap was the degraded fallback (an in-memory counter after the file lock failed 10 x
+    25 ms), which could hand out an id another process also issued. Now: ~1 s of retries, and the fallback id carries the pid
+    (job-<n>p<pid>) so it cannot collide.
+  - Scope: headless jobs only; the TUI and direct tool calls are not gated. A lock path that cannot be used at all degrades to
+    running without the slot (stderr + transcript note) rather than parking every job.
+  - Tests: MachineJobSlotTests - separate lock paths run concurrently; a shared path makes the second job wait (waiting_for,
+    status payload, state file) and run after the first releases; exclusive TryAcquire; killed child process frees the slot; a
+    wait 5x the stall window does not stall; cancel while waiting never takes the slot (ticket removed, worker not stuck); a freed
+    slot goes to the earliest queued waiter, not back to the releasing process; task_list / status / result / cancel for another
+    process's job via its state file, dead pid = orphaned; own jobs write their state file. Mutation checks: dropping the ticket
+    order fails the fairness test; skipping the lock fails the wait, stall and cancel tests. The test assembly gives every
+    AgentJobManager its own slot (AgentJobManager.SlotLockPathFactory) and points DEVMIND_JOB_SLOT_LOCK into the per-run folder.
+- **Status:** fixed, pending deploy - commit "H-74: one headless job at a time across all McpServer processes".

@@ -14,7 +14,9 @@ one-way; nothing in Core knows MCP exists.
 | `McpServices.cs` | Shared service container for the tool classes (working directory, file cache, shell runner, LSP router, …). |
 | `DevMindTools.cs` | The granular tool surface (~40 tools): files, search, LSP, shell, build/test, memory, library/RAG, db, clipboard, network. |
 | `AgentTaskTools.cs` | The headless-agent job tools: `devmind_task_start` / `status` / `result` / `list` / `continue` / `cancel`. |
-| `AgentJobManager.cs` | The job queue and lifecycle: one-at-a-time execution, state tracking, transcript persistence, result retention. |
+| `AgentJobManager.cs` | The job queue and lifecycle: one-at-a-time execution (machine-wide, via `MachineJobSlot`), state tracking, transcript persistence, result retention. |
+| `MachineJobSlot.cs` | H-74: the machine-wide job slot (an exclusive handle on `%LOCALAPPDATA%\devmind\job-slot.lock`) and the ticket files that order waiters FIFO across server processes. |
+| `JobStateFiles.cs` | H-74: per-job `<job_id>.state.json` in the tasks folder, so every server process can see every job. |
 
 Tools are declared with `[McpServerTool(Name = "...")]` +
 `[Description(...)]` attributes; descriptions are part of the product surface —
@@ -72,10 +74,53 @@ the job pattern in `AgentTaskTools` / `AgentJobManager`:
   minutes later), clamps `max_depth` (default 40, 1–100) and `timeout_minutes`
   (default 10, 1–240; a STALL window since H-37 — the job runner's watchdog cancels the
   agent turn only after that long with no progress, never on wall-clock time), and enqueues. Returns `job_id` + queue position.
-- Jobs execute **strictly one at a time** — single GPU; a queue beats KV-cache
-  thrash. The queue is in-process; a server restart loses it (acceptable — the
-  client re-submits). `devmind_task_result` falls back to the on-disk
+- Jobs execute **strictly one at a time across the machine** — single GPU; a
+  queue beats KV-cache thrash. Each server process keeps its own in-process queue
+  (a server restart loses it — acceptable, the client re-submits), and the job at
+  its head must also take the **machine-wide job slot** before it starts (H-74):
+  Claude Desktop runs several McpServer processes, one per conversation, and they
+  all share the one model behind `DEVMIND_ENDPOINT`.
+  - The slot is an exclusive handle on `%LOCALAPPDATA%\devmind\job-slot.lock`
+    (`DEVMIND_JOB_SLOT_LOCK` overrides the path): opened ReadWrite with
+    `FileShare.Read`, so any second ReadWrite open fails with a sharing violation.
+    The holder writes an owner record (pid, process start, job id, prompt snippet,
+    working dir, acquired time) into the file; release clears it and closes the
+    handle. A killed or crashed server's handle is closed by the OS, so the slot
+    can never stay stuck. Not a named Mutex (thread-affine; a job spans async
+    continuations) and not a named Semaphore (survives its holder's death).
+  - The slot is held for the job's whole lifetime: test baseline, agent turn, and
+    build/test verification. The result sidecar and state file are written before
+    it is released.
+  - A waiting job stays `queued`; it polls every 2 s, and `devmind_task_status`
+    shows `queue_position` plus `waiting_for` {reason, job_id, pid, since,
+    other_process, ahead}. The stall watchdog only runs during the agent turn, so
+    waiting never counts against `timeout_minutes`. `devmind_task_cancel` ends the
+    wait without the slot ever being taken.
+  - Fairness: FIFO by queue time across processes. The waiter at the head of each
+    process's queue holds a ticket file in `job-slot.lock.tickets\`
+    (`<queued ticks>-<pid>-<job id>.ticket`, opened `DeleteOnClose`, so a dead
+    waiter's ticket disappears with it); only the waiter whose ticket sorts first
+    may take the slot. Without it, the process that just released the slot would
+    always win (its next job tries at once; the others are mid-poll).
+  - A lock path that cannot be used at all (permissions, bad path) degrades to
+    "no machine slot" with a stderr line and a transcript note, rather than parking
+    every job forever.
+  - Only headless jobs are gated. The TUI and direct tool calls (`read_file`,
+    `run_shell`, …) are not.
+- Every job writes `{TasksDir}\<job_id>.state.json` (pid + process start, display
+  state, queued/started/ended, prompt snippet, working dir, transcript, waiting_for)
+  on each state change. `devmind_task_list` merges in other processes' jobs from
+  these files (`other_process: true`, `owner_pid`; a queued/running job whose
+  server is gone shows as `orphaned` for 24 h). `devmind_task_status` and
+  `devmind_task_result` on another process's job id answer read-only from its state
+  file / result sidecar instead of "Unknown job_id"; steer, cancel and continue stay
+  with the owning conversation. `devmind_task_result` falls back to the on-disk
   transcript when the job is no longer in memory.
+- Job ids are allocated machine-wide: a read-increment-write of
+  `{TasksDir}\_jobcounter.txt` under an exclusive (`FileShare.None`) handle, retried
+  for ~1 s. Only if the counter cannot be used at all does a server fall back to an
+  in-memory counter, and then the id carries its pid (`job-<n>p<pid>`) so it still
+  cannot collide with another process's id.
 - A per-job `_active_<job_id>.json` marker is written while the job runs and
   removed when it ends; each server writes and clears only its own jobs' markers
   (several servers share the tasks folder). On startup, and on a status/result

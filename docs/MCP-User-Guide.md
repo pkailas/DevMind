@@ -34,8 +34,14 @@ client.
 | `think` | false | Enable model reasoning for this task. Capped by the backend server's reasoning budget (e.g. 3000 tokens on the current Strata config; a server without a budget is uncapped) and adds up to that many tokens per iteration. Leave off for mechanical jobs; turn on for jobs that rearrange existing behaviour or need consequence reasoning. |
 
 `devmind_task_start` health-probes the model server first and fails fast with a
-clear message if it's down. Jobs run **one at a time** (single GPU — a queue
-beats KV-cache thrash); additional jobs queue with a reported position.
+clear message if it's down. Jobs run **one at a time across the whole machine**
+(single GPU — a queue beats KV-cache thrash): every DevMind server process — one per
+Claude conversation — shares one job slot. Additional jobs queue with a reported
+position; a job waiting for another conversation's job stays `queued`, and
+`devmind_task_status` shows what it is waiting for (`waiting_for`: job id, pid, since).
+The stall timeout does not run while a job waits, and a waiting job can be cancelled.
+`devmind_task_list` also shows other conversations' jobs (`other_process: true`), and
+`devmind_task_status` / `devmind_task_result` work on their ids (read-only).
 
 ### Following a task
 

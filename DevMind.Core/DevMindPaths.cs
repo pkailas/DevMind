@@ -75,5 +75,36 @@ namespace DevMind
         /// </summary>
         public static string GlobalLogsDir =>
             Path.Combine(GlobalDir, LogsDirName);
+
+        /// <summary>
+        /// Name of the machine-wide headless-job slot lock file (H-74).
+        /// </summary>
+        public const string JobSlotLockFileName = "job-slot.lock";
+
+        /// <summary>
+        /// Absolute path to the machine-wide headless-job slot
+        /// (%LOCALAPPDATA%\devmind\job-slot.lock). Every DevMind.McpServer process on
+        /// the machine holds this file open exclusively while one of its delegated jobs
+        /// runs, so at most one job uses the model at a time across all of them. Local,
+        /// not roaming (%APPDATA%): the lock is about this machine's GPU.
+        /// </summary>
+        /// <remarks>
+        /// Overridable via the <c>DEVMIND_JOB_SLOT_LOCK</c> environment variable (a full
+        /// file path) — a test seam like <c>DEVMIND_GLOBAL_DIR</c>, so a test run never
+        /// queues behind, or blocks, the operator's live server. Whitespace-only counts as
+        /// unset. Re-read on every access. Not created here.
+        /// </remarks>
+        public static string JobSlotLockPath
+        {
+            get
+            {
+                string override_ = Environment.GetEnvironmentVariable("DEVMIND_JOB_SLOT_LOCK");
+                if (!string.IsNullOrWhiteSpace(override_))
+                    return override_;
+                return Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    ConfigDirName, JobSlotLockFileName);
+            }
+        }
     }
 }

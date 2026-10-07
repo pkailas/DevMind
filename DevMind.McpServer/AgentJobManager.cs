@@ -8,6 +8,12 @@
 // separate from McpServices' tool-dispatch channel: a task runs for minutes, and
 // parking it on the shared dispatcher would block every other tool call.
 //
+// H-74: one at a time across the MACHINE, not just this process. Claude Desktop runs
+// several McpServer processes, each with its own queue; the job at the head of this
+// queue must also take the machine-wide slot (MachineJobSlot) before it starts, and
+// holds it for its whole lifetime — test baseline, agent turn, build/test verification.
+// Every job also writes a state file (JobStateFiles) so other processes can see it.
+//
 // Diagnostic policy: stdout belongs to the MCP JSON-RPC transport — any diagnostics
 // here go to Console.Error only, and HeadlessAgent itself never touches Console.
 
@@ -304,6 +310,34 @@ namespace DevMind.McpServer
         public DateTime? EndedAtUtc;
         public readonly CancellationTokenSource Cts = new CancellationTokenSource();
 
+        /// <summary>H-74: what this queued job is waiting for while another job — in this
+        /// process or another — holds the machine-wide slot. Null when not waiting.</summary>
+        public volatile JobSlotWait? WaitingFor;
+
+        /// <summary>H-74: when this job took the machine-wide slot (null: never did).</summary>
+        public DateTime? SlotAcquiredUtc;
+
+        /// <summary>The full transcript file, set when the job starts.</summary>
+        public string? TranscriptPath;
+
+        /// <summary>"done" only when the work is actually trustworthy — a depth-capped or
+        /// verification-failed job reports stopped_incomplete instead (field lesson: "done"
+        /// with a broken build was built upon). A job paused on ask_caller reports
+        /// needs_input: the agent has specific questions — answer them via
+        /// devmind_task_continue (the conversation keeps full context).</summary>
+        public string DisplayState =>
+            (Result?.NeedsInput ?? false) && State == AgentJobState.Done
+                ? "needs_input"
+                : IsIncomplete ? "stopped_incomplete" : State.ToString().ToLowerInvariant();
+
+        /// <summary>One line, at most <paramref name="max"/> characters.</summary>
+        public static string Snippet(string text, int max)
+        {
+            if (string.IsNullOrEmpty(text)) return "";
+            string flat = text.Replace("\r", " ").Replace("\n", " ").Trim();
+            return flat.Length <= max ? flat : flat.Substring(0, max) + "…";
+        }
+
         // Rolling tail of the live transcript for devmind_task_status. Bounded so a
         // chatty model can't grow server memory; the FULL transcript goes to a file.
         private const int TailCapChars = 4_000;
@@ -400,7 +434,7 @@ namespace DevMind.McpServer
         public bool FailedOnlyOnLocks => !Succeeded && LockErrorCount > 0 && OtherErrorCount == 0;
     }
 
-    /// <summary>One-at-a-time headless-agent job queue with bounded result retention.</summary>
+    /// <summary>One-at-a-time (machine-wide, H-74) headless-agent job queue with bounded result retention.</summary>
     internal sealed class AgentJobManager : IDisposable
     {
         /// <summary>Completed jobs retained for devmind_task_result (oldest evicted past this).</summary>
@@ -476,6 +510,22 @@ namespace DevMind.McpServer
         /// <summary>How long one requested MCP server may take to start before the job gives up
         /// on it and runs without it. Settable for tests.</summary>
         internal TimeSpan McpStartTimeout { get; set; } = TimeSpan.FromSeconds(60);
+
+        /// <summary>
+        /// H-74: the machine-wide job slot's lock file. Defaults to
+        /// <see cref="DevMindPaths.JobSlotLockPath"/> (DEVMIND_JOB_SLOT_LOCK overrides it), or
+        /// to <see cref="SlotLockPathFactory"/> when a test assembly set one. Two managers with
+        /// the same path share one slot exactly as two server processes do.
+        /// </summary>
+        internal string SlotLockPath { get; set; }
+
+        /// <summary>Test seam: when set, each new manager's default <see cref="SlotLockPath"/>
+        /// comes from here (a test assembly gives every manager its own slot, so a job left
+        /// running by one test can never park another test's job).</summary>
+        internal static Func<string>? SlotLockPathFactory { get; set; }
+
+        /// <summary>How often a job waiting for the machine slot retries (H-74).</summary>
+        internal TimeSpan SlotPollInterval { get; set; } = TimeSpan.FromSeconds(2);
 
         /// <summary>
         /// Resolves devmind_task_start's mcp_servers against the configured servers. Null or
@@ -573,6 +623,8 @@ namespace DevMind.McpServer
             EndpointUrl = string.IsNullOrEmpty(endpoint) ? "http://127.0.0.1:8080/v1" : endpoint;
             ApiKey = Environment.GetEnvironmentVariable("DEVMIND_API_KEY") ?? "";
 
+            SlotLockPath = SlotLockPathFactory?.Invoke() ?? DevMindPaths.JobSlotLockPath;
+
             _nextId = LoadPersistedIdCounter();
             // Best-effort: make sure the transcript location exists before the worker
             // thread starts writing. Production default is always creatable; a
@@ -620,7 +672,7 @@ namespace DevMind.McpServer
         {
             lock (_idAllocLock) // intra-process; the FileShare.None handle is the inter-process lock
             {
-                for (int attempt = 0; attempt < 10; attempt++)
+                for (int attempt = 0; attempt < 40; attempt++) // ~1 s: the lock is held for microseconds, but AV scans hold it longer
                 {
                     try
                     {
@@ -654,9 +706,11 @@ namespace DevMind.McpServer
                     }
                 }
 
-                // Degraded fallback: in-memory increment from the startup seed (the
-                // pre-lock behavior). Only here can ids collide with another process.
-                return $"job-{Interlocked.Increment(ref _nextId)}";
+                // Degraded fallback: in-memory increment from the startup seed. Another process
+                // can hand out the same number, so the id carries this process's pid (H-74:
+                // state files, sidecars and the slot record are keyed by id across processes).
+                // No '-' before the pid: "job-12-*.log" must not match "job-12p345-...log".
+                return $"job-{Interlocked.Increment(ref _nextId)}p{Environment.ProcessId}";
             }
         }
 
@@ -802,6 +856,7 @@ namespace DevMind.McpServer
             {
                 _jobs[job.Id] = job;
                 _jobOrder.Add(job.Id);
+                JobStateFiles.Write(job);   // H-74: visible to other server processes from now on
 
                 // Expire idle sessions (best-effort, piggybacked on job creation).
                 foreach (var j in _jobs.Values)
@@ -937,6 +992,8 @@ namespace DevMind.McpServer
                 {
                     job.State = AgentJobState.Cancelled;
                     job.EndedAtUtc = DateTime.UtcNow;
+                    job.WaitingFor = null;
+                    JobStateFiles.Write(job);
                 }
             }
             return true;
@@ -949,8 +1006,42 @@ namespace DevMind.McpServer
                 if (job.Cts.IsCancellationRequested)
                     continue; // cancelled while queued — already finalized by Cancel()
 
-                job.State = AgentJobState.Running;
-                job.StartedAtUtc = DateTime.UtcNow;
+                // H-74: the machine-wide slot. The job stays Queued while another job — in any
+                // server process — holds it; the stall watchdog has not started, so the wait
+                // never counts against timeout_minutes. Cancel() ends the wait.
+                MachineJobSlot slot;
+                try
+                {
+                    slot = await AcquireMachineSlotAsync(job).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    lock (_lock)
+                    {
+                        job.WaitingFor = null;
+                        if (job.State == AgentJobState.Queued)
+                        {
+                            job.State = AgentJobState.Cancelled;   // shutdown while waiting
+                            job.EndedAtUtc = DateTime.UtcNow;
+                        }
+                        JobStateFiles.Write(job);
+                    }
+                    continue;
+                }
+
+                lock (_lock)
+                {
+                    // Cancelled between the last wait check and the acquire: give the slot back.
+                    if (job.State != AgentJobState.Queued || job.Cts.IsCancellationRequested)
+                    {
+                        slot.Dispose();
+                        continue;
+                    }
+                    job.State = AgentJobState.Running;
+                    job.StartedAtUtc = DateTime.UtcNow;
+                    job.SlotAcquiredUtc = job.StartedAtUtc;
+                    job.WaitingFor = null;
+                }
                 // H-37: no wall-clock kill. The stall watchdog below runs for the agent turn
                 // only; the harness phases (test baseline, build/test verification) are not
                 // the agent's time and carry their own timeouts.
@@ -958,8 +1049,12 @@ namespace DevMind.McpServer
                 string transcriptPath = Path.Combine(
                     TranscriptDir,
                     $"{job.Id}-{DateTime.Now:yyyyMMdd-HHmmss}.log");
+                job.TranscriptPath = transcriptPath;
 
                 ActiveJobMarkers.Write(job, transcriptPath);
+                JobStateFiles.Write(job);
+                if (slot.DegradedReason != null)
+                    job.AppendTail($"\n[job] {slot.DegradedReason}\n");
 
                 // Per JOB, not per session: disposed in the finally below whatever the terminal
                 // state, while the session it was attached to lives on for a continuation.
@@ -1198,6 +1293,7 @@ namespace DevMind.McpServer
                     job.EndedAtUtc = DateTime.UtcNow;
                     ActiveJobMarkers.Clear(job.Id);   // this job's marker only (H-66)
                     WriteResultSidecar(job);
+                    JobStateFiles.Write(job);
 
                     // Drop the turn's PATCH backups now the job is over, WITHOUT ending
                     // the session — a finished job keeps its conversation so it can be
@@ -1210,8 +1306,47 @@ namespace DevMind.McpServer
                     try { job.Session?.DrainPatchBackups(); } catch { /* never kill the worker */ }
 
                     try { _onJobFinished(); } catch { /* never kill the worker */ }
+
+                    // H-74: last — the result and state file are on disk before the next job,
+                    // here or in another process, can start.
+                    slot.Dispose();
                 }
             }
+        }
+
+        /// <summary>
+        /// H-74: waits for the machine-wide slot for <paramref name="job"/>, publishing what it
+        /// waits for on <see cref="AgentJob.WaitingFor"/> (and the job's state file when that
+        /// changes). Throws OperationCanceledException when the job is cancelled or the manager
+        /// shuts down first — the slot is then never taken.
+        /// </summary>
+        private async Task<MachineJobSlot> AcquireMachineSlotAsync(AgentJob job)
+        {
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(job.Cts.Token, _shutdownCts.Token);
+            var owner = new JobSlotOwner
+            {
+                JobId = job.Id,
+                Pid = Environment.ProcessId,
+                ProcessStartUtc = JobProcess.OwnStartUtc,
+                PromptSnippet = AgentJob.Snippet(job.Prompt, 120),
+                WorkingDir = job.WorkingDirectory,
+            };
+            return await MachineJobSlot.AcquireAsync(SlotLockPath, owner, job.QueuedAtUtc, SlotPollInterval,
+                wait =>
+                {
+                    JobSlotWait? previous = job.WaitingFor;
+                    if (wait == null ? previous == null : wait.SameAs(previous)) return;
+                    job.WaitingFor = wait;
+                    if (wait == null) return;   // the Running state write follows at once
+                    if (previous == null)
+                        job.AppendTail($"\n[job] waiting for the machine job slot: " +
+                            $"{(wait.Reason == "machine_slot_held" ? "held by" : "queued behind")} " +
+                            $"{wait.JobId ?? "another job"} (pid {wait.Pid})\n");
+                    lock (_lock)
+                    {
+                        if (job.State == AgentJobState.Queued) JobStateFiles.Write(job);
+                    }
+                }, linked.Token).ConfigureAwait(false);
         }
 
         /// <summary>The job's stall window: timeout_minutes (or the test override).</summary>

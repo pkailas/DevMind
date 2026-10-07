@@ -70,7 +70,10 @@ An agentic turn runs 1–15 min; MCP clients time out long tool calls. Job patte
 | `devmind_task_cancel(job_id)` | Cancels the job's CTS. |
 
 **Concurrency:** jobs execute strictly one-at-a-time (single GPU; a queue beats KV-cache thrash).
-The queue is in-process; server restart loses it (acceptable — client re-submits).
+The queue is in-process; server restart loses it (acceptable — client re-submits). Since H-74 the
+limit is machine-wide: the job at the head of each server's queue also takes an exclusive lock-file
+slot (`%LOCALAPPDATA%\devmind\job-slot.lock`) shared by every McpServer process — see
+docs/MCP-Developer-Guide.md.
 
 **Defaults:** `max_depth` = DevMind's AgenticLoopMaxDepth default (25), `timeout_minutes` = 10
 stall timeout (H-37: cancelled only after that long with no progress; no wall-clock cap), `allow_commit` = false.

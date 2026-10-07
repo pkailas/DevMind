@@ -22,6 +22,8 @@
 // concurrent test runs cannot collide, and cleanup is deliberately skipped —
 // it is a small dir under %TEMP% and Windows reaps temp dirs; building a
 // custom fixture/lifecycle just to delete it is not worth it.
+//
+// The machine-wide job slot (H-74) is redirected here too — see Initialize.
 
 using System.Runtime.CompilerServices;
 
@@ -35,6 +37,15 @@ namespace DevMind.McpServer.Tests
             string dir = Path.Combine(Path.GetTempPath(), "devmind-test-tasks", Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(dir);
             Environment.SetEnvironmentVariable("DEVMIND_TASKS_DIR", dir);
+
+            // H-74: the machine-wide job slot. Never the operator's real
+            // %LOCALAPPDATA%\devmind\job-slot.lock — a test job would queue behind a live
+            // delegated job (or block one). Each manager gets its OWN slot by default, so a
+            // job one test leaves running can never park the next test's job; the H-74
+            // tests share a path explicitly when they mean to.
+            string slots = Path.Combine(dir, "job-slots");
+            Environment.SetEnvironmentVariable("DEVMIND_JOB_SLOT_LOCK", Path.Combine(slots, "shared-job-slot.lock"));
+            AgentJobManager.SlotLockPathFactory = () => Path.Combine(slots, $"job-slot-{Guid.NewGuid():N}.lock");
         }
     }
 }
