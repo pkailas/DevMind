@@ -32,6 +32,12 @@ namespace DevMind
         private readonly bool _verbose;
         private bool _callOpen;
 
+        // Whether the next chunk starts a line. A streamer that writes a line a token at a
+        // time hands over "Every", "thing", " valid…" — and only the first of those starts the
+        // line. Indent and translation belong to a line, so the rest are drawn as they came;
+        // treating each as a fresh line put four spaces between every streamed token.
+        private bool _atLineStart = true;
+
         /// <param name="verbose">
         /// <c>DEVMIND_TUI_VERBOSE</c>: the raw firehose. It has meant "show me exactly what
         /// the engine emitted" since the quiet filter was introduced, and translating lines
@@ -48,12 +54,19 @@ namespace DevMind
         /// painted diff. It ends the block, so the next tool output does not hang under a
         /// call the reader has lost sight of.
         /// </summary>
+        /// <remarks>
+        /// The line position is deliberately left alone. Closing the block changes what the
+        /// NEXT line hangs under, not where the cursor is: if output is mid-line when prose
+        /// closes the block, the text that follows still continues that line, and drawing it
+        /// as a fresh one would translate and indent the middle of it.
+        /// </remarks>
         public void CloseBlock() => _callOpen = false;
 
         /// <summary>
         /// Translate and lay out one chunk. A chunk may hold any number of lines, or part of
-        /// one; each complete line is translated, and the trailing fragment is emitted as it
-        /// stands so a caller that streams mid-line is never held up.
+        /// one. Each line is translated and indented once, at its first fragment; every later
+        /// fragment of it is emitted as it stands, so a caller that streams mid-line is never
+        /// held up.
         /// </summary>
         public IReadOnlyList<TranscriptLine> Accept(string text, OutputColor color)
         {
@@ -91,12 +104,26 @@ namespace DevMind
             string line = rawLine.TrimEnd('\r');
             string newline = complete ? "\n" : string.Empty;
 
-            // A blank line is blank. It does NOT close the block: shell and build output are
-            // full of blank lines, and de-indenting the rest of a command's output at its
-            // first one would break exactly the case the indent was added for.
-            if (line.Trim().Length == 0)
+            bool continuation = !_atLineStart;
+            _atLineStart = complete;
+
+            // The rest of a line already started: its first fragment was translated and
+            // indented, and this is the same line going on.
+            if (continuation)
             {
                 result.Add(new TranscriptLine(line + newline, color));
+                return;
+            }
+
+            // A blank line is blank. It does NOT close the block: shell and build output are
+            // full of blank lines, and de-indenting the rest of a command's output at its
+            // first one would break exactly the case the indent was added for. A whitespace
+            // fragment that STARTS a line is still where that line starts, so it carries the
+            // line's indent.
+            if (line.Trim().Length == 0)
+            {
+                string lead = !complete && _callOpen ? Indent : string.Empty;
+                result.Add(new TranscriptLine(lead + line + newline, color));
                 return;
             }
 

@@ -64,6 +64,54 @@ namespace DevMind.TUI.Tests
             Assert.Equal("    partial", Run(block, ("partial", OutputColor.Normal)));
         }
 
+        // A reasoning stream, as the thinking path appends it: one token per chunk.
+        private static readonly string[] StreamedTokens =
+            { "Everything", " valid", "ated.", " Let me\n", "next line" };
+
+        private static (string Text, OutputColor Color)[] Thinking() =>
+            StreamedTokens.Select(t => (t, OutputColor.Thinking)).ToArray();
+
+        [Fact]
+        public void ALineStreamedInTokens_IsIndentedOnce_UnderAnOpenCall()
+        {
+            // Every token used to be treated as a fresh line, so each got its own four spaces:
+            // "Everything    valid    ated." on screen.
+            var block = Quiet();
+            Run(block, ("[SHELL] > ls\n", OutputColor.Dim));
+            Assert.True(block.IsCallOpen);
+
+            Assert.Equal("    Everything validated. Let me\n    next line", Run(block, Thinking()));
+        }
+
+        [Fact]
+        public void ALineStreamedInTokens_WithNoCallOpen_IsUnchanged()
+        {
+            Assert.Equal(string.Concat(StreamedTokens), Run(Quiet(), Thinking()));
+        }
+
+        [Fact]
+        public void AStreamedLine_IsTranslatedAtItsStart_NotMidLine()
+        {
+            // Only the first fragment of a line is a line start. A continuation that happens
+            // to begin with a tag is the middle of a sentence, not the engine reporting.
+            var block = Quiet();
+            Run(block, ("[SHELL] > ls\n", OutputColor.Dim));
+
+            Assert.Equal("    see ", Run(block, ("see ", OutputColor.Thinking)));
+            Assert.Equal("[FILE] Saved x\n", Run(block, ("[FILE] Saved x\n", OutputColor.Thinking)));
+            Assert.True(block.IsCallOpen);
+        }
+
+        [Fact]
+        public void AWhitespaceFragmentThatStartsALine_CarriesTheIndent()
+        {
+            var block = Quiet();
+            Run(block, ("[SHELL] > ls\n", OutputColor.Dim));
+
+            Assert.Equal("     Pick 5005.\n", Run(block,
+                (" ", OutputColor.Thinking), ("Pick", OutputColor.Thinking), (" 5005.\n", OutputColor.Thinking)));
+        }
+
         [Fact]
         public void ANewCallClosesThePreviousBlock()
         {
