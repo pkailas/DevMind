@@ -225,6 +225,41 @@ namespace DevMind.TUI.Tests
             Assert.Contains("    a.txt", text);
         }
 
+        // A call, then reasoning streamed a token at a time across two lines — the shape the
+        // thinking path appends.
+        private static List<TranscriptEntry> CallThenStreamed(OutputColor color)
+        {
+            var entries = new List<TranscriptEntry> { TranscriptEntry.Output("[SHELL] > ls\n", OutputColor.Dim) };
+            foreach (string t in new[] { "Everything", " valid", "ated.", " Let me\n", "check", " again.\n" })
+                entries.Add(TranscriptEntry.Output(t, color));
+            return entries;
+        }
+
+        [Fact]
+        public void ThinkingAfterACall_StartsEveryLineAtColumnZero()
+        {
+            // Thinking is the model talking, not the call's output. Indented, it hung under the
+            // call — and since the indent is literal text, its soft-wrapped rows fell back to
+            // column 0 and the left edge went ragged.
+            var entries = CallThenStreamed(OutputColor.Thinking);
+            string text = Render(entries, 100);
+
+            Assert.EndsWith("\nEverything validated. Let me\ncheck again.\n", text);
+
+            var live = new Sink();
+            var renderer = Make(live, 100);
+            foreach (TranscriptEntry e in entries) renderer.Render(e);
+            Assert.Equal(text, live.Text);
+        }
+
+        [Fact]
+        public void OrdinaryOutputAfterACall_IsStillIndented()
+        {
+            string text = Render(CallThenStreamed(OutputColor.Normal), 100);
+
+            Assert.EndsWith("\n    Everything validated. Let me\n    check again.\n", text);
+        }
+
         [Fact]
         public void ProseStillLeadsWithTheDiamond()
         {

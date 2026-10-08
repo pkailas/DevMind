@@ -171,6 +171,11 @@ namespace DevMind
         {
             if (string.IsNullOrEmpty(text)) return;
 
+            // Thinking is the model talking, not something the open call produced, so it does
+            // not hang under it. Closing here rather than at the call site keeps a rebuild
+            // identical to the live stream. The line position is untouched (see CloseBlock).
+            if (color == OutputColor.Thinking) _block.CloseBlock();
+
             foreach (TranscriptLine line in _block.Accept(text, color))
                 Emit(line.Text, line.Color);
 
