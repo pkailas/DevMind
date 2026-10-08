@@ -360,6 +360,17 @@ namespace DevMind
         /// </summary>
         public void MarkThoughtBoundary() => Record(TranscriptEntry.Prose("\n"));
 
+        /// <summary>
+        /// Draw the one-line stand-in for a collapsed thought. Its own entry rather than
+        /// AppendOutput, so it renders at column 0 instead of under the last call — on a
+        /// rebuild as well as live.
+        /// </summary>
+        public void AppendThoughtSummary(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return;
+            Record(TranscriptEntry.ThoughtSummary(text));
+        }
+
         // ── The renderer ──────────────────────────────────────────────────────────
 
         private TranscriptRenderer _renderer;

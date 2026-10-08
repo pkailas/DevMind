@@ -2213,7 +2213,7 @@ namespace DevMind
                     thoughtSummarized = true;
                     ((TuiAgenticHost)host).ClearLiveTail();
                     ((TuiAgenticHost)host).Expansions.ParkThought(thought.Text);
-                    ((TuiAgenticHost)host).AppendOutputLocal(summary + "\n", OutputColor.Dim);
+                    ((TuiAgenticHost)host).AppendThoughtSummary(summary + "\n");
                     ((TuiAgenticHost)host).MarkThoughtBoundary();
                 }
 

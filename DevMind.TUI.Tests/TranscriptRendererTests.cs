@@ -253,6 +253,46 @@ namespace DevMind.TUI.Tests
         }
 
         [Fact]
+        public void ACollapsedThoughtsSummaryAfterACall_StartsAtColumnZero()
+        {
+            // With thinking display off, the reasoning never reaches the transcript — only its
+            // one-line stand-in does, and nothing before it closes the call's block.
+            var entries = new List<TranscriptEntry>
+            {
+                TranscriptEntry.Output("[SHELL] > ls\n", OutputColor.Dim),
+                TranscriptEntry.ThoughtSummary("∴ Thought for 12s — ctrl+o to expand\n"),
+                TranscriptEntry.Prose("\n"),                 // MarkThoughtBoundary
+                TranscriptEntry.Prose("Here is the plan.\n"),
+            };
+            string text = Render(entries, 100);
+
+            Assert.Contains("\n∴ Thought for 12s — ctrl+o to expand\n", text);
+            Assert.DoesNotContain("    ∴", text);
+
+            var live = new Sink();
+            var renderer = Make(live, 100);
+            foreach (TranscriptEntry e in entries) renderer.Render(e);
+            Assert.Equal(text, live.Text);
+        }
+
+        [Fact]
+        public void ACollapsedThoughtsSummary_KeepsTheSpacingEngineOutputHad()
+        {
+            // Only the indent moves. Drawn as Output with no call open, it had the same text,
+            // the same blank line before the prose, and the same diamond.
+            string Draw(TranscriptEntry summary) => Render(new[]
+            {
+                summary,
+                TranscriptEntry.Prose("\n"),
+                TranscriptEntry.Prose("Here is the plan.\n"),
+            }, 100);
+
+            Assert.Equal(
+                Draw(TranscriptEntry.Output("∴ Thought for 12s\n", OutputColor.Dim)),
+                Draw(TranscriptEntry.ThoughtSummary("∴ Thought for 12s\n")));
+        }
+
+        [Fact]
         public void OrdinaryOutputAfterACall_IsStillIndented()
         {
             string text = Render(CallThenStreamed(OutputColor.Normal), 100);

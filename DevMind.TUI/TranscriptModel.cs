@@ -42,6 +42,12 @@ namespace DevMind
         /// parked for /expand. Retained as its input so a rebuild draws the SAME line live.
         /// </summary>
         AnswerCollapsed,
+        /// <summary>
+        /// The one dim line ("∴ Thought for …") that stands in for a reasoning phase the
+        /// display collapsed. Drawn like engine output — same text, same spacing — but at
+        /// column 0: it is about the model, not something the open call produced.
+        /// </summary>
+        ThoughtSummary,
     }
 
     /// <summary>One retained call. Immutable; the payload is whatever that emitter takes.</summary>
@@ -117,6 +123,13 @@ namespace DevMind
         /// </summary>
         public static TranscriptEntry AnswerCollapsed(string summary)
             => new TranscriptEntry(TranscriptEntryKind.AnswerCollapsed, summary, OutputColor.Dim, null, false, false, null, null, 0);
+
+        /// <summary>
+        /// A collapsed thought's summary line. Unlike <see cref="AnswerCollapsed"/>, the text
+        /// IS what is drawn; the thought itself is parked for /expand by the caller.
+        /// </summary>
+        public static TranscriptEntry ThoughtSummary(string line)
+            => new TranscriptEntry(TranscriptEntryKind.ThoughtSummary, line, OutputColor.Dim, null, false, false, null, null, 0);
 
         /// <summary>Roughly what this entry costs to keep. Used only by the cap.</summary>
         public int Weight => Text.Length + (Second?.Length ?? 0) + 64;

@@ -151,6 +151,7 @@ namespace DevMind
                 case TranscriptEntryKind.Listing:   RenderListing(entry.Text, entry.Path, entry.Count); break;
                 case TranscriptEntryKind.Diff:      RenderDiff(entry.Text, entry.Second, entry.Path); break;
                 case TranscriptEntryKind.AnswerCollapsed: RenderAnswerCollapsed(); break;
+                case TranscriptEntryKind.ThoughtSummary: RenderThoughtSummary(entry.Text); break;
             }
         }
 
@@ -209,6 +210,17 @@ namespace DevMind
 
             _inProseBlock = false;
             Emit(AnswerCollapsedLine + "\n", OutputColor.Dim);
+        }
+
+        /// <summary>
+        /// A collapsed thought's "∴ Thought for …" line. It is about the model, not output of
+        /// the open call, so it closes the block first; past that it is drawn exactly as engine
+        /// output was, so the spacing around it does not move.
+        /// </summary>
+        private void RenderThoughtSummary(string text)
+        {
+            _block.CloseBlock();
+            RenderOutput(text, OutputColor.Dim);
         }
 
         private void RenderTableResult(TableBufferResult result)
