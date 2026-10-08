@@ -2276,9 +2276,17 @@ namespace DevMind
                         string visible = thinkFilter.Process(token, showThinking: true,
                             out string thinkText);
 
+                        // Real visible model content marks the start of generation. Reasoning
+                        // is still thinking, and DevMind's own status lines must not flip the
+                        // phase either, so "Thinking…" covers prompt processing AND reasoning.
+                        if (!timerStopped && StreamPhase.EndsThinking(isStatus, thinkText, visible))
+                        {
+                            callbacks.StopThinkingTimer();
+                            timerStopped = true;
+                        }
+
                        if (!string.IsNullOrEmpty(thinkText))
                         {
-                            if (!timerStopped) { callbacks.StopThinkingTimer(); timerStopped = true; }
                             if (!thoughtClock.IsRunning && !thought.HasThought) thoughtClock.Restart();
 
                             string inline = thought.Route(thinkText);
@@ -2305,11 +2313,6 @@ namespace DevMind
                         }
 
                         if (string.IsNullOrEmpty(visible)) return;
-
-                        // Real visible model content marks the start of generation; DevMind's own
-                        // status lines flow through here too but must not flip the phase (so the
-                        // "Thinking…" state now renders during prompt-processing + hidden reasoning).
-                        if (!isStatus && !timerStopped) { callbacks.StopThinkingTimer(); timerStopped = true; }
 
                         responseBuffer.Append(visible);
 

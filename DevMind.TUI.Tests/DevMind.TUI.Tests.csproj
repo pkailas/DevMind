@@ -61,6 +61,8 @@
     <ProjectReference Include="..\DevMind.TUI\DevMind.TUI.csproj" />
     <!-- Read-side golden cases, shared with Core.Tests and the other adapter test project. -->
     <Compile Include="..\DevMind.Core.Tests\Shared\ReadToolGolden.cs" Link="Shared\ReadToolGolden.cs" />
+    <!-- FakeSseServer: drive a real LlmClient over a scripted SSE stream (StreamPhaseTests). -->
+    <Compile Include="..\DevMind.Core.Tests\TestInfra.cs" Link="Shared\TestInfra.cs" />
   </ItemGroup>
 
   <!-- xunit.runner.json is intentionally NOT copied to the output (2026-08-18):
