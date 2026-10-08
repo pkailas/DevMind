@@ -45,6 +45,15 @@ namespace DevMind.Core.Tests
         /// <see cref="RepeatLastWhenExhausted"/> is set (for depth-cap loops).
         /// </summary>
         public List<string> SseQueue { get; } = new();
+
+        /// <summary>
+        /// Scripted replies to GET probes, keyed by exact request path ("/props", "/v1/models").
+        /// Set before the client is configured. Unscripted GETs get <c>{"data":[]}</c>.
+        /// </summary>
+        public Dictionary<string, (int Status, string Body)> GetResponses { get; } = new();
+
+        /// <summary>Paths of every GET received, in order (lock it to read while the server runs).</summary>
+        public List<string> GetPaths { get; } = new();
         public bool RepeatLastWhenExhausted { get; set; }
         private int _sseIndex;
 
@@ -230,7 +239,15 @@ namespace DevMind.Core.Tests
                     }
                     else
                     {
-                        payload = Encoding.UTF8.GetBytes("{\"data\":[]}");
+                        if (method == "GET") lock (GetPaths) GetPaths.Add(path);
+                        string json = "{\"data\":[]}";
+                        if (method == "GET" && GetResponses.TryGetValue(path, out var scripted))
+                        {
+                            status = scripted.Status;
+                            reason = ReasonPhrase(status);
+                            json = scripted.Body;
+                        }
+                        payload = Encoding.UTF8.GetBytes(json);
                         contentType = "application/json";
                     }
                     string headers =

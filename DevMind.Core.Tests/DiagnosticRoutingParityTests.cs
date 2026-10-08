@@ -85,6 +85,9 @@ namespace DevMind.Core.Tests
             new object[] { "DevMind.Core/LlmClient.cs",           "[DevMind] Context detection: unknown server type" },
             new object[] { "DevMind.Core/LlmClient.cs",           "[DevMind] Context detection: n_ctx=" },
             new object[] { "DevMind.Core/LlmClient.cs",           "[DevMind] Server type auto-detected: vLLM" },
+            new object[] { "DevMind.Core/LlmClient.cs",           "[DevMind] Context detection: server=Strata" },
+            new object[] { "DevMind.Core/LlmClient.cs",           "[DevMind] Server type auto-detected: Strata" },
+            new object[] { "DevMind.Core/LlmClient.cs",           "[DevMind] Server type auto-detect (/props) skipped" },
         };
 
         [Theory]

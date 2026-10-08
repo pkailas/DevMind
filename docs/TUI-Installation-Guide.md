@@ -87,7 +87,7 @@ You can also set defaults with environment variables so you don't repeat them:
 |---|---|
 | `DEVMIND_ENDPOINT` | LLM endpoint URL |
 | `DEVMIND_API_KEY` | API key, if your endpoint requires one (local servers usually don't) |
-| `DEVMIND_SERVER_TYPE` | Force backend type: `vllm`, `llama`, `lmstudio`, or `custom` (otherwise auto-detected at startup) |
+| `DEVMIND_SERVER_TYPE` | Force backend type: `vllm`, `llama`, `lmstudio`, `custom`, or `strata` (otherwise auto-detected at startup) |
 
 Settings resolve in this order (highest wins): environment variables →
 `%APPDATA%\devmind\devmind.json` (the TUI's global config) → `~/.devmind.env` →

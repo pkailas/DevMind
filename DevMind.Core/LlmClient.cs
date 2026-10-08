@@ -464,8 +464,8 @@ namespace DevMind
 
         /// <summary>
         /// Effective LLM server type. Defaults to the configured <see cref="ILlmOptions.ServerType"/>
-        /// but startup auto-detection may override it (e.g. vLLM, identified via /v1/models
-        /// <c>owned_by == "vllm"</c>). Read this — not <c>_options.ServerType</c> — wherever the
+        /// but startup auto-detection may override it (vLLM, identified via /v1/models
+        /// <c>owned_by == "vllm"</c>; Strata, via a /props <c>build_info</c> of "Strata …"). Read this — not <c>_options.ServerType</c> — wherever the
         /// streaming/detection paths need to branch on the backend.
         /// </summary>
         public LlmServerType ServerType
@@ -601,7 +601,7 @@ namespace DevMind
             // context read before the first message showed the wrong window.
             //
             // The detection task still runs, and is NOT redundant when an override is set:
-            // it resolves ServerType (DEVMIND_SERVER_TYPE override, else a /v1/models probe)
+            // it resolves ServerType (DEVMIND_SERVER_TYPE override, else the /v1/models and /props probes)
             // BEFORE the manual branch, and streaming/detection branch on that backend
             // regardless of where the context size came from. It re-enters the same helper,
             // which is then a no-op.
@@ -783,7 +783,9 @@ namespace DevMind
             // Server-type resolution (before anything else, so streaming/detection branch on the
             // right backend even when context size is manually overridden below):
             //   1. DEVMIND_SERVER_TYPE env override wins outright.
-            //   2. Otherwise probe /v1/models to auto-detect a vLLM backend.
+            //   2. Otherwise probe /v1/models for vLLM, then /props for Strata.
+            // The /props body the probe read, if any, is reused below for the context size.
+            JObject probedProps = null;
             if (TryGetServerTypeOverride(out LlmServerType forcedType))
             {
                 ServerType = forcedType;
@@ -791,7 +793,7 @@ namespace DevMind
             }
             else
             {
-                await DetectServerTypeAsync(serverRoot).ConfigureAwait(false);
+                probedProps = await DetectServerTypeAsync(serverRoot).ConfigureAwait(false);
             }
 
             // A manual override short-circuits detection. Configure() has normally already
@@ -814,10 +816,22 @@ namespace DevMind
 
                 switch (serverType)
                 {
+                    // Strata mirrors llama-server's /props (default_generation_settings.n_ctx).
+                    // Either way, the server-type probe's /props body is reused when it got one.
                     case LlmServerType.LlamaServer:
                         url = serverRoot + "/props";
-                        DevMindLog.Write($"[DevMind] Context detection: server=llama-server, endpoint={url}");
-                        detected = await DetectFromLlamaPropsAsync(url).ConfigureAwait(false);
+                        DevMindLog.Write($"[DevMind] Context detection: server=llama-server, endpoint={url}, reused={probedProps != null}");
+                        detected = probedProps != null
+                            ? ReadLlamaProps(probedProps)
+                            : await DetectFromLlamaPropsAsync(url).ConfigureAwait(false);
+                        break;
+
+                    case LlmServerType.Strata:
+                        url = serverRoot + "/props";
+                        DevMindLog.Write($"[DevMind] Context detection: server=Strata, endpoint={url}, reused={probedProps != null}");
+                        detected = probedProps != null
+                            ? ReadLlamaProps(probedProps)
+                            : await DetectFromLlamaPropsAsync(url).ConfigureAwait(false);
                         break;
 
                     case LlmServerType.LmStudio:
@@ -872,7 +886,15 @@ namespace DevMind
             using var response = await _httpClient.GetAsync(url).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode) return 0;
             var content = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-            var data = JObject.Parse(content);
+            return ReadLlamaProps(JObject.Parse(content));
+        }
+
+        /// <summary>
+        /// Takes the model-name hint from a llama-server-style /props body and returns
+        /// default_generation_settings.n_ctx, or 0 when it is absent.
+        /// </summary>
+        private int ReadLlamaProps(JObject data)
+        {
             ApplyModelNameHint(data?["model_path"]?.ToString() ?? data?["model_alias"]?.ToString());
             return data?["default_generation_settings"]?["n_ctx"]?.Value<int>() ?? 0;
         }
@@ -927,7 +949,7 @@ namespace DevMind
 
         /// <summary>
         /// Reads the <c>DEVMIND_SERVER_TYPE</c> environment override
-        /// (<c>vllm</c> | <c>llama</c> | <c>lmstudio</c> | <c>custom</c>, case-insensitive).
+        /// (<c>vllm</c> | <c>llama</c> | <c>lmstudio</c> | <c>custom</c> | <c>strata</c>, case-insensitive).
         /// Returns <c>true</c> with the mapped <see cref="LlmServerType"/> when set to a recognized
         /// value — taking precedence over startup auto-detection. Returns <c>false</c> when unset,
         /// blank, or unrecognized, in which case auto-detection runs instead. Follows the existing
@@ -944,37 +966,45 @@ namespace DevMind
                 case "llama":    serverType = LlmServerType.LlamaServer; return true;
                 case "lmstudio": serverType = LlmServerType.LmStudio;    return true;
                 case "custom":   serverType = LlmServerType.Custom;      return true;
+                case "strata":   serverType = LlmServerType.Strata;      return true;
                 default:
                     DevMindLog.Write($"[DevMind] DEVMIND_SERVER_TYPE='{raw}' not recognized " +
-                        "(use vllm|llama|lmstudio|custom) — falling back to auto-detection.");
+                        "(use vllm|llama|lmstudio|custom|strata) — falling back to auto-detection.");
                     return false;
             }
         }
 
         /// <summary>
-        /// Auto-detects a vLLM backend by probing GET /v1/models and checking for any model
-        /// with <c>owned_by == "vllm"</c>. On a match, sets <see cref="ServerType"/> to
-        /// <see cref="LlmServerType.Vllm"/>. Best-effort: leaves the configured server type
-        /// untouched on any HTTP/parse failure so non-vLLM backends are unaffected.
+        /// Auto-detects the backend. First GET /v1/models: any model with
+        /// <c>owned_by == "vllm"</c> sets <see cref="ServerType"/> to <see cref="LlmServerType.Vllm"/>.
+        /// Otherwise GET /props: a <c>build_info</c> starting with "Strata" sets
+        /// <see cref="LlmServerType.Strata"/>. Best-effort: each probe leaves the configured server
+        /// type untouched on any HTTP/parse failure, so other backends are unaffected.
         /// </summary>
-        private async Task DetectServerTypeAsync(string serverRoot)
+        /// <returns>
+        /// The parsed /props body when that probe got one, so llama-server-style context detection
+        /// can reuse it instead of fetching /props again; otherwise null.
+        /// </returns>
+        private async Task<JObject> DetectServerTypeAsync(string serverRoot)
         {
             try
             {
                 string url = serverRoot + "/v1/models";
                 using var response = await _httpClient.GetAsync(url).ConfigureAwait(false);
-                if (!response.IsSuccessStatusCode) return;
-                var content = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-                var data = JObject.Parse(content);
-                if (data?["data"] is JArray models)
+                if (response.IsSuccessStatusCode)
                 {
-                    foreach (var model in models)
+                    var content = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    var data = JObject.Parse(content);
+                    if (data?["data"] is JArray models)
                     {
-                        if ((model as JObject)?["owned_by"]?.ToString() == "vllm")
+                        foreach (var model in models)
                         {
-                            ServerType = LlmServerType.Vllm;
-                            DevMindLog.Write("[DevMind] Server type auto-detected: vLLM (owned_by=vllm)");
-                            return;
+                            if ((model as JObject)?["owned_by"]?.ToString() == "vllm")
+                            {
+                                ServerType = LlmServerType.Vllm;
+                                DevMindLog.Write("[DevMind] Server type auto-detected: vLLM (owned_by=vllm)");
+                                return null;
+                            }
                         }
                     }
                 }
@@ -983,7 +1013,33 @@ namespace DevMind
             {
                 DevMindLog.Write($"[DevMind] Server type auto-detect skipped ({ex.GetType().Name}: {ex.Message})");
             }
+
+            // Not vLLM. Strata answers /props like llama-server but stamps build_info "Strata <version>".
+            try
+            {
+                string url = serverRoot + "/props";
+                using var response = await _httpClient.GetAsync(url).ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode) return null;
+                var content = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                var props = JObject.Parse(content);
+                string buildInfo = props["build_info"]?.Type == JTokenType.String ? (string)props["build_info"] : null;
+                if (IsStrataBuildInfo(buildInfo))
+                {
+                    ServerType = LlmServerType.Strata;
+                    DevMindLog.Write($"[DevMind] Server type auto-detected: Strata (build_info={buildInfo})");
+                }
+                return props;
+            }
+            catch (Exception ex)
+            {
+                DevMindLog.Write($"[DevMind] Server type auto-detect (/props) skipped ({ex.GetType().Name}: {ex.Message})");
+                return null;
+            }
         }
+
+        /// <summary>True when a /props <c>build_info</c> names Strata ("Strata 0.9.1").</summary>
+        private static bool IsStrataBuildInfo(string buildInfo)
+            => buildInfo != null && buildInfo.StartsWith("Strata", StringComparison.OrdinalIgnoreCase);
 
         /// <summary>
         /// Reads n_ctx from a custom endpoint — tries root n_ctx first, then
@@ -4116,18 +4172,18 @@ namespace DevMind
                     ["continuous_usage_stats"] = true
                 };
             }
-            else if (ServerType == LlmServerType.LlamaServer)
+            else if (ServerType.SpeaksLlamaServerProtocol())
             {
                 // llama-server emits a per-chunk `timings` block (predicted_n / predicted_per_second)
                 // only when the request asks for it. This is the authoritative live tok/s source:
                 // predicted_n is the true running token count and predicted_per_second the cumulative
                 // rate — both account for speculative decoding, which the client-side chunk count
-                // undercounts 5-12x. LlamaServer-only: vLLM ignores this field (it uses
-                // stream_options.continuous_usage_stats above instead).
+                // undercounts 5-12x. llama-server protocol only (llama-server, Strata): vLLM
+                // ignores this field (it uses stream_options.continuous_usage_stats above instead).
                 request["timings_per_token"] = true;
             }
 
-            if (ServerType == LlmServerType.Vllm || ServerType == LlmServerType.LlamaServer)
+            if (ServerType == LlmServerType.Vllm || ServerType.SpeaksLlamaServerProtocol())
             {
                 // vLLM and llama-server (--jinja) toggle Qwen-style reasoning via the chat
                 // template, not the Anthropic-style {"thinking": {"type": "disabled"}} object

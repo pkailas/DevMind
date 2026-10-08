@@ -154,7 +154,7 @@ They're listed here so you can read the transcript:
 | Variable | Purpose |
 |---|---|
 | `DEVMIND_ENDPOINT`, `DEVMIND_API_KEY` | Model server connection |
-| `DEVMIND_SERVER_TYPE` | Force backend type (`vllm`/`llama`/`lmstudio`/`custom`) |
+| `DEVMIND_SERVER_TYPE` | Force backend type (`vllm`/`llama`/`lmstudio`/`custom`/`strata`) |
 | `DEVMIND_BUILD_COMMAND` | Explicit build command for the build tool |
 | `DEVMIND_CONTEXT_STRATEGY` | Context-management policy (`transformer`/`hybrid`/`auto`) |
 | `DEVMIND_HISTORY_*` | Session-history store configuration (SqlServer/Sqlite/Null) |
