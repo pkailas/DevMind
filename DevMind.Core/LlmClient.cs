@@ -1014,6 +1014,9 @@ namespace DevMind
         /// tool catalog + DevMind.md context). When non-null, preferred over
         /// DevMindOptions.Instance.SystemPrompt. Pass null to use the options value (legacy path).</param>
         /// <param name="cancellationToken">Cancellation token to abort the request.</param>
+        /// <param name="onToolCallStart">Called at most once per request, on the first streamed
+        /// tool_calls delta: the model has stopped reasoning and started a tool call, which no
+        /// onToken chunk says. Null (the default) for callers with no use for it.</param>
         public async Task SendMessageAsync(
              string userMessage,
              Action<string> onToken,
@@ -1025,7 +1028,8 @@ namespace DevMind
              bool forceToolChoiceRequired = false,
              string imageBase64 = null,
              int maxTokens = 0,
-             string taskScratchpad = null)
+             string taskScratchpad = null,
+             Action onToolCallStart = null)
         {
             System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] SendMessageAsync ENTER — userMessage length={userMessage?.Length ?? 0}, deferCompression={deferCompression}");
 
@@ -1503,7 +1507,18 @@ namespace DevMind
                         _streamStartMs = Environment.TickCount64;
 
                     // Accumulate streamed tool_calls deltas
+                    bool hadToolCall = toolCallMeta.Count > 0;
                     AccumulateToolCallDelta(data, toolCallArgBuilders, toolCallMeta);
+
+                    // The first tool_calls delta ends the reasoning exactly as a content delta
+                    // does: close the synthetic think block (or everything after it — status
+                    // lines included — reads as thought), then say a tool call has started, since
+                    // its arguments never pass through onToken and nothing else would.
+                    if (!hadToolCall && toolCallMeta.Count > 0)
+                    {
+                        if (inReasoning) { inReasoning = false; onToken("</think>"); }
+                        onToolCallStart?.Invoke();
+                    }
                 }
 
                 // Build accumulated tool calls from streamed deltas

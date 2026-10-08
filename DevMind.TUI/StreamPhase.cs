@@ -27,5 +27,13 @@ namespace DevMind
             _ = thinkText; // reasoning never ends the phase — named so that is a visible choice
             return !isStatus && !string.IsNullOrEmpty(visible);
         }
+
+        /// <summary>
+        /// The model started streaming a tool call (LlmClient's onToolCallStart). Reasoning is
+        /// over and what streams now is output — a write_file's arguments can run for a long
+        /// time — so the phase ends here even though no visible content may ever arrive.
+        /// </summary>
+        /// <param name="generating">Whether the phase already ended this request.</param>
+        public static bool EndsThinkingAtToolCall(bool generating) => !generating;
     }
 }

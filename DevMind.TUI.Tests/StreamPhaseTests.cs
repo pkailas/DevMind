@@ -61,9 +61,47 @@ namespace DevMind.TUI.Tests
                     steps.Add(new Step(token, isStatus, thinkText, visible, generating));
                 },
                 onComplete: () => done.TrySetResult(true),
-                onError: ex => done.TrySetException(ex));
+                onError: ex => done.TrySetException(ex),
+                // As RunTurnAsync wires it: a tool call starting ends the phase too.
+                onToolCallStart: () =>
+                {
+                    if (StreamPhase.EndsThinkingAtToolCall(generating)) generating = true;
+                    steps.Add(new Step(ToolCallStart, false, null, "", generating));
+                });
             await done.Task.WaitAsync(TimeSpan.FromSeconds(15));
             return steps;
+        }
+
+        private const string ToolCallStart = "<<TOOL_CALL_START>>";
+
+        [Fact]
+        public async Task ReasoningThenAToolCall_LeavesThinking_AtTheToolCallSignal()
+        {
+            // No content at all: the model reasons, then streams a tool call. Before the
+            // signal existed nothing ended the phase until the request was over.
+            string[] reasoning = { "Need", " the", " file", "." };
+            var sse = new System.Text.StringBuilder();
+            foreach (string t in reasoning) sse.Append(Delta("reasoning_content", t));
+            sse.Append("data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\"," +
+                       "\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"a.txt\\\"}\"}}]},\"finish_reason\":null}]}\n\n");
+            sse.Append("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n");
+            sse.Append("data: [DONE]\n\n");
+
+            List<Step> steps = await StreamAsync(sse.ToString());
+
+            int signal = steps.FindIndex(s => s.Token == ToolCallStart);
+            Assert.True(signal > 0, "onToolCallStart never fired: " + string.Join(" | ", steps.Select(s => s.Token)));
+            Assert.All(steps.Take(signal), s => Assert.False(s.Generating,
+                $"phase left Thinking before the tool call, at '{s.Token}'"));
+            Assert.All(steps.Skip(signal), s => Assert.True(s.Generating,
+                $"phase was Thinking after the tool call started, at '{s.Token}'"));
+        }
+
+        [Fact]
+        public void AToolCallEndsThinking_OnlyIfItHasNotEndedAlready()
+        {
+            Assert.True(StreamPhase.EndsThinkingAtToolCall(generating: false));
+            Assert.False(StreamPhase.EndsThinkingAtToolCall(generating: true));
         }
 
         [Fact]

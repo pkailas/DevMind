@@ -95,6 +95,8 @@ namespace DevMind
        /// <summary>Streams a message to the LLM endpoint, invoking callbacks as tokens arrive.</summary>
         /// <param name="imageBase64">Optional base64-encoded image data (data: URI format). When provided,
         /// the message is sent as multimodal content with both text and image parts.</param>
+        /// <param name="onToolCallStart">Called at most once per request, on the first streamed
+        /// tool_calls delta. Null by default.</param>
         Task SendMessageAsync(
             string userMessage,
             Action<string> onToken,
@@ -106,7 +108,8 @@ namespace DevMind
             bool forceToolChoiceRequired = false,
             string imageBase64 = null,
             int maxTokens = 0,
-            string taskScratchpad = null);
+            string taskScratchpad = null,
+            Action onToolCallStart = null);
 
        /// <summary>Resets conversation history to the system prompt only.</summary>
         void ClearHistory(bool preserveScratchpad = false);

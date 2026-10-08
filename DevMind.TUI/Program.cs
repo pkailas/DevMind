@@ -2355,6 +2355,21 @@ namespace DevMind
                             codeStreamer.Feed(visible);
                         }
                     },
+                    // The model stopped reasoning and started a tool call. Its arguments never
+                    // reach onToken, so without this a reasoning → tool-call turn would read
+                    // "Thinking…" until the call finished streaming. Same thread as onToken;
+                    // everything here is already safe from it.
+                    onToolCallStart: () =>
+                    {
+                        if (StreamPhase.EndsThinkingAtToolCall(timerStopped))
+                        {
+                            callbacks.StopThinkingTimer();
+                            timerStopped = true;
+                        }
+                        // The thought ended in a call, not prose: close the live tail and draw
+                        // its summary now rather than when the turn's finally gets to it.
+                        FlushThoughtSummary();
+                    },
                     onComplete: () => tcs.TrySetResult(true),
                     onError: ex => tcs.TrySetException(ex),
                    deferCompression: state.ShellLoopPending,
