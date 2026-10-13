@@ -224,6 +224,11 @@ namespace DevMind
 
             _llmClient = new LlmClient(options);
             _llmClient.Configure(endpointUrl, apiKey);
+            // Strata ties every thinking record to a job via the X-DevMind-Job-Id request
+            // header, so the job's own id goes on the client that sends this job's requests.
+            // sessionId is exactly that id (the job runner passes job.Id); a null sessionId —
+            // every non-job use — leaves the client header-free, unchanged behaviour.
+            _llmClient.JobId = sessionId;
 
             _host = new BufferedAgenticHost(workingDirectory,
                 cancelTurn: () => _currentTurnCts?.Cancel(),
@@ -1025,6 +1030,15 @@ namespace DevMind
         public void SetCarryCutoffReasoning(bool carryCutoffReasoning)
         {
             _options.CarryCutoffReasoning = carryCutoffReasoning;
+        }
+
+        /// <summary>Re-syncs the job id stamped on the X-DevMind-Job-Id request header on a
+        /// REUSED (continuation) session. The session outlives its job, so without this its
+        /// requests keep naming the PARENT's job id; a continuation is a new job with a new id,
+        /// and that is the one the backend needs to see. Headless only.</summary>
+        public void SetJobId(string jobId)
+        {
+            _llmClient.JobId = jobId;
         }
 
         /// <summary>

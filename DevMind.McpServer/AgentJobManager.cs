@@ -1148,6 +1148,11 @@ namespace DevMind.McpServer
                         // would misinstruct the agent on turn N+1.
                         session.SetHarnessVerifiesTests(job.VerifyTests);
                         session.SetCarryCutoffReasoning(job.CarryCutoffReasoning);
+                        // Same rule for the X-DevMind-Job-Id request header: the session
+                        // outlives its job, so a reused one still names the PARENT's id.
+                        // A continuation is a new job with a new id, and that is the id the
+                        // backend needs on this turn's requests.
+                        session.SetJobId(job.Id);
                     }
 
                     // External MCP servers (mcp_servers): started and awaited BEFORE the first

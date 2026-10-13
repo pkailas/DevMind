@@ -138,6 +138,23 @@ namespace DevMind
         /// </summary>
         public IMcpClientManager McpClients { get; set; }
 
+        /// <summary>The request header that names the headless job a request belongs to.</summary>
+        public const string JobIdHeaderName = "X-DevMind-Job-Id";
+
+        /// <summary>
+        /// The headless job this client is working for (e.g. <c>job-2297</c>). When set, every
+        /// chat/completions request this client sends carries <see cref="JobIdHeaderName"/>, so
+        /// the backend can tie its per-request records to the job. Null - the default - sends no
+        /// header at all, which is the unchanged behaviour of the TUI, the CLI, the document
+        /// digester and every other non-job use.
+        /// <para>
+        /// Mutable because a <see cref="HeadlessSession"/> outlives the job that created it:
+        /// devmind_task_continue reuses the conversation, and the CONTINUATION's own job id is
+        /// the one that belongs on the wire from that turn on.
+        /// </para>
+        /// </summary>
+        public string JobId { get; set; }
+
         private string _taskScratchpad = "";
         private const int ScratchpadMaxTokens = 200;
         // H-71: a one-shot harness note for the next request only (SetNextRequestNote).
@@ -694,6 +711,25 @@ namespace DevMind
             Debug.WriteLine($"[DevMind TRACE] ApplyHttpClientSettings — Authorization header {(authSet ? $"SET: scheme={authHeader.Scheme}, param length={authHeader.Parameter?.Length ?? 0}" : "NOT SET (null)")}");
             if (_options.ShowDebugOutput)
                 _pendingDebugLog.Add($"\n[DEBUG] ApplyHttpClientSettings() — Authorization header: {(authSet ? "SET" : "NOT SET")}\n");
+        }
+
+        /// <summary>
+        /// Stamps <see cref="JobIdHeaderName"/> on a chat/completions request when this client
+        /// is running a headless job. No-op otherwise.
+        /// <para>
+        /// Per request, NOT on <c>HttpClient.DefaultRequestHeaders</c>: the HttpClient is shared
+        /// by every request the client sends (and is recreated by health-probe recovery), while
+        /// the job id changes under a long-lived client — devmind_task_continue reuses a session,
+        /// and from that turn on its requests must carry the continuation's id. Stamping at send
+        /// time is what makes that true. It also leaves the health/models/props probes
+        /// header-free, which is the intent: the header names the job a MODEL request belongs to.
+        /// </para>
+        /// </summary>
+        private void ApplyJobIdHeader(HttpRequestMessage request)
+        {
+            if (string.IsNullOrWhiteSpace(JobId))
+                return;
+            request.Headers.TryAddWithoutValidation(JobIdHeaderName, JobId);
         }
 
         /// <summary>
@@ -1902,6 +1938,8 @@ namespace DevMind
                 {
                     Content = new StringContent(requestJson, Encoding.UTF8, "application/json")
                 };
+                // Stamped inside the loop, so the overflow-recovery retry carries it too.
+                ApplyJobIdHeader(request);
 
                 System.Diagnostics.Debug.WriteLine($"[DevMind TRACE] About to POST to {url} — requestJson length={requestJson.Length}");
 
@@ -3169,14 +3207,28 @@ namespace DevMind
                 if (!string.IsNullOrWhiteSpace(modelName))
                     request["model"] = modelName;
 
-                var httpContent = new StringContent(
-                    request.ToString(Formatting.None), Encoding.UTF8, "application/json");
+                string summaryJson = request.ToString(Formatting.None);
+
+                // One request built per attempt: the retry must re-send the payload, and an
+                // HttpContent instance cannot be sent twice (HttpClient rejects a reused one) —
+                // which is why this path used PostAsync(content) and now builds the message.
+                // Building it here is also where the job-id header gets stamped, on the retry
+                // exactly as on the first attempt.
+                HttpRequestMessage NewSummaryRequest()
+                {
+                    var summaryRequest = new HttpRequestMessage(HttpMethod.Post, _baseUrl + "/chat/completions")
+                    {
+                        Content = new StringContent(summaryJson, Encoding.UTF8, "application/json")
+                    };
+                    ApplyJobIdHeader(summaryRequest);
+                    return summaryRequest;
+                }
 
                 using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
                 {
                     bool retried = false;
-                    var response = await _httpClient.PostAsync(
-                        _baseUrl + "/chat/completions", httpContent, cts.Token).ConfigureAwait(false);
+                    var response = await _httpClient.SendAsync(
+                        NewSummaryRequest(), HttpCompletionOption.ResponseHeadersRead, cts.Token).ConfigureAwait(false);
                     try
                     {
                         if (!response.IsSuccessStatusCode)
@@ -3187,8 +3239,8 @@ namespace DevMind
                                 retried = true;
                                 await Task.Delay(250, cts.Token).ConfigureAwait(false);
                                 response.Dispose(); // release the failed first response before reassigning
-                                response = await _httpClient.PostAsync(
-                                    _baseUrl + "/chat/completions", httpContent, cts.Token).ConfigureAwait(false);
+                                response = await _httpClient.SendAsync(
+                                    NewSummaryRequest(), HttpCompletionOption.ResponseHeadersRead, cts.Token).ConfigureAwait(false);
                                 if (!response.IsSuccessStatusCode)
                                 {
                                     _lastSummaryError = $"HTTP {(int)response.StatusCode} {response.ReasonPhrase} (after retry)";

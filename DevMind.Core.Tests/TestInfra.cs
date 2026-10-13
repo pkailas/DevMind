@@ -29,6 +29,36 @@ namespace DevMind.Core.Tests
 
         public List<string> RequestBodies { get; } = new();
 
+        /// <summary>
+        /// Raw header lines of every recorded POST, parallel to <see cref="RequestBodies"/>
+        /// (chat bodies and embedding bodies, in request order; GET probes are not recorded).
+        /// Line 0 is the request line, the rest are "Name: value". Read it through
+        /// <see cref="HeaderValue"/>.
+        /// </summary>
+        public List<string[]> RequestHeaders { get; } = new();
+
+        /// <summary>
+        /// The value of one header on a recorded POST, or null when the request did not carry
+        /// it — the shape job-id-header assertions need.
+        /// </summary>
+        public string? HeaderValue(int requestIndex, string name)
+        {
+            string[] lines;
+            lock (RequestHeaders)
+            {
+                if (requestIndex < 0 || requestIndex >= RequestHeaders.Count) return null;
+                lines = RequestHeaders[requestIndex];
+            }
+            foreach (string line in lines)
+            {
+                int colon = line.IndexOf(':');
+                if (colon <= 0) continue;
+                if (string.Equals(line.Substring(0, colon).Trim(), name, StringComparison.OrdinalIgnoreCase))
+                    return line.Substring(colon + 1).Trim();
+            }
+            return null;
+        }
+
         /// <summary>Bodies of POSTs to /embeddings (kept separate from chat bodies).</summary>
         public List<string> EmbeddingRequestBodies { get; } = new();
 
@@ -198,7 +228,7 @@ namespace DevMind.Core.Tests
                 {
                     var request = await ReadRequestAsync(stream);
                     if (request == null) continue;
-                    var (method, path, body) = request.Value;
+                    var (method, path, body, requestHeaders) = request.Value;
 
                     bool isEmbedding = method == "POST" && path.Contains("/embeddings");
                     // Record only the chat POSTs under test — the client also sends
@@ -207,10 +237,12 @@ namespace DevMind.Core.Tests
                     if (isChatPost)
                     {
                         lock (RequestBodies) RequestBodies.Add(body);
+                        lock (RequestHeaders) RequestHeaders.Add(requestHeaders);
                     }
                     if (isEmbedding)
                     {
                         lock (EmbeddingRequestBodies) EmbeddingRequestBodies.Add(body);
+                        lock (RequestHeaders) RequestHeaders.Add(requestHeaders);
                     }
 
                     byte[] payload;
@@ -283,7 +315,7 @@ namespace DevMind.Core.Tests
             return sb.ToString();
         }
 
-        private static async Task<(string method, string path, string body)?> ReadRequestAsync(NetworkStream stream)
+        private static async Task<(string method, string path, string body, string[] headers)?> ReadRequestAsync(NetworkStream stream)
         {
             // Read until end of headers.
             var headerBuf = new MemoryStream();
@@ -313,7 +345,7 @@ namespace DevMind.Core.Tests
                 if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
                     contentLength = int.Parse(line.Substring(15).Trim());
             }
-            if (contentLength == 0) return (method, path, string.Empty);
+            if (contentLength == 0) return (method, path, string.Empty, headerLines);
 
             var bodyBytes = new byte[contentLength];
             int read = 0;
@@ -323,7 +355,7 @@ namespace DevMind.Core.Tests
                 if (n == 0) break;
                 read += n;
             }
-            return (method, path, Encoding.UTF8.GetString(bodyBytes, 0, read));
+            return (method, path, Encoding.UTF8.GetString(bodyBytes, 0, read), headerLines);
         }
 
         public void Dispose()
