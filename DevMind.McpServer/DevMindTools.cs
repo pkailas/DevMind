@@ -254,7 +254,11 @@ internal sealed class DevMindTools
         {
             try
             {
-                return _svc.ReadTools.Find(pattern, glob, root, start_line, end_line).Text;
+                return _svc.ReadTools.Find(pattern, glob, root, start_line, end_line, cancellationToken).Text;
+            }
+            catch (OperationCanceledException)
+            {
+                return "[find_in_files: cancelled]";
             }
             catch (Exception ex)
             {

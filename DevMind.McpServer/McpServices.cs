@@ -264,9 +264,31 @@ namespace DevMind.McpServer
         // ── Dispatch helpers ─────────────────────────────────────────────────────
 
         /// <summary>
+        /// Largest tool result (in chars) the dispatcher hands back. One JSON-RPC message
+        /// carries the whole result, and Claude Desktop drops the connection (every tool then
+        /// "no longer available") on a message over 32 MiB — a find_in_files over minified
+        /// help HTML sent 36.7 MiB. JSON escaping is at most 6 bytes per char ('&lt;' →
+        /// <), so 1M chars stays under 6 MiB on the wire; no caller can use more anyway.
+        /// </summary>
+        internal const int MaxResultChars = 1_000_000;
+
+        /// <summary>Cuts a result over <see cref="MaxResultChars"/> (never inside a surrogate
+        /// pair) and says so, with how to get a smaller one.</summary>
+        internal static string CapResult(string result)
+        {
+            if (result.Length <= MaxResultChars) return result;
+            int cut = MaxResultChars;
+            if (char.IsHighSurrogate(result[cut - 1])) cut--;
+            return result.Substring(0, cut) +
+                $"\n[output truncated by the DevMind MCP server — {cut:N0} of {result.Length:N0} chars shown; " +
+                "the full result is too large for one MCP message. Narrow the request (root, glob, pattern or line range).]";
+        }
+
+        /// <summary>
         /// Enqueues <paramref name="work"/> for strictly sequential FIFO execution
         /// by the single consumer task. Returns a Task that resolves when the work
-        /// completes (or is cancelled / faulted).
+        /// completes (or is cancelled / faulted). The result is capped by
+        /// <see cref="CapResult"/>.
         /// </summary>
         public async Task<string> EnqueueAsync(Func<Task<string>> work, CancellationToken ct)
         {
@@ -279,7 +301,7 @@ namespace DevMind.McpServer
             {
                 // TryWrite on an unbounded channel never fails.
                 _dispatchChannel.Writer.TryWrite(item);
-                return await tcs.Task.ConfigureAwait(false);
+                return CapResult(await tcs.Task.ConfigureAwait(false));
             }
             finally
             {

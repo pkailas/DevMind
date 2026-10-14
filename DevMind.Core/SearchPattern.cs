@@ -53,6 +53,29 @@ namespace DevMind
         }
 
         /// <summary>
+        /// Where <paramref name="pattern"/> first matches <paramref name="line"/> under the
+        /// <see cref="BuildMatcher"/> semantics: the earliest occurrence of any alternative
+        /// (case-insensitive, ordinal). Returns -1 (and length 0) when nothing matches.
+        /// </summary>
+        public static int IndexOfFirstMatch(string line, string pattern, out int length)
+        {
+            int best = -1;
+            length = 0;
+            if (line == null) return best;
+            foreach (string alt in (pattern ?? "").Split('|'))
+            {
+                if (alt.Length == 0) continue;
+                int i = line.IndexOf(alt, StringComparison.OrdinalIgnoreCase);
+                if (i >= 0 && (best < 0 || i < best))
+                {
+                    best = i;
+                    length = alt.Length;
+                }
+            }
+            return best;
+        }
+
+        /// <summary>
         /// Regex metacharacters that are NOT supported by the substring matcher.
         /// </summary>
         private static readonly HashSet<char> s_regexMetaChars = new HashSet<char>

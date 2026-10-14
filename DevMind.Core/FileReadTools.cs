@@ -94,6 +94,14 @@ namespace DevMind
         public const int GitLogMax = 50;
         public const int GitMaxOutputLines = 500;
 
+        /// <summary>
+        /// grep_file / find_in_files: a matching line longer than this is shown as a window
+        /// around its first match. Minified/generated files put a whole page on one line —
+        /// 100 hits of ~245 KB help-file HTML made one 36 MiB MCP message, over Claude
+        /// Desktop's 32 MiB read buffer, and the client dropped the connection.
+        /// </summary>
+        public const int MaxMatchLineChars = 300;
+
         private readonly FileReadPolicy _policy;
         private readonly string _workingDirectory;
         private readonly FileContentCache _cache;
@@ -138,6 +146,29 @@ namespace DevMind
 
         /// <summary>The one text reader for every read-side tool (BOM-aware, UTF-8 default).</summary>
         public static string ReadText(string fullPath) => PatchEngine.ReadFilePreservingEncoding(fullPath).content;
+
+        /// <summary>
+        /// A matching line as the search tools show it: trailing whitespace trimmed and, past
+        /// <see cref="MaxMatchLineChars"/>, cut to a window centred on the first match with
+        /// "…" at each cut end and the full length noted. <paramref name="clipped"/> reports a cut.
+        /// </summary>
+        internal static string ClipMatchLine(string line, string pattern, out bool clipped)
+        {
+            string text = (line ?? "").TrimEnd();
+            clipped = text.Length > MaxMatchLineChars;
+            if (!clipped) return text;
+
+            int at = SearchPattern.IndexOfFirstMatch(text, pattern, out int matchLength);
+            int start = at < 0 ? 0 : at - Math.Max(0, (MaxMatchLineChars - matchLength) / 2);
+            start = Math.Max(0, Math.Min(start, text.Length - MaxMatchLineChars));
+            int end = start + MaxMatchLineChars;
+            // Never split a surrogate pair at either cut.
+            if (start > 0 && char.IsLowSurrogate(text[start])) start++;
+            if (end < text.Length && char.IsHighSurrogate(text[end - 1])) end--;
+
+            return (start > 0 ? "…" : "") + text.Substring(start, end - start).Trim()
+                + (end < text.Length ? "…" : "") + $" [line clipped — {text.Length:N0} chars]";
+        }
 
         public FileResolution Resolve(string filename)
         {
@@ -498,7 +529,7 @@ namespace DevMind
                 ? $"{label} results for \"{pattern}\" in {filename} ({GrepMaxMatches} of {total} matches — narrow your pattern or use a line range):"
                 : $"{label} results for \"{pattern}\" in {filename} ({total} match{(total == 1 ? "" : "es")}):");
             foreach (var (lineNum, lineText) in matches)
-                sb.AppendLine($"  {lineNum.ToString().PadLeft(numWidth)}: {lineText.TrimEnd()}");
+                sb.AppendLine($"  {lineNum.ToString().PadLeft(numWidth)}: {ClipMatchLine(lineText, pattern, out _)}");
 
             return new FileReadResult
             {
@@ -516,9 +547,11 @@ namespace DevMind
         /// find_in_files: matching lines across the files a glob selects under the working
         /// directory (or an explicit absolute <paramref name="root"/>), capped at 100. Skips
         /// noise directories, cloud placeholders, binaries and oversized files; an unreadable
-        /// file is skipped.
+        /// file is skipped. Long lines are clipped (<see cref="ClipMatchLine"/>), so the result
+        /// stays small whatever the tree holds. Cancellation is checked per file and throws.
         /// </summary>
-        public FileReadResult Find(string pattern, string glob, string root, int? startLine, int? endLine)
+        public FileReadResult Find(string pattern, string glob, string root, int? startLine, int? endLine,
+            CancellationToken ct = default)
         {
             string label = _policy.FindLabel;
             string searchDir = ResolveSearchRoot(root, label, out string rootError);
@@ -549,6 +582,7 @@ namespace DevMind
             foreach (string filePath in files)
             {
                 if (hitCap) break;
+                ct.ThrowIfCancellationRequested();
                 string key = FileKey(filePath);
                 _cache.InvalidateIfStale(key, filePath); // out-of-band writes
                 if (!_cache.Contains(key))
@@ -589,10 +623,17 @@ namespace DevMind
             int shown = all.Count;
             var sb = new StringBuilder();
             sb.AppendLine(hitCap
-                ? $"{label} results for \"{pattern}\" in {glob} ({FindMaxMatches}+ matches — narrow your pattern or add a line range):"
+                ? $"{label} results for \"{pattern}\" in {glob} ({FindMaxMatches}+ matches — narrow your pattern, root or glob, or add a line range):"
                 : $"{label} results for \"{pattern}\" in {glob} ({shown} match{(shown == 1 ? "" : "es")}):");
+            int clippedLines = 0;
             foreach (var (file, lineNum, lineText) in all)
-                sb.AppendLine($"  {file}:{lineNum}: {lineText.TrimEnd()}");
+            {
+                sb.AppendLine($"  {file}:{lineNum}: {ClipMatchLine(lineText, pattern, out bool clipped)}");
+                if (clipped) clippedLines++;
+            }
+            if (clippedLines > 0)
+                sb.AppendLine($"[{clippedLines} long line{(clippedLines == 1 ? "" : "s")} clipped to {MaxMatchLineChars} chars around the match " +
+                    "(minified or generated files?) — narrow your root or glob to skip them]");
 
             return new FileReadResult
             {
