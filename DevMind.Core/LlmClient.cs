@@ -471,7 +471,9 @@ namespace DevMind
         /// read from llama-server's per-chunk <c>timings.predicted_per_second</c> when the request
         /// sets <c>timings_per_token</c>. This is the authoritative live tok/s — it accounts for
         /// speculative decoding, which chunk-counting on the client undercounts 5-12x. 0 when the
-        /// server reports no per-chunk timings (e.g. vLLM), so the TUI falls back to wall-clock.
+        /// server reports per-chunk usage but no timings (vLLM), so the TUI falls back to wall-clock.
+        /// When the server reports no live data at all (Strata), a client chunk-count estimate
+        /// fills it during the stream (see UpdateClientLiveFallback) until the terminal timings land.
         /// Reset per send; guarded against the first-token divide-by-near-zero garbage.
         /// </summary>
         public double LiveTokensPerSecond { get; private set; }
@@ -497,6 +499,20 @@ namespace DevMind
         // monotonic ms) and dividing usage.completion_tokens by the elapsed wall time on
         // the terminal chunk. 0 = not yet stamped for the in-flight stream.
         private long _streamStartMs;
+
+        // ── Client-side live tok/s fallback ─────────────────────────────────
+        // Some llama-server-protocol backends (Strata) ignore timings_per_token and send no
+        // per-chunk timings or usage: only the terminal chunk carries them. Without a fallback
+        // LiveGeneratedTokens / LiveTokensPerSecond sit at 0 for the whole stream and the TUI
+        // divides its onToken count by wall time — which misses every tool_call delta, so an
+        // agentic round reads ~5 tok/s against a true ~150. When (and only when) the server has
+        // supplied no live data this stream, count token-bearing chunks (reasoning, content,
+        // tool_calls — one chunk is ~one token on these backends) against a monotonic clock
+        // started at the first one. Server values win the moment any arrive, and the terminal
+        // chunk's timings still finalize the numbers. All three reset per send.
+        private bool _serverLiveDataSeen;
+        private int _clientLiveChunks;
+        private long _clientFirstTokenMs;
 
         // ── Predictive context growth tracking ──────────────────────────────
         private readonly List<int> _contextDeltas = new List<int>();
@@ -1486,6 +1502,11 @@ namespace DevMind
                 // vLLM wall-clock timing — stamped on the first SSE chunk below (0 = unstamped).
                 _streamStartMs = 0;
 
+                // Client-side live fallback state (see UpdateClientLiveFallback).
+                _serverLiveDataSeen = false;
+                _clientLiveChunks = 0;
+                _clientFirstTokenMs = 0;
+
                 // Accumulate tool calls across SSE delta chunks.
                 // llama-server streams tool_calls incrementally:
                 //   chunk 1: id, name, arguments="" (start)
@@ -1600,7 +1621,13 @@ namespace DevMind
 
                     // Accumulate streamed tool_calls deltas
                     bool hadToolCall = toolCallMeta.Count > 0;
-                    AccumulateToolCallDelta(data, toolCallArgBuilders, toolCallMeta);
+                    bool toolCallDelta = AccumulateToolCallDelta(data, toolCallArgBuilders, toolCallMeta);
+
+                    // Client-side live counter for backends that send no per-chunk timings/usage.
+                    // Empty deltas (the role-only opener's content:"") carry no token and are not
+                    // counted. Dormant once ParseLiveUsage has seen server live data this stream.
+                    if (!string.IsNullOrEmpty(reasoning) || !string.IsNullOrEmpty(token) || toolCallDelta)
+                        UpdateClientLiveFallback();
 
                     // The first tool_calls delta ends the reasoning exactly as a content delta
                     // does: close the synthetic think block (or everything after it — status
@@ -1637,6 +1664,13 @@ namespace DevMind
                     if (LastRequestUsage == null)
                         ParseFinalChunkUsage(lastDataLine);
                 }
+
+                // The client fallback ran this stream (the server sent no live data before its
+                // terminal chunk): its chunk count is an estimate that can land a few tokens over
+                // the true count, and the monotonic max() in ParseTimings would keep the overshoot.
+                // Snap the live counter to the server's authoritative completion count.
+                if (_clientLiveChunks > 0 && LastRequestUsage?.Completion is int finalCompletion && finalCompletion > 0)
+                    LiveGeneratedTokens = finalCompletion;
 
                 // Emit visible status if model responded with tool calls but no content
                 if (accumulatedToolCalls != null && accumulatedToolCalls.Count > 0 && string.IsNullOrWhiteSpace(fullResponse.ToString()))
@@ -4620,6 +4654,12 @@ namespace DevMind
             {
                 var obj = JObject.Parse(json);
 
+                // Any server-reported timings or usage object (a JSON null — OpenAI-style
+                // "usage": null on mid-stream chunks — does not count) puts the client-side
+                // fallback to sleep for the rest of this stream: server values win.
+                if (obj?["timings"]?.Type == JTokenType.Object || obj?["usage"]?.Type == JTokenType.Object)
+                    _serverLiveDataSeen = true;
+
                 // ── Per-chunk server-true timings (llama-server, timings_per_token=true) ──
                 // When present, timings.predicted_n is the authoritative running token count and
                 // timings.predicted_per_second the cumulative generation rate. Both reflect the
@@ -4811,7 +4851,7 @@ namespace DevMind
         /// Accumulates a single SSE delta chunk's tool_calls into the per-index builders.
         /// First chunk for an index captures id/name; all chunks append arguments.
         /// </summary>
-        private static void AccumulateToolCallDelta(string json,
+        private static bool AccumulateToolCallDelta(string json,
             Dictionary<int, StringBuilder> argBuilders,
             Dictionary<int, JObject> meta)
         {
@@ -4820,7 +4860,7 @@ namespace DevMind
                 var obj = JObject.Parse(json);
                 var delta = obj?["choices"]?[0]?["delta"];
                 var toolCalls = delta?["tool_calls"] as JArray;
-                if (toolCalls == null) return;
+                if (toolCalls == null || toolCalls.Count == 0) return false;
 
                 foreach (var tc in toolCalls)
                 {
@@ -4847,11 +4887,39 @@ namespace DevMind
                     if (tc["function"]?["name"] != null && meta[index]["name"] == null)
                         meta[index]["name"] = tc["function"]["name"].ToString();
                 }
+                return true;
             }
             catch
             {
                 // Malformed chunk — skip silently
+                return false;
             }
+        }
+
+        /// <summary>
+        /// Client-side live fallback, called once per token-bearing SSE chunk (reasoning, content
+        /// or tool_calls delta). No-op once the server has reported live timings/usage this
+        /// stream (<see cref="_serverLiveDataSeen"/>, set by <see cref="ParseLiveUsage"/>), so
+        /// llama.cpp (per-chunk timings) and vLLM (continuous_usage_stats) are unaffected.
+        /// Otherwise advances <see cref="LiveGeneratedTokens"/> by chunk count and derives
+        /// <see cref="LiveTokensPerSecond"/> from the monotonic time since the first token chunk.
+        /// The rate is (chunks - 1) / elapsed — the first chunk starts the clock, so it is not
+        /// one of the tokens generated during the measured interval — and is withheld until
+        /// 100 ms have passed, the same divide-by-near-zero guard the server path applies.
+        /// </summary>
+        private void UpdateClientLiveFallback()
+        {
+            if (_serverLiveDataSeen) return;
+
+            long now = Environment.TickCount64;
+            if (_clientLiveChunks == 0) _clientFirstTokenMs = now;
+            _clientLiveChunks++;
+
+            if (_clientLiveChunks > LiveGeneratedTokens) LiveGeneratedTokens = _clientLiveChunks;
+
+            long elapsedMs = now - _clientFirstTokenMs;
+            if (_clientLiveChunks > 1 && elapsedMs >= 100)
+                LiveTokensPerSecond = (_clientLiveChunks - 1) / (elapsedMs / 1000.0);
         }
 
         /// <summary>
