@@ -216,7 +216,12 @@ namespace DevMind
                 if (!string.IsNullOrEmpty(prose))
                     toolBlocks.Insert(0, new ResponseBlock { Type = BlockType.Text, Content = prose });
 
-                outcome = new ResponseOutcome(toolBlocks);
+                // The response's reasoning rides along (by reference — the executor reads only
+                // its tail) for the approval dialog's "Why (thinking):" fallback: with thinking
+                // on, the model rarely writes visible prose before a tool call. Same value the
+                // training log records as reasoning_content.
+                outcome = new ResponseOutcome(toolBlocks) { Reasoning = _llmClient.LastReasoning };
+
 
                 if (_options.ShowDebugOutput)
                     _agenticHost.AppendOutput(

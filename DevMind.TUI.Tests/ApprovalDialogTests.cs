@@ -561,6 +561,49 @@ namespace DevMind.TUI.Tests
             await WaitDialogClosedAsync(ta);
         }
 
+        [Fact]
+        public async Task ApprovalDialog_LongWhyThinking_CappedAtThreeRowsWithEllipsis_CommandStillShown()
+        {
+            using var ta = TestApp.Start(120, 30);
+            string reason = string.Join(" ", Enumerable.Range(1, 150).Select(i => $"w{i:000}"));
+            string detail = $"Tool: run_shell\nWhy (thinking): {reason}\necho COMMAND_MARK\necho SECOND_LINE";
+            var confirmTask = ((IAgenticHost)ta.Host).ConfirmActionAsync("Run shell: echo COMMAND_MARK", detail);
+            await WaitDialogOpenAsync(ta);
+
+            var r = await RenderDialogAsync(ta);
+            int toolRow = RowOf(r, "Tool: run_shell");
+            int whyRow = RowOf(r, "Why (thinking): w001");
+            int cmdRow = RowOf(r, "echo COMMAND_MARK");
+            int secondRow = RowOf(r, "echo SECOND_LINE");
+            int buttonTextRow = RowOf(r, "Skip");
+            Assert.True(whyRow == toolRow + 1, $"Why on row {whyRow}, tool on row {toolRow}.\n{r.Diag}");
+            Assert.True(cmdRow == whyRow + 3, $"reason should take exactly 3 rows: Why row {whyRow}, command row {cmdRow}.\n{r.Diag}");
+            Assert.EndsWith("…", BodySlice(r, cmdRow - 1).TrimEnd(' ', '│', '║', '┃'));
+            Assert.Equal(-1, RowOf(r, "w150"));
+            Assert.True(secondRow == cmdRow + 1, $"rest of the command not drawn under it.\n{r.Diag}");
+            Assert.True(secondRow < buttonTextRow, $"command not above buttons.\n{r.Diag}");
+            Assert.DoesNotContain("w0", r.Rows[buttonTextRow]);
+            Assert.DoesNotContain("echo", r.Rows[buttonTextRow]);
+
+            ta.App.Invoke(() => ta.App.Keyboard.RaiseKeyDownEvent(Key.Esc));
+            Assert.False(await AwaitAsync(confirmTask));
+            await WaitDialogClosedAsync(ta);
+        }
+
+        [Fact]
+        public void CapReasonRows_OnlyTheTwoReasonLabelsAreCapped()
+        {
+            string reason = string.Join(" ", Enumerable.Range(1, 150).Select(i => $"w{i:000}"));
+            int Rows(string label) => TuiAgenticHost.CapReasonRows($"Tool: run_shell\n{label}{reason}\necho X", 60).Length;
+
+            int capped = 1 + TuiAgenticHost.MaxReasonRows + 1;
+            Assert.Equal(capped, Rows("Why: "));
+            Assert.Equal(capped, Rows("Why (thinking): "));
+            // A command that merely starts with "Why" is not a reason line and is never cut.
+            Assert.True(Rows("Whyever ") > capped);
+            Assert.True(Rows("Why (other): ") > capped);
+        }
+
         // ── Test 4: ConfirmContinueAsync still uses "Token budget" ────────────
         // The budget guard's dialog is unchanged — only the approval prompt moved.
         [Fact]

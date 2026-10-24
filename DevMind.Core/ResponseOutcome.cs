@@ -62,6 +62,16 @@ namespace DevMind
         /// </summary>
         public bool HasAnyDirective { get; }
 
+        /// <summary>
+        /// The same response's reasoning (thinking) text, as the LLM client captured it
+        /// (<see cref="ILlmClient.LastReasoning"/>) — a reference, not a copy. Never executed
+        /// or logged from here; the executor only falls back to its last paragraph for the
+        /// approval dialog's "Why (thinking):" line when the visible prose gives no reason.
+        /// Null when the response had none or the outcome was not built from a model reply.
+        /// </summary>
+        public string Reasoning { get; init; }
+
+
         public ResponseOutcome(List<ResponseBlock> blocks)
         {
             Blocks = blocks ?? new List<ResponseBlock>();

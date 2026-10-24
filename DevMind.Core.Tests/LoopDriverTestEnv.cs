@@ -44,6 +44,7 @@ namespace DevMind.Core.Tests
     {
         public LoopState State { get; } = new LoopState();
         public FakeHost Host { get; }
+        public FakeLlmOptions Options { get; } = new FakeLlmOptions();
         private readonly FakeLlmClient _llm;
         private readonly LoopDriver _driver;
         private readonly string _dir;
@@ -56,8 +57,7 @@ namespace DevMind.Core.Tests
             _llm = new FakeLlmClient();
             Host = new FakeHost(_dir);
             var callbacks = new NoopCallbacks();
-            var options = new FakeLlmOptions();
-            _driver = new LoopDriver(_llm, Host, callbacks, options, State);
+            _driver = new LoopDriver(_llm, Host, callbacks, Options, State);
         }
 
         public Task<LoopIterationResult> RunToolTurn(params ToolCallResult[] calls)
@@ -65,6 +65,18 @@ namespace DevMind.Core.Tests
             _llm.LastToolCalls = calls.ToList();
             return _driver.ProcessIterationAsync(
                 "task", "working on it", buildCommand: "dotnet build", CancellationToken.None);
+        }
+
+        /// <summary>
+        /// Drives one tool iteration whose response carried <paramref name="prose"/> as its
+        /// visible text and <paramref name="reasoning"/> as the client's LastReasoning.
+        /// </summary>
+        public Task<LoopIterationResult> RunToolTurnWith(string prose, string reasoning, params ToolCallResult[] calls)
+        {
+            _llm.LastToolCalls = calls.ToList();
+            _llm.LastReasoning = reasoning;
+            return _driver.ProcessIterationAsync(
+                "task", prose, buildCommand: "dotnet build", CancellationToken.None);
         }
 
         /// <summary>
@@ -183,6 +195,15 @@ namespace DevMind.Core.Tests
         /// assert that a confirmation-gated guard actually fired, not merely that the turn ended.</summary>
         public List<string> ConfirmPrompts { get; } = new();
 
+        /// <summary>The full dialog text of every approval the executor asked for, in order.</summary>
+        public List<string> ConfirmActionDetails { get; } = new();
+
+        public Task<bool> ConfirmActionAsync(string action, string detail)
+        {
+            ConfirmActionDetails.Add(detail);
+            return ConfirmContinueAsync(action);
+        }
+
         /// <summary>What <see cref="ConfirmContinueAsync"/> answers. Default true (continue).</summary>
         public bool ConfirmAnswer { get; set; } = true;
 
@@ -229,7 +250,7 @@ namespace DevMind.Core.Tests
         public string SystemPromptContent => "";
         public string? LastCompactionSummary => null;
         public string LastAssistantText => "";
-        public string LastReasoning => "";
+        public string LastReasoning { get; set; } = "";
         public int EstimateHistoryTokens() => 0;
         public void AddToolResultMessage(string toolCallId, string content, string? toolName = null) { }
         public void StagePendingImage(string imageDataUri) { }

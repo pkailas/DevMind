@@ -494,6 +494,108 @@ namespace DevMind.Core.Tests
             Assert.All(host.ConfirmActionPrompts, p => Assert.DoesNotContain("Why:", p));
         }
 
+        // ── "Why (thinking):" — fallback to the same response's reasoning ──────
+        // Qwen3.8 with thinking on rarely writes prose before a tool call (5 of 135 tool
+        // turns in the 2026-10-23 trace), so the reason usually lives only in its
+        // reasoning. Visible prose still wins; reasoning is labelled so it is not mistaken
+        // for something the model said.
+
+        private static ResponseOutcome WithReasoning(string reasoning, ResponseOutcome outcome)
+            => new ResponseOutcome(outcome.Blocks) { Reasoning = reasoning };
+
+        [Fact]
+        public async Task WhyThinking_NoProse_FallsBackToLastParagraphOfReasoning()
+        {
+            string reasoning = "The user wants a build.\n\nI should check   the\r\nsolution first, then build it.\n";
+            var host = await AskWith(WithReasoning(reasoning, ShellOutcome("dotnet build X.slnx")));
+
+            Assert.Single(host.ConfirmActionDetails);
+            Assert.Equal("Tool: run_shell\nWhy (thinking): I should check the solution first, then build it.\ndotnet build X.slnx",
+                host.ConfirmActionDetails[0]);
+        }
+
+        [Fact]
+        public async Task WhyThinking_ProseWins_OverReasoning()
+        {
+            var host = await AskWith(WithReasoning("Private musing about the build.",
+                WithProse("Rebuilding the stale test project.", ShellOutcome("echo hi"))));
+
+            Assert.Equal("Tool: run_shell\nWhy: Rebuilding the stale test project.\necho hi", host.ConfirmActionDetails[0]);
+            Assert.DoesNotContain("musing", host.ConfirmActionDetails[0]);
+        }
+
+        [Fact]
+        public async Task WhyThinking_BlankProse_StillFallsBackToReasoning()
+        {
+            var host = await AskWith(WithReasoning("Run it to see the output.",
+                WithProse("  \r\n\n  ", ShellOutcome("echo hi"))));
+
+            Assert.Equal("Tool: run_shell\nWhy (thinking): Run it to see the output.\necho hi", host.ConfirmActionDetails[0]);
+        }
+
+        [Fact]
+        public async Task WhyThinking_NeitherProseNorReasoning_OmitsTheWhyLine()
+        {
+            var nul = await AskWith(WithReasoning(null!, ShellOutcome("echo hi")));
+            Assert.Equal("Tool: run_shell\necho hi", nul.ConfirmActionDetails[0]);
+
+            var blank = await AskWith(WithReasoning(" \n\n \r\n", ShellOutcome("echo hi")));
+            Assert.Equal("Tool: run_shell\necho hi", blank.ConfirmActionDetails[0]);
+        }
+
+        [Fact]
+        public async Task WhyThinking_LongReasoning_IsCappedWithEllipsis_AndCommandFollows()
+        {
+            string reasoning = "First thought.\n\n" + string.Join(" ", Enumerable.Repeat("because", 400));
+            var host = await AskWith(WithReasoning(reasoning, ShellOutcome("echo hi")));
+
+            string[] lines = Lines(host.ConfirmActionDetails[0]);
+            Assert.Equal(3, lines.Length);
+            Assert.StartsWith("Why (thinking): because", lines[1]);
+            Assert.EndsWith("…", lines[1]);
+            Assert.True(lines[1].Length <= "Why (thinking): ".Length + AgenticExecutor.MaxApprovalReasonChars + 1,
+                $"reason line is {lines[1].Length} chars");
+            Assert.Equal("echo hi", lines[2]);
+        }
+
+        [Fact]
+        public async Task WhyThinking_HugeReasoning_UsesOnlyItsLastParagraph()
+        {
+            // Megabytes of thinking: only the tail matters, and the answer is still its last paragraph.
+            string reasoning = string.Join("\n\n", Enumerable.Repeat("Earlier deliberation " + new string('x', 200), 20_000))
+                               + "\n\nSo delete the temp file.";
+            var host = await AskWith(WithReasoning(reasoning,
+                ToolOutcome("delete_file", new Dictionary<string, string> { ["filename"] = "tmp.txt" })));
+
+            Assert.Equal("Why (thinking): So delete the temp file.", Lines(host.ConfirmActionDetails[0])[1]);
+        }
+
+        [Fact]
+        public async Task WhyThinking_ReasoningIsCleaned_OfThinkTags_ToolCallEchoes_AndStatusLines()
+        {
+            string reasoning = "<think>Weigh the options.\n\nDelete the temp file now." +
+                               "<tool_call>{\"name\":\"delete_file\"}</tool_call>\n[TOOL_USE] 1 call\n</think>";
+            var host = await AskWith(WithReasoning(reasoning,
+                ToolOutcome("delete_file", new Dictionary<string, string> { ["filename"] = "tmp.txt" })));
+
+            string detail = host.ConfirmActionDetails[0];
+            Assert.Contains("\nWhy (thinking): Delete the temp file now.\n", detail);
+            Assert.DoesNotContain("think>", detail);
+            Assert.DoesNotContain("tool_call", detail);
+            Assert.DoesNotContain("[TOOL_USE]", detail);
+        }
+
+        [Fact]
+        public async Task WhyThinking_TranscriptAndShortPrompt_StayFreeOfReasoning()
+        {
+            var host = await AskWith(WithReasoning("Secret-ish reasoning.", ShellOutcome("echo hi")));
+
+            Assert.DoesNotContain("Why", host.Output.ToString());
+            Assert.DoesNotContain("reasoning", host.Output.ToString());
+            Assert.All(host.ConfirmActionPrompts, p => Assert.DoesNotContain("Why", p));
+        }
+
+
         // ── run_tests executes code, so it is gated exactly like run_build ─────
         // Auto runs it, Manual asks first (a decline means NOT run and the model is told
         // so), Plan refuses without asking.

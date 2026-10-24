@@ -1459,11 +1459,13 @@ namespace DevMind
             return capped;
         }
 
-        /// <summary>Most wrapped rows the approval dialog gives the model's "Why:" line.</summary>
+        /// <summary>Most wrapped rows the approval dialog gives the model's "Why:" /
+        /// "Why (thinking):" line.</summary>
         internal const int MaxReasonRows = 3;
 
         /// <summary>
-        /// Wraps the dialog text, holding an approval's "Why:" line (the second line, under
+        /// Wraps the dialog text, holding an approval's "Why:" or "Why (thinking):" line (the
+        /// executor's two reason labels; the second line, under
         /// "Tool: …") to <see cref="MaxReasonRows"/> rows, the last ending in "…" when cut, so
         /// the model's prose can never push the command it wants approved out of the dialog.
         /// Any other text wraps exactly as <see cref="WrapText"/> does.
@@ -1472,7 +1474,8 @@ namespace DevMind
         {
             string[] src = text.Split('\n');
             if (src.Length < 2 || !src[0].StartsWith("Tool: ", StringComparison.Ordinal)
-                || !src[1].StartsWith("Why: ", StringComparison.Ordinal))
+                || !(src[1].StartsWith("Why: ", StringComparison.Ordinal)
+                     || src[1].StartsWith("Why (thinking): ", StringComparison.Ordinal)))
                 return WrapText(text, width);
 
             string[] why = WrapText(src[1], width);

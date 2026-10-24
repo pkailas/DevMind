@@ -37,8 +37,10 @@ namespace DevMind
         // Repetition guard — tracks consecutive identical READ/GREP requests to break infinite loops
         private string _lastReadKey;
 
-        // The "Why:" line for approval dialogs in the batch being executed (see ApprovalReason).
+        // The reason line for approval dialogs in the batch being executed (see ApprovalReasonFor):
+        // its label ("Why" for visible prose, "Why (thinking)" for the reasoning fallback) and text.
         private string _approvalReason;
+        private string _approvalReasonLabel = ProseReasonLabel;
         private int _lastReadRepeatCount;
 
         /// <summary>
@@ -74,6 +76,8 @@ namespace DevMind
                 return ExecutionResult.None();
 
             _approvalReason = null;
+            _approvalReasonLabel = ProseReasonLabel;
+
 
 
             switch (action.Type)
@@ -158,8 +162,9 @@ namespace DevMind
             if (outcome?.Blocks == null)
                 return result;
 
-            // One reason per response: every gated call in it shares the prose the model wrote.
-            _approvalReason = ApprovalReason(outcome.Blocks);
+            // One reason per response: every gated call in it shares the prose the model wrote
+            // (or, when it wrote none, the end of its reasoning).
+            (_approvalReasonLabel, _approvalReason) = ApprovalReasonFor(outcome);
 
             // Patches run in call order (H-55 follow-up). They used to be applied as one batch
             // after EVERY other block, so patch_file then read_file of the same file in one
@@ -1152,7 +1157,7 @@ namespace DevMind
             // must not be posed under the token-budget guard's title/buttons. Hosts that
             // do not override it inherit the interface default, which routes here to
             // ConfirmContinueAsync, so headless and test fakes behave exactly as before.
-            bool approved = await _host.ConfirmActionAsync(prompt, WithReason(detail ?? prompt, _approvalReason));
+            bool approved = await _host.ConfirmActionAsync(prompt, WithReason(detail ?? prompt, _approvalReason, _approvalReasonLabel));
             if (approved)
                 return true;
 
@@ -1195,16 +1200,59 @@ namespace DevMind
         /// wrapped rows on screen; this keeps a runaway paragraph from being carried at all.</summary>
         internal const int MaxApprovalReasonChars = 400;
 
+        /// <summary>Label of a reason taken from the response's visible prose.</summary>
+        internal const string ProseReasonLabel = "Why";
+
+        /// <summary>Label of a reason taken from the response's reasoning (thinking) text, so
+        /// the operator can tell it from something the model actually said.</summary>
+        internal const string ThinkingReasonLabel = "Why (thinking)";
+
         /// <summary>
-        /// Puts "Why: &lt;reason&gt;" under the dialog text's "Tool:" line. No reason, no line.
+        /// How much of the END of a response's reasoning the fallback looks at. Only its last
+        /// paragraph is shown and that is capped at <see cref="MaxApprovalReasonChars"/>, so a
+        /// long thinking pass is never regex-scanned or copied whole.
         /// </summary>
-        internal static string WithReason(string detail, string reason)
+        internal const int ReasoningTailChars = 8_000;
+
+        /// <summary>
+        /// Puts "&lt;label&gt;: &lt;reason&gt;" under the dialog text's "Tool:" line. No reason, no line.
+        /// </summary>
+        internal static string WithReason(string detail, string reason, string label = ProseReasonLabel)
         {
             if (string.IsNullOrEmpty(reason) || detail == null) return detail;
             int nl = detail.IndexOf('\n');
             return nl < 0
-                ? $"{detail}\nWhy: {reason}"
-                : $"{detail.Substring(0, nl)}\nWhy: {reason}{detail.Substring(nl)}";
+                ? $"{detail}\n{label}: {reason}"
+                : $"{detail.Substring(0, nl)}\n{label}: {reason}{detail.Substring(nl)}";
+        }
+
+        /// <summary>
+        /// The reason line for this response's approvals: the visible prose's last paragraph
+        /// (<see cref="ApprovalReason"/>) labelled "Why"; when that yields nothing, the last
+        /// paragraph of the same response's reasoning (<see cref="ResponseOutcome.Reasoning"/>)
+        /// labelled "Why (thinking)". Null reason when neither has anything to say.
+        /// </summary>
+        internal static (string label, string reason) ApprovalReasonFor(ResponseOutcome outcome)
+        {
+            string prose = ApprovalReason(outcome?.Blocks);
+            if (prose != null) return (ProseReasonLabel, prose);
+            string thought = ReasoningReason(outcome?.Reasoning);
+            return thought != null ? (ThinkingReasonLabel, thought) : (ProseReasonLabel, null);
+        }
+
+        /// <summary>
+        /// The last paragraph of a response's reasoning text, cleaned like the prose reason
+        /// (think tags themselves, leaked tool-call syntax, status lines) but keeping the text
+        /// inside think tags — here that text IS the content. Looks only at the last
+        /// <see cref="ReasoningTailChars"/> characters.
+        /// </summary>
+        internal static string ReasoningReason(string reasoning)
+        {
+            if (string.IsNullOrWhiteSpace(reasoning)) return null;
+            string tail = reasoning.Length > ReasoningTailChars
+                ? reasoning.Substring(reasoning.Length - ReasoningTailChars)
+                : reasoning;
+            return LastParagraphReason(tail);
         }
 
         /// <summary>
@@ -1232,7 +1280,17 @@ namespace DevMind
             if (close >= 0) prose = prose.Substring(close + "</think>".Length);
             int open = prose.IndexOf("<think>", StringComparison.Ordinal);
             if (open >= 0) prose = prose.Substring(0, open);
-            prose = HeadlessAgent.StripStatusLines(HeadlessAgent.SanitizeAnswer(prose));
+            return LastParagraphReason(prose);
+        }
+
+        /// <summary>
+        /// Shared tail of both reasons: drops leaked tool-call syntax, any remaining think tags
+        /// and DevMind's status lines, takes the last non-empty paragraph, collapses whitespace
+        /// and cuts at <see cref="MaxApprovalReasonChars"/> with "…". Null when nothing is left.
+        /// </summary>
+        private static string LastParagraphReason(string text)
+        {
+            string prose = HeadlessAgent.StripStatusLines(HeadlessAgent.SanitizeAnswer(text.Replace("\r", string.Empty)));
 
             string[] paragraphs = System.Text.RegularExpressions.Regex.Split(prose, @"\n[ \t]*\n");
             string last = paragraphs.LastOrDefault(p => !string.IsNullOrWhiteSpace(p));

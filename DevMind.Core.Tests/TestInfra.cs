@@ -389,7 +389,8 @@ namespace DevMind.Core.Tests
         public bool MicroCompactSummarize => false;
         public bool MicroCompactBrainwash => false;
         public bool AlwaysConfirmPatch => false;
-        public ApprovalMode ApprovalMode => ApprovalMode.Auto;
+        // Settable so a loop-level test can reach the Manual approval dialog.
+        public ApprovalMode ApprovalMode { get; set; } = ApprovalMode.Auto;
         public int AgenticLoopMaxDepth => 25;
         public int AgenticContextLimitPercent => 0;
     }
