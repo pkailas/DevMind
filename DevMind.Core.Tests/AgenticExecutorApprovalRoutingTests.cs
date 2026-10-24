@@ -28,11 +28,21 @@ namespace DevMind.Core.Tests
         {
             public List<string> ConfirmActionPrompts { get; } = new();
             public List<string> ConfirmContinuePrompts { get; } = new();
+            public List<string> ConfirmActionDetails { get; } = new();
+            public System.Text.StringBuilder Output { get; } = new();
             public bool ConfirmAnswer { get; set; } = true;
 
             public Task<bool> ConfirmActionAsync(string action)
             {
                 ConfirmActionPrompts.Add(action);
+                return Task.FromResult(ConfirmAnswer);
+            }
+
+            // The interactive overload: short one-liner + the full dialog text.
+            public Task<bool> ConfirmActionAsync(string action, string detail)
+            {
+                ConfirmActionPrompts.Add(action);
+                ConfirmActionDetails.Add(detail);
                 return Task.FromResult(ConfirmAnswer);
             }
 
@@ -43,7 +53,7 @@ namespace DevMind.Core.Tests
             }
 
             // ── Inert members ─────────────────────────────────────────────────
-            public void AppendOutput(string text, OutputColor color = OutputColor.Normal) { }
+            public void AppendOutput(string text, OutputColor color = OutputColor.Normal) => Output.Append(text);
             public void UpdateScratchpad(string content) { }
             public string TaskScratchpad => "";
             public string GetWorkingDirectory() => "";
@@ -191,7 +201,8 @@ namespace DevMind.Core.Tests
             public bool MicroCompactSummarize => false;
             public bool MicroCompactBrainwash => false;
             public bool AlwaysConfirmPatch => false;
-            public ApprovalMode ApprovalMode => ApprovalMode.Manual;
+            public ApprovalMode Mode { get; set; } = ApprovalMode.Manual;
+            public ApprovalMode ApprovalMode => Mode;
             public int AgenticLoopMaxDepth => 25;
             public int AgenticContextLimitPercent => 0;
         }
@@ -255,6 +266,140 @@ namespace DevMind.Core.Tests
             // The DIM forwarded the call to ConfirmContinueAsync.
             Assert.Single(host.ConfirmContinuePrompts);
             Assert.Contains("echo test", host.ConfirmContinuePrompts[0]);
+        }
+
+        // ── Dialog text vs transcript text ─────────────────────────────────────
+        // The approval dialog needs the tool name and the WHOLE action (Paul's popup read only
+        // `Run shell: python -c " … (1093 chars total)`), while the transcript's [SKIPPED] /
+        // [PLAN MODE] lines and the plan refusal sent to the model must stay one line.
+
+        private const string MultiLineCommand = "python -c \"\nimport sys\nprint('hello')\nprint(sys.argv)\n\"";
+
+        private static ResponseOutcome ToolOutcome(string name, Dictionary<string, string> args)
+            => new ResponseOutcome(ToolCallMapper.Map(
+                new List<ToolCallResult> { new ToolCallResult { Name = name, Arguments = args } },
+                buildCommand: "dotnet build \"C:\\x\\X.slnx\""));
+
+        private static string[] Lines(string s) => s.Replace("\r", "").Split('\n');
+
+        [Fact]
+        public async Task Dialog_RunShell_ShowsToolNameAndFullMultiLineCommand()
+        {
+            var host = new RoutingRecordingHost { ConfirmAnswer = false };
+            var executor = new AgenticExecutor(host, new ManualApprovalOptions());
+            executor.SetCancellationToken(CancellationToken.None);
+
+            await executor.ExecuteAsync(new AgenticAction { Type = ActionType.ApplyAndBuild },
+                ShellOutcome(MultiLineCommand));
+
+            Assert.Single(host.ConfirmActionDetails);
+            string[] lines = Lines(host.ConfirmActionDetails[0]);
+            Assert.Contains("run_shell", lines[0]);
+            // Every line of the command, in order, line breaks kept.
+            Assert.Equal(Lines(MultiLineCommand), lines.Skip(1).ToArray());
+
+            // The short form stays one line.
+            Assert.DoesNotContain("\n", host.ConfirmActionPrompts[0]);
+        }
+
+        [Fact]
+        public async Task Dialog_RunBuild_NamesRunBuildNotRunShell()
+        {
+            var host = new RoutingRecordingHost { ConfirmAnswer = false };
+            var executor = new AgenticExecutor(host, new ManualApprovalOptions());
+            executor.SetCancellationToken(CancellationToken.None);
+
+            await executor.ExecuteAsync(new AgenticAction { Type = ActionType.ApplyAndBuild },
+                ToolOutcome("run_build", new Dictionary<string, string>()));
+
+            Assert.Single(host.ConfirmActionDetails);
+            string[] lines = Lines(host.ConfirmActionDetails[0]);
+            Assert.Contains("run_build", lines[0]);
+            Assert.DoesNotContain("run_shell", lines[0]);
+            Assert.Contains("dotnet build", host.ConfirmActionDetails[0]);
+        }
+
+        [Fact]
+        public async Task Dialog_CreateFile_NamesToolAndKeepsNameAndSize()
+        {
+            var host = new RoutingRecordingHost { ConfirmAnswer = false };
+            var executor = new AgenticExecutor(host, new ManualApprovalOptions());
+            executor.SetCancellationToken(CancellationToken.None);
+
+            await executor.ExecuteAsync(new AgenticAction { Type = ActionType.ApplyAndBuild },
+                ToolOutcome("create_file", new Dictionary<string, string> { ["filename"] = "Foo.cs", ["content"] = "class Foo {}" }));
+
+            Assert.Single(host.ConfirmActionDetails);
+            string detail = host.ConfirmActionDetails[0];
+            Assert.Contains("create_file", Lines(detail)[0]);
+            Assert.Contains("Foo.cs", detail);
+            Assert.Contains("12 chars", detail);
+            Assert.DoesNotContain("class Foo", detail); // no content preview
+        }
+
+        private sealed class NullMcp : IMcpToolInvoker
+        {
+            public Task<string> CallToolAsync(string server, string tool, Newtonsoft.Json.Linq.JObject? args, CancellationToken ct)
+                => Task.FromResult("ok");
+        }
+
+        [Fact]
+        public async Task Dialog_McpCall_NamesServerAndTool_AndShowsAllArguments()
+        {
+            var host = new RoutingRecordingHost { ConfirmAnswer = false };
+            var executor = new AgenticExecutor(host, new ManualApprovalOptions()) { McpTools = new NullMcp() };
+            executor.SetCancellationToken(CancellationToken.None);
+
+            string longPrompt = new string('p', 400) + "_END";
+            await executor.ExecuteAsync(new AgenticAction { Type = ActionType.ApplyAndBuild },
+                ToolOutcome("mcp__comfy__run_workflow", new Dictionary<string, string> { ["workflow"] = "sdxl", ["prompt"] = longPrompt }));
+
+            Assert.Single(host.ConfirmActionDetails);
+            string detail = host.ConfirmActionDetails[0];
+            Assert.Contains("MCP comfy/run_workflow", Lines(detail)[0]);
+            Assert.Contains(longPrompt, detail);      // not cut at 200 chars
+            Assert.Contains("sdxl", detail);
+
+            // The short form keeps the 200-char cut and stays one line.
+            Assert.DoesNotContain("_END", host.ConfirmActionPrompts[0]);
+            Assert.DoesNotContain("\n", host.ConfirmActionPrompts[0]);
+        }
+
+        [Fact]
+        public async Task Transcript_SkippedLine_StaysOneLine_ForMultiLineCommand()
+        {
+            var host = new RoutingRecordingHost { ConfirmAnswer = false };
+            var executor = new AgenticExecutor(host, new ManualApprovalOptions());
+            executor.SetCancellationToken(CancellationToken.None);
+
+            await executor.ExecuteAsync(new AgenticAction { Type = ActionType.ApplyAndBuild },
+                ShellOutcome(MultiLineCommand));
+
+            string skipped = Lines(host.Output.ToString()).Single(l => l.StartsWith("[SKIPPED]"));
+            Assert.Contains("python -c", skipped);
+            Assert.DoesNotContain("print('hello')", host.Output.ToString()); // only the first line
+            // The dialog DID get the full text — the transcript is short by choice, not by loss.
+            Assert.Single(host.ConfirmActionDetails);
+            Assert.Contains("print('hello')", host.ConfirmActionDetails[0]);
+        }
+
+        [Fact]
+        public async Task PlanMode_RefusalAndTranscript_StayOneLine_AndNeverAsk()
+        {
+            var host = new RoutingRecordingHost();
+            var executor = new AgenticExecutor(host, new ManualApprovalOptions { Mode = ApprovalMode.Plan });
+            executor.SetCancellationToken(CancellationToken.None);
+
+            var result = await executor.ExecuteAsync(new AgenticAction { Type = ActionType.ApplyAndBuild },
+                ShellOutcome(MultiLineCommand));
+
+            Assert.Empty(host.ConfirmActionPrompts);
+            Assert.Empty(host.ConfirmActionDetails);
+            string refusal = result.Errors.Single(e => e.StartsWith("[PLAN MODE]"));
+            Assert.DoesNotContain("\n", refusal);
+            Assert.DoesNotContain("print('hello')", refusal);
+            Assert.DoesNotContain("print('hello')", host.Output.ToString());
+            Assert.Single(Lines(host.Output.ToString()), l => l.StartsWith("[PLAN MODE] Refused:"));
         }
     }
 }

@@ -57,5 +57,6 @@ namespace DevMind
         public JObject McpArguments { get; set; }                         // for McpCall — typed arguments, forwarded un-flattened
         public string ToolCallId { get; set; }                            // the call's ResultId; keys the result — McpCall (McpToolName.ResultKey) and the read-side tools (ExecutionResult.ToolResultsByCallId)
         public string ArgumentNote { get; set; }                          // ToolCallResult.ArgumentNote (H-56 alias rename); journaled by AgenticExecutor
+        public string ToolName { get; set; }                              // the tool the model called (e.g. run_shell vs run_build, which share BlockType.Shell); set by ToolCallMapper, null for blocks built elsewhere — shown in the manual-approval dialog
     }
 }

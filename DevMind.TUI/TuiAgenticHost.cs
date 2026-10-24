@@ -1251,6 +1251,13 @@ namespace DevMind
         Task<bool> IAgenticHost.ConfirmActionAsync(string action)
             => ConfirmAsync("Approve action", action, "_Approve", "_Skip");
 
+        // The executor's overload: `action` is the one-line form the transcript keeps;
+        // `detail` is what the operator needs to decide — the tool name, then the whole
+        // command or arguments. The dialog shows detail (capped to a third of the screen,
+        // with a "(N more lines)" tail), falling back to the short form if it is empty.
+        Task<bool> IAgenticHost.ConfirmActionAsync(string action, string detail)
+            => ConfirmAsync("Approve action", string.IsNullOrWhiteSpace(detail) ? action : detail, "_Approve", "_Skip");
+
         /// <summary>
         /// A modal yes/no on the UI thread, resolving the awaiting worker with the answer.
         /// <para>
@@ -1313,17 +1320,9 @@ namespace DevMind
 
                 // Cap to a sensible fraction of the screen so a huge prompt can't
                 // fill the whole terminal.
-                int maxBodyRows = Math.Max(2, screenRows / 3);
-                if (lines.Length > maxBodyRows)
-                {
-                    var capped = new string[maxBodyRows];
-                    Array.Copy(lines, capped, maxBodyRows - 1);
-                    string last = lines[maxBodyRows - 1];
-                    capped[maxBodyRows - 1] = last.Length > bodyWidth - 1
-                        ? last.Substring(0, bodyWidth - 1) + "\u2026"
-                        : last + "\u2026";
-                    lines = capped;
-                }
+                // The last row says HOW MUCH is hidden — a bare "…" gave the operator no way
+                // to tell a cut tail of one line from fifty.
+                lines = CapBodyLines(lines, Math.Max(2, screenRows / 3), bodyWidth);
 
                 int bodyRows = lines.Length;
                 string displayText = string.Join("\n", lines);
@@ -1352,12 +1351,28 @@ namespace DevMind
                 dlg.AddButton(yesBtn);
                 dlg.AddButton(noBtn);
 
+                // ── No spacer row above the buttons ──────────────────────────
+                // Dialog<T>.AddButton (Terminal.Gui 2.4.17, decompiled) sets every button's
+                // Y = 1 inside the button container and then sizes Padding.Bottom to the
+                // container's required height: 1 (empty row) + 1 (button) + 1 (shadow) = 3.
+                // That empty row is the blank line the operator saw between a one-line body
+                // and the buttons (screen buffer: body row 12, blank row 13, buttons row 14).
+                // Put the buttons on the container's first row and take the spacer back out of
+                // the padding, so the body sits directly above the buttons.
+                foreach (var b in dlg.Buttons) b.Y = 0;
+                dlg.Padding!.Thickness = dlg.Padding.Thickness with
+                {
+                    Bottom = Math.Max(0, dlg.Padding.Thickness.Bottom - 1),
+                };
+
                 // ── Height from the dialog's REAL vertical chrome ───────────────
                 // The old Height = bodyRows + 5 was a guess. In Terminal.Gui 2.4.17 the
                 // dialog's adornments (border + title, padding, and the button bar with its
-                // shadow, which lives in the padding) take 6 rows, so the viewport got
+                // shadow, which lives in the padding) took 6 rows, so the viewport got
                 // bodyRows - 1 rows; with the label at Y=1 only bodyRows - 2 lines were
                 // visible — a one-line prompt drew NOTHING (the blank approval dialog).
+                // (5 rows now that the spacer above the buttons is removed, but the number
+                // is measured, not assumed.)
                 // Lay the dialog out once so its adornments are final, then size the
                 // viewport to exactly bodyRows (ApprovalDialogTests reads the drawn screen
                 // to prove every line is visible above the buttons).
@@ -1419,6 +1434,28 @@ namespace DevMind
                 });
             });
             return tcs.Task;
+        }
+
+        /// <summary>
+        /// Caps wrapped dialog lines at <paramref name="maxRows"/>. When lines are dropped, the
+        /// last visible row is replaced by "… (N more lines)", where N counts every wrapped line
+        /// not shown (including the one the indicator displaced), so the operator knows how
+        /// much of the action is off-screen. Under the cap the lines are returned unchanged.
+        /// </summary>
+        internal static string[] CapBodyLines(string[] lines, int maxRows, int width)
+        {
+            if (maxRows < 1) maxRows = 1;
+            if (lines.Length <= maxRows) return lines;
+
+            int shown = maxRows - 1;
+            int hidden = lines.Length - shown;
+            string indicator = $"… ({hidden:N0} more line{(hidden == 1 ? "" : "s")})";
+            if (width > 0 && indicator.Length > width) indicator = indicator.Substring(0, width);
+
+            var capped = new string[maxRows];
+            Array.Copy(lines, capped, shown);
+            capped[shown] = indicator;
+            return capped;
         }
 
         /// <summary>

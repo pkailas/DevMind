@@ -45,6 +45,9 @@ namespace DevMind
                 if (block != null)
                 {
                     block.ArgumentNote = tc.ArgumentNote;
+                    // run_shell and run_build share BlockType.Shell; the approval dialog names
+                    // the tool the model actually called.
+                    block.ToolName = tc.Name;
                     blocks.Add(block);
                 }
             }

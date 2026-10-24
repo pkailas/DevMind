@@ -401,6 +401,103 @@ namespace DevMind.TUI.Tests
             await WaitDialogClosedAsync(ta);
         }
 
+        // ── Tool name + full action, and no wasted rows ─────────────────────────
+        // Paul's popup after 1.0.615 read only `Run shell: python -c " … (1093 chars total)`,
+        // with one blank row between that line and the buttons. These drive the
+        // two-text overload the executor uses (short one-liner + full dialog text).
+
+        static int RowOf(Rendered r, string text)
+        {
+            for (int y = Math.Max(0, r.Dialog.Y); y < r.Dialog.Y + r.Dialog.Height && y < r.Rows.Length; y++)
+                if (r.Rows[y].Contains(text)) return y;
+            return -1;
+        }
+
+        [Fact]
+        public async Task ApprovalDialog_OneLinePrompt_NoBlankRowAboveButtons()
+        {
+            using var ta = TestApp.Start(120, 30);
+            var confirmTask = ((IAgenticHost)ta.Host).ConfirmActionAsync(
+                "Delete file Foo.cs?", "Delete file Foo.cs?");
+            await WaitDialogOpenAsync(ta);
+
+            var r = await RenderDialogAsync(ta);
+            int textRow = RowOf(r, "Delete file Foo.cs?");
+            int buttonTextRow = RowOf(r, "Skip"); // not "Approve": the title says "Approve action"
+            Assert.True(textRow >= 0, $"prompt text not drawn.\n{r.Diag}");
+            Assert.True(buttonTextRow >= 0, $"button text not drawn.\n{r.Diag}");
+            Assert.True(buttonTextRow == textRow + 1,
+                $"text on row {textRow}, buttons on row {buttonTextRow}: {buttonTextRow - textRow - 1} blank row(s) between them.\n{r.Diag}");
+
+            ta.App.Invoke(() => ta.App.Keyboard.RaiseKeyDownEvent(Key.Esc));
+            Assert.False(await AwaitAsync(confirmTask));
+            await WaitDialogClosedAsync(ta);
+        }
+
+        [Fact]
+        public async Task ApprovalDialog_MultiLineShell_ShowsToolNameAndEveryLineInOrder()
+        {
+            using var ta = TestApp.Start(120, 30);
+            string[] detailLines =
+            {
+                "Tool: run_shell",
+                "python -c \"",
+                "import sys",
+                "print('hello world')",
+                "print(sys.argv)",
+                "\"",
+            };
+            var confirmTask = ((IAgenticHost)ta.Host).ConfirmActionAsync(
+                "Run shell: python -c \" … (58 chars total)", string.Join("\n", detailLines));
+            await WaitDialogOpenAsync(ta);
+
+            var r = await RenderDialogAsync(ta);
+            int prev = r.Dialog.Y;
+            foreach (string want in detailLines)
+            {
+                int row = -1;
+                for (int y = prev + 1; y < r.Dialog.Y + r.Dialog.Height; y++)
+                    if (r.Rows[y].Contains(want)) { row = y; break; }
+                Assert.True(row > prev, $"line \"{want}\" not drawn below row {prev}.\n{r.Diag}");
+                prev = row;
+            }
+            int buttonTextRow = RowOf(r, "Skip");
+            Assert.True(prev < buttonTextRow, $"last body line (row {prev}) is not above the buttons (row {buttonTextRow}).\n{r.Diag}");
+
+            ta.App.Invoke(() => ta.App.Keyboard.RaiseKeyDownEvent(Key.Esc));
+            Assert.False(await AwaitAsync(confirmTask));
+            await WaitDialogClosedAsync(ta);
+        }
+
+        [Fact]
+        public async Task ApprovalDialog_OverCapPrompt_SaysHowManyLinesAreHidden()
+        {
+            // 30 rows → cap = 10 body rows. 40 short lines: 9 shown + the indicator line,
+            // so 31 lines are hidden.
+            using var ta = TestApp.Start(120, 30);
+            var lines = new[] { "Tool: run_shell" }.Concat(Enumerable.Range(1, 39).Select(i => $"echo line{i:00}")).ToArray();
+            var confirmTask = ((IAgenticHost)ta.Host).ConfirmActionAsync("Run shell: echo line01 …", string.Join("\n", lines));
+            await WaitDialogOpenAsync(ta);
+
+            var r = await RenderDialogAsync(ta);
+            int buttonTextRow = RowOf(r, "Skip");
+            int indicatorRow = RowOf(r, "(31 more lines)");
+            Assert.True(indicatorRow >= 0, $"no \"(31 more lines)\" indicator drawn.\n{r.Diag}");
+            Assert.True(indicatorRow == buttonTextRow - 1,
+                $"indicator on row {indicatorRow}, buttons on row {buttonTextRow} — it must be the last body row.\n{r.Diag}");
+            // The 9 visible lines are the first 9, in order; the 10th is not drawn.
+            Assert.True(RowOf(r, "Tool: run_shell") > r.Dialog.Y);
+            Assert.True(RowOf(r, "echo line08") == indicatorRow - 1, $"line 9 of 40 should sit just above the indicator.\n{r.Diag}");
+            Assert.Equal(-1, RowOf(r, "echo line09"));
+            // Nothing overlaps the buttons: the button row holds no body text.
+            Assert.DoesNotContain("echo", r.Rows[buttonTextRow]);
+            Assert.Contains("Approve", r.Rows[buttonTextRow]);
+
+            ta.App.Invoke(() => ta.App.Keyboard.RaiseKeyDownEvent(Key.Esc));
+            Assert.False(await AwaitAsync(confirmTask));
+            await WaitDialogClosedAsync(ta);
+        }
+
         // ── Test 4: ConfirmContinueAsync still uses "Token budget" ────────────
         // The budget guard's dialog is unchanged — only the approval prompt moved.
         [Fact]

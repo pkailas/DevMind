@@ -321,6 +321,18 @@ namespace DevMind
         Task<bool> ConfirmActionAsync(string action) => ConfirmContinueAsync(action);
 
         /// <summary>
+        /// The approval question with two renderings of the same action: <paramref name="action"/>
+        /// is the short one-line form (what the transcript's [SKIPPED] line shows), and
+        /// <paramref name="detail"/> is the full multi-line text for a dialog — the tool name on
+        /// its first line, then the whole command or arguments. The default implementation
+        /// forwards only the short form to <see cref="ConfirmActionAsync(string)"/>, so hosts
+        /// that never override either method keep today's one-line behaviour (and still land
+        /// on <see cref="ConfirmContinueAsync"/>); interactive skins override this to show
+        /// <paramref name="detail"/>.
+        /// </summary>
+        Task<bool> ConfirmActionAsync(string action, string detail) => ConfirmActionAsync(action);
+
+        /// <summary>
         /// Executes a SQL query and returns formatted results as a text table.
         /// Read-only guard enforced (SELECT/WITH only) unless allowWrite=true.
         /// The connection is resolved by precedence: explicit <paramref name="connectionString"/>,

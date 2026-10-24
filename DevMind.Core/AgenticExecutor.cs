@@ -82,8 +82,12 @@ namespace DevMind
                     if (!string.IsNullOrEmpty(action.ShellCommand))
                     {
                         var result = new ExecutionResult();
+                        // No tool call produced this action (nothing in Core builds a
+                        // RunShell action with a command; only tests do), so there is no tool
+                        // name to show — say what it is rather than borrow run_shell's.
                         if (!await ApproveMutationAsync(MutationKind.Shell,
-                                $"Run shell: {DescribeCommand(action.ShellCommand)}", result))
+                                $"Run shell: {DescribeCommand(action.ShellCommand)}", result,
+                                ApprovalDetail("shell (direct action, no tool call)", action.ShellCommand)))
                         {
                             result.ShellExitCode     = 1;
                             result.ShellOutput       = ShellRefusalOutput(result);
@@ -223,8 +227,9 @@ namespace DevMind
                     case BlockType.File:
                         if (!processFiles) break;
                         if (MissingFileName(block, "create_file", result)) break;
-                        if (!await ApproveMutationAsync(MutationKind.CreateFile,
-                                $"Create file {block.FileName} ({block.Content?.Length ?? 0:N0} chars)?", result))
+                        string createPrompt = $"Create file {block.FileName} ({block.Content?.Length ?? 0:N0} chars)?";
+                        if (!await ApproveMutationAsync(MutationKind.CreateFile, createPrompt, result,
+                                ApprovalDetail(block.ToolName ?? "create_file", createPrompt)))
                             break;
                         try
                         {
@@ -248,8 +253,9 @@ namespace DevMind
                     case BlockType.AppendFile:
                         if (!processFiles) break;
                         if (MissingFileName(block, "append_file", result)) break;
-                        if (!await ApproveMutationAsync(MutationKind.AppendFile,
-                                $"Append to {block.FileName} ({block.Content?.Length ?? 0:N0} chars)?", result))
+                        string appendPrompt = $"Append to {block.FileName} ({block.Content?.Length ?? 0:N0} chars)?";
+                        if (!await ApproveMutationAsync(MutationKind.AppendFile, appendPrompt, result,
+                                ApprovalDetail(block.ToolName ?? "append_file", appendPrompt)))
                             break;
                         try
                         {
@@ -288,8 +294,11 @@ namespace DevMind
                             _host.AppendOutput($"[SHELL ERROR] {noCommandMsg}\n", OutputColor.Error);
                             break;
                         }
+                        // run_shell and run_build both map to a Shell block; ToolName (set by
+                        // ToolCallMapper) says which one the model actually called.
                         if (!await ApproveMutationAsync(MutationKind.Shell,
-                                $"Run shell: {DescribeCommand(block.Command)}", result))
+                                $"Run shell: {DescribeCommand(block.Command)}", result,
+                                ApprovalDetail(block.ToolName ?? "run_shell", block.Command)))
                         {
                             // The model reads ShellOutput verbatim (LoopHelpers' run_shell
                             // case returns it when non-empty), so the decline reaches it as
@@ -414,8 +423,9 @@ namespace DevMind
 
                     case BlockType.Delete:
                         if (MissingFileName(block, "delete_file", result)) break;
-                        if (!await ApproveMutationAsync(MutationKind.DeleteFile,
-                                $"Delete file {block.FileName}?", result))
+                        string deletePrompt = $"Delete file {block.FileName}?";
+                        if (!await ApproveMutationAsync(MutationKind.DeleteFile, deletePrompt, result,
+                                ApprovalDetail(block.ToolName ?? "delete_file", deletePrompt)))
                             break;
                         try
                         {
@@ -443,8 +453,9 @@ namespace DevMind
                         break;
 
                     case BlockType.Rename:
-                        if (!await ApproveMutationAsync(MutationKind.RenameFile,
-                                $"Rename {block.RenameFrom} to {block.RenameTo}?", result))
+                        string renamePrompt = $"Rename {block.RenameFrom} to {block.RenameTo}?";
+                        if (!await ApproveMutationAsync(MutationKind.RenameFile, renamePrompt, result,
+                                ApprovalDetail(block.ToolName ?? "rename_file", renamePrompt)))
                             break;
                         try
                         {
@@ -990,7 +1001,9 @@ namespace DevMind
                 return;
             }
 
-            if (!await ApproveMutationAsync(MutationKind.Shell, $"Run MCP tool {label} {DescribeMcpArgs(block.McpArguments)}", result))
+            string mcpDetail = ApprovalDetail($"MCP {block.McpServer}/{block.McpTool}",
+                (block.McpArguments ?? new JObject()).ToString(Newtonsoft.Json.Formatting.Indented));
+            if (!await ApproveMutationAsync(MutationKind.Shell, $"Run MCP tool {label} {DescribeMcpArgs(block.McpArguments)}", result, mcpDetail))
             {
                 // ApproveMutationAsync put the decline / plan-mode refusal in Errors; hand the
                 // model that exact text as the tool's result.
@@ -1087,7 +1100,14 @@ namespace DevMind
         /// success-shaped message that would have to be kept honest separately.
         /// </para>
         /// </remarks>
-        private async Task<bool> ApproveMutationAsync(MutationKind kind, string prompt, ExecutionResult result)
+        /// <param name="kind">What the mutation is, for the policy decision.</param>
+        /// <param name="prompt">The short one-line description. It is what the transcript's
+        /// [SKIPPED] / [PLAN MODE] lines and the plan refusal sent to the model carry, so it
+        /// must stay one line.</param>
+        /// <param name="result">Receives the decline / refusal cause.</param>
+        /// <param name="detail">The full text for an approval dialog (see <see cref="ApprovalDetail"/>):
+        /// the tool name, then the whole command or arguments. Only the Ask branch uses it.</param>
+        private async Task<bool> ApproveMutationAsync(MutationKind kind, string prompt, ExecutionResult result, string detail)
         {
             ApprovalDecision decision = ApprovalPolicy.Decide(_options.ApprovalMode, kind);
             if (decision == ApprovalDecision.Allow)
@@ -1105,7 +1125,7 @@ namespace DevMind
             // must not be posed under the token-budget guard's title/buttons. Hosts that
             // do not override it inherit the interface default, which routes here to
             // ConfirmContinueAsync, so headless and test fakes behave exactly as before.
-            bool approved = await _host.ConfirmActionAsync(prompt);
+            bool approved = await _host.ConfirmActionAsync(prompt, detail ?? prompt);
             if (approved)
                 return true;
 
@@ -1128,6 +1148,18 @@ namespace DevMind
             return planRefusal
                 ? result.Errors[^1]
                 : "The user declined to run this command in manual approval mode. It was NOT executed \u2014 do not assume any of its effects happened.";
+        }
+
+        /// <summary>
+        /// The approval dialog's text: "Tool: &lt;name&gt;" on the first line, then the full action
+        /// with its own line breaks. Paul's popup used to show only the one-line summary
+        /// (`Run shell: python -c " … (1093 chars total)`), which is useless for deciding; the
+        /// dialog caps the height and says how much is hidden, so the text is not cut here.
+        /// </summary>
+        internal static string ApprovalDetail(string tool, string body)
+        {
+            string text = (body ?? string.Empty).Replace("\r", string.Empty).Trim();
+            return text.Length == 0 ? $"Tool: {tool}" : $"Tool: {tool}\n{text}";
         }
 
         /// <summary>
