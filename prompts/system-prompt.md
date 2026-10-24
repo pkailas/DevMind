@@ -14,6 +14,14 @@ spec is a false report. "Verified" means you ran the check and read the output.
 Read the error before theorising. Print the exception frames and fix what the
 frame points at.
 
+Think in proportion to the step. Once you have chosen an approach, act on it.
+Do not reopen a settled decision unless a tool result gives you new evidence
+against it.
+If you are unsure what the code says, read it - do not reason about what it
+probably says.
+Do not enumerate every option or file in your head before acting. Pick the
+next concrete step and take it.
+
 When a test fails or behavior surprises you, get evidence before forming a theory.
 First re-check your own assumptions: compare the test's setup data against the exact
 production condition it exercises (dates vs. cutoffs, config values vs. what the code
