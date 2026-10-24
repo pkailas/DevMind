@@ -1316,7 +1316,8 @@ namespace DevMind
                 // construction rather than approximated.
                 int bodyWidth = Math.Max(1, dialogCols - 5);
 
-                string[] lines = WrapText(text, bodyWidth);
+                string[] lines = CapReasonRows(text, bodyWidth);
+
 
                 // Cap to a sensible fraction of the screen so a huge prompt can't
                 // fill the whole terminal.
@@ -1456,6 +1457,37 @@ namespace DevMind
             Array.Copy(lines, capped, shown);
             capped[shown] = indicator;
             return capped;
+        }
+
+        /// <summary>Most wrapped rows the approval dialog gives the model's "Why:" line.</summary>
+        internal const int MaxReasonRows = 3;
+
+        /// <summary>
+        /// Wraps the dialog text, holding an approval's "Why:" line (the second line, under
+        /// "Tool: …") to <see cref="MaxReasonRows"/> rows, the last ending in "…" when cut, so
+        /// the model's prose can never push the command it wants approved out of the dialog.
+        /// Any other text wraps exactly as <see cref="WrapText"/> does.
+        /// </summary>
+        internal static string[] CapReasonRows(string text, int width)
+        {
+            string[] src = text.Split('\n');
+            if (src.Length < 2 || !src[0].StartsWith("Tool: ", StringComparison.Ordinal)
+                || !src[1].StartsWith("Why: ", StringComparison.Ordinal))
+                return WrapText(text, width);
+
+            string[] why = WrapText(src[1], width);
+            if (why.Length > MaxReasonRows)
+            {
+                why = why.Take(MaxReasonRows).ToArray();
+                string last = why[^1];
+                if (last.Length >= width) last = last.Substring(0, Math.Max(0, width - 1));
+                why[^1] = last.TrimEnd() + "…";
+            }
+            var lines = new List<string>(WrapText(src[0], width));
+            lines.AddRange(why);
+            if (src.Length > 2)
+                lines.AddRange(WrapText(string.Join("\n", src.Skip(2)), width));
+            return lines.ToArray();
         }
 
         /// <summary>

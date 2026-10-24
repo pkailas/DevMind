@@ -406,6 +406,94 @@ namespace DevMind.Core.Tests
             Assert.Single(Lines(host.Output.ToString()), l => l.StartsWith("[PLAN MODE] Refused:"));
         }
 
+        // ── "Why:" — the model's own prose from the same response ─────────────
+        // LoopDriver puts the response's visible (thinking-stripped) prose first in the
+        // block list as a Text block; the dialog shows its last paragraph between the
+        // tool line and the command.
+
+        private static ResponseOutcome WithProse(string prose, ResponseOutcome tools)
+        {
+            var blocks = new List<ResponseBlock>(tools.Blocks);
+            blocks.Insert(0, new ResponseBlock { Type = BlockType.Text, Content = prose });
+            return new ResponseOutcome(blocks);
+        }
+
+        private static async Task<RoutingRecordingHost> AskWith(ResponseOutcome outcome)
+        {
+            var host = new RoutingRecordingHost { ConfirmAnswer = false };
+            var executor = new AgenticExecutor(host, new ManualApprovalOptions());
+            executor.SetCancellationToken(CancellationToken.None);
+            await executor.ExecuteAsync(new AgenticAction { Type = ActionType.ApplyAndBuild }, outcome);
+            return host;
+        }
+
+        [Fact]
+        public async Task Why_ShowsLastParagraphOfProse_BetweenToolLineAndCommand()
+        {
+            string prose = "I looked at the build output.\r\n\r\nThe   test project is\r\nstale,  so I will   rebuild it.\n";
+            var host = await AskWith(WithProse(prose, ShellOutcome("dotnet build X.slnx")));
+
+            Assert.Single(host.ConfirmActionDetails);
+            Assert.Equal("Tool: run_shell\nWhy: The test project is stale, so I will rebuild it.\ndotnet build X.slnx",
+                host.ConfirmActionDetails[0]);
+        }
+
+        [Fact]
+        public async Task Why_EmptyOrWhitespaceProse_OmitsTheWhyLine()
+        {
+            var none = await AskWith(ShellOutcome("echo hi"));
+            Assert.Equal("Tool: run_shell\necho hi", none.ConfirmActionDetails[0]);
+
+            var blank = await AskWith(WithProse("  \r\n\n  ", ShellOutcome("echo hi")));
+            Assert.Equal("Tool: run_shell\necho hi", blank.ConfirmActionDetails[0]);
+        }
+
+        [Fact]
+        public async Task Why_LongProse_IsCappedWithEllipsis_AndCommandFollows()
+        {
+            string prose = string.Join(" ", Enumerable.Repeat("because", 400));
+            var host = await AskWith(WithProse(prose, ShellOutcome("echo hi")));
+
+            string[] lines = Lines(host.ConfirmActionDetails[0]);
+            Assert.Equal(3, lines.Length);
+            Assert.StartsWith("Why: because", lines[1]);
+            Assert.EndsWith("…", lines[1]);
+            Assert.True(lines[1].Length <= "Why: ".Length + AgenticExecutor.MaxApprovalReasonChars + 1,
+                $"reason line is {lines[1].Length} chars");
+            Assert.Equal("echo hi", lines[2]);
+        }
+
+        [Fact]
+        public async Task Why_NeverShowsThinking_OrToolCallEchoes_OrStatusLines()
+        {
+            string prose = "<think>secret plan</think>[TOOL_USE] 1 call\nOkay.\n\nDelete the temp file now." +
+                           "<tool_call>{\"name\":\"delete_file\"}</tool_call>";
+            var host = await AskWith(WithProse(prose,
+                ToolOutcome("delete_file", new Dictionary<string, string> { ["filename"] = "tmp.txt" })));
+
+            string detail = host.ConfirmActionDetails[0];
+            Assert.Contains("\nWhy: Delete the temp file now.\n", detail);
+            Assert.DoesNotContain("secret", detail);
+            Assert.DoesNotContain("think", detail);
+            Assert.DoesNotContain("tool_call", detail);
+            Assert.DoesNotContain("[TOOL_USE]", detail);
+        }
+
+        [Fact]
+        public async Task Why_SharedByEveryGatedCallInTheResponse_AndTranscriptStaysShort()
+        {
+            var tools = ToolOutcome("create_file", new Dictionary<string, string> { ["filename"] = "A.cs", ["content"] = "x" });
+            var more = ShellOutcome("echo two");
+            var blocks = new List<ResponseBlock>(tools.Blocks);
+            blocks.AddRange(more.Blocks);
+            var host = await AskWith(WithProse("Write A then echo.", new ResponseOutcome(blocks)));
+
+            Assert.Equal(2, host.ConfirmActionDetails.Count);
+            Assert.All(host.ConfirmActionDetails, d => Assert.Equal("Why: Write A then echo.", Lines(d)[1]));
+            Assert.DoesNotContain("Why:", host.Output.ToString());
+            Assert.All(host.ConfirmActionPrompts, p => Assert.DoesNotContain("Why:", p));
+        }
+
         // ── run_tests executes code, so it is gated exactly like run_build ─────
         // Auto runs it, Manual asks first (a decline means NOT run and the model is told
         // so), Plan refuses without asking.

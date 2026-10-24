@@ -498,6 +498,69 @@ namespace DevMind.TUI.Tests
             await WaitDialogClosedAsync(ta);
         }
 
+        // ── "Why:" line: the model's reason sits between the tool and the command ──
+        // A long reason is held to 3 wrapped rows ending in "…", so the command (what is
+        // actually being approved) is never pushed off the dialog by prose.
+
+        static string BodySlice(Rendered r, int row)
+        {
+            int left = Math.Max(0, r.Dialog.X);
+            int width = Math.Min(r.Dialog.Width, r.Rows[row].Length - left);
+            return r.Rows[row].Substring(left, width);
+        }
+
+        [Fact]
+        public async Task ApprovalDialog_WhyLine_DrawnBetweenToolAndCommand()
+        {
+            using var ta = TestApp.Start(120, 30);
+            string detail = "Tool: run_shell\nWhy: The test project is stale, so rebuild it.\ndotnet build COMMAND_MARK.slnx";
+            var confirmTask = ((IAgenticHost)ta.Host).ConfirmActionAsync("Run shell: dotnet build", detail);
+            await WaitDialogOpenAsync(ta);
+
+            var r = await RenderDialogAsync(ta);
+            int toolRow = RowOf(r, "Tool: run_shell");
+            int whyRow = RowOf(r, "Why: The test project is stale, so rebuild it.");
+            int cmdRow = RowOf(r, "dotnet build COMMAND_MARK.slnx");
+            int buttonTextRow = RowOf(r, "Skip");
+            Assert.True(toolRow > r.Dialog.Y, $"tool line not drawn.\n{r.Diag}");
+            Assert.True(whyRow == toolRow + 1, $"Why on row {whyRow}, tool on row {toolRow}.\n{r.Diag}");
+            Assert.True(cmdRow == whyRow + 1, $"command on row {cmdRow}, Why on row {whyRow}.\n{r.Diag}");
+            Assert.True(cmdRow < buttonTextRow, $"command (row {cmdRow}) not above buttons (row {buttonTextRow}).\n{r.Diag}");
+
+            ta.App.Invoke(() => ta.App.Keyboard.RaiseKeyDownEvent(Key.Esc));
+            Assert.False(await AwaitAsync(confirmTask));
+            await WaitDialogClosedAsync(ta);
+        }
+
+        [Fact]
+        public async Task ApprovalDialog_LongWhy_CappedAtThreeRowsWithEllipsis_CommandStillShown()
+        {
+            using var ta = TestApp.Start(120, 30);
+            string reason = string.Join(" ", Enumerable.Range(1, 150).Select(i => $"w{i:000}"));
+            string detail = $"Tool: run_shell\nWhy: {reason}\necho COMMAND_MARK\necho SECOND_LINE";
+            var confirmTask = ((IAgenticHost)ta.Host).ConfirmActionAsync("Run shell: echo COMMAND_MARK", detail);
+            await WaitDialogOpenAsync(ta);
+
+            var r = await RenderDialogAsync(ta);
+            int toolRow = RowOf(r, "Tool: run_shell");
+            int whyRow = RowOf(r, "Why: w001");
+            int cmdRow = RowOf(r, "echo COMMAND_MARK");
+            int secondRow = RowOf(r, "echo SECOND_LINE");
+            int buttonTextRow = RowOf(r, "Skip");
+            Assert.True(whyRow == toolRow + 1, $"Why on row {whyRow}, tool on row {toolRow}.\n{r.Diag}");
+            Assert.True(cmdRow == whyRow + 3, $"reason should take exactly 3 rows: Why row {whyRow}, command row {cmdRow}.\n{r.Diag}");
+            Assert.EndsWith("…", BodySlice(r, cmdRow - 1).TrimEnd(' ', '│', '║', '┃'));
+            Assert.Equal(-1, RowOf(r, "w150"));
+            Assert.True(secondRow == cmdRow + 1, $"rest of the command not drawn under it.\n{r.Diag}");
+            Assert.True(secondRow < buttonTextRow, $"command not above buttons.\n{r.Diag}");
+            Assert.DoesNotContain("w0", r.Rows[buttonTextRow]);
+            Assert.DoesNotContain("echo", r.Rows[buttonTextRow]);
+
+            ta.App.Invoke(() => ta.App.Keyboard.RaiseKeyDownEvent(Key.Esc));
+            Assert.False(await AwaitAsync(confirmTask));
+            await WaitDialogClosedAsync(ta);
+        }
+
         // ── Test 4: ConfirmContinueAsync still uses "Token budget" ────────────
         // The budget guard's dialog is unchanged — only the approval prompt moved.
         [Fact]

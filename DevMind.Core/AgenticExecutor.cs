@@ -36,6 +36,9 @@ namespace DevMind
 
         // Repetition guard — tracks consecutive identical READ/GREP requests to break infinite loops
         private string _lastReadKey;
+
+        // The "Why:" line for approval dialogs in the batch being executed (see ApprovalReason).
+        private string _approvalReason;
         private int _lastReadRepeatCount;
 
         /// <summary>
@@ -69,6 +72,9 @@ namespace DevMind
         {
             if (action == null)
                 return ExecutionResult.None();
+
+            _approvalReason = null;
+
 
             switch (action.Type)
             {
@@ -151,6 +157,9 @@ namespace DevMind
 
             if (outcome?.Blocks == null)
                 return result;
+
+            // One reason per response: every gated call in it shares the prose the model wrote.
+            _approvalReason = ApprovalReason(outcome.Blocks);
 
             // Patches run in call order (H-55 follow-up). They used to be applied as one batch
             // after EVERY other block, so patch_file then read_file of the same file in one
@@ -1143,7 +1152,7 @@ namespace DevMind
             // must not be posed under the token-budget guard's title/buttons. Hosts that
             // do not override it inherit the interface default, which routes here to
             // ConfirmContinueAsync, so headless and test fakes behave exactly as before.
-            bool approved = await _host.ConfirmActionAsync(prompt, detail ?? prompt);
+            bool approved = await _host.ConfirmActionAsync(prompt, WithReason(detail ?? prompt, _approvalReason));
             if (approved)
                 return true;
 
@@ -1180,6 +1189,63 @@ namespace DevMind
         {
             string text = (body ?? string.Empty).Replace("\r", string.Empty).Trim();
             return text.Length == 0 ? $"Tool: {tool}" : $"Tool: {tool}\n{text}";
+        }
+
+        /// <summary>Longest reason the executor hands the dialog. The TUI holds it to 3
+        /// wrapped rows on screen; this keeps a runaway paragraph from being carried at all.</summary>
+        internal const int MaxApprovalReasonChars = 400;
+
+        /// <summary>
+        /// Puts "Why: &lt;reason&gt;" under the dialog text's "Tool:" line. No reason, no line.
+        /// </summary>
+        internal static string WithReason(string detail, string reason)
+        {
+            if (string.IsNullOrEmpty(reason) || detail == null) return detail;
+            int nl = detail.IndexOf('\n');
+            return nl < 0
+                ? $"{detail}\nWhy: {reason}"
+                : $"{detail.Substring(0, nl)}\nWhy: {reason}{detail.Substring(nl)}";
+        }
+
+        /// <summary>
+        /// The model's reason for this response's tool calls: the last paragraph of the visible
+        /// prose it wrote alongside them. LoopDriver puts that prose (the response's content,
+        /// already stripped of reasoning by ThinkFilter) first in the block list as a Text
+        /// block. Defensively drops any think region, leaked tool-call syntax and DevMind's
+        /// own status lines, collapses whitespace, and cuts at
+        /// <see cref="MaxApprovalReasonChars"/> with "…". Null when there is nothing to say.
+        /// </summary>
+        internal static string ApprovalReason(IEnumerable<ResponseBlock> blocks)
+        {
+            if (blocks == null) return null;
+            string prose = string.Join("\n\n", blocks
+                .Where(b => b.Type == BlockType.Text && !string.IsNullOrWhiteSpace(b.Content))
+                .Select(b => b.Content));
+            if (prose.Length == 0) return null;
+
+            prose = prose.Replace("\r", string.Empty);
+            // A whole think region, then anything before a stray close tag (its open tag went
+            // to the reasoning channel), then any lone open tag and what follows it.
+            prose = System.Text.RegularExpressions.Regex.Replace(prose, @"<think>.*?</think>", "",
+                System.Text.RegularExpressions.RegexOptions.Singleline);
+            int close = prose.LastIndexOf("</think>", StringComparison.Ordinal);
+            if (close >= 0) prose = prose.Substring(close + "</think>".Length);
+            int open = prose.IndexOf("<think>", StringComparison.Ordinal);
+            if (open >= 0) prose = prose.Substring(0, open);
+            prose = HeadlessAgent.StripStatusLines(HeadlessAgent.SanitizeAnswer(prose));
+
+            string[] paragraphs = System.Text.RegularExpressions.Regex.Split(prose, @"\n[ \t]*\n");
+            string last = paragraphs.LastOrDefault(p => !string.IsNullOrWhiteSpace(p));
+            if (last == null) return null;
+
+            string reason = System.Text.RegularExpressions.Regex.Replace(last.Trim(), @"\s+", " ");
+            if (reason.Length > MaxApprovalReasonChars)
+            {
+                int cut = reason.LastIndexOf(' ', MaxApprovalReasonChars);
+                if (cut < MaxApprovalReasonChars / 2) cut = MaxApprovalReasonChars;
+                reason = reason.Substring(0, cut).TrimEnd() + "…";
+            }
+            return reason;
         }
 
 
