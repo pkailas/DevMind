@@ -1332,20 +1332,39 @@ namespace DevMind
                 {
                     Title  = title,
                     Width  = dialogCols, // absolute — the SAME number bodyWidth was derived from
-                    Height = bodyRows + 5, // body + top border/title + button bar + bottom border
+                    // Provisional; replaced below once the real vertical chrome is measured.
+                    Height = bodyRows,
                 };
                 var label = new Label
                 {
                     Text   = displayText,
-                    X = 1, Y = 1,
+                    X = 1, Y = 0, // Y=0: the viewport is sized to exactly bodyRows below
                     Width  = bodyWidth, // absolute — the EXACT width WrapText wrapped to
                     Height = bodyRows, // explicit — Dim.Fill(2) resolved to 0 in the old layout
+                    // Label treats '_' as a hot-key marker and hides it, so "run_shell" or
+                    // "my_file.cs" drew as "runshell" / "myfile.cs". The prompt is data, not a
+                    // mnemonic: disable hot-key parsing so every character is drawn.
+                    HotKeySpecifier = (System.Text.Rune)0xFFFF,
                 };
                 var yesBtn = new Button { Text = yesText };
                 var noBtn  = new Button { Text = noText, IsDefault = true };
                 dlg.Add(label);
                 dlg.AddButton(yesBtn);
                 dlg.AddButton(noBtn);
+
+                // ── Height from the dialog's REAL vertical chrome ───────────────
+                // The old Height = bodyRows + 5 was a guess. In Terminal.Gui 2.4.17 the
+                // dialog's adornments (border + title, padding, and the button bar with its
+                // shadow, which lives in the padding) take 6 rows, so the viewport got
+                // bodyRows - 1 rows; with the label at Y=1 only bodyRows - 2 lines were
+                // visible — a one-line prompt drew NOTHING (the blank approval dialog).
+                // Lay the dialog out once so its adornments are final, then size the
+                // viewport to exactly bodyRows (ApprovalDialogTests reads the drawn screen
+                // to prove every line is visible above the buttons).
+                dlg.Layout(new System.Drawing.Size(screenCols, screenRows));
+                int vChrome = dlg.GetAdornmentsThickness().Vertical;
+                dlg.Height = Math.Min(screenRows, bodyRows + vChrome);
+
 
                 // Non-blocking modal session. The old code called app.Run(dlg) — a NESTED modal
                 // loop — from inside this app.Invoke callback, which parked the main loop for the

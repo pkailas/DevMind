@@ -304,6 +304,103 @@ namespace DevMind.TUI.Tests
             await WaitDialogClosedAsync(ta);
         }
 
+        // ── Rendered-screen tests: what is DRAWN, not what Label.Text holds ───
+        // The tests above check Label.Text and Frame.Height, which were both fine
+        // while the dialog body rendered BLANK on screen. These force a full
+        // layout+draw on the UI thread and read the driver's cell buffer, then
+        // assert every line of the message is visible inside the dialog, on its
+        // own row, above the button row.
+
+        sealed record Rendered(string[] Rows, System.Drawing.Rectangle Dialog, int ButtonRow, string[] LabelLines, string Diag);
+
+        static async Task<Rendered> RenderDialogAsync(TestApp ta)
+        {
+            Rendered? r = null;
+            await InvokeOnUIAsync(ta, () =>
+            {
+                ta.App.LayoutAndDraw(true);
+                var d = (Dialog)ta.App.TopRunnableView!;
+                Label? label = null;
+                foreach (var sv in d.SubViews)
+                    if (sv is Label l) { label = l; break; }
+                var cells = ta.App.Driver!.Contents!;
+                int rows = cells.GetLength(0), cols = cells.GetLength(1);
+                var lines = new string[rows];
+                for (int y = 0; y < rows; y++)
+                {
+                    var sb = new System.Text.StringBuilder(cols);
+                    for (int x = 0; x < cols; x++)
+                    {
+                        string g = cells[y, x].Grapheme;
+                        sb.Append(string.IsNullOrEmpty(g) ? " " : g);
+                    }
+                    lines[y] = sb.ToString();
+                }
+                var dlgRect = d.FrameToScreen();
+                int buttonRow = d.Buttons[0].FrameToScreen().Y;
+                string diag = $"dialog={dlgRect} viewport={d.Viewport} label.Frame={label?.Frame} " +
+                              $"label.Screen={label?.FrameToScreen()} buttonRow={buttonRow}\n" +
+                              string.Join("\n", lines.Skip(Math.Max(0, dlgRect.Y)).Take(dlgRect.Height));
+                r = new Rendered(lines, dlgRect, buttonRow,
+                                 (label?.Text ?? "").Split('\n'), diag);
+            });
+            return r!;
+        }
+
+        static void AssertAllLinesVisible(Rendered r)
+        {
+            int prevRow = r.Dialog.Y; // top border row; first body line must be below it
+            foreach (string line in r.LabelLines)
+            {
+                string want = line.TrimEnd();
+                if (want.Length == 0) continue;
+                int found = -1;
+                for (int y = prevRow + 1; y < r.ButtonRow; y++)
+                {
+                    string row = r.Rows[y];
+                    int left = Math.Max(0, r.Dialog.X), width = Math.Min(r.Dialog.Width, row.Length - left);
+                    if (row.Substring(left, width).Contains(want)) { found = y; break; }
+                }
+                Assert.True(found >= 0,
+                    $"line \"{want}\" is not drawn on its own row between the title and the button row (row {r.ButtonRow}).\n{r.Diag}");
+                prevRow = found;
+            }
+        }
+
+        [Fact]
+        public async Task ApprovalDialog_ShortPrompt_TextIsDrawnOnScreen()
+        {
+            using var ta = TestApp.Start(120, 30);
+            var confirmTask = ((IAgenticHost)ta.Host).ConfirmActionAsync("Create file Foo.cs (123 chars)?");
+            await WaitDialogOpenAsync(ta);
+
+            var r = await RenderDialogAsync(ta);
+            Assert.Contains(r.Rows.Skip(r.Dialog.Y).Take(r.ButtonRow - r.Dialog.Y), row => row.Contains("Foo.cs"));
+            AssertAllLinesVisible(r);
+
+            ta.App.Invoke(() => ta.App.Keyboard.RaiseKeyDownEvent(Key.Esc));
+            Assert.False(await AwaitAsync(confirmTask));
+            await WaitDialogClosedAsync(ta);
+        }
+
+        [Fact]
+        public async Task ApprovalDialog_WrappedPrompt_AllLinesDrawnAboveButtons()
+        {
+            using var ta = TestApp.Start(120, 30);
+            string msg = "Run MCP tool comfy.run_workflow " +
+                         string.Join(" ", Enumerable.Range(1, 60).Select(i => $"arg{i}=v{i}"));
+            var confirmTask = ((IAgenticHost)ta.Host).ConfirmActionAsync(msg);
+            await WaitDialogOpenAsync(ta);
+
+            var r = await RenderDialogAsync(ta);
+            Assert.True(r.LabelLines.Length >= 3, $"expected a wrapped (multi-line) prompt, got {r.LabelLines.Length} line(s)");
+            AssertAllLinesVisible(r);
+
+            ta.App.Invoke(() => ta.App.Keyboard.RaiseKeyDownEvent(Key.Esc));
+            Assert.False(await AwaitAsync(confirmTask));
+            await WaitDialogClosedAsync(ta);
+        }
+
         // ── Test 4: ConfirmContinueAsync still uses "Token budget" ────────────
         // The budget guard's dialog is unchanged — only the approval prompt moved.
         [Fact]
