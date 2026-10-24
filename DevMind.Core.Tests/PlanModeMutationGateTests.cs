@@ -270,10 +270,12 @@ namespace DevMind.Core.Tests
             Assert.DoesNotContain("[PLAN MODE]", host.Output, StringComparison.Ordinal);
         }
 
-        // ── reads and builds stay free ─────────────────────────────────────────
+        // ── reads stay free ────────────────────────────────────────────────────
+        // run_build and run_tests are NOT free in Plan: anything that executes code goes
+        // through the gate (see AgenticExecutorApprovalRoutingTests.RunTests_*).
 
         [Fact]
-        public async Task Plan_LeavesReadToolsAndBuildsUntouched()
+        public async Task Plan_LeavesReadToolsUntouched()
         {
             var (exec, host) = Build(ApprovalMode.Plan);
 
@@ -282,17 +284,11 @@ namespace DevMind.Core.Tests
                 {
                     Type = BlockType.ReadRequest,
                     FileName = "Foo.cs",
-                },
-                new ResponseBlock
-                {
-                    Type = BlockType.Test,
-                    TestProject = "DevMind.Core.Tests",
                 }));
 
-            // No refusal of any kind: reads and run_tests are not mutations.
+            // No refusal of any kind: reads are not gated.
             Assert.Empty(result.Errors);
             Assert.Empty(host.ConfirmPrompts);
-            Assert.Equal(0, result.ShellExitCode);   // run_tests reported no failure
         }
 
         // ── Auto stays exactly as today ────────────────────────────────────────

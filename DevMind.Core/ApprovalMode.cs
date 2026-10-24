@@ -15,6 +15,15 @@
 // refusal the model can finish with a plan instead of retrying. The enum is named for the
 // question it answers rather than for its members, so a fourth can be added without renaming.
 //
+// What is gated (Auto runs, Manual asks, Plan refuses): anything that executes code, i.e.
+// run_shell, run_build and run_tests; file writes (patch_file via the diff card, create_file,
+// append_file), delete_file, rename_file; and MCP tool calls. save_memory and run_sql with
+// allow_write are refused in Plan only (Manual dispatches them without asking).
+// What is NOT gated in any mode: read-only tools (read_file, grep_file, find_in_files,
+// list_files, diff_file, LSP lookups, memory/library/web/learn lookups, run_sql read-only),
+// and the headless harness's own build/test verification, which the harness runs itself
+// rather than through a model tool call.
+//
 // The decision lives in ApprovalPolicy rather than at the six call sites, because six
 // scattered `if (mode == ...)` checks is how a new mutation tool silently ships ungated —
 // adding a MutationKind forces a decision here, in one place, with a test over every pair.
@@ -32,15 +41,17 @@ namespace DevMind
 
         /// <summary>
         /// Ask before every mutation: every patch goes through the diff-preview card
-        /// (exact matches included), and each file write, delete, rename and shell command
-        /// is confirmed first. A refusal is reported to the model AS a refusal.
+        /// (exact matches included), and each file write, delete, rename, MCP call and every
+        /// code execution (run_shell, run_build, run_tests) is confirmed first. A refusal is
+        /// reported to the model AS a refusal.
         /// </summary>
         Manual,
 
         /// <summary>
         /// Analyze only. Every mutation is REFUSED outright — no prompt, no diff card —
         /// and the refusal the model receives says so in plain terms, so the run ends in a
-        /// concrete plan. Read-only tools, run_build and run_tests work as usual.
+        /// concrete plan. Code execution (run_shell, run_build, run_tests) is refused too;
+        /// only read-only tools work as usual.
         /// </summary>
         Plan,
     }
@@ -58,7 +69,11 @@ namespace DevMind
         DeleteFile,
         RenameFile,
 
-        /// <summary>run_shell. NOT run_build or run_tests — see <see cref="ApprovalPolicy"/>.</summary>
+        /// <summary>
+        /// Code execution: run_shell, run_build and run_tests (and the RunShell action path),
+        /// plus MCP tool calls, which the executor gates under the same kind. They share a
+        /// kind because the question is the same — "may the agent run something external?".
+        /// </summary>
         Shell,
 
         /// <summary>
@@ -142,12 +157,11 @@ namespace DevMind
     /// own gate reads <c>Decide</c> directly.
     /// </para>
     /// <para>
-    /// <c>run_build</c> and <c>run_tests</c> are execution but not mutation, and are
-    /// deliberately NOT gated in any mode. A build is how you verify the edit you just
-    /// approved (or, in Plan, the ONLY verification you are left with); asking twice per
-    /// iteration is what makes people turn the mode off, and a mode nobody leaves on
-    /// protects nothing. They also cannot write outside what the build system already does,
-    /// which is not a boundary this gate was built for.
+    /// Anything that executes code is gated as <see cref="MutationKind.Shell"/>:
+    /// <c>run_shell</c>, <c>run_build</c> and <c>run_tests</c> alike. A build or test run
+    /// executes arbitrary code (MSBuild targets, test assemblies), so it is no safer than a
+    /// shell command. The headless harness's own build/test verification is not a model tool
+    /// call and is not gated.
     /// </para>
     /// </summary>
     public static class ApprovalPolicy

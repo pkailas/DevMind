@@ -296,8 +296,9 @@ namespace DevMind
                         }
                         // run_shell and run_build both map to a Shell block; ToolName (set by
                         // ToolCallMapper) says which one the model actually called.
+                        string shellVerb = block.ToolName == "run_build" ? "Run build" : "Run shell";
                         if (!await ApproveMutationAsync(MutationKind.Shell,
-                                $"Run shell: {DescribeCommand(block.Command)}", result,
+                                $"{shellVerb}: {DescribeCommand(block.Command)}", result,
                                 ApprovalDetail(block.ToolName ?? "run_shell", block.Command)))
                         {
                             // The model reads ShellOutput verbatim (LoopHelpers' run_shell
@@ -511,6 +512,23 @@ namespace DevMind
                         break;
 
                     case BlockType.Test:
+                        // run_tests executes code (the test assemblies), so it is gated
+                        // exactly like run_shell / run_build: Auto runs, Manual asks, Plan
+                        // refuses. The harness's own verify_tests run is NOT a model tool
+                        // call and never comes through here.
+                        string testsWhat = DescribeTests(block);
+                        if (!await ApproveMutationAsync(MutationKind.Shell,
+                                $"Run tests: {testsWhat}", result,
+                                ApprovalDetail(block.ToolName ?? "run_tests", TestsDetail(block))))
+                        {
+                            // LoopHelpers' run_tests case returns ShellOutput verbatim, so the
+                            // refusal reaches the model as the run's own result, never as
+                            // "[Tests executed]" or an empty pass.
+                            result.ShellExitCode    = 1;
+                            result.ShellOutput      = ShellRefusalOutput(result, tests: true);
+                            result.LastShellCommand = $"TEST {block.TestProject}";
+                            break;
+                        }
                         try
                         {
                            string testSummary = await _host.RunTestsAsync(block.TestProject, block.TestFilter, block.TestTimeoutSeconds);
@@ -1141,13 +1159,15 @@ namespace DevMind
         /// wording it always had, because a model that was told "plan mode" about a user's
         /// _Stop answer would be misinformed about why.
         /// </summary>
-        private static string ShellRefusalOutput(ExecutionResult result)
+        private static string ShellRefusalOutput(ExecutionResult result, bool tests = false)
         {
             bool planRefusal = result.Errors.Count > 0
                 && result.Errors[result.Errors.Count - 1].StartsWith("[PLAN MODE]", StringComparison.Ordinal);
-            return planRefusal
-                ? result.Errors[^1]
-                : "The user declined to run this command in manual approval mode. It was NOT executed \u2014 do not assume any of its effects happened.";
+            if (planRefusal)
+                return result.Errors[^1];
+            if (tests)
+                return "The user declined to run these tests in manual approval mode. They were NOT run; do not assume they passed.";
+            return "The user declined to run this command in manual approval mode. It was NOT executed \u2014 do not assume any of its effects happened.";
         }
 
         /// <summary>
@@ -1161,6 +1181,32 @@ namespace DevMind
             string text = (body ?? string.Empty).Replace("\r", string.Empty).Trim();
             return text.Length == 0 ? $"Tool: {tool}" : $"Tool: {tool}\n{text}";
         }
+
+
+        /// <summary>run_tests as a one-line prompt: the project (or the host's auto-detect)
+        /// and the filter when there is one.</summary>
+        private static string DescribeTests(ResponseBlock block)
+        {
+            string project = string.IsNullOrWhiteSpace(block.TestProject)
+                ? "(auto-detected project)" : block.TestProject.Trim();
+            string text = string.IsNullOrWhiteSpace(block.TestFilter)
+                ? project : $"{project} --filter {block.TestFilter.Trim()}";
+            return DescribeCommand(text);
+        }
+
+        /// <summary>run_tests for the approval dialog: every argument the host will use to
+        /// build the `dotnet test` invocation.</summary>
+        private static string TestsDetail(ResponseBlock block)
+        {
+            string text = "project: " + (string.IsNullOrWhiteSpace(block.TestProject)
+                ? "(none; the host auto-detects one)" : block.TestProject.Trim());
+            if (!string.IsNullOrWhiteSpace(block.TestFilter))
+                text += "\nfilter: " + block.TestFilter.Trim();
+            if (block.TestTimeoutSeconds.HasValue)
+                text += $"\ntimeout: {block.TestTimeoutSeconds.Value} s";
+            return text;
+        }
+
 
         /// <summary>
         /// A shell command as a one-line prompt: first line, plus a length when there is more.

@@ -71,8 +71,12 @@ namespace DevMind.Core.Tests
             public Task<string> DeleteFileAsync(string filename) => Task.FromResult("Deleted");
             public Task<string> RenameFileAsync(string oldFilename, string newFilename) => Task.FromResult("Renamed");
             public Task<string> GetFileDiffAsync(string filename) => Task.FromResult("");
+            public int RunTestsCalls { get; private set; }
             public Task<string> RunTestsAsync(string project, string filter, int? timeoutSeconds = null)
-                => Task.FromResult("");
+            {
+                RunTestsCalls++;
+                return Task.FromResult("Passed! - Failed: 0, Passed: 3, Total: 3");
+            }
             public Task<(PatchResolveResult? result, string? failureReason)> ResolvePatchAsync(string patchContent, bool fromToolCall = false)
                 => Task.FromResult<(PatchResolveResult?, string?)>((null, null));
             public Task<(string? fullPath, string? failureReason)> ApplyResolvedPatchAsync(PatchResolveResult resolved)
@@ -400,6 +404,102 @@ namespace DevMind.Core.Tests
             Assert.DoesNotContain("print('hello')", refusal);
             Assert.DoesNotContain("print('hello')", host.Output.ToString());
             Assert.Single(Lines(host.Output.ToString()), l => l.StartsWith("[PLAN MODE] Refused:"));
+        }
+
+        // ── run_tests executes code, so it is gated exactly like run_build ─────
+        // Auto runs it, Manual asks first (a decline means NOT run and the model is told
+        // so), Plan refuses without asking.
+
+        private static ResponseOutcome TestsOutcome()
+            => ToolOutcome("run_tests", new Dictionary<string, string>
+            {
+                ["project"] = "DevMind.Core.Tests",
+                ["filter"]  = "FullyQualifiedName~Approval",
+            });
+
+        private static string RunTestsToolResult(ExecutionResult result)
+            => LoopHelpers.BuildToolResultContent(
+                new ToolCallResult { Name = "run_tests", Arguments = new Dictionary<string, string>() },
+                result,
+                new List<ResponseBlock>());
+
+        [Fact]
+        public async Task RunTests_Manual_AsksFirst_AndADeclineRunsNothing_AndTellsTheModelNotRun()
+        {
+            var host = new RoutingRecordingHost { ConfirmAnswer = false };
+            var executor = new AgenticExecutor(host, new ManualApprovalOptions());
+            executor.SetCancellationToken(CancellationToken.None);
+
+            var result = await executor.ExecuteAsync(new AgenticAction { Type = ActionType.ApplyAndBuild },
+                TestsOutcome());
+
+            // Asked through the approval dialog, naming the tool and what would run.
+            Assert.Single(host.ConfirmActionDetails);
+            Assert.StartsWith("Tool: run_tests", host.ConfirmActionDetails[0]);
+            Assert.Contains("DevMind.Core.Tests", host.ConfirmActionDetails[0]);
+            Assert.Contains("FullyQualifiedName~Approval", host.ConfirmActionDetails[0]);
+            Assert.DoesNotContain("\n", host.ConfirmActionPrompts[0]);
+            Assert.Empty(host.ConfirmContinuePrompts);
+
+            // Declined: nothing ran, and the result is a failure, not a pass.
+            Assert.Equal(0, host.RunTestsCalls);
+            Assert.NotEqual(0, result.ShellExitCode);
+
+            string toolResult = RunTestsToolResult(result);
+            Assert.Contains("declined", toolResult, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("NOT run", toolResult, StringComparison.Ordinal);
+            Assert.DoesNotContain("[Tests executed]", toolResult, StringComparison.Ordinal);
+        }
+
+        [Fact]
+        public async Task RunTests_Manual_Approved_Runs()
+        {
+            var host = new RoutingRecordingHost { ConfirmAnswer = true };
+            var executor = new AgenticExecutor(host, new ManualApprovalOptions());
+            executor.SetCancellationToken(CancellationToken.None);
+
+            var result = await executor.ExecuteAsync(new AgenticAction { Type = ActionType.ApplyAndBuild },
+                TestsOutcome());
+
+            Assert.Single(host.ConfirmActionDetails);
+            Assert.Equal(1, host.RunTestsCalls);
+            Assert.Equal(0, result.ShellExitCode);
+        }
+
+        [Fact]
+        public async Task RunTests_Plan_IsRefused_NeverAsks_NothingRuns()
+        {
+            var host = new RoutingRecordingHost();
+            var executor = new AgenticExecutor(host, new ManualApprovalOptions { Mode = ApprovalMode.Plan });
+            executor.SetCancellationToken(CancellationToken.None);
+
+            var result = await executor.ExecuteAsync(new AgenticAction { Type = ActionType.ApplyAndBuild },
+                TestsOutcome());
+
+            Assert.Empty(host.ConfirmActionPrompts);
+            Assert.Empty(host.ConfirmContinuePrompts);
+            Assert.Equal(0, host.RunTestsCalls);
+            Assert.NotEqual(0, result.ShellExitCode);
+
+            string toolResult = RunTestsToolResult(result);
+            Assert.Contains("[PLAN MODE]", toolResult, StringComparison.Ordinal);
+            Assert.Contains("plan mode", toolResult, StringComparison.OrdinalIgnoreCase);
+        }
+
+        [Fact]
+        public async Task RunTests_Auto_Runs_WithoutAsking()
+        {
+            var host = new RoutingRecordingHost();
+            var executor = new AgenticExecutor(host, new ManualApprovalOptions { Mode = ApprovalMode.Auto });
+            executor.SetCancellationToken(CancellationToken.None);
+
+            var result = await executor.ExecuteAsync(new AgenticAction { Type = ActionType.ApplyAndBuild },
+                TestsOutcome());
+
+            Assert.Empty(host.ConfirmActionPrompts);
+            Assert.Empty(host.ConfirmContinuePrompts);
+            Assert.Equal(1, host.RunTestsCalls);
+            Assert.Equal(0, result.ShellExitCode);
         }
     }
 }
