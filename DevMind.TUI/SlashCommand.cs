@@ -243,14 +243,27 @@ namespace DevMind
         // -- File checkpoints (/rewind part 2b) -----------------------------------
 
         /// <summary>
+        /// Where <see cref="FileRestorePlan"/> lives. The host builds a NEW context per
+        /// slash command, so the plan /rewind N stages must outlive that context: the TUI
+        /// passes ONE slot for the whole session into every context. Defaults to a fresh
+        /// slot, so a context built without one behaves as a self-contained unit.
+        /// </summary>
+        public FileRestorePlanSlot FileRestorePlanSlot { get; init; } = new FileRestorePlanSlot();
+
+        /// <summary>
         /// The pending file-restore plan from the last /rewind N: which repo, which
         /// checkpoint commit, and which paths to restore. Set by /rewind N (after the
         /// conversation fork and memory restore), consumed and cleared by /rewind files.
         /// Null when no /rewind N has run in this process, or when /rewind files
         /// already applied it. The plan is process-state only — a /rewind in a new
-        /// process has no pending plan and says so.
+        /// process has no pending plan and says so. Reads and writes go through
+        /// <see cref="FileRestorePlanSlot"/>.
         /// </summary>
-        public PendingFileRestorePlan FileRestorePlan { get; set; }
+        public PendingFileRestorePlan FileRestorePlan
+        {
+            get => FileRestorePlanSlot.Plan;
+            set => FileRestorePlanSlot.Plan = value;
+        }
 
         // -- Multimodal (/image) ----------------------------------------------------
 
@@ -268,6 +281,22 @@ namespace DevMind
         /// report the same percentage for the same prompt. 0 only if a non-positive manual
         /// context size was configured; the handler falls back to "window not yet determined".</summary>
         public int ContextWindowSize { get; set; }
+    }
+
+    /// <summary>
+    /// Holds the pending file-restore plan across slash commands (the host builds a new
+    /// <see cref="CommandContext"/> per command). A pending plan is only meant for
+    /// "rewind the conversation, then optionally restore files to that point" — applied
+    /// later it would overwrite work done since — so the host clears it when a model turn
+    /// starts and when the conversation is reset (/new, /clear, /resume; /rewind N stages
+    /// its plan AFTER its own reset).
+    /// </summary>
+    public sealed class FileRestorePlanSlot
+    {
+        public PendingFileRestorePlan Plan { get; set; }
+
+        /// <summary>Drop any pending plan.</summary>
+        public void Clear() => Plan = null;
     }
 
     /// <summary>
@@ -1977,9 +2006,13 @@ namespace DevMind
                                 !string.IsNullOrEmpty(manifest.RepoRoot) &&
                                 !string.IsNullOrEmpty(manifest.CommitSha))
                             {
+                                // Stamped with the FORK's id: the fork is the session
+                                // live when /rewind files runs (adopted above). The repo
+                                // root, commit and paths come from the ORIGINAL session's
+                                // turn-N manifest.
                                 ctx.FileRestorePlan = new PendingFileRestorePlan
                                 {
-                                    SessionId = ctx.SessionId,
+                                    SessionId = newId,
                                     RepoRoot = manifest.RepoRoot,
                                     CheckpointCommit = manifest.CommitSha,
                                     TurnNumber = n,
@@ -2034,11 +2067,14 @@ namespace DevMind
                 };
 
             if (!string.Equals(plan.SessionId, ctx.SessionId, StringComparison.Ordinal))
+            {
+                ctx.FileRestorePlan = null;
                 return new CommandResult
                 {
                     Message = $"The pending plan belongs to session {ShortId(plan.SessionId)}, not the current session {ShortId(ctx.SessionId)}. The plan was cleared.",
                     IsError = true,
                 };
+            }
 
             if (plan.Paths.Count == 0)
             {

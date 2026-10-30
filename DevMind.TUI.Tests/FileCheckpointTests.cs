@@ -503,6 +503,9 @@ namespace DevMind.TUI.Tests
             var result = await SlashCommand.Dispatch("/rewind files", ctx);
             Assert.True(result.IsError);
             Assert.Contains("belongs to session", result.Message);
+            // The message says "The plan was cleared." — it must be.
+            Assert.Contains("The plan was cleared.", result.Message);
+            Assert.True(ctx.FileRestorePlan == null, "a mismatched plan must be cleared, as the message says");
         }
 
         [Fact]
@@ -538,6 +541,149 @@ namespace DevMind.TUI.Tests
             Assert.Contains("Restored 1 file(s)", result.Message);
             Assert.Equal("original readme\n", File.ReadAllText(Path.Combine(_repo, "README.md")));
             Assert.True(ctx.FileRestorePlan == null, "the plan must be cleared after it is applied");
+        }
+
+        // ── /rewind N then /rewind files across command contexts ─────────
+        // The TUI builds a NEW CommandContext per slash command, all sharing ONE
+        // FileRestorePlanSlot, and the second context's SessionId is the fork id the
+        // first command adopted. These tests build the contexts that way.
+
+        /// <summary>Just enough history for /rewind N: three user turns of session S.</summary>
+        private sealed class TurnsStore : IHistoryStore
+        {
+            static HistoryMessage Row(int turn, string role, string content) => new HistoryMessage
+            {
+                SessionId = S, MachineName = "beast", TurnIndex = turn, Role = role, Content = content,
+                CreatedAt = new DateTime(2026, 9, 27, 10, 0, turn, 0, DateTimeKind.Utc),
+            };
+
+            readonly HistoryMessage[] _rows =
+            {
+                Row(0, "user", "turn one"), Row(0, "assistant", "done one"),
+                Row(1, "user", "turn two"), Row(1, "assistant", "done two"),
+                Row(2, "user", "turn three"), Row(2, "assistant", "done three"),
+            };
+
+            public Task<HistoryMessage[]> LoadSessionMessagesAsync(string sessionId) => Task.FromResult(_rows);
+            public Task SaveMessagesAsync(HistoryMessage[] messages) => Task.CompletedTask;
+            public Task UpsertSessionAsync(string sessionId, string machineName) => Task.CompletedTask;
+            public Task SetSessionTitleAsync(string sessionId, string title) => Task.CompletedTask;
+            public Task<SessionSummary[]> ListSessionsAsync(string machineName)
+                => Task.FromResult(Array.Empty<SessionSummary>());
+            public Task<HistoryMessage[]> LoadMessagesAsync(string machineName, int maxTurns)
+                => Task.FromResult(Array.Empty<HistoryMessage>());
+            public Task InitAsync() => Task.CompletedTask;
+            public Task CloseAsync() => Task.CompletedTask;
+        }
+
+        /// <summary>
+        /// The context for ONE slash command, built the way Program.cs builds it: the
+        /// session's shared slot (null = the default, a fresh slot per context), the live
+        /// session id, and a ResetConversation that clears the slot as Program.cs's does.
+        /// </summary>
+        CommandContext CommandCtx(FileRestorePlanSlot? slot, string sessionId, Action<string> adopt)
+        {
+            var ctx = slot == null
+                ? new CommandContext()
+                : new CommandContext { FileRestorePlanSlot = slot };
+            ctx.HistoryStore = new TurnsStore();
+            ctx.SessionId = sessionId;
+            ctx.MachineName = "beast";
+            ctx.WorkingDirectory = _repo;
+            ctx.MemoryCheckpointRoot = _root;
+            ctx.ResetConversation = () => ctx.FileRestorePlanSlot.Clear();
+            ctx.AdoptSessionId = adopt;
+            ctx.PrependMessages = (_, _) => { };
+            return ctx;
+        }
+
+        /// <summary>Turn 2's snapshot of README.md = "original readme", then a later edit.</summary>
+        async Task SnapshotTurnTwoThenEditReadme()
+        {
+            await Cp().SnapshotAtTurnStartAsync(1);
+            File.WriteAllText(Path.Combine(_repo, "README.md"), "original readme\n");
+            await Cp().SnapshotAtTurnStartAsync(2);
+            File.WriteAllText(Path.Combine(_repo, "README.md"), "mutated in turn 2\n");
+        }
+
+        [Fact]
+        public async Task RewindN_ThenRewindFiles_InSeparateContexts_SharingTheSessionSlot_AppliesThePlan()
+        {
+            await SnapshotTurnTwoThenEditReadme();
+            var slot = new FileRestorePlanSlot();
+            string? forkId = null;
+
+            var ctx1 = CommandCtx(slot, S, id => forkId = id);
+            var rewind = await SlashCommand.Dispatch("/rewind 2", ctx1);
+            Assert.False(rewind.IsError, rewind.Message);
+            Assert.NotNull(forkId);
+
+            // The next command: a NEW context on the same slot, live on the adopted fork.
+            var ctx2 = CommandCtx(slot, forkId!, _ => { });
+            var files = await SlashCommand.Dispatch("/rewind files", ctx2);
+            Assert.False(files.IsError, files.Message);
+            Assert.Contains("Restored 1 file(s)", files.Message);
+            Assert.Equal("original readme\n", File.ReadAllText(Path.Combine(_repo, "README.md")));
+            Assert.True(slot.Plan == null, "the applied plan must be cleared from the shared slot");
+        }
+
+        [Fact]
+        public async Task RewindN_ThenRewindFiles_InSeparateDefaultContexts_FindsNoPlan_TheOldBehaviour()
+        {
+            // Before the shared slot, each command's context held its own plan: the one
+            // /rewind N staged went away with its context.
+            await SnapshotTurnTwoThenEditReadme();
+            string? forkId = null;
+
+            var ctx1 = CommandCtx(null, S, id => forkId = id);
+            Assert.False((await SlashCommand.Dispatch("/rewind 2", ctx1)).IsError);
+            Assert.NotNull(ctx1.FileRestorePlan);
+
+            var ctx2 = CommandCtx(null, forkId!, _ => { });
+            var files = await SlashCommand.Dispatch("/rewind files", ctx2);
+            Assert.True(files.IsError);
+            Assert.Contains("No pending file-restore plan", files.Message);
+            Assert.Equal("mutated in turn 2\n", File.ReadAllText(Path.Combine(_repo, "README.md")));
+        }
+
+        [Fact]
+        public async Task RewindN_StagesItsPlanAfterItsOwnReset_StampedWithTheForkId()
+        {
+            await SnapshotTurnTwoThenEditReadme();
+            var slot = new FileRestorePlanSlot();
+            // A stale plan from earlier: the rewind's own reset must drop it.
+            slot.Plan = new PendingFileRestorePlan { SessionId = "stale", TurnNumber = 9 };
+            string? forkId = null;
+
+            var ctx1 = CommandCtx(slot, S, id => forkId = id);
+            Assert.False((await SlashCommand.Dispatch("/rewind 2", ctx1)).IsError);
+
+            Assert.NotNull(slot.Plan);
+            Assert.Equal(2, slot.Plan!.TurnNumber);
+            Assert.Equal(forkId, slot.Plan.SessionId);
+            // The restore source is still the ORIGINAL session's turn-2 checkpoint.
+            Assert.Equal(Git(_repo, "rev-parse", $"refs/devmind/checkpoints/{S}/turn-2"), slot.Plan.CheckpointCommit);
+        }
+
+        [Theory]
+        [InlineData("/new")]
+        [InlineData("/clear")]
+        public async Task PendingPlan_IsDroppedByAConversationReset(string command)
+        {
+            var slot = new FileRestorePlanSlot { Plan = new PendingFileRestorePlan { SessionId = S, TurnNumber = 1 } };
+            var ctx = CommandCtx(slot, S, _ => { });
+            Assert.False((await SlashCommand.Dispatch(command, ctx)).IsError);
+            Assert.True(slot.Plan == null, $"{command} resets the conversation, which must drop the pending plan");
+        }
+
+        [Fact]
+        public void PendingPlan_IsDroppedByTheSlotClear_TheTurnStartPath()
+        {
+            // Program.cs's BeginTurnAsync (normal turn and /t) calls slot.Clear().
+            var slot = new FileRestorePlanSlot { Plan = new PendingFileRestorePlan { SessionId = S } };
+            var ctx = new CommandContext { FileRestorePlanSlot = slot };
+            slot.Clear();
+            Assert.True(ctx.FileRestorePlan == null);
         }
 
         // ── Fork inheritance of refs ─────────────────────────────────────────

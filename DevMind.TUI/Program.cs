@@ -472,6 +472,11 @@ namespace DevMind
 
             var cts = new CancellationTokenSource();
 
+            // The pending /rewind files plan, shared by every slash command's context (each
+            // command builds a new one). Cleared when a model turn starts and when the
+            // conversation resets — a stale plan applied later would overwrite newer work.
+            var fileRestorePlanSlot = new FileRestorePlanSlot();
+
             // ── Terminal.Gui v2 Application ────────────────────────────────────────
 
             IApplication app = Application.Create();
@@ -1111,6 +1116,9 @@ namespace DevMind
             // The box stays live during the turn: typing is a steer (SteerInputRouter).
             Task BeginTurnAsync() => OnUiAsync(() =>
             {
+                // A new turn changes the working tree; a pending /rewind files plan from
+                // before it would overwrite that work.
+                fileRestorePlanSlot.Clear();
                 statusBar.SetBusy("Processing...");
                 _isTurnRunning = true;  host.SetStreaming(true);
                 callbacks.BeginTurn();
@@ -1748,8 +1756,12 @@ namespace DevMind
                         // minus response headroom and made /prompt report a percentage the
                         // warning disagreed with.
                         ContextWindowSize = llmClient.EffectiveContextWindow,
+                        FileRestorePlanSlot = fileRestorePlanSlot,
                        ResetConversation = () =>
                         {
+                            // /new, /clear and /resume drop a pending /rewind files plan;
+                            // /rewind N stages its own AFTER this reset.
+                            fileRestorePlanSlot.Clear();
                             state.ResetForUserTurn();
                             llmClient.ClearHistory();
                             // Images staged but not yet sent belong to the discarded
