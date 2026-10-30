@@ -535,6 +535,36 @@ namespace DevMind
         private static int EstimateTokens(string text) => (text?.Length ?? 0) / 4 + 4;
 
         /// <summary>
+        /// Estimated prompt size of the next send, for the pre-send guard in
+        /// <see cref="SendMessageAsync"/>. With a server count (n_past), that count covers every
+        /// message before <see cref="_lastServerCountIndex"/> (images included) and only the
+        /// messages added since are estimated; without one, the whole history is estimated.
+        /// Uses <see cref="EstimateMessageTokens"/> so image parts count — the text-only
+        /// estimate let an image-heavy message pass the guard and be rejected by the server.
+        /// </summary>
+        private int EstimatePromptTotal()
+        {
+            int total;
+            if (LastContextUsed > 0 && ServerContextSize > 0)
+            {
+                // Estimate tokens for ALL messages added since the last server response.
+                // _lastServerCountIndex marks how many messages were in history when n_past was captured.
+                // Everything from that index onward is new and not yet counted by the server.
+                total = LastContextUsed;
+                for (int i = _lastServerCountIndex; i < _conversationHistory.Count; i++)
+                    total += EstimateMessageTokens(_conversationHistory[i]);
+            }
+            else
+            {
+                // No server data yet (first turn) — fall back to full estimation
+                total = 0;
+                foreach (var msg in _conversationHistory)
+                    total += EstimateMessageTokens(msg);
+            }
+            return total;
+        }
+
+        /// <summary>
         /// Estimates a message's prompt-token cost: text estimate plus a flat
         /// <see cref="ImageTokenEstimatePerPart"/> for each image_url content part.
         /// Without the image term, multimodal messages are invisible to budget and
@@ -1302,7 +1332,7 @@ namespace DevMind
                     // Original soft/hard trim logic for when MicroCompact is disabled
                     _budget.Assess(_conversationHistory, EstimateTokens);
                     int totalHistoryTokens = _budget.SystemPromptUsed + _budget.WorkingHistoryUsed + _budget.ProtectedTurnsUsed
-                        + EstimateTokens(_conversationHistory[_conversationHistory.Count - 1].Content);
+                        + EstimateMessageTokens(_conversationHistory[_conversationHistory.Count - 1]);
 
                     // Detect tool_use session: any "tool" role message in history
                     bool isToolUseSession = false;
@@ -1344,23 +1374,7 @@ namespace DevMind
             }
 
             // Use real server context usage when available
-            int grandTotal;
-            if (LastContextUsed > 0 && ServerContextSize > 0)
-            {
-                // Estimate tokens for ALL messages added since the last server response.
-                // _lastServerCountIndex marks how many messages were in history when n_past was captured.
-                // Everything from that index onward is new and not yet counted by the server.
-                grandTotal = LastContextUsed;
-                for (int i = _lastServerCountIndex; i < _conversationHistory.Count; i++)
-                    grandTotal += EstimateTokens(_conversationHistory[i].Content);
-            }
-            else
-            {
-                // No server data yet (first turn) — fall back to full estimation
-                grandTotal = 0;
-                foreach (var msg in _conversationHistory)
-                    grandTotal += EstimateTokens(msg.Content);
-            }
+            int grandTotal = EstimatePromptTotal();
 
             // Compare against server's actual context size when known, otherwise use DevMind's budget.
             // The server knows its own limit — ResponseHeadroom is a DevMind concept, not a server constraint.
@@ -1374,18 +1388,7 @@ namespace DevMind
                     onToken(compactLog);
 
                 // Re-estimate after compaction
-                if (LastContextUsed > 0 && ServerContextSize > 0)
-                {
-                    grandTotal = LastContextUsed;
-                    for (int i = _lastServerCountIndex; i < _conversationHistory.Count; i++)
-                        grandTotal += EstimateTokens(_conversationHistory[i].Content);
-                }
-                else
-                {
-                    grandTotal = 0;
-                    foreach (var msg in _conversationHistory)
-                        grandTotal += EstimateTokens(msg.Content);
-                }
+                grandTotal = EstimatePromptTotal();
             }
 
             if (grandTotal > contextCeiling)

@@ -5,6 +5,9 @@
 //   * ChatMessage.ContentParts construction (5-param vs 6-param constructor)
 //   * LlmClient.RebuildContentParts — compaction must not silently drop images
 //   * LlmClient.EstimateMessageTokens — budget math must count image parts
+//   * The pre-send context guard in SendMessageAsync counts image parts too
+//     (first turn and after a server n_past count)
+
 //   * End-to-end: SendMessageAsync against a fake SSE server, asserting the
 //     ACTUAL request JSON — content is an OpenAI-style parts array (text +
 //     image_url) for image sends, a flat string for text-only sends, and
@@ -224,7 +227,113 @@ namespace DevMind.Core.Tests
             Assert.Equal(JTokenType.String, secondUser["content"]!.Type);
         }
 
+        // ── Pre-send context guard counts image parts ─────────────────────────
+        //
+        // Images live in ContentParts, not Content. The pre-send guard in SendMessageAsync
+        // ("Cannot fit in context window") used the text-only estimator, so a message
+        // carrying many page images passed it and the server rejected the request. With
+        // FakeLlmOptions the ceiling is ManualContextSize (32,768); 40 images at
+        // ImageTokenEstimatePerPart (1,024) each are well past it while the text is tiny.
+
+        private const int ImagesPastCeiling = 40;
+
+        [Fact]
+        public async Task ContextGuard_FirstTurn_ImagesPastCeiling_AbortsWithoutRequest()
+        {
+            using var server = new FakeSseServer();
+            var (client, _) = CreateConfiguredClient(server);
+            for (int i = 0; i < ImagesPastCeiling; i++)
+                client.StagePendingImage($"data:image/png;base64,PAGE{i}");
+
+            var (error, tokens) = await SendCapturingErrorAsync(client, "summarize these pages");
+
+            Assert.NotNull(error);
+            Assert.Contains("Context window is full", error!.Message, StringComparison.Ordinal);
+            Assert.Contains("Cannot fit in context window", tokens, StringComparison.Ordinal);
+            Assert.Empty(server.RequestBodies); // aborted before any chat POST
+        }
+
+        [Fact]
+        public async Task ContextGuard_FirstTurn_SameTextWithoutImages_Sends()
+        {
+            using var server = new FakeSseServer();
+            var (client, _) = CreateConfiguredClient(server);
+
+            var (error, tokens) = await SendCapturingErrorAsync(client, "summarize these pages");
+
+            Assert.Null(error);
+            Assert.DoesNotContain("Cannot fit in context window", tokens, StringComparison.Ordinal);
+            Assert.Single(server.RequestBodies);
+        }
+
+        // The n_past branch: after a server count exists, only messages added since
+        // _lastServerCountIndex are estimated — the new image-bearing message among them.
+        [Fact]
+        public async Task ContextGuard_AfterServerCount_ImagesPastCeiling_AbortsWithoutRequest()
+        {
+            using var server = new FakeSseServer();
+            server.SseQueue.Add(TextSseWithNPast(1_000));
+            var (client, _) = CreateConfiguredClient(server);
+
+            await SendAndAwaitAsync(client, "first turn, text only", imageBase64: null);
+            Assert.Equal(1_000, client.LastContextUsed); // precondition: the n_past branch is live
+
+            for (int i = 0; i < ImagesPastCeiling; i++)
+                client.StagePendingImage($"data:image/png;base64,PAGE{i}");
+            var (error, tokens) = await SendCapturingErrorAsync(client, "now these pages");
+
+            Assert.NotNull(error);
+            Assert.Contains("Cannot fit in context window", tokens, StringComparison.Ordinal);
+            Assert.Single(server.RequestBodies); // only the first turn reached the server
+        }
+
+        [Fact]
+        public async Task ContextGuard_AfterServerCount_SameTextWithoutImages_Sends()
+        {
+            using var server = new FakeSseServer();
+            server.SseQueue.Add(TextSseWithNPast(1_000));
+            var (client, _) = CreateConfiguredClient(server);
+
+            await SendAndAwaitAsync(client, "first turn, text only", imageBase64: null);
+            Assert.Equal(1_000, client.LastContextUsed);
+
+            var (error, tokens) = await SendCapturingErrorAsync(client, "now these pages");
+
+            Assert.Null(error);
+            Assert.DoesNotContain("Cannot fit in context window", tokens, StringComparison.Ordinal);
+            Assert.Equal(2, server.RequestBodies.Count);
+        }
+
         // ── Helpers ───────────────────────────────────────────────────────────
+
+        /// <summary>A text reply whose terminal chunk carries llama-server timings with n_past,
+        /// so the client records LastContextUsed and anchors _lastServerCountIndex.</summary>
+        private static string TextSseWithNPast(int nPast) =>
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n" +
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]," +
+            "\"timings\":{\"prompt_n\":" + nPast + ",\"cache_n\":0,\"n_past\":" + nPast +
+            ",\"prompt_ms\":10.0,\"predicted_n\":5,\"predicted_ms\":50.0,\"n_ctx\":32768}}\n\n" +
+            "data: [DONE]\n\n";
+
+        /// <summary>Sends and returns the onError exception (null on success) plus all streamed
+        /// onToken text, so guard tests can assert the abort instead of rethrowing it.</summary>
+        private static async Task<(Exception? error, string tokens)> SendCapturingErrorAsync(
+            LlmClient client, string message)
+        {
+            var done = new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var tokens = new System.Text.StringBuilder();
+            client.IncrementTurn();
+            await client.SendMessageAsync(
+                message,
+                onToken: t => { lock (tokens) tokens.Append(t); },
+                onComplete: () => done.TrySetResult(null),
+                onError: ex => done.TrySetResult(ex));
+            Assert.True(await Task.WhenAny(done.Task, Task.Delay(15000)) == done.Task,
+                "SendMessageAsync did not complete within 15s");
+            Exception? error = await done.Task;
+            lock (tokens) return (error, tokens.ToString());
+        }
+
 
         private static JArray MakeParts(string text, string imageUrl) => new JArray
         {
