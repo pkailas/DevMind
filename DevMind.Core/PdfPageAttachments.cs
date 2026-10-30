@@ -5,7 +5,8 @@
 // (%PDF- magic bytes, never the extension), rendering a page range to PNGs with the
 // per-page size cap, and the PNG data: URI. /image and view_image both use it; each
 // caller keeps its own policy (page caps, cursors, staging) and its own message texts,
-// so failures come back as a kind plus the facts a caller needs to word them.
+// so failures come back as a kind plus the facts a caller needs to word them. It also
+// extracts a page range's text layer for read_pdf.
 
 using System;
 using System.Collections.Generic;
@@ -69,7 +70,42 @@ namespace DevMind
         public long TotalBytes { get; init; }
     }
 
-    /// <summary>Shared PDF-page attachment mechanics for /image and view_image.</summary>
+    /// <summary>One page's text layer.</summary>
+    public sealed class PdfPageText
+    {
+        /// <summary>1-based page number in the source PDF.</summary>
+        public int PageNumber { get; init; }
+
+        /// <summary>The page's text, line endings normalised to <c>\n</c>, trailing whitespace
+        /// trimmed; empty when the page has no text layer.</summary>
+        public string Text { get; init; } = "";
+
+        /// <summary>Length of <see cref="Text"/>.</summary>
+        public int CharCount => Text.Length;
+
+        /// <summary>True when the page carries at least
+        /// <see cref="PdfPageAttachments.MinTextLayerChars"/> non-whitespace characters.</summary>
+        public bool HasText { get; init; }
+    }
+
+    /// <summary>The outcome of extracting a page range's text: every page, or none and why.</summary>
+    public sealed class PdfTextResult
+    {
+        /// <summary>The pages in order first..last; empty on failure.</summary>
+        public IReadOnlyList<PdfPageText> Pages { get; init; } = Array.Empty<PdfPageText>();
+
+        /// <summary><see cref="PdfRenderFailure.None"/>, <see cref="PdfRenderFailure.OutOfRange"/> or
+        /// <see cref="PdfRenderFailure.Unreadable"/> (text has no size cap, so never PageTooLarge).</summary>
+        public PdfRenderFailure Failure { get; init; }
+
+        public bool Succeeded => Failure == PdfRenderFailure.None;
+
+        /// <summary>The exception message on failure; null otherwise.</summary>
+        public string Message { get; init; }
+    }
+
+    /// <summary>Shared PDF-page attachment mechanics for /image and view_image, and text
+    /// extraction for read_pdf.</summary>
     public static class PdfPageAttachments
     {
         /// <summary>True when the file starts with the PDF magic bytes <c>%PDF-</c>. I/O errors
@@ -130,6 +166,57 @@ namespace DevMind
                 pages.Add(new RenderedPdfPage { PageNumber = first + i, PageCount = rendered[i].PageCount, PngBytes = png });
             }
             return new PdfRenderResult { Pages = pages, TotalBytes = totalBytes };
+        }
+
+        /// <summary>
+        /// A page "has text" with at least this many non-whitespace characters. A scanned page
+        /// can still carry a few stray glyphs (a stamped page number, "Page 3 of 10" = 9) that
+        /// are not a usable text layer; 16 is above such stamps yet below any real line of text.
+        /// </summary>
+        public const int MinTextLayerChars = 16;
+
+        /// <summary>
+        /// Extracts the text layer of the inclusive 1-based range <paramref name="first"/>..<paramref name="last"/>
+        /// (<see cref="PdfRasterizer.ExtractPagesText"/>), in PDFium's reading order, line endings
+        /// normalised to <c>\n</c>. All or nothing: a range outside the document or an unreadable
+        /// file returns no pages. Never throws for those.
+        /// </summary>
+        public static PdfTextResult ExtractText(string path, int first, int last)
+        {
+            List<string> raw;
+            try
+            {
+                raw = PdfRasterizer.ExtractPagesText(path, first, last);
+            }
+            catch (InvalidOperationException ex)
+            {
+                return new PdfTextResult { Failure = PdfRenderFailure.OutOfRange, Message = ex.Message };
+            }
+            catch (Exception ex)
+            {
+                return new PdfTextResult { Failure = PdfRenderFailure.Unreadable, Message = ex.Message };
+            }
+
+            var pages = new List<PdfPageText>(raw.Count);
+            for (int i = 0; i < raw.Count; i++)
+            {
+                string text = NormalizeText(raw[i]);
+                pages.Add(new PdfPageText { PageNumber = first + i, Text = text, HasText = CountNonWhitespace(text) >= MinTextLayerChars });
+            }
+            return new PdfTextResult { Pages = pages };
+        }
+
+        /// <summary>CRLF and lone CR become LF; NULs (buffer terminators) are dropped; trailing
+        /// whitespace is trimmed.</summary>
+        internal static string NormalizeText(string raw)
+            => (raw ?? "").Replace("\0", "").Replace("\r\n", "\n").Replace('\r', '\n').TrimEnd();
+
+        private static int CountNonWhitespace(string text)
+        {
+            int n = 0;
+            foreach (char c in text)
+                if (!char.IsWhiteSpace(c)) n++;
+            return n;
         }
 
         /// <summary>The data: URI the chat protocol expects for a rendered page.</summary>

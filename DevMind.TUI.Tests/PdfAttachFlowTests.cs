@@ -16,7 +16,7 @@ namespace DevMind.TUI.Tests
         private const string Pdf = @"C:\docs\report.pdf";
         private const string Pdf2 = @"C:\docs\spec.pdf";
 
-        private readonly List<(string DataUri, string? SavedPath)> _staged = new();
+        private readonly List<(string DataUri, string? SavedPath, string PdfPath, int Page)> _staged = new();
         private readonly List<string> _saveLabels = new();
         private readonly List<string> _echo = new();
         private readonly List<string> _messages = new();
@@ -52,7 +52,7 @@ namespace DevMind.TUI.Tests
             },
             Render = render ?? FakeRender,
             Save = (dataUri, label) => { _saveLabels.Add(label); return @"C:\saved\" + label; },
-            Stage = (dataUri, savedPath) => _staged.Add((dataUri, savedPath)),
+            Stage = (dataUri, savedPath, pdfPath, page) => _staged.Add((dataUri, savedPath, pdfPath, page)),
             Echo = line => _echo.Add(line),
         };
 
@@ -98,6 +98,8 @@ namespace DevMind.TUI.Tests
             Assert.Equal(new[] { "report.pdf p2", "report.pdf p3" }, _saveLabels);
             Assert.Equal(2, _staged.Count);
             Assert.Equal("[attached: report.pdf pages 2-3 (2 images, ~2K tokens)]", Assert.Single(_echo));
+            // Each page carries its source PDF and page number for its placeholder.
+            Assert.Equal(new[] { (Pdf, 2), (Pdf, 3) }, _staged.Select(s => (s.PdfPath, s.Page)));
         }
 
         [Fact]

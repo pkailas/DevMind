@@ -436,6 +436,16 @@ namespace DevMind
                         return "[VIEW_IMAGE ERROR] result not available — nothing was attached.";
                     }
 
+                case "read_pdf":
+                    {
+                        // Normally answered above from ToolResultsByCallId; this is the id-less fallback.
+                        if (result.ToolResultContents != null &&
+                            result.ToolResultContents.TryGetValue("read_pdf", out string pdfContent) &&
+                            !string.IsNullOrEmpty(pdfContent))
+                            return pdfContent;
+                        return $"{ReadPdfTool.ErrorPrefix} result not available.";
+                    }
+
                 case "debug":
                     {
                         // AgenticExecutor stores the debug status/output line under the "debug" key.
@@ -518,7 +528,8 @@ namespace DevMind
             sb.Append("- Content search across files: `find_in_files`\n");
             sb.Append("- Content search in a known file: `grep_file`\n");
             sb.Append("- Reading a file: `read_file` (large files return an outline first; use start_line/end_line for targeted reads)\n");
-            sb.Append("- Looking at an image file (PNG/JPEG/GIF/WebP/BMP): `view_image` — one image per call; it appears in your NEXT request only, once (call it again to look again, also for an image a placeholder says was removed from context). PDFs take a pages argument (e.g. \"3\" or \"2-5\"; omit it to get the page count); each page is one image and counts toward the per-request limit\n");
+            sb.Append("- Reading a PDF's text: `read_pdf` — first choice for PDFs; omit pages for the page count and which pages are scanned. PDFs are read with `read_pdf` / `view_image`, never by running Python or other shell tools to extract or render them\n");
+            sb.Append("- Looking at an image file (PNG/JPEG/GIF/WebP/BMP): `view_image` — one image per call; it appears in your NEXT request only, once (call it again to look again, also for an image a placeholder says was removed from context). PDFs take a pages argument (e.g. \"3\" or \"2-5\"; omit it to get the page count); each page is one image and counts toward the per-request limit; for PDFs use it for layout, figures, tables or scanned pages (pages without a text layer)\n");
             sb.Append("- Cumulative diff of changes made to a file during the current session: `diff_file`\n");
             sb.Append("- Editing an existing file: `patch_file`\n");
             sb.Append("- Creating a new file: `create_file`\n");

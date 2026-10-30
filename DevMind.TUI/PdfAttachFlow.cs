@@ -52,8 +52,9 @@ namespace DevMind
         /// <summary>Saves a page image: (dataUri, label) → saved path (null when the save failed).</summary>
         public Func<string, string, string?> Save { get; init; } = (_, _) => null;
 
-        /// <summary>Stages a page image as a user attachment: (dataUri, savedPath).</summary>
-        public Action<string, string?> Stage { get; init; } = (_, _) => { };
+        /// <summary>Stages a page image as a user attachment: (dataUri, savedPath, pdfPath, page) —
+        /// the source PDF and page travel with it so its placeholder can name the PDF.</summary>
+        public Action<string, string?, string, int> Stage { get; init; } = (_, _, _, _) => { };
 
         /// <summary>Writes one dim transcript line (no trailing newline).</summary>
         public Action<string> Echo { get; init; } = _ => { };
@@ -61,6 +62,7 @@ namespace DevMind
         private sealed class Chosen
         {
             public string Name = "";
+            public string PdfPath = "";
             public int First;
             public int Last;
             public IReadOnlyList<RenderedPdfPage> Pages = Array.Empty<RenderedPdfPage>();
@@ -139,7 +141,7 @@ namespace DevMind
                     Echo($"[PDF not attached: {name} — {DescribeFailure(result)}]");
                     continue;
                 }
-                chosen.Add(new Chosen { Name = name, First = range.First, Last = range.Last, Pages = result.Pages });
+                chosen.Add(new Chosen { Name = name, PdfPath = path, First = range.First, Last = range.Last, Pages = result.Pages });
                 chosenPages += result.Pages.Count;
             }
 
@@ -151,7 +153,7 @@ namespace DevMind
                 foreach (RenderedPdfPage page in c.Pages)
                 {
                     string dataUri = PdfPageAttachments.BuildPngDataUri(page.PngBytes);
-                    Stage(dataUri, Save(dataUri, $"{c.Name} p{page.PageNumber}"));
+                    Stage(dataUri, Save(dataUri, $"{c.Name} p{page.PageNumber}"), c.PdfPath, page.PageNumber);
                 }
                 string pages = c.First == c.Last ? $"page {c.First}" : $"pages {c.First}-{c.Last}";
                 int n = c.Pages.Count;

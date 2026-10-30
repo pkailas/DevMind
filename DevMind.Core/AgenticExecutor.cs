@@ -919,6 +919,10 @@ namespace DevMind
                         ExecuteViewImage(block, result);
                         break;
 
+                    case BlockType.ReadPdf:
+                        ExecuteReadPdf(block, result);
+                        break;
+
                     // Text, Done — already handled during streaming or by resolver
                     default:
                         break;
@@ -1515,6 +1519,54 @@ namespace DevMind
         private static (string Text, string LogLine) ViewPdfUnreadable(string pdfPath, string message)
             => ($"[VIEW_IMAGE ERROR] {pdfPath}: the PDF could not be rendered (corrupt or password-protected?): {message}. Nothing was attached.",
                 $"[VIEW_IMAGE ERROR] {pdfPath}: PDF could not be rendered: {message}");
+
+        /// <summary>
+        /// read_pdf: resolves the path exactly as read_file does (<see cref="FileReadTools.ResolvePath"/>),
+        /// requires the <c>%PDF-</c> magic bytes (<see cref="PdfPageAttachments.IsPdf"/>) and returns
+        /// <see cref="ReadPdfTool.Read(string,string)"/>'s text as the call's result. Read-only, so no
+        /// approval; nothing is staged.
+        /// </summary>
+        private void ExecuteReadPdf(ResponseBlock block, ExecutionResult result)
+        {
+            string requested = block.FileName;
+            string text;      // the call's tool result
+            string logLine;   // its one-line transcript form
+            if (string.IsNullOrWhiteSpace(requested))
+            {
+                logLine = $"{ReadPdfTool.ErrorPrefix} no path was provided";
+                text = $"{ReadPdfTool.ErrorPrefix} no path was provided — pass the PDF's path in 'path'.";
+            }
+            else
+            {
+                try
+                {
+                    FileResolution res = FileReadTools.ResolvePath(requested, _host.GetWorkingDirectory());
+                    if (res.Path == null || !System.IO.File.Exists(res.Path))
+                    {
+                        logLine = $"{ReadPdfTool.ErrorPrefix} {requested}: file not found";
+                        text = $"{ReadPdfTool.ErrorPrefix} " + FilePathResolver.BuildFileNotFoundMessage("read_pdf", requested, res).TrimEnd();
+                    }
+                    else
+                    {
+                        // Canonical form, as view_image: the resolver hands an absolute hint back
+                        // with forward slashes.
+                        string full = FileReadTools.FileKey(res.Path);
+                        (text, logLine) = PdfPageAttachments.IsPdf(full)
+                            ? ReadPdfTool.Read(full, block.PageSpec)
+                            : ReadPdfTool.Error(full, "not a PDF (no %PDF- header) — use read_file for text files or view_image for images.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    (text, logLine) = ReadPdfTool.Error(requested, ex.Message);
+                }
+            }
+
+            bool failed = text.StartsWith(ReadPdfTool.ErrorPrefix, StringComparison.Ordinal);
+            _host.AppendOutput(logLine + "\n", failed ? OutputColor.Warning : OutputColor.Dim);
+            result.ToolResultContents["read_pdf"] = text;
+            RecordCallResult(result, block, text);
+        }
 
         /// <summary>Files a read-side result under its call id as well (H-55), so two calls on
         /// the same file in one turn each get their own result.</summary>

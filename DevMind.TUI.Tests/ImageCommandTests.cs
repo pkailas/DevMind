@@ -96,6 +96,21 @@ namespace DevMind.TUI.Tests
         }
 
         [Fact]
+        public async Task Image_PdfPages_CarryTheirSourcePdfAndPage_WhenTheHostWiresStagePdfPage()
+        {
+            string pdf = Write("doc.pdf", MinimalPdf(pages: 3));
+            var pdfPages = new List<(string Label, string PdfPath, int Page)>();
+            var ctx = Context();
+            ctx.StagePdfPage = (uri, label, pdfPath, page) => pdfPages.Add((label, pdfPath, page));
+
+            var result = await SlashCommand.Dispatch("/image doc.pdf 2-3", ctx);
+
+            Assert.False(result.IsError, result.Message);
+            Assert.Equal(new[] { ("doc.pdf p2", pdf, 2), ("doc.pdf p3", pdf, 3) }, pdfPages);
+            Assert.Empty(_staged);   // the plain stager is the fallback only
+        }
+
+        [Fact]
         public async Task Image_PageSpecOnAnImage_IsRefused()
         {
             Write("shot.bin", PngBytes);

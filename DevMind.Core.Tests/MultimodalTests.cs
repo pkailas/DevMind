@@ -522,6 +522,67 @@ namespace DevMind.Core.Tests
             Assert.Equal(1, count);
         }
 
+        // ── User-attached PDF pages name their source PDF ──────────────────────
+        //
+        // A page attached from a typed PDF path (or /image <pdf>) is saved as a PNG; its
+        // placeholder names that PNG AND the PDF + page, so the model can go back to the PDF.
+
+        private const string SourcePdfPlaceholder =
+            "[image removed from context — page 2 of C:\\docs\\spec.pdf, saved at C:\\imgs\\001-spec.pdf p2.png; " +
+            "call view_image on the saved file, or read_pdf / view_image with pages=\"2\" on the PDF]";
+
+        [Fact]
+        public async Task UserAttachedPdfPage_ReleasesToAPlaceholderNamingThePngAndThePdf()
+        {
+            using var server = new FakeSseServer();
+            var (client, _) = CreateConfiguredClient(server);
+
+            client.StagePendingImage("data:image/png;base64,PAGE2", @"C:\imgs\001-spec.pdf p2.png",
+                transient: false, page: 2, sourcePdf: @"C:\docs\spec.pdf");
+            client.StagePendingImage("data:image/png;base64,PIC", @"C:\imgs\002-pic.png");
+            await SendAndAwaitAsync(client, "summarize", imageBase64: null);
+
+            var sent = client.HistorySnapshotForTests().Single(m => m.ContentParts != null);
+            Assert.Equal(new string?[] { @"C:\docs\spec.pdf", null }, sent.ImageSourcePdfs!.ToArray());
+            Assert.Equal(new int?[] { 2, null }, sent.ImagePages!.ToArray());
+            Assert.Null(sent.TransientImages);
+
+            Assert.Equal(2, client.DropImagesFromHistory());
+
+            var released = client.HistorySnapshotForTests().Single(m => m.Content?.StartsWith("summarize\n", StringComparison.Ordinal) == true);
+            Assert.Equal(
+                "summarize\n" + SourcePdfPlaceholder + "\n" +
+                "[image removed from context — saved at C:\\imgs\\002-pic.png; call view_image to see it again]",
+                released.Content);
+        }
+
+        [Fact]
+        public void WithText_CarriesImageSourcePdfs_AndBothReleasePathsUseThem()
+        {
+            var msg = new ChatMessage("user", "orig", 1, null, null,
+                MakeParts("orig", "data:image/png;base64,X"), new[] { @"C:\imgs\001-spec.pdf p2.png" },
+                new[] { true }, new int?[] { 2 }, new[] { @"C:\docs\spec.pdf" });
+
+            var rewritten = msg.WithText("trimmed");
+
+            Assert.Equal(new[] { @"C:\docs\spec.pdf" }, rewritten.ImageSourcePdfs);
+            Assert.Equal("trimmed\n" + SourcePdfPlaceholder, rewritten.WithTransientImagesReleased(out int count).Content);
+            Assert.Equal(1, count);
+            Assert.Equal("trimmed\n" + SourcePdfPlaceholder, rewritten.WithImagesReleased(out _).Content);
+        }
+
+        [Fact]
+        public void UserAttachedPdfPage_WhoseSaveFailed_PointsAtThePdfPage()
+        {
+            var msg = new ChatMessage("user", "orig", 1, null, null,
+                MakeParts("orig", "data:image/png;base64,X"), new string?[] { null },
+                null, new int?[] { 4 }, new[] { @"C:\docs\spec.pdf" });
+
+            Assert.Equal(
+                "orig\n[image removed from context — page 4 of C:\\docs\\spec.pdf; call view_image with pages=\"4\" to see it again]",
+                msg.WithImagesReleased(out _).Content);
+        }
+
         // ── Pre-send context guard counts image parts ─────────────────────────
 
         //

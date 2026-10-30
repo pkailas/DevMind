@@ -111,6 +111,13 @@ namespace DevMind
         /// override it.</summary>
         void StagePendingImage(string imageDataUri, string savedPath, bool transient, int? page) => StagePendingImage(imageDataUri, savedPath, transient);
 
+        /// <summary>As <see cref="StagePendingImage(string, string, bool, int?)"/>, for a user-attached
+        /// PDF page: <paramref name="savedPath"/> is its saved PNG, <paramref name="page"/> its
+        /// 1-based page and <paramref name="sourcePdf"/> the PDF it was rendered from, so its
+        /// placeholder can name both. The default ignores the source — implementations that keep
+        /// history override it.</summary>
+        void StagePendingImage(string imageDataUri, string savedPath, bool transient, int? page, string sourcePdf) => StagePendingImage(imageDataUri, savedPath, transient, page);
+
         /// <summary>Replaces every image part in history with a text placeholder naming its
         /// saved copy, so images are not resent on later requests. Returns the number of
         /// images removed (0 when none remain). The default does nothing and returns 0 —

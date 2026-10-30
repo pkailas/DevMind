@@ -300,9 +300,10 @@ namespace DevMind
         /// image is not a saved user attachment), which becomes the message's
         /// <see cref="ChatMessage.ImagePaths"/> entry, and whether it is transient (view_image:
         /// sent in that one request only — <see cref="ChatMessage.TransientImages"/>), and for a
-        /// view_image PDF page its 1-based page number (<see cref="ChatMessage.ImagePages"/>).
+        /// PDF page its 1-based page number (<see cref="ChatMessage.ImagePages"/>), and for a
+        /// user-attached PDF page the source PDF (<see cref="ChatMessage.ImageSourcePdfs"/>).
         /// </summary>
-        private readonly List<(string DataUri, string SavedPath, bool Transient, int? Page)> _pendingImages = new List<(string DataUri, string SavedPath, bool Transient, int? Page)>();
+        private readonly List<(string DataUri, string SavedPath, bool Transient, int? Page, string SourcePdf)> _pendingImages = new List<(string DataUri, string SavedPath, bool Transient, int? Page, string SourcePdf)>();
 
         /// <summary>
         /// Estimated prompt tokens per image content part, used wherever history size is
@@ -704,13 +705,28 @@ namespace DevMind
         /// <param name="transient">True for a view_image image.</param>
         /// <param name="page">The PDF page number, or null for an ordinary image.</param>
         public void StagePendingImage(string imageDataUri, string savedPath, bool transient, int? page)
+            => StagePendingImage(imageDataUri, savedPath, transient, page, sourcePdf: null);
+
+        /// <summary>
+        /// As <see cref="StagePendingImage(string, string, bool, int?)"/>, for a user-attached PDF
+        /// page: <paramref name="savedPath"/> is the saved PNG, <paramref name="page"/> the 1-based
+        /// page and <paramref name="sourcePdf"/> the PDF it was rendered from, which land in
+        /// <see cref="ChatMessage.ImagePages"/> and <see cref="ChatMessage.ImageSourcePdfs"/> so the
+        /// page's placeholder names both the saved file and the PDF.
+        /// </summary>
+        /// <param name="imageDataUri">The image payload; null/whitespace clears ALL staged images.</param>
+        /// <param name="savedPath">Absolute path of the image on disk (or the PDF), or null.</param>
+        /// <param name="transient">True for a view_image image.</param>
+        /// <param name="page">The PDF page number, or null for an ordinary image.</param>
+        /// <param name="sourcePdf">Absolute path of the source PDF of a user-attached page, or null.</param>
+        public void StagePendingImage(string imageDataUri, string savedPath, bool transient, int? page, string sourcePdf)
         {
             lock (_pendingImages)
             {
                 if (string.IsNullOrWhiteSpace(imageDataUri))
                     _pendingImages.Clear();
                 else
-                    _pendingImages.Add((imageDataUri, savedPath, transient, page));
+                    _pendingImages.Add((imageDataUri, savedPath, transient, page, sourcePdf));
             }
         }
 
@@ -1353,14 +1369,14 @@ namespace DevMind
             // ranges). The staged list is drained under its lock so a racing send cannot
             // attach the same images twice.
             // The explicit argument has no saved copy, so its path entry is null.
-            List<(string DataUri, string SavedPath, bool Transient, int? Page)> images = null;
+            List<(string DataUri, string SavedPath, bool Transient, int? Page, string SourcePdf)> images = null;
             if (imageBase64 != null)
-                images = new List<(string DataUri, string SavedPath, bool Transient, int? Page)> { (imageBase64, null, false, null) };
+                images = new List<(string DataUri, string SavedPath, bool Transient, int? Page, string SourcePdf)> { (imageBase64, null, false, null, null) };
             lock (_pendingImages)
             {
                 if (_pendingImages.Count > 0)
                 {
-                    (images ?? (images = new List<(string DataUri, string SavedPath, bool Transient, int? Page)>(_pendingImages.Count))).AddRange(_pendingImages);
+                    (images ?? (images = new List<(string DataUri, string SavedPath, bool Transient, int? Page, string SourcePdf)>(_pendingImages.Count))).AddRange(_pendingImages);
                     _pendingImages.Clear();
                 }
             }
@@ -1377,6 +1393,7 @@ namespace DevMind
                 var imagePaths = new List<string>(images.Count);
                 var transient = new List<bool>(images.Count);
                 var pages = new List<int?>(images.Count);
+                var sources = new List<string>(images.Count);
                 foreach (var image in images)
                 {
                     parts.Add(new JObject
@@ -1387,13 +1404,15 @@ namespace DevMind
                     imagePaths.Add(image.SavedPath);
                     transient.Add(image.Transient);
                     pages.Add(image.Page);
+                    sources.Add(image.SourcePdf);
                 }
                 // Flags only when some image is transient (pages only when some image is a PDF
-                // page): a message of user attachments alone keeps both null, exactly as before
-                // view_image existed.
+                // page, sources only when some image has a source PDF): a message of plain user
+                // image attachments keeps all three null, exactly as before view_image existed.
                 _conversationHistory.Add(new ChatMessage("user", userMessage, _currentTurn, null, null, parts, imagePaths,
                     transient.Contains(true) ? transient : null,
-                    pages.Exists(p => p.HasValue) ? pages : null));
+                    pages.Exists(p => p.HasValue) ? pages : null,
+                    sources.Exists(s => s != null) ? sources : null));
             }
             else
             {
@@ -5287,16 +5306,19 @@ namespace DevMind
         /// Called by the onComplete handler after executing each tool call.
         /// Oversized results are nearline-capped: full content is cached immediately AND spilled to
         /// the durable output dir, and only an excerpt + recall handle + spill path + sha256 enters
-        /// history (append-only context discipline). recall_cache and read_file results are exempt —
-        /// recall_cache because the model explicitly asked for the full content (re-capping it would
-        /// hand back another excerpt forever), read_file because it self-pages via outline/line-range.
+        /// history (append-only context discipline). recall_cache, read_file and read_pdf results are
+        /// exempt — recall_cache because the model explicitly asked for the full content (re-capping it
+        /// would hand back another excerpt forever), read_file because it self-pages via
+        /// outline/line-range, read_pdf because it self-pages by page range under its own cap
+        /// (<see cref="ReadPdfTool.MaxOutputChars"/>, below <see cref="MaxToolResultChars"/>).
         /// </summary>
         public void AddToolResultMessage(string toolCallId, string content, string toolName = null)
         {
             string stored = content ?? "";
             bool exemptFromIngestCap =
                 string.Equals(toolName, "recall_cache", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(toolName, "read_file", StringComparison.OrdinalIgnoreCase);
+                string.Equals(toolName, "read_file", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(toolName, "read_pdf", StringComparison.OrdinalIgnoreCase);
 
             // Non-positive means "unset" — fall back to the default so the cap is never
             // accidentally disabled. Anything positive but below the splice floor is clamped
@@ -5449,13 +5471,26 @@ namespace DevMind
 
         /// <summary>
         /// Per-image PDF page numbers, aligned 1:1 and in order with the <c>image_url</c> parts
-        /// (like <see cref="ImagePaths"/>): the 1-based page a view_image PDF page was rendered
-        /// from — its <see cref="ImagePaths"/> entry is then the PDF itself, and its placeholder
-        /// says how to re-render that page (<see cref="ReleasedImagePdfPageFormat"/>), since
-        /// rendered pages are never written to disk. Null entries (and a null list, when no image
-        /// is a PDF page) mean an ordinary image file. Carried through <see cref="WithText"/>.
+        /// (like <see cref="ImagePaths"/>): the 1-based page a PDF page image was rendered from.
+        /// For a view_image PDF page its <see cref="ImagePaths"/> entry is the PDF itself, and its
+        /// placeholder says how to re-render that page (<see cref="ReleasedImagePdfPageFormat"/>),
+        /// since those rendered pages are never written to disk. For a user-attached PDF page the
+        /// PDF is in <see cref="ImageSourcePdfs"/> and <see cref="ImagePaths"/> holds the saved PNG.
+        /// Null entries (and a null list, when no image is a PDF page) mean an ordinary image
+        /// file. Carried through <see cref="WithText"/>.
         /// </summary>
         public IReadOnlyList<int?> ImagePages { get; }
+
+        /// <summary>
+        /// Per-image source PDFs, aligned 1:1 and in order with the <c>image_url</c> parts (like
+        /// <see cref="ImagePaths"/>): for a user-attached PDF page (typed path or /image), the
+        /// absolute path of the PDF it was rendered from, its page in <see cref="ImagePages"/> and
+        /// its saved PNG in <see cref="ImagePaths"/> — so the placeholder names both
+        /// (<see cref="ReleasedImageSourcePdfFormat"/>). Null entries, and a null list when no image
+        /// has one, otherwise (view_image PDF pages keep the PDF in <see cref="ImagePaths"/>).
+        /// Carried through <see cref="WithText"/>.
+        /// </summary>
+        public IReadOnlyList<string> ImageSourcePdfs { get; }
 
         /// <summary>
         /// True for the single harness-maintained scratchpad message. A structural marker
@@ -5555,6 +5590,18 @@ namespace DevMind
         public ChatMessage(string role, string content, int turn,
             JArray toolCalls, string toolCallId, JArray contentParts, IReadOnlyList<string> imagePaths,
             IReadOnlyList<bool> transientImages, IReadOnlyList<int?> imagePages)
+            : this(role, content, turn, toolCalls, toolCallId, contentParts, imagePaths, transientImages, imagePages, null)
+        {
+        }
+
+        /// <summary>
+        /// Initializes a multimodal message with saved-copy paths, per-image transient flags,
+        /// per-image PDF page numbers and per-image source PDFs.
+        /// </summary>
+        /// <param name="imageSourcePdfs">Aligned 1:1 with the image_url parts; null when no image has a source PDF.</param>
+        public ChatMessage(string role, string content, int turn,
+            JArray toolCalls, string toolCallId, JArray contentParts, IReadOnlyList<string> imagePaths,
+            IReadOnlyList<bool> transientImages, IReadOnlyList<int?> imagePages, IReadOnlyList<string> imageSourcePdfs)
         {
             Role = role;
             Content = content;
@@ -5565,18 +5612,19 @@ namespace DevMind
             ImagePaths = imagePaths;
             TransientImages = transientImages;
             ImagePages = imagePages;
+            ImageSourcePdfs = imageSourcePdfs;
         }
 
         /// <summary>
         /// A copy of this message with its text replaced (micro-compact rewrites): role, turn,
-        /// tool fields, ImagePaths, TransientImages and ImagePages carried over; ContentParts
+        /// tool fields, ImagePaths, TransientImages, ImagePages and ImageSourcePdfs carried over; ContentParts
         /// rebuilt around the new text via <see cref="LlmClient.RebuildContentParts"/>, which keeps
         /// every image part in order — so the per-image lists stay aligned. The ONE place a message is rebuilt from an
         /// existing one; every rewrite site must go through here.
         /// </summary>
         internal ChatMessage WithText(string newText)
             => new ChatMessage(Role, newText, Turn, ToolCalls, ToolCallId,
-                LlmClient.RebuildContentParts(ContentParts, newText), ImagePaths, TransientImages, ImagePages);
+                LlmClient.RebuildContentParts(ContentParts, newText), ImagePaths, TransientImages, ImagePages, ImageSourcePdfs);
 
         /// <summary>Placeholder line for a released image whose saved copy is at <c>{0}</c>.</summary>
         internal const string ReleasedImageSavedFormat = "[image removed from context — saved at {0}; call view_image to see it again]";
@@ -5588,10 +5636,20 @@ namespace DevMind
         /// absolute path, <c>{1}</c> the 1-based page number.</summary>
         internal const string ReleasedImagePdfPageFormat = "[image removed from context — page {1} of {0}; call view_image with pages=\"{1}\" to see it again]";
 
-        /// <summary>The placeholder line for one released image: its PDF page when known, else
-        /// its saved copy, else "not saved".</summary>
-        private static string ReleasedImagePlaceholder(string path, int? page)
+        /// <summary>Placeholder line for a released user-attached PDF page: <c>{0}</c> is its saved
+        /// PNG, <c>{1}</c> the 1-based page number, <c>{2}</c> the source PDF's absolute path.</summary>
+        internal const string ReleasedImageSourcePdfFormat = "[image removed from context — page {1} of {2}, saved at {0}; call view_image on the saved file, or read_pdf / view_image with pages=\"{1}\" on the PDF]";
+
+        /// <summary>The placeholder line for one released image: a user-attached PDF page names
+        /// its saved PNG and its source PDF; else its PDF page when known, else its saved copy,
+        /// else "not saved".</summary>
+        private static string ReleasedImagePlaceholder(string path, int? page, string sourcePdf)
         {
+            if (sourcePdf != null && page.HasValue)
+                return path != null
+                    ? string.Format(System.Globalization.CultureInfo.InvariantCulture, ReleasedImageSourcePdfFormat, path, page.Value, sourcePdf)
+                    // The PNG save failed: the page can still be rendered again from the PDF.
+                    : string.Format(System.Globalization.CultureInfo.InvariantCulture, ReleasedImagePdfPageFormat, sourcePdf, page.Value);
             if (path == null)
                 return ReleasedImageNotSaved;
             return page.HasValue
@@ -5601,6 +5659,9 @@ namespace DevMind
 
         private int? PageAt(int imageIndex)
             => ImagePages != null && imageIndex < ImagePages.Count ? ImagePages[imageIndex] : null;
+
+        private string SourcePdfAt(int imageIndex)
+            => ImageSourcePdfs != null && imageIndex < ImageSourcePdfs.Count ? ImageSourcePdfs[imageIndex] : null;
 
         /// <summary>
         /// A text-only copy of this message with each image part replaced by a placeholder
@@ -5627,7 +5688,7 @@ namespace DevMind
                     : null;
                 if (text.Length > 0)
                     text.Append('\n');
-                text.Append(ReleasedImagePlaceholder(path, PageAt(imageCount)));
+                text.Append(ReleasedImagePlaceholder(path, PageAt(imageCount), SourcePdfAt(imageCount)));
                 imageCount++;
             }
             if (imageCount == 0)
@@ -5653,6 +5714,7 @@ namespace DevMind
             var keptParts = new List<JToken>();
             var keptPaths = new List<string>();
             var keptPages = new List<int?>();
+            var keptSources = new List<string>();
             int imageIndex = 0;
             foreach (var part in ContentParts)
             {
@@ -5667,17 +5729,19 @@ namespace DevMind
                 string path = ImagePaths != null && imageIndex < ImagePaths.Count ? ImagePaths[imageIndex] : null;
                 bool transient = imageIndex < TransientImages.Count && TransientImages[imageIndex];
                 int? page = PageAt(imageIndex);
+                string sourcePdf = SourcePdfAt(imageIndex);
                 imageIndex++;
                 if (!transient)
                 {
                     keptParts.Add(part.DeepClone());
                     keptPaths.Add(path);
                     keptPages.Add(page);
+                    keptSources.Add(sourcePdf);
                     continue;
                 }
                 if (text.Length > 0)
                     text.Append('\n');
-                text.Append(ReleasedImagePlaceholder(path, page));
+                text.Append(ReleasedImagePlaceholder(path, page, sourcePdf));
                 releasedCount++;
             }
             if (releasedCount == 0)
@@ -5691,7 +5755,8 @@ namespace DevMind
             foreach (var kept in keptParts)
                 parts.Add(kept);
             return new ChatMessage(Role, newText, Turn, ToolCalls, ToolCallId, parts, keptPaths, null,
-                keptPages.Exists(p => p.HasValue) ? keptPages : null);
+                keptPages.Exists(p => p.HasValue) ? keptPages : null,
+                keptSources.Exists(s => s != null) ? keptSources : null);
         }
     }
 }

@@ -420,9 +420,21 @@ namespace DevMind
                 "request only, once — call view_image again to look at it again (also when a placeholder says an image " +
                 "was removed from context). One image per call; to go through a folder, list_files it and call view_image " +
                 "for several files in one response (at most 10 images per response). For a PDF, pass pages: each page is one " +
-                "image and counts toward that limit; omit pages to get the PDF's page count.",
+                "image and counts toward that limit; omit pages to get the PDF's page count. To read a PDF's text use read_pdf " +
+                "first; view_image is for its layout, figures, tables or scanned pages.",
                 Required("path", "string", "Absolute path of the image or PDF file (as list_files returned it); relative paths resolve like read_file's."),
                 Optional("pages", "string", "PDFs only: the page or page range to view, e.g. \"3\" or \"2-5\" (\"all\" for every page). Omit to get the page count. Ignored for image files.")));
+
+            // ── read_pdf ─────────────────────────────────────────────────────
+            tools.Add(MakeTool("read_pdf",
+                "Read a PDF's text layer — the first choice for any PDF. Omit pages to get the page count, which pages have " +
+                "text and which are scanned (no text layer — look at those with view_image and pages). With pages, returns " +
+                "each page's text under a '--- page N ---' line, up to " +
+                ReadPdfTool.MaxOutputChars.ToString("N0", System.Globalization.CultureInfo.InvariantCulture) + " characters per call; " +
+                "a longer range ends with a note naming the pages to read next. Never extract or render PDFs with Python or " +
+                "other shell tools.",
+                Required("path", "string", "Absolute path of the PDF file (as list_files returned it); relative paths resolve like read_file's."),
+                Optional("pages", "string", "The page or page range to read, e.g. \"3\" or \"2-5\" (\"all\" for every page). Omit for the page count and the text/scanned page lists.")));
 
             return tools;
         }

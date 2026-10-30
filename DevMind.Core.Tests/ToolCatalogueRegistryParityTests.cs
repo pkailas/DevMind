@@ -123,7 +123,7 @@ public sealed class ToolCatalogueRegistryParityTests
     [Fact]
     public void ToolCount_ReflectsTheLearnToolRegistration()
     {
-        // 36 = 35 tools built through MakeTool plus `debug`, which is hand-built (its schema
+        // 37 = 36 tools built through MakeTool plus `debug`, which is hand-built (its schema
         // needs an enum command with a nested per-command args object) and added to the same
         // array. ToolCount is BuildToolsArray().Count, and RegistryToolNames() above reads the
         // same array, so the hand-built tool is inside both this count and the name-parity
@@ -131,7 +131,7 @@ public sealed class ToolCatalogueRegistryParityTests
         // method's own definition and concluded debug sat outside; it does not. Update the
         // literal when the tool set intentionally changes; the parity test above is the real
         // guard for advertised-but-undeclared drift.
-        Assert.Equal(36, ToolRegistry.ToolCount);
+        Assert.Equal(37, ToolRegistry.ToolCount);
     }
 
     [Fact]
@@ -144,8 +144,25 @@ public sealed class ToolCatalogueRegistryParityTests
         Assert.Equal(new[] { "path" }, tool["function"]!["parameters"]!["required"]!.Select(r => (string)r!));
 
         string bullet = ToolCatalogSection(LoopHelpers.BuildToolUsePrompt("", "", @"C:\work\repo"))
-            .Split('\n').Single(l => l.Contains("`view_image`", StringComparison.Ordinal));
+            .Split('\n').Single(l => l.Contains(": `view_image`", StringComparison.Ordinal));
         Assert.Contains("PNG/JPEG/GIF/WebP/BMP", bullet, StringComparison.Ordinal);
         Assert.Contains("NEXT request only, once", bullet, StringComparison.Ordinal);
+        Assert.Contains("for PDFs use it for layout, figures, tables or scanned pages (pages without a text layer)", bullet, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ReadPdf_IsRegistered_AndAdvertisedInTheCatalogue_WithTheNoShellRule()
+    {
+        Assert.Contains("read_pdf", RegistryToolNames());
+        Assert.Contains("read_pdf", AdvertisedTools());
+
+        var tool = ToolRegistry.BuildToolsArray().Single(t => (string?)t["function"]?["name"] == "read_pdf");
+        Assert.Equal(new[] { "path" }, tool["function"]!["parameters"]!["required"]!.Select(r => (string)r!));
+        Assert.Contains("40,000 characters per call", (string)tool["function"]!["description"]!, StringComparison.Ordinal);
+
+        string bullet = ToolCatalogSection(LoopHelpers.BuildToolUsePrompt("", "", @"C:\work\repo"))
+            .Split('\n').Single(l => l.Contains(": `read_pdf`", StringComparison.Ordinal));
+        Assert.Contains("first choice for PDFs; omit pages for the page count and which pages are scanned", bullet, StringComparison.Ordinal);
+        Assert.Contains("never by running Python or other shell tools to extract or render them", bullet, StringComparison.Ordinal);
     }
 }

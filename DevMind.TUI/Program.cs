@@ -1758,7 +1758,8 @@ namespace DevMind
                             Prompt = (title, message, validate, ct) =>
                                 host.PromptTextAsync(title, message, "", validate, ct),
                             Save = (dataUri, label) => imageStore.Save(dataUri, label),
-                            Stage = (dataUri, savedPath) => llmClient.StagePendingImage(dataUri, savedPath),
+                            Stage = (dataUri, savedPath, pdfPath, page) =>
+                                llmClient.StagePendingImage(dataUri, savedPath, transient: false, page: page, sourcePdf: pdfPath),
                             Echo = line => host.AppendOutputLocal(line + "\n", OutputColor.Dim),
                         };
                         try
@@ -1889,6 +1890,11 @@ namespace DevMind
                         // travels with it into history (null if the save failed).
                         StagePendingImage = (dataUri, label) =>
                             llmClient.StagePendingImage(dataUri, imageStore.Save(dataUri, label)),
+                        // /image <pdf>: a page also carries its source PDF and page number, so
+                        // its placeholder names the PDF as well as the saved PNG.
+                        StagePdfPage = (dataUri, label, pdfPath, page) =>
+                            llmClient.StagePendingImage(dataUri, imageStore.Save(dataUri, label),
+                                transient: false, page: page, sourcePdf: pdfPath),
                         // /image's PDF fit check: room left for the next message.
                         FreeContextTokens = extra => llmClient.EstimateFreeContextTokens(null, extra),
                         // Behavioral rules.

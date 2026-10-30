@@ -134,6 +134,7 @@ namespace DevMind
                 ["TEST"]        = "Test",
                 ["DEBUG"]       = "Debug",
                 ["VIEW_IMAGE"]  = "Image",   // view_image: the model looked at an image file
+                ["READ_PDF"]    = "Pdf",     // read_pdf: the model read a PDF's text layer
 
                 // Knowledge and data.
                 ["MEMORY"]      = "Memory",

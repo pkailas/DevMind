@@ -416,6 +416,58 @@ namespace DevMind.Core.Tests
             for (int i = 0; i < pages; i++)
                 objects.Add($"{3 + i} 0 obj\n<</Type/Page/Parent 2 0 R/MediaBox[0 0 {widthPts} {heightPts}]>>\nendobj\n");
 
+            return WriteObjects(objects);
+        }
+
+        /// <summary>
+        /// Writes a US Letter PDF whose pages carry real text: one page per entry, each line
+        /// (split on <c>\n</c>) shown with Helvetica (a standard-14 font, so nothing is embedded).
+        /// A null entry is a page with no content stream at all — no text layer, like a scan.
+        /// ASCII text only; <c>( ) \</c> are escaped.
+        /// </summary>
+        public static string WriteTempTextPdf(params string?[] pageTexts)
+        {
+            int pages = pageTexts.Length;
+            var kids = new StringBuilder();
+            for (int i = 0; i < pages; i++)
+                kids.Append($"{4 + 2 * i} 0 R ");
+
+            var objects = new List<string>
+            {
+                "1 0 obj\n<</Type/Catalog/Pages 2 0 R>>\nendobj\n",
+                $"2 0 obj\n<</Type/Pages/Kids[{kids.ToString().TrimEnd()}]/Count {pages}>>\nendobj\n",
+                "3 0 obj\n<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>\nendobj\n",
+            };
+            for (int i = 0; i < pages; i++)
+            {
+                int pageObj = 4 + 2 * i, contentObj = 5 + 2 * i;
+                string? text = pageTexts[i];
+                if (text == null)
+                {
+                    objects.Add($"{pageObj} 0 obj\n<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]>>\nendobj\n");
+                    // Keep object numbering dense: an unused dictionary in the content slot.
+                    objects.Add($"{contentObj} 0 obj\n<<>>\nendobj\n");
+                    continue;
+                }
+                // Lines shrink to fit the page height, so long test pages stay on the page.
+                string[] lines = text.Split('\n');
+                double leading = Math.Min(12.0, 720.0 / lines.Length);
+                string fmt(double v) => v.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+                var stream = new StringBuilder($"BT /F1 {fmt(leading * 0.8)} Tf {fmt(leading)} TL 36 756 Td");
+                foreach (string line in lines)
+                    stream.Append(" (").Append(line.Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)")).Append(") Tj T*");
+                stream.Append(" ET");
+                string s = stream.ToString();
+                objects.Add($"{pageObj} 0 obj\n<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Resources<</Font<</F1 3 0 R>>>>/Contents {contentObj} 0 R>>\nendobj\n");
+                objects.Add($"{contentObj} 0 obj\n<</Length {Encoding.ASCII.GetByteCount(s)}>>\nstream\n{s}\nendstream\nendobj\n");
+            }
+            return WriteObjects(objects);
+        }
+
+        /// <summary>Assembles numbered objects (1..N, in order) into a PDF with a correct xref
+        /// table and writes it to a temp file.</summary>
+        private static string WriteObjects(List<string> objects)
+        {
             var sb = new StringBuilder();
             sb.Append("%PDF-1.4\n");
             var offsets = new long[objects.Count];

@@ -104,6 +104,38 @@ namespace DevMind
             }
         }
 
+        /// <summary>
+        /// Extracts the text layer of an inclusive 1-based page range with a single document
+        /// open (PDFium's <c>FPDFText_GetText</c> via Docnet's <c>IPageReader.GetText()</c>), in
+        /// the reading order PDFium gives. The text is raw — no line-ending normalisation. The
+        /// page dimensions only matter for rendering; text extraction ignores them. Throws
+        /// <see cref="InvalidOperationException"/> (user-presentable) when the range falls
+        /// outside the document; PDFium errors surface as Docnet exceptions.
+        /// </summary>
+        public static System.Collections.Generic.List<string> ExtractPagesText(
+            string pdfPath, int firstPage, int lastPage)
+        {
+            using (var docReader = DocLib.Instance.GetDocReader(
+                pdfPath, new PageDimensions(MaxRenderDimOne, MaxRenderDimTwo)))
+            {
+                int pageCount = docReader.GetPageCount();
+                if (firstPage < 1 || lastPage > pageCount || firstPage > lastPage)
+                {
+                    string what = firstPage == lastPage ? $"Page {firstPage} is" : $"Pages {firstPage}-{lastPage} are";
+                    throw new InvalidOperationException(
+                        $"{what} out of range — the PDF has {pageCount} page(s).");
+                }
+
+                var results = new System.Collections.Generic.List<string>(lastPage - firstPage + 1);
+                for (int page = firstPage; page <= lastPage; page++)
+                {
+                    using (var pageReader = docReader.GetPageReader(page - 1))
+                        results.Add(pageReader.GetText() ?? "");
+                }
+                return results;
+            }
+        }
+
         /// <summary>Returns the page count of the PDF (opens and closes the document).</summary>
         public static int GetPageCount(string pdfPath)
         {

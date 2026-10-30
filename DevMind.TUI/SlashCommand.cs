@@ -273,6 +273,11 @@ namespace DevMind
         /// host's saved copy of the image (the file name, or "&lt;pdf name&gt; p&lt;N&gt;").</summary>
         public Action<string, string> StagePendingImage { get; set; }
 
+        /// <summary>Stages a rendered PDF page like <see cref="StagePendingImage"/>, also recording
+        /// its source: (dataUri, label, pdfPath, page). Null falls back to
+        /// <see cref="StagePendingImage"/> (no source recorded).</summary>
+        public Action<string, string, string, int> StagePdfPage { get; set; }
+
         /// <summary>Estimated prompt tokens free for the next message, given N images that will
         /// join it but are not staged yet (<c>LlmClient.EstimateFreeContextTokens</c>, no pending
         /// text). /image refuses a PDF page range that does not fit. Null, or a null result,
@@ -1157,9 +1162,14 @@ namespace DevMind
 
                 var pages = render.Pages;
                 foreach (RenderedPdfPage page in pages)
-                    ctx.StagePendingImage(
-                        PdfPageAttachments.BuildPngDataUri(page.PngBytes),
-                        $"{Path.GetFileName(path)} p{page.PageNumber}");
+                {
+                    string pageUri = PdfPageAttachments.BuildPngDataUri(page.PngBytes);
+                    string saveLabel = $"{Path.GetFileName(path)} p{page.PageNumber}";
+                    if (ctx.StagePdfPage != null)
+                        ctx.StagePdfPage(pageUri, saveLabel, path, page.PageNumber);
+                    else
+                        ctx.StagePendingImage(pageUri, saveLabel);
+                }
 
                 // Every PDF attach advances the reading cursor, so explicit ranges and
                 // p=N chunks compose ("1-5" then "p=5" continues at page 6).

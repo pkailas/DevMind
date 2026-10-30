@@ -88,6 +88,7 @@ namespace DevMind
         {
             "read_file", "grep_file", "find_in_files", "create_file", "append_file", "patch_file",
             "delete_file", "rename_file", "diff_file", "list_files", "run_shell", "view_image",
+            "read_pdf",
         };
 
         /// <summary>Arguments that may legitimately be an empty string (an empty file).
@@ -671,6 +672,16 @@ namespace DevMind
                     return new ResponseBlock
                     {
                         Type = BlockType.ViewImage,
+                        FileName = GetArg(tc, "path"),
+                        PageSpec = GetArg(tc, "pages"),
+                        ToolCallId = tc.ResultId,
+                        FromToolCall = true
+                    };
+
+                case "read_pdf":
+                    return new ResponseBlock
+                    {
+                        Type = BlockType.ReadPdf,
                         FileName = GetArg(tc, "path"),
                         PageSpec = GetArg(tc, "pages"),
                         ToolCallId = tc.ResultId,
