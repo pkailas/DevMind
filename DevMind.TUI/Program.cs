@@ -1722,17 +1722,18 @@ namespace DevMind
                 // validated by magic bytes) stages it as multimodal content without
                 // an explicit /image. A PDF path pauses the send for a choice per PDF
                 // (PdfAttachFlow): a PDF with a text layer defaults to text (Enter = nothing
-                // staged, a reading note naming the PDF is appended to the message so the model
-                // uses read_pdf); a page range is rendered, saved and staged as images; Esc
-                // skips that PDF. PDFs are asked about BEFORE the typed images are staged, and
-                // the free figure counts those images explicitly. Echoes what it attached so
-                // nothing is silent; config autoAttachImages=false opts out of both. Returns
+                // staged; a small PDF's text is appended to the message, a larger one gets a
+                // "NOT yet read" note so the model uses read_pdf); a page range is rendered,
+                // saved and staged as images; Esc skips that PDF. PDFs are asked about BEFORE
+                // the typed images are staged, and the free figure counts those images
+                // explicitly. Echoes what it attached so nothing is silent; config autoAttachImages=false opts out of both. Returns
                 // the message to send (the typed text plus any reading notes), or null only
                 // when the send was cancelled while a prompt was open (the session token —
                 // F10/Ctrl+Q quit): nothing is staged and the caller does not send. The note
                 // is part of the user message from here on: history, the saved session row,
-                // the training log and _originalTaskPrompt all carry it (intended — it is
-                // small, and the model needs the path on later turns too).
+                // the training log and _originalTaskPrompt all carry it (intended — the model
+                // needs the path, or the text, on later turns too; included text is capped at
+                // PdfAttachFlow.InlineTextMaxTokens).
                 //
                 // Threading: past the first prompt's await this runs on a POOL thread. Every
                 // call made there is thread-safe: llmClient.StagePendingImage (locks its list),

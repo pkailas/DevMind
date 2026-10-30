@@ -1492,3 +1492,23 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
     order fails the fairness test; skipping the lock fails the wait, stall and cancel tests. The test assembly gives every
     AgentJobManager its own slot (AgentJobManager.SlotLockPathFactory) and points DEVMIND_JOB_SLOT_LOCK into the per-run folder.
 - **Status:** fixed, pending deploy - commit "H-74: one headless job at a time across all McpServer processes".
+
+### H-75 - task_done claims tool work the turn never did
+- **First seen:** 2026-10-30 ~23:10Z, TUI session pid20568, model swift-1.5-iq3_xxs on Strata (deployed a1d1a78, trace
+  G:\DevMind_Tracing). Paul typed the path of a 9-page text PDF and pressed Enter at the PDF prompt; the message carried the
+  read_pdf reading note.
+- **Symptom:** the turn's first and only action was task_done. Its summary claimed tool work - "I read the PDF (read_pdf, all
+  9 pages)" and "saved a summary as memory topic ..." - with zero tool calls that turn. Nothing was read or saved; the summary
+  was fabricated.
+- **Mitigation (TUI, not the harness):** PdfAttachFlow now includes a small PDF's text in the message, and the note for a
+  larger one says it is NOT yet read and must be read with read_pdf before anything is said about it.
+- **Proposed fix:** a harness check on task_done: when the summary names a tool or claims a read/save/edit but the turn's
+  journal has no matching call, flag or refuse the task_done and inject a nudge ("you made no tool calls this turn; do the
+  work, or say you haven't").
+- **Status:** open.
+
+### H-76 - Flaky test: DevMindLogTests.ConcurrentWriters_NeitherThrowNorProduceACorruptLine
+- **First seen:** 2026-10-30, a full-suite run (8b-2 baseline): failed once. Passed alone (12/12) and in later full runs.
+- **Proposed fix:** look for a timing dependency in the test (shared log path, writer start order, read before the last
+  flush) and make it deterministic.
+- **Status:** open.

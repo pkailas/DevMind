@@ -31,8 +31,10 @@ namespace DevMind.TUI.Tests
             Func<int, int?>? free = null,
             Func<string, int, int, PdfRenderResult>? render = null,
             Action<string>? onPrompt = null,
-            Func<string, int, PdfTextResult>? extract = null) => new PdfAttachFlow
+            Func<string, int, PdfTextResult>? extract = null,
+            int? inlineMax = null) => new PdfAttachFlow
         {
+            InlineMaxTokens = inlineMax ?? PdfAttachFlow.InlineTextMaxTokens,
             GetPageCount = pageCount ?? (_ => 3),
             ExtractText = extract ?? ((_, n) => Layer(n, Array.Empty<int>())),
             FreeTokens = extra => { _freeArgs.Add(extra); return (free ?? (_ => 100_000))(extra); },
@@ -82,8 +84,15 @@ namespace DevMind.TUI.Tests
                 : new PdfPageText { PageNumber = n, Text = "", HasText = false }).ToList(),
         };
 
-        private const string ReadHint =
-            "Read it with read_pdf (pages optional, e.g. pages=\"2-5\"); use view_image with pages for layout or scanned pages.]";
+        private static string ReadHint(string all) =>
+            $"You have not seen its contents. Call read_pdf (pages=\"{all}\") before saying anything about what it contains; " +
+            "use view_image with pages for layout or scanned pages.]";
+
+        /// <summary>A text layer with the given page texts; an empty string is a scanned page.</summary>
+        private static PdfTextResult Texts(params string[] pages) => new PdfTextResult
+        {
+            Pages = pages.Select((t, i) => new PdfPageText { PageNumber = i + 1, Text = t, HasText = t.Length > 0 }).ToList(),
+        };
 
         [Fact]
         public async Task NoTextLayer_Enter_AttachesAllPages_WithSavedPathsAndLabels()
@@ -244,23 +253,102 @@ namespace DevMind.TUI.Tests
         // ── Text-first: a PDF with a text layer ─────────────────────────────
 
         [Fact]
-        public async Task TextPdf_Enter_StagesNothing_ReturnsReadingNote()
+        public async Task TextPdf_Enter_OverInlineLimit_StagesNothing_ReturnsNotYetReadNote()
         {
             Answer("");
 
-            var outcome = await Flow(extract: (_, n) => Layer(n, 1, 2, 3)).RunAsync(new[] { Pdf }, 0, CancellationToken.None);
+            var outcome = await Flow(extract: (_, n) => Layer(n, 1, 2, 3), inlineMax: 0).RunAsync(new[] { Pdf }, 0, CancellationToken.None);
 
             Assert.True(outcome.Send);
             Assert.Equal(
                 "report.pdf — 3 pages; text on 3 of them (~3K tokens as text).\n" +
-                "Enter = let DM read it as text · or a page range for page images (~1K tokens/page, 100K free), e.g. 2-5 · Esc = skip",
+                "Enter = let DM read it as text (too large to include: ~3K tokens) · or a page range for page images " +
+                "(~1K tokens/page, 100K free), e.g. 2-5 · Esc = skip",
                 Assert.Single(_messages));
             Assert.Empty(_renders);
             Assert.Empty(_saveLabels);
             Assert.Empty(_staged);
-            Assert.Equal($"[PDF attached for reading: {Pdf} — 3 pages; text layer on pages 1-3. " + ReadHint,
+            Assert.Equal($"[PDF attached for reading — NOT yet read: {Pdf} — 3 pages; text layer on pages 1-3. " + ReadHint("1-3"),
                 Assert.Single(outcome.ReadingNotes));
             Assert.Equal("[PDF for reading: report.pdf (3 pages, ~3K tokens as text)]", Assert.Single(_echo));
+        }
+
+        [Fact]
+        public async Task SmallTextPdf_Enter_IncludesEveryPageInOrder_WithScannedHintAndEndMarker()
+        {
+            Answer("");
+
+            var outcome = await Flow(extract: (_, _) => Texts("First page text.", "", "Third page.\nSecond line."))
+                .RunAsync(new[] { Pdf }, 0, CancellationToken.None);
+
+            string expected =
+                $"[PDF text included: {Pdf} — 3 pages; text layer on pages 1, 3; scanned: 2 (use view_image with pages=\"2\" for those)]\n" +
+                "--- page 1 ---\nFirst page text.\n" +
+                "--- page 2 ---\n[no text layer — call view_image with pages=\"2\"]\n" +
+                "--- page 3 ---\nThird page.\nSecond line.\n" +
+                "[end of PDF text]";
+            Assert.True(outcome.Send);
+            Assert.Equal(expected, Assert.Single(outcome.ReadingNotes));
+            Assert.Empty(_renders);
+            Assert.Empty(_saveLabels);
+            Assert.Empty(_staged);
+            Assert.Contains($"Enter = include its text in your message (~{expected.Length / 4} tokens)", Assert.Single(_messages));
+            Assert.Equal($"[PDF text included: report.pdf (3 pages, ~{expected.Length / 4} tokens)]", Assert.Single(_echo));
+        }
+
+        [Fact]
+        public async Task LargeTextPdf_Enter_GetsNotYetReadNote_AndNoText()
+        {
+            Answer("");
+
+            // 10 pages x 4,000 chars = ~10K tokens, over the default 8K inline limit.
+            var outcome = await Flow(pageCount: _ => 10, extract: (_, n) => Layer(n, Enumerable.Range(1, 10).ToArray()))
+                .RunAsync(new[] { Pdf }, 0, CancellationToken.None);
+
+            string note = Assert.Single(outcome.ReadingNotes);
+            Assert.Equal($"[PDF attached for reading — NOT yet read: {Pdf} — 10 pages; text layer on pages 1-10. " + ReadHint("1-10"), note);
+            Assert.DoesNotContain("--- page", note);
+            Assert.Contains("Enter = let DM read it as text (too large to include: ~10K tokens)", Assert.Single(_messages));
+            Assert.Equal("[PDF for reading: report.pdf (10 pages, ~10K tokens as text)]", Assert.Single(_echo));
+            Assert.Empty(_staged);
+        }
+
+        [Fact]
+        public async Task SmallTextPdf_FreeContextBelowItsSize_GetsNotYetReadNote()
+        {
+            Answer("");
+
+            // ~3K tokens of text, only 2,000 free.
+            var outcome = await Flow(free: _ => 2_000, extract: (_, n) => Layer(n, 1, 2, 3)).RunAsync(new[] { Pdf }, 0, CancellationToken.None);
+
+            Assert.StartsWith($"[PDF attached for reading — NOT yet read: {Pdf} — 3 pages;", Assert.Single(outcome.ReadingNotes));
+            Assert.Contains("Enter = let DM read it as text (too large to include: ~3K tokens)", Assert.Single(_messages));
+        }
+
+        [Fact]
+        public async Task TwoSmallPdfs_SecondFreeFigure_CountsTheFirstsIncludedText()
+        {
+            Answer("", "");
+
+            // Each PDF's included text is ~3K tokens; 5,000 free fits the first, and what is
+            // left after it (~2K) no longer fits the second, which gets the read_pdf note.
+            var outcome = await Flow(free: _ => 5_000, extract: (_, n) => Layer(n, 1, 2, 3))
+                .RunAsync(new[] { Pdf, Pdf2 }, 0, CancellationToken.None);
+
+            int first = PdfAttachFlow.BuildInlineText(Pdf, 3, new[] { 1, 2, 3 }, Array.Empty<int>(), Layer(3, 1, 2, 3).Pages).Length / 4;
+            Assert.Equal(new[] { 0, 0 }, _freeArgs); // no images either way
+            Assert.Contains("(~1K tokens/page, 5K free)", _messages[0]);
+            Assert.Contains($"(~1K tokens/page, {PdfAttachFlow.FormatTokens(5_000 - first)} free)", _messages[1]);
+            Assert.Contains("Enter = include its text in your message", _messages[0]);
+            Assert.Contains("Enter = let DM read it as text (too large to include:", _messages[1]);
+            Assert.Equal(2, outcome.ReadingNotes.Count);
+            Assert.StartsWith($"[PDF text included: {Pdf} — 3 pages;", outcome.ReadingNotes[0]);
+            Assert.StartsWith($"[PDF attached for reading — NOT yet read: {Pdf2} — 3 pages;", outcome.ReadingNotes[1]);
+            Assert.Equal(new[]
+            {
+                $"[PDF text included: report.pdf (3 pages, ~{PdfAttachFlow.FormatTokens(first)} tokens)]",
+                "[PDF for reading: spec.pdf (3 pages, ~3K tokens as text)]",
+            }, _echo);
         }
 
         [Fact]
@@ -294,14 +382,15 @@ namespace DevMind.TUI.Tests
         {
             Answer("");
 
-            var outcome = await Flow(pageCount: _ => 8, extract: (_, n) => Layer(n, 1, 2, 3, 4, 5, 6, 8))
+            var outcome = await Flow(pageCount: _ => 8, extract: (_, n) => Layer(n, 1, 2, 3, 4, 5, 6, 8), inlineMax: 0)
                 .RunAsync(new[] { Pdf }, 0, CancellationToken.None);
 
             Assert.Equal(
                 "report.pdf — 8 pages; text on 7 of them (~7K tokens as text); scanned: 7.\n" +
-                "Enter = let DM read it as text · or a page range for page images (~1K tokens/page, 100K free), e.g. 2-5 · Esc = skip",
+                "Enter = let DM read it as text (too large to include: ~7K tokens) · or a page range for page images " +
+                "(~1K tokens/page, 100K free), e.g. 2-5 · Esc = skip",
                 Assert.Single(_messages));
-            Assert.Equal($"[PDF attached for reading: {Pdf} — 8 pages; text layer on pages 1-6, 8; scanned: 7. " + ReadHint,
+            Assert.Equal($"[PDF attached for reading — NOT yet read: {Pdf} — 8 pages; text layer on pages 1-6, 8; scanned: 7. " + ReadHint("1-8"),
                 Assert.Single(outcome.ReadingNotes));
             Assert.Empty(_staged);
         }
@@ -311,20 +400,43 @@ namespace DevMind.TUI.Tests
         {
             // No text layer: today's wording plus "no text layer"; Enter = all pages as images.
             Assert.Equal("scan.pdf — 2 pages, no text layer (~2K tokens, unknown free).\n" + PdfAttachFlow.RangeHint,
-                PdfAttachFlow.BuildPromptMessage("scan.pdf", 2, Array.Empty<int>(), new[] { 1, 2 }, 0, null));
-            // Text on every page: no scanned list.
+                PdfAttachFlow.BuildPromptMessage("scan.pdf", 2, Array.Empty<int>(), new[] { 1, 2 }, 0, null, false, 0));
+            // Text on every page, small enough to include: no scanned list.
             Assert.Equal(
                 "a.pdf — 1 page; text on 1 of them (~250 tokens as text).\n" +
-                "Enter = let DM read it as text · or a page range for page images (~1K tokens/page, 9K free), e.g. 2-5 · Esc = skip",
-                PdfAttachFlow.BuildPromptMessage("a.pdf", 1, new[] { 1 }, Array.Empty<int>(), 250, 9_000));
+                "Enter = include its text in your message (~270 tokens) · or a page range for page images " +
+                "(~1K tokens/page, 9K free), e.g. 2-5 · Esc = skip",
+                PdfAttachFlow.BuildPromptMessage("a.pdf", 1, new[] { 1 }, Array.Empty<int>(), 250, 9_000, true, 270));
             // Mixed: the scanned pages are listed.
             Assert.StartsWith("b.pdf — 7 pages; text on 3 of them (~4K tokens as text); scanned: 3, 5-7.\n",
-                PdfAttachFlow.BuildPromptMessage("b.pdf", 7, new[] { 1, 2, 4 }, new[] { 3, 5, 6, 7 }, 4_000, 50_000));
+                PdfAttachFlow.BuildPromptMessage("b.pdf", 7, new[] { 1, 2, 4 }, new[] { 3, 5, 6, 7 }, 4_000, 50_000, true, 4_100));
         }
 
         [Fact]
+        public void PromptMessage_TextCase_SaysWhetherEnterIncludesOrPoints()
+        {
+            Assert.Equal(
+                "c.pdf — 2 pages; text on 2 of them (~2K tokens as text).\n" +
+                "Enter = include its text in your message (~2K tokens) · or a page range for page images " +
+                "(~1K tokens/page, 50K free), e.g. 2-5 · Esc = skip",
+                PdfAttachFlow.BuildPromptMessage("c.pdf", 2, new[] { 1, 2 }, Array.Empty<int>(), 2_000, 50_000, true, 2_030));
+            Assert.Equal(
+                "c.pdf — 40 pages; text on 40 of them (~40K tokens as text).\n" +
+                "Enter = let DM read it as text (too large to include: ~40K tokens) · or a page range for page images " +
+                "(~1K tokens/page, 50K free), e.g. 2-5 · Esc = skip",
+                PdfAttachFlow.BuildPromptMessage("c.pdf", 40, Enumerable.Range(1, 40).ToArray(), Array.Empty<int>(), 40_000, 50_000, false, 40_150));
+        }
+
+        [Fact]
+        public void InlineText_SeveralScannedRanges_NamesTheFirstForViewImage()
+            => Assert.StartsWith(
+                $"[PDF text included: {Pdf} — 4 pages; text layer on pages 1, 3; scanned: 2, 4 " +
+                "(use view_image with pages=\"2\" for those, one range per call)]\n--- page 1 ---\na\n",
+                PdfAttachFlow.BuildInlineText(Pdf, 4, new[] { 1, 3 }, new[] { 2, 4 }, Texts("a", "", "c", "").Pages));
+
+        [Fact]
         public void ReadingNote_SingleTextPage_SaysPage()
-            => Assert.Equal($"[PDF attached for reading: {Pdf} — 2 pages; text layer on page 1; scanned: 2. " + ReadHint,
+            => Assert.Equal($"[PDF attached for reading — NOT yet read: {Pdf} — 2 pages; text layer on page 1; scanned: 2. " + ReadHint("1-2"),
                 PdfAttachFlow.BuildReadingNote(Pdf, 2, new[] { 1 }, new[] { 2 }));
 
         [Fact]
@@ -332,10 +444,10 @@ namespace DevMind.TUI.Tests
         {
             Answer("", "1-2");
 
-            var outcome = await Flow(extract: (_, n) => Layer(n, 1, 2, 3)).RunAsync(new[] { Pdf, Pdf2 }, 0, CancellationToken.None);
+            var outcome = await Flow(extract: (_, n) => Layer(n, 1, 2, 3), inlineMax: 0).RunAsync(new[] { Pdf, Pdf2 }, 0, CancellationToken.None);
 
             Assert.True(outcome.Send);
-            Assert.StartsWith($"[PDF attached for reading: {Pdf} — 3 pages;", Assert.Single(outcome.ReadingNotes));
+            Assert.StartsWith($"[PDF attached for reading — NOT yet read: {Pdf} — 3 pages;", Assert.Single(outcome.ReadingNotes));
             Assert.Equal((Pdf2, 1, 2), Assert.Single(_renders));
             Assert.Equal(new[] { (Pdf2, 1), (Pdf2, 2) }, _staged.Select(s => (s.PdfPath, s.Page)));
             // The text PDF renders nothing, so the second PDF's free figure counts no pages for it.

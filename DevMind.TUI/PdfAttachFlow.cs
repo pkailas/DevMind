@@ -3,10 +3,12 @@
 //
 // The pause-before-send for PDFs mentioned in a typed message (auto-attach). For each
 // PDF, in order: count its pages and read its text layer, then ask. A PDF with text on
-// any page defaults to text: Enter attaches nothing and adds a one-line reading note to
-// the message, so the model reads it with read_pdf; a page range attaches those pages as
-// images. A PDF with no text layer keeps the image prompt (Enter = all pages). Once every
-// PDF has been asked, the rendered pages are saved and staged as user attachments of the
+// any page defaults to text: Enter attaches nothing. A small PDF (its text within
+// InlineTextMaxTokens and the free context) has its text included in the message as
+// read_pdf's "--- page N ---" blocks; a larger one gets a one-line note saying it is NOT yet
+// read, so the model reads it with read_pdf (a bare pointer let a model claim it had read a
+// 9-page PDF without calling a tool). A page range attaches those pages as images. A PDF
+// with no text layer keeps the image prompt (Enter = all pages). Once every PDF has been asked, the rendered pages are saved and staged as user attachments of the
 // message. Nothing is staged until the end, so cancelling the whole send part-way leaves
 // no stray images for the next message.
 //
@@ -36,6 +38,13 @@ namespace DevMind
 
         /// <summary>Estimated prompt tokens per attached page (the client's per-image estimate).</summary>
         internal const int TokensPerPage = LlmClient.ImageTokenEstimatePerPart;
+
+        /// <summary>Largest PDF text (estimated tokens, chars/4) Enter includes in the message;
+        /// above it the PDF gets a reading note instead.</summary>
+        internal const int InlineTextMaxTokens = 8000;
+
+        /// <summary>The inline threshold in use (tests lower it); defaults to <see cref="InlineTextMaxTokens"/>.</summary>
+        internal int InlineMaxTokens { get; init; } = InlineTextMaxTokens;
 
         /// <summary>Page count of a PDF; throws when the file cannot be read.</summary>
         public Func<string, int> GetPageCount { get; init; } = PdfRasterizer.GetPageCount;
@@ -74,7 +83,8 @@ namespace DevMind
             public int Last;
             public IReadOnlyList<RenderedPdfPage> Pages = Array.Empty<RenderedPdfPage>();
 
-            /// <summary>Set when the PDF is left for read_pdf: nothing rendered or staged.</summary>
+            /// <summary>Set when the PDF is read as text (its included text, or the note leaving
+            /// it for read_pdf): nothing rendered or staged.</summary>
             public string? ReadingNote;
             public string? ReadingEcho;
         }
@@ -85,12 +95,14 @@ namespace DevMind
         /// but are not staged yet (typed image paths), so the free figure accounts for them.
         /// The outcome's Send is false when <paramref name="ct"/> was cancelled while asking:
         /// nothing is staged and the caller must not send. Otherwise its ReadingNotes (one per
-        /// PDF left for read_pdf) go on the end of the message (<see cref="AppendNotes"/>).
+        /// PDF read as text: its included text or a read_pdf note) go on the end of the message
+        /// (<see cref="AppendNotes"/>). Included text counts against the free figure of later PDFs.
         /// </summary>
         public async Task<PdfAttachOutcome> RunAsync(IReadOnlyList<string> pdfs, int otherPendingImages, CancellationToken ct)
         {
             var chosen = new List<Chosen>();
             int chosenPages = 0;
+            int inlinedTokens = 0;
 
             foreach (string path in pdfs)
             {
@@ -127,9 +139,23 @@ namespace DevMind
                 bool hasText = textPages.Count > 0;
                 int textTokens = textChars / 4; // LlmClient.EstimateTokens' chars/4 convention
 
-                // Pages chosen for earlier PDFs in this message are not staged yet either.
+                // Pages chosen for earlier PDFs in this message are not staged yet either, and
+                // text included for earlier PDFs is not in the typed message the estimate sees.
                 int? free = FreeTokens(otherPendingImages + chosenPages);
-                string message = BuildPromptMessage(name, pageCount, textPages, scannedPages, textTokens, free);
+                if (free.HasValue)
+                    free = Math.Max(0, free.Value - inlinedTokens);
+
+                string? inlineText = null;
+                int inlineTokens = 0;
+                if (hasText)
+                {
+                    inlineText = BuildInlineText(path, pageCount, textPages, scannedPages, textLayer.Pages);
+                    inlineTokens = inlineText.Length / 4;
+                    if (inlineTokens > InlineMaxTokens || (free.HasValue && inlineTokens > free.Value))
+                        inlineText = null;
+                }
+                string message = BuildPromptMessage(name, pageCount, textPages, scannedPages, textTokens, free,
+                    inlineText != null, inlineTokens);
 
                 bool asText = false;
                 (int First, int Last) range = (1, pageCount);
@@ -163,6 +189,19 @@ namespace DevMind
                 if (answer == null)
                 {
                     Echo($"[skipped: {name}]");
+                    continue;
+                }
+
+                if (asText && inlineText != null)
+                {
+                    chosen.Add(new Chosen
+                    {
+                        Name = name,
+                        PdfPath = path,
+                        ReadingNote = inlineText,
+                        ReadingEcho = $"[PDF text included: {name} ({Pages(pageCount)}, ~{FormatTokens(inlineTokens)} tokens)]",
+                    });
+                    inlinedTokens += inlineTokens;
                     continue;
                 }
 
@@ -213,12 +252,14 @@ namespace DevMind
         }
 
         /// <summary>
-        /// The prompt text. A PDF with text on any page offers text first (Enter) and a range
-        /// for page images; one with no text layer offers images only (Enter = all pages).
+        /// The prompt text. A PDF with text on any page offers text first (Enter: its text
+        /// included when <paramref name="inline"/>, else left for read_pdf) and a range for page
+        /// images; one with no text layer offers images only (Enter = all pages).
+        /// <paramref name="inlineTokens"/> is the size of the text as it would be included.
         /// </summary>
         internal static string BuildPromptMessage(
             string name, int pageCount, IReadOnlyList<int> textPages, IReadOnlyList<int> scannedPages,
-            int textTokens, int? free)
+            int textTokens, int? free, bool inline, int inlineTokens)
         {
             if (textPages.Count == 0)
                 return $"{name} — {Pages(pageCount)}, no text layer " +
@@ -228,22 +269,52 @@ namespace DevMind
             string scanned = scannedPages.Count > 0 ? $"; scanned: {ReadPdfTool.Ranges(scannedPages)}" : "";
             return $"{name} — {Pages(pageCount)}; text on {textPages.Count} of them " +
                    $"(~{FormatTokens(textTokens)} tokens as text){scanned}.\n" +
-                   $"Enter = let DM read it as text · or a page range for page images " +
+                   (inline
+                       ? $"Enter = include its text in your message (~{FormatTokens(inlineTokens)} tokens)"
+                       : $"Enter = let DM read it as text (too large to include: ~{FormatTokens(inlineTokens)} tokens)") +
+                   " · or a page range for page images " +
                    $"(~{FormatTokens(TokensPerPage)} tokens/page, {FormatFree(free)}), e.g. 2-5 · Esc = skip";
         }
 
-        /// <summary>The line added to the message for a PDF left for read_pdf.</summary>
+        /// <summary>The line added to the message for a PDF left for read_pdf (too large to include).</summary>
         internal static string BuildReadingNote(
             string path, int pageCount, IReadOnlyList<int> textPages, IReadOnlyList<int> scannedPages)
         {
             string scanned = scannedPages.Count > 0 ? $"; scanned: {ReadPdfTool.Ranges(scannedPages)}" : "";
-            return $"[PDF attached for reading: {path} — {Pages(pageCount)}; " +
+            string all = pageCount == 1 ? "1" : $"1-{pageCount}";
+            return $"[PDF attached for reading — NOT yet read: {path} — {Pages(pageCount)}; " +
                    $"text layer on page{(textPages.Count == 1 ? "" : "s")} {ReadPdfTool.Ranges(textPages)}{scanned}. " +
-                   "Read it with read_pdf (pages optional, e.g. pages=\"2-5\"); " +
+                   "You have not seen its contents. " +
+                   $"Call read_pdf (pages=\"{all}\") before saying anything about what it contains; " +
                    "use view_image with pages for layout or scanned pages.]";
         }
 
-        /// <summary>The message as sent: the typed text, then one reading note per line.</summary>
+        /// <summary>
+        /// A small PDF's text as included in the message: a header line, every page as
+        /// read_pdf formats it (<see cref="ReadPdfTool.FormatPages"/>; a scanned page carries its
+        /// view_image hint), then an end marker.
+        /// </summary>
+        internal static string BuildInlineText(
+            string path, int pageCount, IReadOnlyList<int> textPages, IReadOnlyList<int> scannedPages,
+            IReadOnlyList<PdfPageText> pages)
+        {
+            string scanned = "";
+            if (scannedPages.Count > 0)
+            {
+                string ranges = ReadPdfTool.Ranges(scannedPages);
+                // view_image takes one range per call: name the first when there are several.
+                int comma = ranges.IndexOf(',');
+                string example = comma < 0 ? ranges : ranges.Substring(0, comma);
+                scanned = $"; scanned: {ranges} (use view_image with pages=\"{example}\" for those" +
+                          (comma < 0 ? ")" : ", one range per call)");
+            }
+            return $"[PDF text included: {path} — {Pages(pageCount)}; " +
+                   $"text layer on page{(textPages.Count == 1 ? "" : "s")} {ReadPdfTool.Ranges(textPages)}{scanned}]\n" +
+                   ReadPdfTool.FormatPages(pages) + "\n" +
+                   "[end of PDF text]";
+        }
+
+        /// <summary>The message as sent: the typed text, then each note (or included text) on its own line(s).</summary>
         internal static string AppendNotes(string message, IReadOnlyList<string> notes)
             => notes.Count == 0 ? message : message + "\n\n" + string.Join("\n", notes);
 
@@ -284,7 +355,8 @@ namespace DevMind
         /// <summary>False when the send was cancelled while asking: nothing staged, do not send.</summary>
         public bool Send { get; init; }
 
-        /// <summary>One note per PDF left for read_pdf, to append to the message.</summary>
+        /// <summary>One entry per PDF read as text (its included text or a read_pdf note), to
+        /// append to the message.</summary>
         public IReadOnlyList<string> ReadingNotes { get; init; } = Array.Empty<string>();
     }
 }

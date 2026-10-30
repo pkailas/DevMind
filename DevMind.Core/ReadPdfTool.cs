@@ -34,6 +34,26 @@ namespace DevMind
         internal static string NoTextLayerHint(int page)
             => $"[no text layer — call view_image with pages=\"{page}\"]";
 
+        /// <summary>The heading line of one page's block: <c>--- page N ---</c> and a newline.</summary>
+        public static string PageHeading(int page) => $"--- page {page} ---\n";
+
+        /// <summary>One page's block body: its text, or (for a page without a text layer) any
+        /// stray text followed by the <see cref="NoTextLayerHint"/> line.</summary>
+        public static string PageBody(PdfPageText page)
+            => page.HasText
+                ? page.Text
+                : (page.Text.Length > 0 ? page.Text + "\n" : "") + NoTextLayerHint(page.PageNumber);
+
+        /// <summary>The <c>--- page N ---</c> blocks of <paramref name="pages"/>, uncapped, as
+        /// read_pdf formats them; no trailing newline.</summary>
+        public static string FormatPages(IEnumerable<PdfPageText> pages)
+        {
+            var sb = new StringBuilder();
+            foreach (PdfPageText page in pages)
+                sb.Append(PageHeading(page.PageNumber)).Append(PageBody(page)).Append('\n');
+            return sb.ToString().TrimEnd('\n');
+        }
+
         /// <summary>
         /// Reads <paramref name="pdfPath"/> (an existing PDF): the page summary when
         /// <paramref name="pageSpec"/> is blank, else the text of those pages
@@ -110,10 +130,8 @@ namespace DevMind
             string truncation = null;
             foreach (PdfPageText page in pages)
             {
-                string heading = $"--- page {page.PageNumber} ---\n";
-                string body = page.HasText
-                    ? page.Text
-                    : (page.Text.Length > 0 ? page.Text + "\n" : "") + NoTextLayerHint(page.PageNumber);
+                string heading = PageHeading(page.PageNumber);
+                string body = PageBody(page);
                 if (sb.Length + heading.Length + body.Length + 1 <= maxChars)
                 {
                     sb.Append(heading).Append(body).Append('\n');
