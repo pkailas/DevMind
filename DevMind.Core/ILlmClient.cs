@@ -98,6 +98,12 @@ namespace DevMind
         /// ignores the path — implementations that keep history override it.</summary>
         void StagePendingImage(string imageDataUri, string savedPath) => StagePendingImage(imageDataUri);
 
+        /// <summary>As <see cref="StagePendingImage(string, string)"/>; a <paramref name="transient"/>
+        /// image (the view_image tool's) is sent in exactly one request — the next one — and replaced
+        /// by its placeholder at the start of the send after. The default ignores the flag —
+        /// implementations that keep history override it.</summary>
+        void StagePendingImage(string imageDataUri, string savedPath, bool transient) => StagePendingImage(imageDataUri, savedPath);
+
         /// <summary>Replaces every image part in history with a text placeholder naming its
         /// saved copy, so images are not resent on later requests. Returns the number of
         /// images removed (0 when none remain). The default does nothing and returns 0 —

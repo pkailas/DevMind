@@ -339,9 +339,9 @@ namespace DevMind.Core.Tests
             Assert.Equal(original.Turn, msg.Turn);
             Assert.Equal(
                 "look at these\n" +
-                "[image removed from context — saved at C:\\imgs\\001-one.png]\n" +
+                "[image removed from context — saved at C:\\imgs\\001-one.png; call view_image to see it again]\n" +
                 "[image removed from context — not saved]\n" +
-                "[image removed from context — saved at C:\\imgs\\003-three.png]",
+                "[image removed from context — saved at C:\\imgs\\003-three.png; call view_image to see it again]",
                 msg.Content);
 
             // Text-only messages are the same instances, untouched.
@@ -386,7 +386,7 @@ namespace DevMind.Core.Tests
             var earlierUser = ((JArray)JObject.Parse(body)["messages"]!)
                 .First(m => (string?)m["role"] == "user");
             Assert.Equal(JTokenType.String, earlierUser["content"]!.Type);
-            Assert.Equal("what is this?\n[image removed from context — saved at C:\\imgs\\001-pic.png]",
+            Assert.Equal("what is this?\n[image removed from context — saved at C:\\imgs\\001-pic.png; call view_image to see it again]",
                 (string?)earlierUser["content"]);
         }
 
@@ -415,6 +415,112 @@ namespace DevMind.Core.Tests
                 .Where(p => (string?)p["type"] == "image_url")
                 .Select(p => (string)p["image_url"]!["url"]!)
                 .ToList();
+
+        // ── Transient (view_image) images: exactly one request each ───────────
+        //
+        // An image staged transient goes out in the next request and is replaced by its
+        // placeholder at the start of the send after, so a folder sweep never piles up images.
+        // User attachments are not touched by that pass (they are released at TUI turn end).
+
+        /// <summary>Every image_url url in a request body, in message order.</summary>
+        private static List<string> RequestImageUrls(string body) =>
+            ((JArray)JObject.Parse(body)["messages"]!)
+                .Select(m => m["content"])
+                .OfType<JArray>()
+                .SelectMany(parts => parts)
+                .Where(p => (string?)p["type"] == "image_url")
+                .Select(p => (string)p["image_url"]!["url"]!)
+                .ToList();
+
+        /// <summary>The flat-string content of every message in a request body, joined.</summary>
+        private static string RequestText(string body) =>
+            string.Join("\n", ((JArray)JObject.Parse(body)["messages"]!)
+                .Select(m => m["content"])
+                .Select(c => c is JArray parts
+                    ? string.Join("\n", parts.Where(p => (string?)p["type"] == "text").Select(p => (string?)p["text"]))
+                    : (string?)c));
+
+        [Fact]
+        public async Task TransientImage_IsInTheNextRequestOnly_ThenBecomesItsPlaceholder()
+        {
+            using var server = new FakeSseServer();
+            var (client, _) = CreateConfiguredClient(server);
+
+            client.StagePendingImage("data:image/png;base64,VIEWED", @"C:\shots\a.png", transient: true);
+            await SendAndAwaitAsync(client, "Continue.", imageBase64: null);
+            await SendAndAwaitAsync(client, "Continue again.", imageBase64: null);
+
+            Assert.Equal(new[] { "data:image/png;base64,VIEWED" }, RequestImageUrls(server.RequestBodies[0]));
+            Assert.Empty(RequestImageUrls(server.RequestBodies[1]));
+            Assert.DoesNotContain("base64,VIEWED", server.RequestBodies[1], StringComparison.Ordinal);
+            Assert.Contains("Continue.\n[image removed from context — saved at C:\\shots\\a.png; call view_image to see it again]",
+                RequestText(server.RequestBodies[1]), StringComparison.Ordinal);
+
+            var released = client.HistorySnapshotForTests().Single(m => m.Content?.StartsWith("Continue.\n", StringComparison.Ordinal) == true);
+            Assert.Null(released.ContentParts);
+            Assert.Null(released.ImagePaths);
+            Assert.Null(released.TransientImages);
+        }
+
+        [Fact]
+        public async Task UserAttachedImage_IsNotReleasedByTheTransientPass()
+        {
+            using var server = new FakeSseServer();
+            var (client, _) = CreateConfiguredClient(server);
+
+            client.StagePendingImage("data:image/png;base64,MINE", @"C:\imgs\001-mine.png");
+            await SendAndAwaitAsync(client, "what is this?", imageBase64: null);
+            await SendAndAwaitAsync(client, "Continue.", imageBase64: null);
+
+            Assert.Equal(new[] { "data:image/png;base64,MINE" }, RequestImageUrls(server.RequestBodies[0]));
+            Assert.Equal(new[] { "data:image/png;base64,MINE" }, RequestImageUrls(server.RequestBodies[1]));
+            var msg = client.HistorySnapshotForTests().Single(m => m.ContentParts != null);
+            Assert.Null(msg.TransientImages);
+            Assert.Equal(new[] { @"C:\imgs\001-mine.png" }, msg.ImagePaths);
+        }
+
+        [Fact]
+        public async Task MixedMessage_TransientPassReleasesOnlyTheTransientImage()
+        {
+            using var server = new FakeSseServer();
+            var (client, _) = CreateConfiguredClient(server);
+
+            client.StagePendingImage("data:image/png;base64,USER", @"C:\imgs\001-user.png");
+            client.StagePendingImage("data:image/png;base64,TOOL", @"C:\shots\b.png", transient: true);
+            await SendAndAwaitAsync(client, "both", imageBase64: null);
+            var sent = client.HistorySnapshotForTests().Single(m => m.ContentParts != null);
+            Assert.Equal(new[] { false, true }, sent.TransientImages);
+
+            await SendAndAwaitAsync(client, "Continue.", imageBase64: null);
+
+            Assert.Equal(new[] { "data:image/png;base64,USER", "data:image/png;base64,TOOL" },
+                RequestImageUrls(server.RequestBodies[0]));
+            Assert.Equal(new[] { "data:image/png;base64,USER" }, RequestImageUrls(server.RequestBodies[1]));
+            var msg = client.HistorySnapshotForTests().Single(m => m.ContentParts != null);
+            Assert.Equal("both\n[image removed from context — saved at C:\\shots\\b.png; call view_image to see it again]", msg.Content);
+            Assert.Equal(new[] { "data:image/png;base64,USER" }, ImageUrls(msg));
+            Assert.Equal(new[] { @"C:\imgs\001-user.png" }, msg.ImagePaths);
+            Assert.Null(msg.TransientImages);
+            Assert.Equal(msg.Content, (string?)msg.ContentParts![0]["text"]); // the text part matches Content
+
+            // The end-of-turn release still takes the user's image.
+            Assert.Equal(1, client.DropImagesFromHistory());
+        }
+
+        [Fact]
+        public void WithText_CarriesTransientImageFlags()
+        {
+            var msg = new ChatMessage("user", "orig", 1, null, null,
+                MakeParts("orig", "data:image/png;base64,X"), new[] { @"C:\shots\x.png" }, new[] { true });
+
+            var rewritten = msg.WithText("trimmed");
+
+            Assert.Equal(new[] { true }, rewritten.TransientImages);
+            Assert.Equal(new[] { @"C:\shots\x.png" }, rewritten.ImagePaths);
+            Assert.Equal("trimmed\n[image removed from context — saved at C:\\shots\\x.png; call view_image to see it again]",
+                rewritten.WithTransientImagesReleased(out int count).Content);
+            Assert.Equal(1, count);
+        }
 
         // ── Pre-send context guard counts image parts ─────────────────────────
 

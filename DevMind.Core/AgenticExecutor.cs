@@ -915,6 +915,10 @@ namespace DevMind
                         await ExecuteMcpCallAsync(block, result);
                         break;
 
+                    case BlockType.ViewImage:
+                        ExecuteViewImage(block, result);
+                        break;
+
                     // Text, Done — already handled during streaming or by resolver
                     default:
                         break;
@@ -1366,6 +1370,77 @@ namespace DevMind
             _host.AppendOutput($"[{tool.ToUpperInvariant()} ERROR] {msg}\n", OutputColor.Error);
             if (block.ToolCallId != null) result.ToolResultsByCallId[block.ToolCallId] = $"[ERROR: {msg}]";
             return true;
+        }
+
+        /// <summary>
+        /// At most this many images are attached to one request by view_image: the calls past
+        /// it in one response are refused (nothing staged) and told to view the rest next.
+        /// </summary>
+        public const int MaxViewImagesPerRequest = 10;
+
+        /// <summary>
+        /// view_image: resolves the path exactly as read_file does (the host's working directory,
+        /// <see cref="FileReadTools.ResolvePath"/>), validates it with the auto-attach checks
+        /// (<see cref="ImagePathScanner.TryValidate"/>) and records the image in
+        /// <see cref="ExecutionResult.StagedImages"/> for LoopDriver to stage on the next
+        /// request. Read-only, so no approval. Every outcome is the call's own text result; a
+        /// rejected file stages nothing. The per-request cap counts this response's staged
+        /// images — one executor result is one request's worth.
+        /// </summary>
+        private void ExecuteViewImage(ResponseBlock block, ExecutionResult result)
+        {
+            string requested = block.FileName;
+            string text;      // the call's tool result
+            string logLine;   // its one-line transcript form
+            if (string.IsNullOrWhiteSpace(requested))
+            {
+                logLine = "[VIEW_IMAGE ERROR] no path was provided";
+                text = "[VIEW_IMAGE ERROR] no path was provided — pass the image file's path in 'path'. Nothing was attached.";
+            }
+            else if (result.StagedImages.Count >= MaxViewImagesPerRequest)
+            {
+                logLine = $"[VIEW_IMAGE ERROR] {requested}: too many images for one request";
+                text = $"[VIEW_IMAGE ERROR] too many images for one request — view the rest next. {MaxViewImagesPerRequest} " +
+                       $"images are already attached to your next request; {requested} was NOT attached.";
+            }
+            else
+            {
+                try
+                {
+                    FileResolution res = FileReadTools.ResolvePath(requested, _host.GetWorkingDirectory());
+                    if (res.Path == null || !System.IO.File.Exists(res.Path))
+                    {
+                        logLine = $"[VIEW_IMAGE ERROR] {requested}: file not found";
+                        text = "[VIEW_IMAGE ERROR] " + FilePathResolver.BuildFileNotFoundMessage("view_image", requested, res).TrimEnd()
+                               + "\nNothing was attached.";
+                    }
+                    // Canonical form (FileReadTools.FileKey): the resolver hands an absolute hint
+                    // back with forward slashes, and this path is what the placeholder names later.
+                    else if (!ImagePathScanner.TryValidate(FileReadTools.FileKey(res.Path), out DetectedImage image, out string why))
+                    {
+                        string full = FileReadTools.FileKey(res.Path);
+                        logLine = $"[VIEW_IMAGE ERROR] {full}: {why}";
+                        text = $"[VIEW_IMAGE ERROR] {full}: {why}. Nothing was attached.";
+                    }
+                    else
+                    {
+                        result.StagedImages.Add((ImagePathScanner.BuildDataUri(image), image.FullPath));
+                        text = $"Image {System.IO.Path.GetFileName(image.FullPath)} ({image.MimeType}, " +
+                               $"{image.SizeBytes / 1024.0:F0} KB) attached to your next request.";
+                        logLine = $"[VIEW_IMAGE] {image.FullPath} ({image.MimeType}, {image.SizeBytes / 1024.0:F0} KB) — attached to the next request";
+                    }
+                }
+                catch (Exception ex)
+                {
+                    logLine = $"[VIEW_IMAGE ERROR] {requested}: {ex.Message}";
+                    text = $"[VIEW_IMAGE ERROR] {requested}: {ex.Message}. Nothing was attached.";
+                }
+            }
+
+            bool failed = text.StartsWith("[VIEW_IMAGE ERROR]", StringComparison.Ordinal);
+            _host.AppendOutput(logLine + "\n", failed ? OutputColor.Warning : OutputColor.Dim);
+            result.ToolResultContents["view_image"] = text;
+            RecordCallResult(result, block, text);
         }
 
         /// <summary>Files a read-side result under its call id as well (H-55), so two calls on

@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v7.34
+// File: LlmClient.cs  v7.35
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -298,9 +298,10 @@ namespace DevMind
         /// send cannot attach the same images twice. The list itself is the lock object.
         /// Each entry carries the path of the image's saved copy on disk (null when the
         /// image is not a saved user attachment), which becomes the message's
-        /// <see cref="ChatMessage.ImagePaths"/> entry.
+        /// <see cref="ChatMessage.ImagePaths"/> entry, and whether it is transient (view_image:
+        /// sent in that one request only — <see cref="ChatMessage.TransientImages"/>).
         /// </summary>
-        private readonly List<(string DataUri, string SavedPath)> _pendingImages = new List<(string DataUri, string SavedPath)>();
+        private readonly List<(string DataUri, string SavedPath, bool Transient)> _pendingImages = new List<(string DataUri, string SavedPath, bool Transient)>();
 
         /// <summary>
         /// Estimated prompt tokens per image content part, used wherever history size is
@@ -644,13 +645,28 @@ namespace DevMind
         /// <param name="imageDataUri">The image payload; null/whitespace clears ALL staged images.</param>
         /// <param name="savedPath">Absolute path of the saved copy, or null.</param>
         public void StagePendingImage(string imageDataUri, string savedPath)
+            => StagePendingImage(imageDataUri, savedPath, transient: false);
+
+        /// <summary>
+        /// As <see cref="StagePendingImage(string, string)"/>. A <paramref name="transient"/> image
+        /// — one the model asked to see with view_image — is in exactly one request: the next send
+        /// carries it, and the send after that replaces it with its placeholder before anything
+        /// else (<see cref="ReleaseTransientImages"/>), so a folder sweep never piles images up in
+        /// history. Non-transient (user-attached) images keep their lifetime: released at the end
+        /// of the TUI turn (<see cref="DropImagesFromHistory"/>).
+        /// </summary>
+        /// <param name="imageDataUri">The image payload; null/whitespace clears ALL staged images.</param>
+        /// <param name="savedPath">Absolute path of the image on disk (its saved copy, or for
+        /// view_image the file itself), or null.</param>
+        /// <param name="transient">True for a view_image image.</param>
+        public void StagePendingImage(string imageDataUri, string savedPath, bool transient)
         {
             lock (_pendingImages)
             {
                 if (string.IsNullOrWhiteSpace(imageDataUri))
                     _pendingImages.Clear();
                 else
-                    _pendingImages.Add((imageDataUri, savedPath));
+                    _pendingImages.Add((imageDataUri, savedPath, transient));
             }
         }
 
@@ -1195,6 +1211,11 @@ namespace DevMind
             if (taskScratchpad != null)
                 _taskScratchpad = taskScratchpad.Trim();
 
+            // view_image images live for one request: the one that just went out carried them,
+            // so they become placeholders now, before compaction and the budget math see history
+            // and before this send's own (possibly new transient) images are appended.
+            ReleaseTransientImages();
+
             // H-71: the harness note queued for this request is taken now, so it travels with
             // this send only — whatever happens to the send, the next one does not repeat it.
             string harnessNote = _pendingHarnessNote;
@@ -1288,14 +1309,14 @@ namespace DevMind
             // ranges). The staged list is drained under its lock so a racing send cannot
             // attach the same images twice.
             // The explicit argument has no saved copy, so its path entry is null.
-            List<(string DataUri, string SavedPath)> images = null;
+            List<(string DataUri, string SavedPath, bool Transient)> images = null;
             if (imageBase64 != null)
-                images = new List<(string DataUri, string SavedPath)> { (imageBase64, null) };
+                images = new List<(string DataUri, string SavedPath, bool Transient)> { (imageBase64, null, false) };
             lock (_pendingImages)
             {
                 if (_pendingImages.Count > 0)
                 {
-                    (images ?? (images = new List<(string DataUri, string SavedPath)>(_pendingImages.Count))).AddRange(_pendingImages);
+                    (images ?? (images = new List<(string DataUri, string SavedPath, bool Transient)>(_pendingImages.Count))).AddRange(_pendingImages);
                     _pendingImages.Clear();
                 }
             }
@@ -1310,6 +1331,7 @@ namespace DevMind
                     new JObject { ["type"] = "text", ["text"] = userMessage }
                 };
                 var imagePaths = new List<string>(images.Count);
+                var transient = new List<bool>(images.Count);
                 foreach (var image in images)
                 {
                     parts.Add(new JObject
@@ -1318,8 +1340,12 @@ namespace DevMind
                         ["image_url"] = new JObject { ["url"] = image.DataUri }
                     });
                     imagePaths.Add(image.SavedPath);
+                    transient.Add(image.Transient);
                 }
-                _conversationHistory.Add(new ChatMessage("user", userMessage, _currentTurn, null, null, parts, imagePaths));
+                // Flags only when some image is transient: a message of user attachments alone
+                // keeps TransientImages null, exactly as before view_image existed.
+                _conversationHistory.Add(new ChatMessage("user", userMessage, _currentTurn, null, null, parts, imagePaths,
+                    transient.Contains(true) ? transient : null));
             }
             else
             {
@@ -1946,6 +1972,35 @@ namespace DevMind
             }
             if (removed > 0)
                 _historyMutatedBetweenSends = true;
+            return removed;
+        }
+
+        /// <summary>
+        /// Replaces every TRANSIENT image in history (staged by view_image, flagged in
+        /// <see cref="ChatMessage.TransientImages"/>) with its placeholder, leaving user-attached
+        /// images where they are (<see cref="ChatMessage.WithTransientImagesReleased"/>). Runs at
+        /// the start of every <see cref="SendMessageAsync"/>: the request that carried a transient
+        /// image has been sent, so each one is in exactly one request — the one where the model
+        /// first sees it. Same skips and in-place discipline as <see cref="DropImagesFromHistory"/>;
+        /// called inside a send, so it taints THIS send's cache-reuse sample.
+        /// </summary>
+        /// <returns>The number of images released.</returns>
+        internal int ReleaseTransientImages()
+        {
+            int removed = 0;
+            for (int i = 0; i < _conversationHistory.Count; i++)
+            {
+                var msg = _conversationHistory[i];
+                if (msg.TransientImages == null || msg.IsScratchpad || msg.IsHarnessNote)
+                    continue;
+                var released = msg.WithTransientImagesReleased(out int count);
+                if (count == 0)
+                    continue;
+                _conversationHistory[i] = released;
+                removed += count;
+            }
+            if (removed > 0)
+                _historyMutatedThisSend = true;
             return removed;
         }
 
@@ -5332,6 +5387,19 @@ namespace DevMind
         public IReadOnlyList<string> ImagePaths { get; }
 
         /// <summary>
+        /// Per-image transient flags, aligned 1:1 and in order with the <c>image_url</c> parts
+        /// (like <see cref="ImagePaths"/>): true for an image the model asked to see with
+        /// view_image, which <see cref="LlmClient.ReleaseTransientImages"/> replaces with its
+        /// placeholder at the start of the next send. Null when no image is transient (every
+        /// user-attached-only message). Per image rather than per message because one message
+        /// CAN mix both: view_image images staged for a re-trigger that was then cancelled before
+        /// it was sent ride the next user message beside that message's attachments (and the
+        /// per-image form stays correct for any user attachment staged while a turn runs).
+        /// Carried through <see cref="WithText"/>.
+        /// </summary>
+        public IReadOnlyList<bool> TransientImages { get; }
+
+        /// <summary>
         /// True for the single harness-maintained scratchpad message. A structural marker
         /// rather than a text match: this message is removed and rebuilt on every send, and
         /// identifying it by scanning its content would fail the moment the model's own
@@ -5406,6 +5474,17 @@ namespace DevMind
         /// <param name="imagePaths">Aligned 1:1 with the image_url parts of <paramref name="contentParts"/>; entries may be null.</param>
         public ChatMessage(string role, string content, int turn,
             JArray toolCalls, string toolCallId, JArray contentParts, IReadOnlyList<string> imagePaths)
+            : this(role, content, turn, toolCalls, toolCallId, contentParts, imagePaths, null)
+        {
+        }
+
+        /// <summary>
+        /// Initializes a multimodal message with saved-copy paths and per-image transient flags.
+        /// </summary>
+        /// <param name="transientImages">Aligned 1:1 with the image_url parts; null when none is transient.</param>
+        public ChatMessage(string role, string content, int turn,
+            JArray toolCalls, string toolCallId, JArray contentParts, IReadOnlyList<string> imagePaths,
+            IReadOnlyList<bool> transientImages)
         {
             Role = role;
             Content = content;
@@ -5414,6 +5493,7 @@ namespace DevMind
             ToolCallId = toolCallId;
             ContentParts = contentParts;
             ImagePaths = imagePaths;
+            TransientImages = transientImages;
         }
 
         /// <summary>
@@ -5425,10 +5505,10 @@ namespace DevMind
         /// </summary>
         internal ChatMessage WithText(string newText)
             => new ChatMessage(Role, newText, Turn, ToolCalls, ToolCallId,
-                LlmClient.RebuildContentParts(ContentParts, newText), ImagePaths);
+                LlmClient.RebuildContentParts(ContentParts, newText), ImagePaths, TransientImages);
 
         /// <summary>Placeholder line for a released image whose saved copy is at <c>{0}</c>.</summary>
-        internal const string ReleasedImageSavedFormat = "[image removed from context — saved at {0}]";
+        internal const string ReleasedImageSavedFormat = "[image removed from context — saved at {0}; call view_image to see it again]";
 
         /// <summary>Placeholder line for a released image that has no saved copy.</summary>
         internal const string ReleasedImageNotSaved = "[image removed from context — not saved]";
@@ -5466,6 +5546,63 @@ namespace DevMind
             if (imageCount == 0)
                 return this;
             return new ChatMessage(Role, text.ToString(), Turn, ToolCalls, ToolCallId, null, null);
+        }
+
+        /// <summary>
+        /// As <see cref="WithImagesReleased"/>, but only for the images flagged in
+        /// <see cref="TransientImages"/>: each becomes a placeholder line (in image order) appended
+        /// to <see cref="Content"/>, and every other image part stays, with its
+        /// <see cref="ImagePaths"/> entry, in order. When no image remains the copy is text-only
+        /// (ContentParts and ImagePaths null); TransientImages is null either way — nothing
+        /// transient remains. Returns this same instance (count 0) when no image is transient.
+        /// </summary>
+        internal ChatMessage WithTransientImagesReleased(out int releasedCount)
+        {
+            releasedCount = 0;
+            if (ContentParts == null || TransientImages == null)
+                return this;
+
+            var text = new System.Text.StringBuilder(Content ?? string.Empty);
+            var keptParts = new List<JToken>();
+            var keptPaths = new List<string>();
+            int imageIndex = 0;
+            foreach (var part in ContentParts)
+            {
+                string type = (string)part["type"];
+                if (type == "text")
+                    continue;
+                if (type != "image_url")
+                {
+                    keptParts.Add(part.DeepClone());
+                    continue;
+                }
+                string path = ImagePaths != null && imageIndex < ImagePaths.Count ? ImagePaths[imageIndex] : null;
+                bool transient = imageIndex < TransientImages.Count && TransientImages[imageIndex];
+                imageIndex++;
+                if (!transient)
+                {
+                    keptParts.Add(part.DeepClone());
+                    keptPaths.Add(path);
+                    continue;
+                }
+                if (text.Length > 0)
+                    text.Append('\n');
+                text.Append(path != null
+                    ? string.Format(System.Globalization.CultureInfo.InvariantCulture, ReleasedImageSavedFormat, path)
+                    : ReleasedImageNotSaved);
+                releasedCount++;
+            }
+            if (releasedCount == 0)
+                return this;
+
+            string newText = text.ToString();
+            if (keptParts.Count == 0)
+                return new ChatMessage(Role, newText, Turn, ToolCalls, ToolCallId, null, null);
+
+            var parts = new JArray { new JObject { ["type"] = "text", ["text"] = newText } };
+            foreach (var kept in keptParts)
+                parts.Add(kept);
+            return new ChatMessage(Role, newText, Turn, ToolCalls, ToolCallId, parts, keptPaths);
         }
     }
 }

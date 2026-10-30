@@ -123,7 +123,7 @@ public sealed class ToolCatalogueRegistryParityTests
     [Fact]
     public void ToolCount_ReflectsTheLearnToolRegistration()
     {
-        // 35 = 34 tools built through MakeTool plus `debug`, which is hand-built (its schema
+        // 36 = 35 tools built through MakeTool plus `debug`, which is hand-built (its schema
         // needs an enum command with a nested per-command args object) and added to the same
         // array. ToolCount is BuildToolsArray().Count, and RegistryToolNames() above reads the
         // same array, so the hand-built tool is inside both this count and the name-parity
@@ -131,6 +131,21 @@ public sealed class ToolCatalogueRegistryParityTests
         // method's own definition and concluded debug sat outside; it does not. Update the
         // literal when the tool set intentionally changes; the parity test above is the real
         // guard for advertised-but-undeclared drift.
-        Assert.Equal(35, ToolRegistry.ToolCount);
+        Assert.Equal(36, ToolRegistry.ToolCount);
+    }
+
+    [Fact]
+    public void ViewImage_IsRegistered_AndAdvertisedInTheCatalogue()
+    {
+        Assert.Contains("view_image", RegistryToolNames());
+        Assert.Contains("view_image", AdvertisedTools());
+
+        var tool = ToolRegistry.BuildToolsArray().Single(t => (string?)t["function"]?["name"] == "view_image");
+        Assert.Equal(new[] { "path" }, tool["function"]!["parameters"]!["required"]!.Select(r => (string)r!));
+
+        string bullet = ToolCatalogSection(LoopHelpers.BuildToolUsePrompt("", "", @"C:\work\repo"))
+            .Split('\n').Single(l => l.Contains("`view_image`", StringComparison.Ordinal));
+        Assert.Contains("PNG/JPEG/GIF/WebP/BMP", bullet, StringComparison.Ordinal);
+        Assert.Contains("NEXT request only, once", bullet, StringComparison.Ordinal);
     }
 }

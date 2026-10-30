@@ -146,12 +146,37 @@ namespace DevMind
 
         /// <summary>Null unless the file is within the cap and sniffs as a real image.</summary>
         private static DetectedImage Validate(string fullPath)
+            => TryValidate(fullPath, out DetectedImage image, out _) ? image : null;
+
+        /// <summary>
+        /// The checks auto-attach applies (exists, non-empty, within <see cref="MaxImageBytes"/>,
+        /// magic bytes of a supported format), reporting WHY a file is rejected so a caller that
+        /// must answer — the view_image tool — can say so.
+        /// </summary>
+        /// <param name="fullPath">Absolute path of the candidate file.</param>
+        /// <param name="image">The validated image; null when rejected.</param>
+        /// <param name="error">A one-line reason when rejected; null on success.</param>
+        public static bool TryValidate(string fullPath, out DetectedImage image, out string error)
         {
+            image = null;
             try
             {
                 var info = new FileInfo(fullPath);
-                if (info.Length == 0 || info.Length > MaxImageBytes)
-                    return null;
+                if (!info.Exists)
+                {
+                    error = "file not found";
+                    return false;
+                }
+                if (info.Length == 0)
+                {
+                    error = "the file is empty";
+                    return false;
+                }
+                if (info.Length > MaxImageBytes)
+                {
+                    error = $"the file is too large ({info.Length / 1024.0 / 1024.0:F1} MB; the limit is {MaxImageBytes / 1024 / 1024} MB)";
+                    return false;
+                }
 
                 var header = new byte[12];
                 int read;
@@ -160,13 +185,20 @@ namespace DevMind
 
                 string mime = SniffMime(header, read);
                 if (mime == null)
-                    return null;
+                {
+                    error = "not an image — its contents are not PNG, JPEG, GIF, WebP or BMP";
+                    return false;
+                }
 
-                return new DetectedImage { FullPath = fullPath, MimeType = mime, SizeBytes = info.Length };
+                image = new DetectedImage { FullPath = fullPath, MimeType = mime, SizeBytes = info.Length };
+                error = null;
+                return true;
             }
-            catch
+            catch (Exception ex)
             {
-                return null; // unreadable (locked, permissions) — skip silently
+                // Unreadable (locked, permissions). Auto-attach skips it silently.
+                error = $"the file could not be read ({ex.Message})";
+                return false;
             }
         }
 

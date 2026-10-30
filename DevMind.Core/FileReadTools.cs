@@ -170,10 +170,17 @@ namespace DevMind
                 + (end < text.Length ? "…" : "") + $" [line clipped — {text.Length:N0} chars]";
         }
 
-        public FileResolution Resolve(string filename)
+        public FileResolution Resolve(string filename) => ResolvePath(filename, _workingDirectory);
+
+        /// <summary>
+        /// read_file's path resolution against <paramref name="workingDirectory"/> — the one rule
+        /// every file-reading tool shares, so a path the model can read_file it can also hand to
+        /// another reader (view_image) and get the same file.
+        /// </summary>
+        public static FileResolution ResolvePath(string filename, string workingDirectory)
         {
             string fileNameOnly = SafeGetFileName(filename);
-            return FilePathResolver.Resolve(fileNameOnly, (filename ?? "").Replace('\\', '/'), _workingDirectory);
+            return FilePathResolver.Resolve(fileNameOnly, (filename ?? "").Replace('\\', '/'), workingDirectory);
         }
 
         /// <summary>Loads a file into the cache unless a fresh entry is there. Throws on read errors.</summary>

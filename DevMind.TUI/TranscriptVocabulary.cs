@@ -133,6 +133,7 @@ namespace DevMind
                 ["LSP"]         = "Lsp",
                 ["TEST"]        = "Test",
                 ["DEBUG"]       = "Debug",
+                ["VIEW_IMAGE"]  = "Image",   // view_image: the model looked at an image file
 
                 // Knowledge and data.
                 ["MEMORY"]      = "Memory",

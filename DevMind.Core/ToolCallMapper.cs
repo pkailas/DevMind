@@ -87,7 +87,7 @@ namespace DevMind
         private static readonly string[] ValidatedTools =
         {
             "read_file", "grep_file", "find_in_files", "create_file", "append_file", "patch_file",
-            "delete_file", "rename_file", "diff_file", "list_files", "run_shell",
+            "delete_file", "rename_file", "diff_file", "list_files", "run_shell", "view_image",
         };
 
         /// <summary>Arguments that may legitimately be an empty string (an empty file).
@@ -665,6 +665,15 @@ namespace DevMind
                     return new ResponseBlock
                     {
                         Type = BlockType.ListCache
+                    };
+
+                case "view_image":
+                    return new ResponseBlock
+                    {
+                        Type = BlockType.ViewImage,
+                        FileName = GetArg(tc, "path"),
+                        ToolCallId = tc.ResultId,
+                        FromToolCall = true
                     };
 
                 default:

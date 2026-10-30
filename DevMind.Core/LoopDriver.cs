@@ -507,6 +507,14 @@ namespace DevMind
                         "available, deliver it via task_done; otherwise reply with the summary as plain text.";
                 }
 
+                // view_image hand-off: the images ride the re-trigger request built from
+                // nextMessage — staged here, on the one path that sends another request, so an
+                // iteration that ends the turn (task_done, ask_caller, a stop) leaves none behind
+                // to leak into the next turn. Transient: the send after that one replaces them
+                // with their placeholders, so each image is in exactly one request.
+                foreach (var (dataUri, savedPath) in result.StagedImages)
+                    _llmClient.StagePendingImage(dataUri, savedPath, transient: true);
+
                 _state.ShellLoopPending = true;
                 MaybeLogTurn(userMessage, assistantResponse, outcome, result, lastToolCalls);
                 return LoopIterationResult.MakeShouldReTrigger(

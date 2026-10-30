@@ -53,6 +53,13 @@ namespace DevMind
         /// </summary>
         public Dictionary<string, List<string>> LintNotes { get; set; }
 
+        /// <summary>
+        /// Images view_image validated this turn, in call order: the data: URI and the image
+        /// file's own absolute path (it is already on disk, so no copy is made). LoopDriver stages
+        /// them on the LLM client as transient images, so they ride the NEXT request only.
+        /// </summary>
+        public List<(string DataUri, string SavedPath)> StagedImages { get; set; }
+
         public ExecutionResult()
         {
             ShellOutput          = string.Empty;
@@ -66,6 +73,7 @@ namespace DevMind
             ToolResultContents   = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             ToolResultsByCallId  = new Dictionary<string, string>(StringComparer.Ordinal);
             LintNotes            = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            StagedImages         = new List<(string DataUri, string SavedPath)>();
         }
 
         /// <summary>

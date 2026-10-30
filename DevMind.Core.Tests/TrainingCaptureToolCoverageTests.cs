@@ -35,6 +35,7 @@ namespace DevMind.Core.Tests
         [InlineData(BlockType.RecallCache, "recall_cache")]
         [InlineData(BlockType.LearnCodeSearch, "learn_code_search")]
         [InlineData(BlockType.RunSql, "run_sql")]
+        [InlineData(BlockType.ViewImage, "view_image")]
         public void ABlockTypeOutsideTheElevenListedCases_SurvivesIntoToolCalls(BlockType type, string expectedName)
         {
             var calls = JsonlTrainingLogger.ExtractToolCalls(new List<ResponseBlock> { Block(type, "x") });
