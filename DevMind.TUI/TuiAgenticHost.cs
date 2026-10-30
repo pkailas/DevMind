@@ -1437,6 +1437,24 @@ namespace DevMind
             return tcs.Task;
         }
 
+#nullable enable
+        /// <summary>
+        /// A single-line text prompt (see <see cref="TuiTextPrompt"/>): resolves with the text
+        /// submitted by Enter (possibly empty — the caller decides what empty means), or null on
+        /// Esc, on <paramref name="ct"/> cancellation, or before the UI is up. When
+        /// <paramref name="validate"/> returns an error string, the dialog stays open showing it
+        /// and keeps the text; it resolves only once validate returns null. TUI-only, so not on
+        /// IAgenticHost. Safe to await from the UI thread's input handler or any other thread.
+        /// </summary>
+        public Task<string?> PromptTextAsync(string title, string message, string defaultText = "",
+            Func<string, string?>? validate = null, CancellationToken ct = default)
+        {
+            IApplication? app = _outputView.App;
+            if (app == null) return Task.FromResult<string?>(null); // pre-init / non-interactive — no prompt
+            return TuiTextPrompt.ShowAsync(app, FocusInputView, title, message, defaultText, validate, ct);
+        }
+#nullable restore
+
         /// <summary>
         /// Caps wrapped dialog lines at <paramref name="maxRows"/>. When lines are dropped, the
         /// last visible row is replaced by "… (N more lines)", where N counts every wrapped line
@@ -1500,7 +1518,7 @@ namespace DevMind
         /// overflows. Embedded newlines in the input are kept as line breaks, and a blank input
         /// yields a single empty line (the caller substitutes a placeholder before wrapping).
         /// </summary>
-        private static string[] WrapText(string text, int width)
+        internal static string[] WrapText(string text, int width)
         {
             if (width < 1) width = 1;
             var lines = new List<string>();
