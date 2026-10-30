@@ -106,5 +106,34 @@ namespace DevMind
                     ConfigDirName, JobSlotLockFileName);
             }
         }
+
+        /// <summary>
+        /// Name of the directory holding per-session copies of user-attached images.
+        /// </summary>
+        public const string ImagesDirName = "images";
+
+        /// <summary>
+        /// Absolute path to the root of the per-session attached-image folders
+        /// (%LOCALAPPDATA%\devmind\images) used by <see cref="SessionImageStore"/>.
+        /// Local, not roaming (%APPDATA%): image payloads are megabytes and only ever
+        /// useful on the machine that attached them.
+        /// </summary>
+        /// <remarks>
+        /// Overridable via the <c>DEVMIND_IMAGES_DIR</c> environment variable — a test seam
+        /// like <c>DEVMIND_GLOBAL_DIR</c>. Whitespace-only counts as unset. Re-read on every
+        /// access. Not created here.
+        /// </remarks>
+        public static string SessionImagesDir
+        {
+            get
+            {
+                string override_ = Environment.GetEnvironmentVariable("DEVMIND_IMAGES_DIR");
+                if (!string.IsNullOrWhiteSpace(override_))
+                    return override_;
+                return Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    ConfigDirName, ImagesDirName);
+            }
+        }
     }
 }

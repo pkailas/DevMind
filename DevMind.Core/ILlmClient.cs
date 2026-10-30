@@ -92,6 +92,12 @@ namespace DevMind
         /// images. Used by the TUI /image command.</summary>
         void StagePendingImage(string imageDataUri);
 
+        /// <summary>Stages a user-attached image together with the path of its saved copy on
+        /// disk (<see cref="SessionImageStore"/>), so the history message records where the
+        /// image lives. <paramref name="savedPath"/> may be null (save failed). The default
+        /// ignores the path — implementations that keep history override it.</summary>
+        void StagePendingImage(string imageDataUri, string savedPath) => StagePendingImage(imageDataUri);
+
        /// <summary>Streams a message to the LLM endpoint, invoking callbacks as tokens arrive.</summary>
         /// <param name="imageBase64">Optional base64-encoded image data (data: URI format). When provided,
         /// the message is sent as multimodal content with both text and image parts.</param>

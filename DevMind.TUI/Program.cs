@@ -466,6 +466,10 @@ namespace DevMind
             // with the banner, since there is no transcript to write to yet.
             ResumeOutcome resumed = ResolveResumeAtLaunch(options, historyStore, llmClient);
 
+            // Saved copies of user-attached images, one folder per session under
+            // %LOCALAPPDATA%\devmind\images. Resolves SessionId per save, so it follows /new.
+            var imageStore = new SessionImageStore();
+
             var cts = new CancellationTokenSource();
 
             // ── Terminal.Gui v2 Application ────────────────────────────────────────
@@ -1680,7 +1684,9 @@ namespace DevMind
                     {
                         foreach (var img in ImagePathScanner.Scan(text, options.WorkingDirectory))
                         {
-                            llmClient.StagePendingImage(ImagePathScanner.BuildDataUri(img));
+                            string dataUri = ImagePathScanner.BuildDataUri(img);
+                            llmClient.StagePendingImage(dataUri,
+                                imageStore.Save(dataUri, Path.GetFileName(img.FullPath)));
                             host.AppendOutputLocal(
                                 $"[attached: {Path.GetFileName(img.FullPath)} ({img.MimeType}, {img.SizeBytes / 1024.0:F0} KB)]\n",
                                 OutputColor.Dim);
@@ -1714,7 +1720,14 @@ namespace DevMind
                         {
                             state.ResetForUserTurn();
                             llmClient.ClearHistory();
+                            // Images staged but not yet sent belong to the discarded
+                            // conversation; their saved copies are deleted just below.
+                            llmClient.StagePendingImage(null);
                             host.ResetSession();
+                            // Drop the discarded conversation's saved images. /new, /clear,
+                            // /resume and /rewind all come through here; later attachments
+                            // go to the next session id's folder (resolved per save).
+                            imageStore.DeleteSession(SessionId.Get());
                             SessionId.Reset(); // new session ID for next turn
                             var oldCts = cts;
                             cts = new CancellationTokenSource();
@@ -1771,7 +1784,10 @@ namespace DevMind
                         McpClients = mcpClients,
                         // Multimodal: /image stages an image on the client; the next
                         // typed message is sent as multimodal content (text + image).
-                        StagePendingImage = (dataUri) => llmClient.StagePendingImage(dataUri),
+                        // The image is saved to the session's image folder first; its path
+                        // travels with it into history (null if the save failed).
+                        StagePendingImage = (dataUri, label) =>
+                            llmClient.StagePendingImage(dataUri, imageStore.Save(dataUri, label)),
                         // Behavioral rules.
                         BehavioralRules = _config.BehavioralRules,
                         SetBehavioralRules = (rules) =>
@@ -2044,6 +2060,10 @@ namespace DevMind
                 }
                 catch { /* best-effort cleanup — must never affect startup */ }
             });
+
+            // Fire-and-forget: delete saved-image folders of dead or week-old sessions. Off the
+            // startup path; SweepOrphans never throws and keeps any live process's folder.
+            _ = Task.Run(() => imageStore.SweepOrphans());
 
             // Run the application.
             app.Run(window);

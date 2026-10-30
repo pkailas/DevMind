@@ -252,8 +252,9 @@ namespace DevMind
 
         /// <summary>Stages an image data URI on the LLM client so the next user message is
         /// sent as multimodal content (text + image). Null when no host wires it or the
-        /// endpoint has no vision support.</summary>
-        public Action<string> StagePendingImage { get; set; }
+        /// endpoint has no vision support. Arguments: (dataUri, label) — the label names the
+        /// host's saved copy of the image (the file name, or "&lt;pdf name&gt; p&lt;N&gt;").</summary>
+        public Action<string, string> StagePendingImage { get; set; }
 
         // -- Context window size (/prompt) --------------------------------------
 
@@ -1117,8 +1118,11 @@ namespace DevMind
                     totalBytes += page.PngBytes.Length;
                 }
 
-                foreach (var page in pages)
-                    ctx.StagePendingImage($"data:image/png;base64,{Convert.ToBase64String(page.PngBytes)}");
+                // Pages come back in order first..last, so the index gives the page number.
+                for (int pi = 0; pi < pages.Count; pi++)
+                    ctx.StagePendingImage(
+                        $"data:image/png;base64,{Convert.ToBase64String(pages[pi].PngBytes)}",
+                        $"{Path.GetFileName(path)} p{first + pi}");
 
                 // Every PDF attach advances the reading cursor, so explicit ranges and
                 // p=N chunks compose ("1-5" then "p=5" continues at page 6).
@@ -1186,7 +1190,7 @@ namespace DevMind
                 });
 
             string dataUri = $"data:{mimeType};base64,{Convert.ToBase64String(bytes)}";
-            ctx.StagePendingImage(dataUri);
+            ctx.StagePendingImage(dataUri, Path.GetFileName(path));
 
             return Task.FromResult(new CommandResult
             {

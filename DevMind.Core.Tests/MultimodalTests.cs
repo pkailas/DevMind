@@ -12,6 +12,9 @@
 //     ACTUAL request JSON — content is an OpenAI-style parts array (text +
 //     image_url) for image sends, a flat string for text-only sends, and
 //     StagePendingImage is consumed exactly once.
+//   * ChatMessage.ImagePaths: saved-image paths recorded 1:1 with image parts on send,
+//     null entries for path-less staging, and carried through micro-compact rewrites.
+
 //
 // The fake server is a raw TcpListener (not HttpListener) so the tests run
 // without Windows URL-ACL reservations. It answers every POST with a minimal
@@ -227,7 +230,88 @@ namespace DevMind.Core.Tests
             Assert.Equal(JTokenType.String, secondUser["content"]!.Type);
         }
 
+        // ── Saved-image paths recorded alongside image parts ──────────────────
+        //
+        // Every image part in history must carry the path of its saved copy (or null), in
+        // order, so a later step can swap the base64 for a pointer at the file.
+
+        [Fact]
+        public async Task StagePendingImage_WithPaths_RecordsImagePathsAlignedWithImageParts()
+        {
+            using var server = new FakeSseServer();
+            var (client, _) = CreateConfiguredClient(server);
+
+            client.StagePendingImage("data:image/png;base64,ONE", @"C:\imgs\001-one.png");
+            client.StagePendingImage("data:image/png;base64,TWO", null);           // save failed
+            client.StagePendingImage("data:image/png;base64,THREE", @"C:\imgs\003-three.png");
+            await SendAndAwaitAsync(client, "look at these", imageBase64: null);
+
+            var msg = client.HistorySnapshotForTests().Single(m => m.Role == "user" && m.ContentParts != null);
+            Assert.Equal(new[] { "ONE", "TWO", "THREE" },
+                ImageUrls(msg).Select(u => u.Substring(u.IndexOf(',') + 1)).ToArray());
+            Assert.Equal(new string?[] { @"C:\imgs\001-one.png", null, @"C:\imgs\003-three.png" }, msg.ImagePaths!.ToArray());
+        }
+
+        [Fact]
+        public async Task StagePendingImage_OneArg_RecordsNullPathEntries()
+        {
+            using var server = new FakeSseServer();
+            var (client, _) = CreateConfiguredClient(server);
+
+            client.StagePendingImage("data:image/png;base64,AAAA");
+            client.StagePendingImage("data:image/png;base64,BBBB");
+            await SendAndAwaitAsync(client, "two images", imageBase64: "data:image/png;base64,ARG");
+
+            var msg = client.HistorySnapshotForTests().Single(m => m.Role == "user" && m.ContentParts != null);
+            Assert.Equal(3, ImageUrls(msg).Count);          // argument first, then the staged two
+            Assert.Equal(new string?[] { null, null, null }, msg.ImagePaths!.ToArray());
+        }
+
+        [Fact]
+        public void WithText_CarriesImagePathsAndRebuildsParts()
+        {
+            var paths = new[] { @"C:\imgs\001-a.png" };
+            var msg = new ChatMessage("user", "original", 3, null, null,
+                MakeParts("original", "data:image/png;base64,AAAA"), paths);
+
+            var rewritten = msg.WithText("trimmed");
+
+            Assert.Equal("trimmed", rewritten.Content);
+            Assert.Equal(3, rewritten.Turn);
+            Assert.Equal("trimmed", (string?)rewritten.ContentParts![0]["text"]);
+            Assert.Single(ImageUrls(rewritten));
+            Assert.Equal(paths, rewritten.ImagePaths);
+        }
+
+        [Fact]
+        public async Task MicroCompact_RewritingAnImageMessage_PreservesImagePaths()
+        {
+            using var server = new FakeSseServer();
+            var (client, _) = CreateConfiguredClient(server);
+
+            // Pinned task prompt, then an image-bearing [READ:] message, then a re-read of the
+            // same file — which makes the image message stale, so Pass 3 rewrites it.
+            await SendAndAwaitAsync(client, "the task", imageBase64: null);
+            client.StagePendingImage("data:image/png;base64,PIC", @"C:\imgs\001-pic.png");
+            await SendAndAwaitAsync(client, "[READ:a.cs]\n" + new string('a', 2000), imageBase64: null);
+            await SendAndAwaitAsync(client, "[READ:a.cs]\n" + new string('b', 2000), imageBase64: null);
+
+            await client.MicroCompactToolResultsAsync(force: true, neededTokens: 0);
+
+            var msg = client.HistorySnapshotForTests().Single(m => m.ContentParts != null);
+            Assert.Contains("[file content trimmed]", msg.Content, StringComparison.Ordinal); // it WAS rewritten
+            Assert.Single(ImageUrls(msg));
+            Assert.Equal(new[] { @"C:\imgs\001-pic.png" }, msg.ImagePaths);
+        }
+
+        private static List<string> ImageUrls(ChatMessage msg) =>
+            msg.ContentParts!
+                .Where(p => (string?)p["type"] == "image_url")
+                .Select(p => (string)p["image_url"]!["url"]!)
+                .ToList();
+
         // ── Pre-send context guard counts image parts ─────────────────────────
+
         //
         // Images live in ContentParts, not Content. The pre-send guard in SendMessageAsync
         // ("Cannot fit in context window") used the text-only estimator, so a message

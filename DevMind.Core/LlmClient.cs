@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v7.32
+// File: LlmClient.cs  v7.33
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -296,8 +296,11 @@ namespace DevMind
         /// page range) and ALL consumed by the next <see cref="SendMessageAsync"/> as
         /// image_url parts of that one message. Guarded by its own lock so a concurrent
         /// send cannot attach the same images twice. The list itself is the lock object.
+        /// Each entry carries the path of the image's saved copy on disk (null when the
+        /// image is not a saved user attachment), which becomes the message's
+        /// <see cref="ChatMessage.ImagePaths"/> entry.
         /// </summary>
-        private readonly List<string> _pendingImages = new List<string>();
+        private readonly List<(string DataUri, string SavedPath)> _pendingImages = new List<(string DataUri, string SavedPath)>();
 
         /// <summary>
         /// Estimated prompt tokens per image content part, used wherever history size is
@@ -631,14 +634,23 @@ namespace DevMind
         /// both in image_url.url.
         /// </summary>
         /// <param name="imageDataUri">The image payload; null/whitespace clears ALL staged images.</param>
-        public void StagePendingImage(string imageDataUri)
+        public void StagePendingImage(string imageDataUri) => StagePendingImage(imageDataUri, null);
+
+        /// <summary>
+        /// As <see cref="StagePendingImage(string)"/>, also recording where the image's saved
+        /// copy lives on disk. The path lands in the sent message's
+        /// <see cref="ChatMessage.ImagePaths"/>, aligned with its image part.
+        /// </summary>
+        /// <param name="imageDataUri">The image payload; null/whitespace clears ALL staged images.</param>
+        /// <param name="savedPath">Absolute path of the saved copy, or null.</param>
+        public void StagePendingImage(string imageDataUri, string savedPath)
         {
             lock (_pendingImages)
             {
                 if (string.IsNullOrWhiteSpace(imageDataUri))
                     _pendingImages.Clear();
                 else
-                    _pendingImages.Add(imageDataUri);
+                    _pendingImages.Add((imageDataUri, savedPath));
             }
         }
 
@@ -1275,14 +1287,15 @@ namespace DevMind
             // everything staged via StagePendingImage (accumulated /image calls, PDF page
             // ranges). The staged list is drained under its lock so a racing send cannot
             // attach the same images twice.
-            List<string> images = null;
+            // The explicit argument has no saved copy, so its path entry is null.
+            List<(string DataUri, string SavedPath)> images = null;
             if (imageBase64 != null)
-                images = new List<string> { imageBase64 };
+                images = new List<(string DataUri, string SavedPath)> { (imageBase64, null) };
             lock (_pendingImages)
             {
                 if (_pendingImages.Count > 0)
                 {
-                    (images ?? (images = new List<string>(_pendingImages.Count))).AddRange(_pendingImages);
+                    (images ?? (images = new List<(string DataUri, string SavedPath)>(_pendingImages.Count))).AddRange(_pendingImages);
                     _pendingImages.Clear();
                 }
             }
@@ -1296,15 +1309,17 @@ namespace DevMind
                 {
                     new JObject { ["type"] = "text", ["text"] = userMessage }
                 };
-                foreach (string image in images)
+                var imagePaths = new List<string>(images.Count);
+                foreach (var image in images)
                 {
                     parts.Add(new JObject
                     {
                         ["type"] = "image_url",
-                        ["image_url"] = new JObject { ["url"] = image }
+                        ["image_url"] = new JObject { ["url"] = image.DataUri }
                     });
+                    imagePaths.Add(image.SavedPath);
                 }
-                _conversationHistory.Add(new ChatMessage("user", userMessage, _currentTurn, null, null, parts));
+                _conversationHistory.Add(new ChatMessage("user", userMessage, _currentTurn, null, null, parts, imagePaths));
             }
             else
             {
@@ -1888,6 +1903,11 @@ namespace DevMind
                 insertAt++;
             }
         }
+
+        /// <summary>Snapshot (copy) of the conversation history, for tests that assert on the
+        /// stored messages themselves (e.g. <see cref="ChatMessage.ImagePaths"/>), which the
+        /// request JSON does not show.</summary>
+        internal IReadOnlyList<ChatMessage> HistorySnapshotForTests() => _conversationHistory.ToArray();
 
         /// <summary>Read-only access to the file content cache for host-layer operations.</summary>
         public FileContentCache FileCache => _fileCache;
@@ -2890,9 +2910,7 @@ namespace DevMind
                 trimmedOriginals.Add(msg);
                 if (msg.Turn < minTrimTurn) minTrimTurn = msg.Turn;
                 if (msg.Turn > maxTrimTurn) maxTrimTurn = msg.Turn;
-                _conversationHistory[i] = new ChatMessage(msg.Role,
-                    breadcrumb, msg.Turn, msg.ToolCalls, msg.ToolCallId,
-                    RebuildContentParts(msg.ContentParts, breadcrumb));
+                _conversationHistory[i] = msg.WithText(breadcrumb);
                 savedChars += origLen;
                 trimmed++;
             }
@@ -2932,9 +2950,7 @@ namespace DevMind
                 trimmedOriginals.Add(msg);
                 if (msg.Turn < minTrimTurn) minTrimTurn = msg.Turn;
                 if (msg.Turn > maxTrimTurn) maxTrimTurn = msg.Turn;
-                _conversationHistory[i] = new ChatMessage(msg.Role,
-                    compacted, msg.Turn, msg.ToolCalls, msg.ToolCallId,
-                    RebuildContentParts(msg.ContentParts, compacted));
+                _conversationHistory[i] = msg.WithText(compacted);
                 savedChars += origLen - compacted.Length;
                 trimmed++;
             }
@@ -2996,9 +3012,7 @@ namespace DevMind
                     trimmedOriginals.Add(msg);
                     if (msg.Turn < minTrimTurn) minTrimTurn = msg.Turn;
                     if (msg.Turn > maxTrimTurn) maxTrimTurn = msg.Turn;
-                    _conversationHistory[i] = new ChatMessage(msg.Role,
-                        replacement, msg.Turn, msg.ToolCalls, msg.ToolCallId,
-                        RebuildContentParts(msg.ContentParts, replacement));
+                    _conversationHistory[i] = msg.WithText(replacement);
                     savedChars += origLen - replacement.Length;
                     trimmed++;
                     currentPct = ComputeWorkingPct();
@@ -5270,6 +5284,14 @@ namespace DevMind
         public JArray ContentParts { get; }
 
         /// <summary>
+        /// Saved-copy paths of this message's images, aligned 1:1 and in order with the
+        /// <c>image_url</c> parts of <see cref="ContentParts"/>. An entry is null when that
+        /// image has no saved copy (save failed, or not a user attachment). Null for a message
+        /// built without paths. Carried through every rebuild (<see cref="WithText"/>).
+        /// </summary>
+        public IReadOnlyList<string> ImagePaths { get; }
+
+        /// <summary>
         /// True for the single harness-maintained scratchpad message. A structural marker
         /// rather than a text match: this message is removed and rebuilt on every send, and
         /// identifying it by scanning its content would fail the moment the model's own
@@ -5334,6 +5356,16 @@ namespace DevMind
         /// <param name="contentParts">OpenAI-style content parts array for multimodal messages.</param>
         public ChatMessage(string role, string content, int turn,
             JArray toolCalls, string toolCallId, JArray contentParts)
+            : this(role, content, turn, toolCalls, toolCallId, contentParts, null)
+        {
+        }
+
+        /// <summary>
+        /// Initializes a multimodal message that also records its images' saved-copy paths.
+        /// </summary>
+        /// <param name="imagePaths">Aligned 1:1 with the image_url parts of <paramref name="contentParts"/>; entries may be null.</param>
+        public ChatMessage(string role, string content, int turn,
+            JArray toolCalls, string toolCallId, JArray contentParts, IReadOnlyList<string> imagePaths)
         {
             Role = role;
             Content = content;
@@ -5341,6 +5373,18 @@ namespace DevMind
             ToolCalls = toolCalls;
             ToolCallId = toolCallId;
             ContentParts = contentParts;
+            ImagePaths = imagePaths;
         }
+
+        /// <summary>
+        /// A copy of this message with its text replaced (micro-compact rewrites): role, turn,
+        /// tool fields and ImagePaths carried over; ContentParts rebuilt around the new text
+        /// via <see cref="LlmClient.RebuildContentParts"/>, which keeps every image part in
+        /// order — so ImagePaths stays aligned. The ONE place a message is rebuilt from an
+        /// existing one; every rewrite site must go through here.
+        /// </summary>
+        internal ChatMessage WithText(string newText)
+            => new ChatMessage(Role, newText, Turn, ToolCalls, ToolCallId,
+                LlmClient.RebuildContentParts(ContentParts, newText), ImagePaths);
     }
 }
