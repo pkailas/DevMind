@@ -1385,7 +1385,8 @@ namespace DevMind
         /// <see cref="ExecutionResult.StagedImages"/> for LoopDriver to stage on the next
         /// request. Read-only, so no approval. Every outcome is the call's own text result; a
         /// rejected file stages nothing. The per-request cap counts this response's staged
-        /// images — one executor result is one request's worth.
+        /// images — one executor result is one request's worth. A file that starts with
+        /// <c>%PDF-</c> (magic bytes, not the extension) goes to <see cref="ViewPdf"/> instead.
         /// </summary>
         private void ExecuteViewImage(ResponseBlock block, ExecutionResult result)
         {
@@ -1396,12 +1397,6 @@ namespace DevMind
             {
                 logLine = "[VIEW_IMAGE ERROR] no path was provided";
                 text = "[VIEW_IMAGE ERROR] no path was provided — pass the image file's path in 'path'. Nothing was attached.";
-            }
-            else if (result.StagedImages.Count >= MaxViewImagesPerRequest)
-            {
-                logLine = $"[VIEW_IMAGE ERROR] {requested}: too many images for one request";
-                text = $"[VIEW_IMAGE ERROR] too many images for one request — view the rest next. {MaxViewImagesPerRequest} " +
-                       $"images are already attached to your next request; {requested} was NOT attached.";
             }
             else
             {
@@ -1414,6 +1409,16 @@ namespace DevMind
                         text = "[VIEW_IMAGE ERROR] " + FilePathResolver.BuildFileNotFoundMessage("view_image", requested, res).TrimEnd()
                                + "\nNothing was attached.";
                     }
+                    else if (IsPdf(res.Path))
+                    {
+                        (text, logLine) = ViewPdf(FileReadTools.FileKey(res.Path), block.PageSpec, result);
+                    }
+                    else if (result.StagedImages.Count >= MaxViewImagesPerRequest)
+                    {
+                        logLine = $"[VIEW_IMAGE ERROR] {requested}: too many images for one request";
+                        text = $"[VIEW_IMAGE ERROR] too many images for one request — view the rest next. {MaxViewImagesPerRequest} " +
+                               $"images are already attached to your next request; {requested} was NOT attached.";
+                    }
                     // Canonical form (FileReadTools.FileKey): the resolver hands an absolute hint
                     // back with forward slashes, and this path is what the placeholder names later.
                     else if (!ImagePathScanner.TryValidate(FileReadTools.FileKey(res.Path), out DetectedImage image, out string why))
@@ -1424,7 +1429,7 @@ namespace DevMind
                     }
                     else
                     {
-                        result.StagedImages.Add((ImagePathScanner.BuildDataUri(image), image.FullPath));
+                        result.StagedImages.Add((ImagePathScanner.BuildDataUri(image), image.FullPath, null));
                         text = $"Image {System.IO.Path.GetFileName(image.FullPath)} ({image.MimeType}, " +
                                $"{image.SizeBytes / 1024.0:F0} KB) attached to your next request.";
                         logLine = $"[VIEW_IMAGE] {image.FullPath} ({image.MimeType}, {image.SizeBytes / 1024.0:F0} KB) — attached to the next request";
@@ -1441,6 +1446,80 @@ namespace DevMind
             _host.AppendOutput(logLine + "\n", failed ? OutputColor.Warning : OutputColor.Dim);
             result.ToolResultContents["view_image"] = text;
             RecordCallResult(result, block, text);
+        }
+
+        /// <summary>True when the file starts with the PDF magic bytes <c>%PDF-</c>.</summary>
+        private static bool IsPdf(string path)
+        {
+            var header = new byte[5];
+            int read;
+            using (var stream = System.IO.File.OpenRead(path))
+                read = stream.Read(header, 0, header.Length);
+            return read == 5 && header[0] == (byte)'%' && header[1] == (byte)'P' && header[2] == (byte)'D'
+                   && header[3] == (byte)'F' && header[4] == (byte)'-';
+        }
+
+        /// <summary>
+        /// view_image on a PDF. Without <paramref name="pageSpec"/> it only reports the page count.
+        /// With it, the pages (<see cref="PdfRasterizer.ParsePageSpec"/> syntax) are rendered
+        /// (<see cref="PdfRasterizer.RenderPagesToPng"/>) and each is staged as a PNG whose
+        /// SavedPath is the PDF and whose Page is its number — nothing is written to disk; the
+        /// placeholder tells the model to call view_image with that page again. All or nothing:
+        /// a range past this request's remaining image allowance, a bad spec, an unreadable PDF or
+        /// a page over the 10 MB cap stages no page at all.
+        /// </summary>
+        /// <returns>The call's tool result and its one-line transcript form.</returns>
+        private static (string Text, string LogLine) ViewPdf(string pdfPath, string pageSpec, ExecutionResult result)
+        {
+            string name = System.IO.Path.GetFileName(pdfPath);
+            try
+            {
+                int pageCount = PdfRasterizer.GetPageCount(pdfPath);
+                if (string.IsNullOrWhiteSpace(pageSpec))
+                    return ($"PDF {name} has {pageCount} page(s). Call view_image again with pages (e.g. \"1\" or \"1-3\").",
+                            $"[VIEW_IMAGE] {pdfPath}: PDF, {pageCount} page(s) — no pages requested, nothing attached");
+
+                var (first, last) = PdfRasterizer.ParsePageSpec(pageSpec.Trim(), pageCount);
+                int requestedPages = last - first + 1;
+                int allowed = Math.Max(0, MaxViewImagesPerRequest - result.StagedImages.Count);
+                if (requestedPages > allowed)
+                    return ($"[VIEW_IMAGE ERROR] {pdfPath}: pages {first}-{last} would be {requestedPages} image(s), but only {allowed} " +
+                            $"more can be attached to your next request (at most {MaxViewImagesPerRequest} per request) — ask for at most " +
+                            $"{allowed} page(s) now and view the rest next. Nothing was attached.",
+                            $"[VIEW_IMAGE ERROR] {pdfPath}: {requestedPages} page(s) requested, {allowed} allowed this request");
+
+                var pages = PdfRasterizer.RenderPagesToPng(pdfPath, first, last);
+                for (int i = 0; i < pages.Count; i++)
+                {
+                    if (pages[i].PngBytes.Length > ImagePathScanner.MaxImageBytes)
+                        return ($"[VIEW_IMAGE ERROR] {pdfPath}: page {first + i} rendered too large " +
+                                $"({pages[i].PngBytes.Length / (1024.0 * 1024.0):F1} MB; the limit is {ImagePathScanner.MaxImageBytes / 1024 / 1024} MB). Nothing was attached.",
+                                $"[VIEW_IMAGE ERROR] {pdfPath}: page {first + i} rendered too large");
+                }
+
+                // Pages come back in order first..last, so the index gives the page number.
+                long totalBytes = 0;
+                for (int i = 0; i < pages.Count; i++)
+                {
+                    result.StagedImages.Add(($"data:image/png;base64,{Convert.ToBase64String(pages[i].PngBytes)}", pdfPath, first + i));
+                    totalBytes += pages[i].PngBytes.Length;
+                }
+
+                string label = first == last ? $"page {first}" : $"pages {first}-{last}";
+                return ($"PDF {name} {label} of {pageCount} attached to your next request ({pages.Count} image(s)).",
+                        $"[VIEW_IMAGE] {pdfPath}: PDF {label} of {pageCount} ({pages.Count} image(s), {totalBytes / 1024.0:F0} KB) — attached to the next request");
+            }
+            catch (InvalidOperationException ex)
+            {
+                // Bad page spec / out of range — PdfRasterizer's message is already presentable.
+                return ($"[VIEW_IMAGE ERROR] {pdfPath}: {ex.Message} Nothing was attached.",
+                        $"[VIEW_IMAGE ERROR] {pdfPath}: {ex.Message}");
+            }
+            catch (Exception ex)
+            {
+                return ($"[VIEW_IMAGE ERROR] {pdfPath}: the PDF could not be rendered (corrupt or password-protected?): {ex.Message}. Nothing was attached.",
+                        $"[VIEW_IMAGE ERROR] {pdfPath}: PDF could not be rendered: {ex.Message}");
+            }
         }
 
         /// <summary>Files a read-side result under its call id as well (H-55), so two calls on

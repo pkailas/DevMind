@@ -672,6 +672,7 @@ namespace DevMind
                     {
                         Type = BlockType.ViewImage,
                         FileName = GetArg(tc, "path"),
+                        PageSpec = GetArg(tc, "pages"),
                         ToolCallId = tc.ResultId,
                         FromToolCall = true
                     };

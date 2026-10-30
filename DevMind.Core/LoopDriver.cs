@@ -512,8 +512,8 @@ namespace DevMind
                 // iteration that ends the turn (task_done, ask_caller, a stop) leaves none behind
                 // to leak into the next turn. Transient: the send after that one replaces them
                 // with their placeholders, so each image is in exactly one request.
-                foreach (var (dataUri, savedPath) in result.StagedImages)
-                    _llmClient.StagePendingImage(dataUri, savedPath, transient: true);
+                foreach (var (dataUri, savedPath, page) in result.StagedImages)
+                    _llmClient.StagePendingImage(dataUri, savedPath, transient: true, page: page);
 
                 _state.ShellLoopPending = true;
                 MaybeLogTurn(userMessage, assistantResponse, outcome, result, lastToolCalls);

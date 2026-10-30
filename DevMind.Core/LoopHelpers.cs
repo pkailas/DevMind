@@ -518,7 +518,7 @@ namespace DevMind
             sb.Append("- Content search across files: `find_in_files`\n");
             sb.Append("- Content search in a known file: `grep_file`\n");
             sb.Append("- Reading a file: `read_file` (large files return an outline first; use start_line/end_line for targeted reads)\n");
-            sb.Append("- Looking at an image file (PNG/JPEG/GIF/WebP/BMP): `view_image` — one image per call; it appears in your NEXT request only, once (call it again to look again, also for an image a placeholder says was removed from context)\n");
+            sb.Append("- Looking at an image file (PNG/JPEG/GIF/WebP/BMP): `view_image` — one image per call; it appears in your NEXT request only, once (call it again to look again, also for an image a placeholder says was removed from context). PDFs take a pages argument (e.g. \"3\" or \"2-5\"; omit it to get the page count); each page is one image and counts toward the per-request limit\n");
             sb.Append("- Cumulative diff of changes made to a file during the current session: `diff_file`\n");
             sb.Append("- Editing an existing file: `patch_file`\n");
             sb.Append("- Creating a new file: `create_file`\n");

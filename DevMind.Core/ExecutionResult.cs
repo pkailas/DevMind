@@ -56,9 +56,11 @@ namespace DevMind
         /// <summary>
         /// Images view_image validated this turn, in call order: the data: URI and the image
         /// file's own absolute path (it is already on disk, so no copy is made). LoopDriver stages
-        /// them on the LLM client as transient images, so they ride the NEXT request only.
+        /// them on the LLM client as transient images, so they ride the NEXT request only. For a
+        /// rendered PDF page, SavedPath is the PDF itself and Page its 1-based page number (null
+        /// for an image file) — rendered pages are not written to disk.
         /// </summary>
-        public List<(string DataUri, string SavedPath)> StagedImages { get; set; }
+        public List<(string DataUri, string SavedPath, int? Page)> StagedImages { get; set; }
 
         public ExecutionResult()
         {
@@ -73,7 +75,7 @@ namespace DevMind
             ToolResultContents   = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             ToolResultsByCallId  = new Dictionary<string, string>(StringComparer.Ordinal);
             LintNotes            = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
-            StagedImages         = new List<(string DataUri, string SavedPath)>();
+            StagedImages         = new List<(string DataUri, string SavedPath, int? Page)>();
         }
 
         /// <summary>

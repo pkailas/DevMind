@@ -416,11 +416,13 @@ namespace DevMind
 
             // ── view_image ───────────────────────────────────────────────────
             tools.Add(MakeTool("view_image",
-                "Look at an image file (PNG, JPEG, GIF, WebP or BMP, up to 10 MB). The image is attached to your NEXT " +
+                "Look at an image file (PNG, JPEG, GIF, WebP or BMP, up to 10 MB) or pages of a PDF. The image is attached to your NEXT " +
                 "request only, once — call view_image again to look at it again (also when a placeholder says an image " +
                 "was removed from context). One image per call; to go through a folder, list_files it and call view_image " +
-                "for several files in one response (at most 10 per response). Not for PDFs or other documents.",
-                Required("path", "string", "Absolute path of the image file (as list_files returned it); relative paths resolve like read_file's.")));
+                "for several files in one response (at most 10 images per response). For a PDF, pass pages: each page is one " +
+                "image and counts toward that limit; omit pages to get the PDF's page count.",
+                Required("path", "string", "Absolute path of the image or PDF file (as list_files returned it); relative paths resolve like read_file's."),
+                Optional("pages", "string", "PDFs only: the page or page range to view, e.g. \"3\" or \"2-5\" (\"all\" for every page). Omit to get the page count. Ignored for image files.")));
 
             return tools;
         }
