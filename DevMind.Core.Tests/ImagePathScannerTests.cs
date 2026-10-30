@@ -1,8 +1,9 @@
-// File: ImagePathScannerTests.cs  v1.0
+// File: ImagePathScannerTests.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Tests for typed-message image auto-attach detection: token/quote extraction,
-// relative-path resolution, magic-byte validation (a renamed text file must never
+// relative-path resolution, single quotes vs prose apostrophes, unquoted rooted
+// paths with spaces, magic-byte validation (a renamed text file must never
 // attach), dedupe, size cap, and data-URI construction. Test images are header
 // bytes + filler — Scan only sniffs, it never decodes.
 
@@ -32,6 +33,12 @@ namespace DevMind.Core.Tests
             string path = Path.Combine(_dir, name);
             File.WriteAllBytes(path, content);
             return path;
+        }
+
+        private string WriteFileIn(string folder, string name, byte[] content)
+        {
+            Directory.CreateDirectory(Path.Combine(_dir, folder));
+            return WriteFile(Path.Combine(folder, name), content);
         }
 
         // ── Detection ─────────────────────────────────────────────────────────
@@ -91,6 +98,96 @@ namespace DevMind.Core.Tests
             Assert.Equal("image/png", hits[0].MimeType);
             Assert.Equal("image/jpeg", hits[1].MimeType);
         }
+
+        // ── Single quotes ─────────────────────────────────────────────────────────────────
+
+        [Fact]
+        public void Scan_SingleQuotedPathWithSpaces_Detected()
+        {
+            string png = WriteFileIn("Single Q", "shot.png", PngMagic);
+            var hits = ImagePathScanner.Scan($"look at '{png}' please", null);
+            Assert.Equal(png, Assert.Single(hits).FullPath);
+        }
+
+        [Fact]
+        public void Scan_ProseApostrophes_DoNotBlockOtherPaths()
+        {
+            string png = WriteFile("prose.png", PngMagic);
+            var hits = ImagePathScanner.Scan(
+                $"'tis odd: don't worry, it's Paul's {png} that I can't open, isn't it'", null);
+            Assert.Equal(png, Assert.Single(hits).FullPath);
+        }
+
+        [Fact]
+        public void Scan_RejectedQuotedSegments_DoNotConsumeInnerPaths()
+        {
+            string a = WriteFile("inner-a.png", PngMagic);
+            string b = WriteFile("inner-b.png", PngMagic);
+            string missing = Path.Combine(_dir, "missing.png");
+            var hits = ImagePathScanner.Scan($"'see {a} now' and \"{missing} or {b}\"", null);
+
+            Assert.Equal(2, hits.Count);
+            Assert.Equal(a, hits[0].FullPath);
+            Assert.Equal(b, hits[1].FullPath);
+        }
+
+        // ── Unquoted rooted paths with spaces ─────────────────────────────────────────────
+
+        [Fact]
+        public void Scan_UnquotedRootedPathWithSpaces_MidSentence_DetectedOnce()
+        {
+            string png = WriteFileIn("My Shots", "a b.png", PngMagic);
+            var hits = ImagePathScanner.Scan($"please check {png} and tell me what you see", null);
+            Assert.Equal(png, Assert.Single(hits).FullPath);
+        }
+
+        [Fact]
+        public void Scan_UnquotedPathWithDoubleSpace_DetectedWithExactSpacing()
+        {
+            string png = WriteFileIn("My  Shots", "x.png", PngMagic);
+            var hits = ImagePathScanner.Scan($"what about {png} here", null);
+            Assert.Equal(png, Assert.Single(hits).FullPath);
+        }
+
+        [Fact]
+        public void Scan_UnquotedNonexistentPathWithSpaces_OtherPathsStillDetected()
+        {
+            string missing = Path.Combine(_dir, "No Such", "c d.png");
+            string ok = WriteFile("ok.png", PngMagic);
+            var hits = ImagePathScanner.Scan($"{missing} then {ok} too", null);
+            Assert.Equal(ok, Assert.Single(hits).FullPath);
+        }
+
+        [Fact]
+        public void Scan_ExtendedPath_LongestValidWins()
+        {
+            WriteFile("a.png", PngMagic);
+            string longer = WriteFile("a.png b.png", PngMagic);
+            var hits = ImagePathScanner.Scan($"open {Path.Combine(_dir, "a.png")} b.png now", null);
+            Assert.Equal(longer, Assert.Single(hits).FullPath);
+        }
+
+        [Theory]
+        [InlineData("", ".")]
+        [InlineData("", ", and more")]
+        [InlineData("(", ") ok")]
+        [InlineData("", "?).")]
+        public void Scan_ExtendedPath_SurroundingPunctuation_Trimmed(string prefix, string suffix)
+        {
+            string png = WriteFileIn("Punct Dir", "a b.png", PngMagic);
+            var hits = ImagePathScanner.Scan($"is {prefix}{png}{suffix}", null);
+            Assert.Equal(png, Assert.Single(hits).FullPath);
+        }
+
+        [Fact]
+        public void Scan_DragDropForms_QuotedAndBare_BothDetected()
+        {
+            // Windows Terminal may paste a dropped path quoted or bare; both must work.
+            string png = WriteFileIn("Drop Zone", "Screen Shot.png", PngMagic);
+            Assert.Equal(png, Assert.Single(ImagePathScanner.Scan($"\"{png}\" ", null)).FullPath);
+            Assert.Equal(png, Assert.Single(ImagePathScanner.Scan($"{png} ", null)).FullPath);
+        }
+
 
         // ── Rejection ─────────────────────────────────────────────────────────
 

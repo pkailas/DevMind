@@ -1,14 +1,17 @@
-// File: ImagePathScanner.cs  v1.0
+// File: ImagePathScanner.cs  v1.1
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Auto-attach detection for typed messages: finds file paths in user input that
 // point at real image files, so the host can stage them as multimodal content
-// without an explicit /image command. Quoted segments are checked first (drag-
-// dropping a file into a Windows terminal pastes a quoted path), then plain
-// whitespace-delimited tokens. A candidate must carry a known image extension,
-// exist on disk, be within the size cap, AND sniff as a real image by magic
-// bytes — a text file renamed .png is never attached. PDFs are deliberately
-// excluded: they need a rasterize/page decision, which stays behind /image.
+// without an explicit /image command. Three passes, in order: double-quoted
+// segments, single-quoted segments, then whitespace-delimited tokens (where a
+// token starting a rooted path may extend over following space-separated tokens,
+// so unquoted paths with spaces work). A candidate must carry a known image
+// extension, exist on disk, be within the size cap, AND sniff as a real image by
+// magic bytes — a text file renamed .png is never attached. Only an ACCEPTED
+// candidate consumes its text; a rejected quoted segment leaves its contents for
+// the later passes. PDFs are deliberately excluded: they need a rasterize/page
+// decision, which stays behind /image.
 
 using System;
 using System.Collections.Generic;
@@ -38,10 +41,37 @@ namespace DevMind
         private static readonly char[] TrailingPunctuation =
             { '.', ',', ';', ':', '!', '?', ')', ']', '}', '\'', '"' };
 
+        // Punctuation that prose puts in front of a bare path ("(see C:\a.png)").
+        private static readonly char[] LeadingPunctuation = { '(', '[', '{', '\'', '"' };
+
+        /// <summary>
+        /// Most whitespace-separated tokens an unquoted rooted path may span
+        /// (the first token plus up to 11 following ones).
+        /// </summary>
+        private const int MaxPathTokens = 12;
+
         /// <summary>
         /// Scans input for image paths and returns each unique, validated image in
-        /// order of first appearance. Unquoted paths containing spaces are not
-        /// detected — quote them (drag-and-drop does this automatically).
+        /// order of first appearance. Rules:
+        /// <list type="bullet">
+        /// <item>Double-quoted segments (<c>"..."</c>) are candidates with spaces intact.
+        /// Windows Terminal drag-and-drop is covered whether it pastes the path quoted
+        /// or bare.</item>
+        /// <item>Single-quoted segments (<c>'...'</c>) are candidates too, but only when
+        /// delimited at word boundaries, so prose apostrophes (<c>don't</c>, <c>Paul's</c>)
+        /// never open or close one — see <see cref="IsSingleQuoteOpener"/> and
+        /// <see cref="IsSingleQuoteCloser"/>.</item>
+        /// <item>Remaining text is split on whitespace; each token is a candidate after
+        /// trimming leading <c>( [ { ' "</c> and trailing prose punctuation.</item>
+        /// <item>A token that starts a ROOTED path (<c>C:\</c>, <c>C:/</c> or
+        /// <c>\\server\share</c>) may extend over up to <see cref="MaxPathTokens"/> tokens
+        /// separated only by plain spaces; the LONGEST extension that validates wins, and
+        /// its tokens are not rescanned. The candidate is the original substring, so runs
+        /// of several spaces inside a file name are preserved. Relative paths containing
+        /// spaces are not extended — quote them.</item>
+        /// </list>
+        /// A candidate that fails validation consumes nothing. Disk is touched only for
+        /// candidates ending in an image extension; there is no directory listing.
         /// </summary>
         public static List<DetectedImage> Scan(string input, string workingDirectory)
         {
@@ -49,15 +79,19 @@ namespace DevMind
             if (string.IsNullOrWhiteSpace(input))
                 return results;
 
+            var state = new ScanState(input, workingDirectory);
+            ScanDoubleQuoted(state);
+            ScanSingleQuoted(state);
+            ScanTokens(state);
+
+            // Appearance order matters — staged images reach the model in this order,
+            // and users refer to them positionally ("the first screenshot").
+            state.Found.Sort((a, b) => a.Pos.CompareTo(b.Pos));
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (string candidate in ExtractCandidates(input))
+            foreach (var found in state.Found)
             {
-                string fullPath = Resolve(candidate, workingDirectory);
-                if (fullPath == null || !seen.Add(fullPath))
-                    continue;
-                var image = Validate(fullPath);
-                if (image != null)
-                    results.Add(image);
+                if (seen.Add(found.Image.FullPath))
+                    results.Add(found.Image);
             }
             return results;
         }
@@ -69,19 +103,63 @@ namespace DevMind
             return $"data:{image.MimeType};base64,{Convert.ToBase64String(bytes)}";
         }
 
-        /// <summary>
-        /// Yields path candidates in order of appearance: contents of double-quoted
-        /// segments (spaces intact), plus whitespace tokens from the unquoted rest
-        /// with trailing prose punctuation trimmed. Appearance order matters — staged
-        /// images reach the model in this order, and users refer to them positionally
-        /// ("the first screenshot"). Only image-extension candidates survive.
-        /// </summary>
-        private static IEnumerable<string> ExtractCandidates(string input)
+        /// <summary>Per-call scan state: accepted images, consumed text, validation cache.</summary>
+        private sealed class ScanState
         {
-            var ordered = new List<(int Pos, string Text)>();
+            public readonly string Input;
+            public readonly string WorkingDirectory;
+            /// <summary>Input with accepted candidates blanked to spaces.</summary>
+            public readonly char[] Masked;
+            /// <summary>True where an accepted candidate (quotes included) consumed the text.</summary>
+            public readonly bool[] Consumed;
+            public readonly List<(int Pos, DetectedImage Image)> Found = new List<(int, DetectedImage)>();
+            private readonly Dictionary<string, DetectedImage> _validated =
+                new Dictionary<string, DetectedImage>(StringComparer.OrdinalIgnoreCase);
 
-            // Quoted segments first, masking them out so the token pass skips them.
-            var masked = input.ToCharArray();
+            public ScanState(string input, string workingDirectory)
+            {
+                Input = input;
+                WorkingDirectory = workingDirectory;
+                Masked = input.ToCharArray();
+                Consumed = new bool[input.Length];
+            }
+
+            /// <summary>Extension check, then resolve + validate (cached per full path).</summary>
+            public bool TryAccept(string candidate, out DetectedImage image)
+            {
+                image = null;
+                if (!HasImageExtension(candidate))
+                    return false;
+                string fullPath = Resolve(candidate, WorkingDirectory);
+                if (fullPath == null)
+                    return false;
+                if (!_validated.TryGetValue(fullPath, out image))
+                {
+                    image = Validate(fullPath);
+                    _validated[fullPath] = image;
+                }
+                return image != null;
+            }
+
+            /// <summary>Records an accepted image and blanks [start, endExclusive) for later passes.</summary>
+            public void Accept(int pos, DetectedImage image, int start, int endExclusive)
+            {
+                Found.Add((pos, image));
+                for (int i = start; i < endExclusive; i++)
+                {
+                    Masked[i] = ' ';
+                    Consumed[i] = true;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Pass 1: double-quoted segments, paired left to right (spaces intact).
+        /// A segment is consumed only when its trimmed contents validate.
+        /// </summary>
+        private static void ScanDoubleQuoted(ScanState state)
+        {
+            string input = state.Input;
             int pos = 0;
             while (true)
             {
@@ -90,14 +168,90 @@ namespace DevMind
                 int close = input.IndexOf('"', open + 1);
                 if (close < 0) break;
                 string quoted = input.Substring(open + 1, close - open - 1).Trim();
-                if (HasImageExtension(quoted))
-                    ordered.Add((open, quoted));
-                for (int i = open; i <= close; i++)
-                    masked[i] = ' ';
+                if (state.TryAccept(quoted, out DetectedImage image))
+                    state.Accept(open, image, open, close + 1);
                 pos = close + 1;
             }
+        }
 
-            // Whitespace-delimited tokens from the unquoted remainder.
+        /// <summary>
+        /// Pass 2: single-quoted segments on the text pass 1 left. An opener that
+        /// finds no closer, or whose contents fail validation, consumes nothing and
+        /// the search resumes at the next apostrophe.
+        /// </summary>
+        private static void ScanSingleQuoted(ScanState state)
+        {
+            string text = new string(state.Masked);
+            for (int open = text.IndexOf('\''); open >= 0; open = text.IndexOf('\'', open + 1))
+            {
+                if (!IsSingleQuoteOpener(text, open))
+                    continue;
+                int close = -1;
+                for (int j = open + 2; j < text.Length; j++)
+                {
+                    if (IsSingleQuoteCloser(text, j))
+                    {
+                        close = j;
+                        break;
+                    }
+                }
+                if (close < 0)
+                    continue;
+                string quoted = text.Substring(open + 1, close - open - 1).Trim();
+                if (state.TryAccept(quoted, out DetectedImage image))
+                {
+                    state.Accept(open, image, open, close + 1);
+                    open = close; // resume after the accepted segment
+                }
+            }
+        }
+
+        /// <summary>
+        /// A <c>'</c> opens a single-quoted segment when it is at the start of the text
+        /// or follows whitespace, <c>(</c> or <c>[</c>, AND the next character is not
+        /// whitespace. The apostrophes in <c>don't</c> / <c>Paul's</c> follow a letter, so
+        /// they never open one.
+        /// </summary>
+        private static bool IsSingleQuoteOpener(string text, int i)
+        {
+            if (text[i] != '\'' || i + 1 >= text.Length || char.IsWhiteSpace(text[i + 1]))
+                return false;
+            if (i == 0)
+                return true;
+            char prev = text[i - 1];
+            return char.IsWhiteSpace(prev) || prev == '(' || prev == '[';
+        }
+
+        /// <summary>
+        /// A <c>'</c> closes a single-quoted segment when the previous character is not
+        /// whitespace AND it is at the end of the text or is followed by whitespace or
+        /// trailing prose punctuation (<see cref="TrailingPunctuation"/>). The first such
+        /// <c>'</c> after the opener closes it; an apostrophe inside a name followed by a
+        /// letter (<c>'C:\Paul's\a.png'</c>) does not.
+        /// </summary>
+        private static bool IsSingleQuoteCloser(string text, int j)
+        {
+            if (text[j] != '\'' || char.IsWhiteSpace(text[j - 1]))
+                return false;
+            if (j + 1 == text.Length)
+                return true;
+            char next = text[j + 1];
+            return char.IsWhiteSpace(next) || Array.IndexOf(TrailingPunctuation, next) >= 0;
+        }
+
+        /// <summary>
+        /// Pass 3: whitespace-delimited tokens on the text passes 1–2 left. A token
+        /// that starts a rooted path is also tried extended over following tokens —
+        /// as the ORIGINAL substring, so the exact spacing (double spaces included)
+        /// is kept — up to <see cref="MaxPathTokens"/> tokens, stopping at any gap
+        /// that is not plain spaces (tab, newline) or that touches consumed text.
+        /// The longest validating candidate wins, including over the bare token, and
+        /// the tokens it covers are skipped.
+        /// </summary>
+        private static void ScanTokens(ScanState state)
+        {
+            char[] masked = state.Masked;
+            var tokens = new List<(int Start, int End)>();
             int t = 0;
             while (t < masked.Length)
             {
@@ -105,16 +259,62 @@ namespace DevMind
                 int start = t;
                 while (t < masked.Length && !char.IsWhiteSpace(masked[t])) t++;
                 if (t > start)
-                {
-                    string token = new string(masked, start, t - start).TrimEnd(TrailingPunctuation);
-                    if (HasImageExtension(token))
-                        ordered.Add((start, token));
-                }
+                    tokens.Add((start, t));
             }
 
-            ordered.Sort((a, b) => a.Pos.CompareTo(b.Pos));
-            foreach (var candidate in ordered)
-                yield return candidate.Text;
+            for (int k = 0; k < tokens.Count; k++)
+            {
+                int start = tokens[k].Start;
+                while (start < tokens[k].End && Array.IndexOf(LeadingPunctuation, masked[start]) >= 0)
+                    start++;
+                if (start == tokens[k].End)
+                    continue;
+
+                int last = IsRootedStart(masked, start, tokens[k].End)
+                    ? Math.Min(tokens.Count - 1, k + MaxPathTokens - 1)
+                    : k;
+                DetectedImage best = null;
+                int bestIndex = -1;
+                for (int m = k; m <= last; m++)
+                {
+                    if (m > k && !IsPlainSpaceGap(state, tokens[m - 1].End, tokens[m].Start))
+                        break;
+                    string candidate = state.Input.Substring(start, tokens[m].End - start)
+                        .TrimEnd(TrailingPunctuation);
+                    if (state.TryAccept(candidate, out DetectedImage image))
+                    {
+                        best = image;
+                        bestIndex = m;
+                    }
+                }
+                if (best != null)
+                {
+                    state.Accept(start, best, start, tokens[bestIndex].End);
+                    k = bestIndex;
+                }
+            }
+        }
+
+        /// <summary>True for <c>X:\</c>, <c>X:/</c> or <c>\\server</c> at <paramref name="start"/>.</summary>
+        private static bool IsRootedStart(char[] text, int start, int end)
+        {
+            if (end - start < 3)
+                return false;
+            if (char.IsLetter(text[start]) && text[start + 1] == ':'
+                && (text[start + 2] == '\\' || text[start + 2] == '/'))
+                return true;
+            return text[start] == '\\' && text[start + 1] == '\\' && text[start + 2] != '\\';
+        }
+
+        /// <summary>True when [from, to) is only plain spaces that no accepted candidate consumed.</summary>
+        private static bool IsPlainSpaceGap(ScanState state, int from, int to)
+        {
+            for (int i = from; i < to; i++)
+            {
+                if (state.Input[i] != ' ' || state.Consumed[i])
+                    return false;
+            }
+            return true;
         }
 
         private static bool HasImageExtension(string candidate)
