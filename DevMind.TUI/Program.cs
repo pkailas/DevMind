@@ -1803,11 +1803,11 @@ namespace DevMind
                             inputBox.View.SetFocus();
                         },
                         AdoptSessionId = (id) => SessionId.Adopt(id),
-                        // /rewind's UI effects (input box, transcript replay) run through
-                        // this seam: Dispatch awaits on a pool thread, and Terminal.Gui
-                        // throws "Call from invalid thread" for off-thread view access.
-                        // app.Invoke is the same marshal every other off-thread UI write uses.
-                        RunOnUiThread = (action) => app.Invoke(action),
+                        // /resume's and /rewind's post-await UI effects (session reset,
+                        // transcript replay, input box) run through this seam: their awaits
+                        // resume on a pool thread. Awaitable, so the handler's ordering holds
+                        // (reset before adopt/prepend) — the same marshal as the handler's own.
+                        RunOnUiThread = OnUiAsync,
                        PrependMessages = (roles, contents) => llmClient.PrependMessages(roles, contents),
                         ReplayTranscript = (roles, contents) => ReplayResumed(host, roles, contents),
                         // Nearline cache (for the /cache command).

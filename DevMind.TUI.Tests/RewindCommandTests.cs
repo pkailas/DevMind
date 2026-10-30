@@ -226,13 +226,14 @@ namespace DevMind.TUI.Tests
         }
 
         /// <summary>
-        /// The threading seam: /rewind's UI effects (transcript replay, input-box text)
-        /// MUST go through ctx.RunOnUiThread — the dispatcher awaits on a pool thread, and
-        /// Terminal.Gui throws "Call from invalid thread" for off-thread view access. This
-        /// test wires a RunOnUiThread that records every effect it is asked to marshal, and a
-        /// SetInputBoxText / ReplayTranscript that THROW if called directly (simulating what
-        /// Terminal.Gui does off-thread). On the old wiring (no seam) both callbacks fire
-        /// directly and the test fails; on the new wiring they fire only through the seam.
+        /// The threading seam: /rewind's UI effects (session reset, transcript replay,
+        /// input-box text) MUST go through ctx.RunOnUiThread — the dispatcher awaits on a pool
+        /// thread, and Terminal.Gui throws "Call from invalid thread" for off-thread view
+        /// access. This test wires a RunOnUiThread that records every effect it is asked to
+        /// marshal, and a ResetConversation / SetInputBoxText / ReplayTranscript that THROW if
+        /// called directly (simulating what Terminal.Gui does off-thread). On the old wiring
+        /// (no seam) the callbacks fire directly and the test fails; on the new wiring they
+        /// fire only through the seam.
         /// </summary>
         [Fact]
         public async Task Rewind_UiEffects_GoThroughTheUiThreadSeam_NotDirectly()
@@ -248,6 +249,7 @@ namespace DevMind.TUI.Tests
             {
                 uiThreadEffects.Add("marshalled");
                 // action() intentionally NOT called — the callbacks throw by design.
+                return Task.CompletedTask;
             };
 
             // The view callbacks THROW if hit off-thread (simulating Terminal.Gui's
@@ -255,6 +257,10 @@ namespace DevMind.TUI.Tests
             // error CommandResult — the test asserts the error message names the off-thread
             // call, proving the effect did NOT go through the seam. On the new wiring the
             // seam intercepts first, the callbacks never throw, and the rewind succeeds.
+            ctx.ResetConversation = () =>
+            {
+                throw new InvalidOperationException("ResetConversation called off the UI thread");
+            };
             ctx.ReplayTranscript = (roles, contents) =>
             {
                 throw new InvalidOperationException("ReplayTranscript called off the UI thread");
@@ -268,8 +274,9 @@ namespace DevMind.TUI.Tests
 
             // The rewind succeeded — the effects went through the seam, not directly.
             Assert.False(result.IsError, result.Message);
-            // Both UI effects were marshalled through the seam (ReplayTranscript + SetInputBoxText).
-            Assert.Equal(2, uiThreadEffects.Count);
+            // All three UI effects were marshalled through the seam
+            // (ResetConversation + ReplayTranscript + SetInputBoxText).
+            Assert.Equal(3, uiThreadEffects.Count);
         }
 
         /// <summary>

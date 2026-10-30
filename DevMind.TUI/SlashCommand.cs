@@ -118,13 +118,17 @@ namespace DevMind
         public Action<string> AdoptSessionId { get; set; }
 
         /// <summary>
-        /// Run an action on the UI thread. Handlers that touch terminal views (the input box,
-        /// the transcript) MUST route through this — the dispatcher awaits on a pool thread,
-        /// and Terminal.Gui throws "Call from invalid thread" for off-thread view access.
-        /// Program.cs wraps it in app.Invoke. Null in a host with no UI thread (tests run the
-        /// action inline instead, and assert the effect only happens through this seam).
+        /// Run an action on the UI thread; the Task completes once it has run. Handlers that
+        /// touch terminal views or UI state (the input box, the transcript, the session reset)
+        /// after an await MUST route through this: Terminal.Gui's plain SynchronizationContext
+        /// resumes the handler on a pool thread, and views are not thread-checked, so an
+        /// off-thread touch silently races the main loop. Awaitable so ordered effects stay
+        /// ordered (the reset must finish before the fork's id is adopted and its rows load).
+        /// Program.cs wires it to TuiTurnTeardown.RunOnUiAsync. Null in a host with no UI
+        /// thread (tests run the action inline instead, and assert the effect only happens
+        /// through this seam).
         /// </summary>
-        public Action<Action> RunOnUiThread { get; set; }
+        public Func<Action, Task> RunOnUiThread { get; set; }
 
        /// <summary>Prepend messages into the conversation history (for /resume).</summary>
         public Action<string[], string[]> PrependMessages { get; set; }
@@ -1734,8 +1738,11 @@ namespace DevMind
                     };
                 }
 
+                // PrependMessages is the LlmClient (no views); the transcript is a view and
+                // the awaits above resumed this on a pool thread, so the replay is marshalled.
                 ctx.PrependMessages(roles, contents);
-                ctx.ReplayTranscript?.Invoke(roles, contents);
+                if (ctx.ReplayTranscript != null)
+                    await RunOnUiAsync(ctx, () => ctx.ReplayTranscript(roles, contents));
 
                 string title = string.IsNullOrEmpty(session.Title) ? "(untitled)" : session.Title;
                 return new CommandResult
@@ -1858,8 +1865,11 @@ namespace DevMind
                 // with /history + /resume. Files on disk are never touched by this command.
 
                 // Reset exactly what /new resets, then adopt the fork's id before anything
-                // loads into the fresh context.
-                ctx.ResetConversation();
+                // loads into the fresh context. The reset clears the transcript model and
+                // swaps UI-owned state, so it runs on the UI thread — and is AWAITED: it
+                // deletes SessionId.Get()'s image folder and resets the id, so it must finish
+                // (on the OLD id) before the adopt, and its ClearHistory before the prepend.
+                await RunOnUiAsync(ctx, () => ctx.ResetConversation());
                 ctx.AdoptSessionId(newId);
 
                 // Load-into-context + replay-into-transcript through the SAME path /resume
@@ -1869,19 +1879,18 @@ namespace DevMind
                 if (roles.Length > 0)
                 {
                     // PrependMessages is the LlmClient (thread-safe); the transcript is a
-                    // terminal view, so it goes through the UI-thread seam — the dispatcher
-                    // awaits on a pool thread and Terminal.Gui throws "Call from invalid
-                    // thread" for off-thread view access (the live crash this seam exists for).
+                    // terminal view, so it goes through the UI-thread seam — the awaits above
+                    // resumed this on a pool thread.
                     ctx.PrependMessages(roles, contents);
                     if (ctx.ReplayTranscript != null)
-                        RunOnUi(ctx, () => ctx.ReplayTranscript(roles, contents));
+                        await RunOnUiAsync(ctx, () => ctx.ReplayTranscript(roles, contents));
                 }
 
                 // Turn N's prompt goes BACK into the input box — not sent — so it can be
                 // edited and re-sent as the fork's first new turn. The input box is a view:
                 // same seam, same reason.
                 if (ctx.SetInputBoxText != null)
-                    RunOnUi(ctx, () => ctx.SetInputBoxText(plan.RestoredPrompt));
+                    await RunOnUiAsync(ctx, () => ctx.SetInputBoxText(plan.RestoredPrompt));
 
                 // ── Repo memory: the conversation fork cut the rows; this cuts the files ──
                 // The rows of the abandoned turns may have called save_memory, which wrote a
@@ -2127,15 +2136,16 @@ namespace DevMind
         }
 
         /// <summary>
-        /// Route a UI effect through the host's UI-thread seam. When the seam is absent (a
-        /// test fake with no terminal) the effect runs inline — the seam, not the handler,
-        /// is what makes the TUI crash-free, so a fake that skips it is the bug the
-        /// threading-seam test is written to catch.
+        /// Route a UI effect through the host's UI-thread seam; the Task completes once the
+        /// effect has run. When the seam is absent (a test fake with no terminal) the effect
+        /// runs inline — the seam, not the handler, is what keeps view access on the UI
+        /// thread, so a fake that skips it is the bug the threading-seam tests catch.
         /// </summary>
-        static void RunOnUi(CommandContext ctx, Action action)
+        static Task RunOnUiAsync(CommandContext ctx, Action action)
         {
-            if (ctx.RunOnUiThread != null) ctx.RunOnUiThread(action);
-            else action();
+            if (ctx.RunOnUiThread != null) return ctx.RunOnUiThread(action) ?? Task.CompletedTask;
+            action();
+            return Task.CompletedTask;
         }
 
         /// <summary>
