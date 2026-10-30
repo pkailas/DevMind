@@ -1078,6 +1078,44 @@ namespace DevMind
                 ClearCtrlCArmed(app, statusBar);
             };
 
+            // ── UI-thread marshal for the input handler below ───────────────────
+            // Terminal.Gui 2.4.17's Init installs a plain SynchronizationContext (Post goes to
+            // the thread pool), so an await in the handler resumes on a POOL thread, not the UI
+            // thread. Every view touch or UI-state write after an await goes through OnUiAsync:
+            // inline when already on the UI thread, otherwise queued to the main loop; the
+            // handler awaits it, so the block has run before the handler goes on (or returns).
+            Task OnUiAsync(Action action) => TuiTurnTeardown.RunOnUiAsync(app, action);
+
+            void ShowReady()
+            {
+                statusBar.SetReady();
+                statusBar.ClearIteration();
+            }
+
+            // The ONE end-of-busy teardown for every long operation the handler starts (agentic
+            // turn, /t, /digest, /library add|replace), so the copies cannot drift. resetStatus
+            // is the path's status tail; revert is plain state to restore first (the /t path's
+            // thinking flag) — run on the UI thread too, so it lands before the box re-enables
+            // and is serialized with CommandContext.SetThinking's writes. _isTurnRunning clears before the box
+            // re-enables (TuiTurnTeardown.EndBusy's order).
+            Task EndBusyAsync(Action resetStatus, Action revert = null) => OnUiAsync(() =>
+            {
+                revert?.Invoke();
+                TuiTurnTeardown.EndBusy(
+                    () => { _isTurnRunning = false; host.SetStreaming(false); },
+                    inputBox, resetStatus);
+            });
+
+            // The agentic turn's start, shared by the /t and normal paths. Both can run after an
+            // await (slash dispatch; a /library question falling through), so it is marshalled.
+            // The box stays live during the turn: typing is a steer (SteerInputRouter).
+            Task BeginTurnAsync() => OnUiAsync(() =>
+            {
+                statusBar.SetBusy("Processing...");
+                _isTurnRunning = true;  host.SetStreaming(true);
+                callbacks.BeginTurn();
+            });
+
            // Handle Enter in input field — submit to LLM.
             inputBox.View.Accepting += async (s, e) =>
             {
@@ -1295,12 +1333,8 @@ namespace DevMind
                     }
                     finally
                     {
-                        _isTurnRunning = false; host.SetStreaming(false);
-                        inputBox.View.CanFocus = true;
-                        inputBox.SetActive(true);
-                        inputBox.View.SetFocus();
-                        statusBar.SetReady();
-                        statusBar.ClearIteration();
+                        // The await above resumed on a pool thread — the teardown is marshalled.
+                        await EndBusyAsync(ShowReady);
                     }
                     return;
                 }
@@ -1493,10 +1527,14 @@ namespace DevMind
                             return;
                         }
 
-                        inputBox.View.CanFocus = false;
-                        inputBox.SetActive(false);
-                        statusBar.SetBusy("Replacing library range...");
-                        _isTurnRunning = true;  host.SetStreaming(true);
+                        // ResolveVisionRouteAsync may have resumed this on a pool thread.
+                        await OnUiAsync(() =>
+                        {
+                            inputBox.View.CanFocus = false;
+                            inputBox.SetActive(false);
+                            statusBar.SetBusy("Replacing library range...");
+                            _isTurnRunning = true;  host.SetStreaming(true);
+                        });
                         try
                         {
                             await Task.Run(async () =>
@@ -1528,12 +1566,7 @@ namespace DevMind
                         }
                         finally
                         {
-                            _isTurnRunning = false; host.SetStreaming(false);
-                            inputBox.View.CanFocus = true;
-                            inputBox.SetActive(true);
-                            inputBox.View.SetFocus();
-                            statusBar.SetReady();
-                            statusBar.ClearIteration();
+                            await EndBusyAsync(ShowReady);
                         }
                         return;
 
@@ -1591,10 +1624,14 @@ namespace DevMind
                             addUseVision = uv;
                         }
 
-                        inputBox.View.CanFocus = false;
-                        inputBox.SetActive(false);
-                        statusBar.SetBusy("Ingesting...");
-                        _isTurnRunning = true;  host.SetStreaming(true);
+                        // ResolveVisionRouteAsync may have resumed this on a pool thread.
+                        await OnUiAsync(() =>
+                        {
+                            inputBox.View.CanFocus = false;
+                            inputBox.SetActive(false);
+                            statusBar.SetBusy("Ingesting...");
+                            _isTurnRunning = true;  host.SetStreaming(true);
+                        });
                         try
                         {
                             await Task.Run(async () =>
@@ -1629,12 +1666,7 @@ namespace DevMind
                         }
                         finally
                         {
-                            _isTurnRunning = false; host.SetStreaming(false);
-                            inputBox.View.CanFocus = true;
-                            inputBox.SetActive(true);
-                            inputBox.View.SetFocus();
-                            statusBar.SetReady();
-                            statusBar.ClearIteration();
+                            await EndBusyAsync(ShowReady);
                         }
                         return;
                     }
@@ -1897,22 +1929,20 @@ namespace DevMind
                             host.AppendOutputLocal($"\n> {message}\n", OutputColor.Input);
                             AutoAttachTypedImages(message);
 
-                            // Enable thinking for this turn.
+                            // Enable thinking for this turn. Plain state, read by the turn worker;
+                            // written before Task.Run, which publishes it to that thread.
                             bool previousThinking = options.ShowLlmThinking;
                             options.ShowLlmThinking = true;
 
-                            // The box stays live: typing during an agentic turn is a steer
-                            // (SteerInputRouter), not a new prompt. Esc/Ctrl+C still cancel.
-                            statusBar.SetBusy("Processing...");
-                            _isTurnRunning = true;  host.SetStreaming(true);
-                            callbacks.BeginTurn();
+                            // Dispatch's await may have resumed this on a pool thread.
+                            await BeginTurnAsync();
 
                             try
                             {
                                 // Run off the UI thread so synchronous tool I/O (FIND/READ/LIST)
-                                // can't block the main loop and freeze the spinner. All UI writes
-                                // already marshal via app.Invoke; this await resumes the finally
-                                // back on the UI thread.
+                                // can't block the main loop and freeze the spinner. This await
+                                // resumes the finally on a POOL thread (Terminal.Gui's plain
+                                // SynchronizationContext), so the teardown is marshalled.
                                 await Task.Run(() => RunTurnAsync(message, options, llmClient, host, driver, state,
                                     callbacks, () => BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules, host.TaskScratchpad), cts, app,
                                     historyStore, SessionId.Get(), SessionId.GetMachineName()));
@@ -1922,12 +1952,10 @@ namespace DevMind
                                 // Guaranteed teardown on completion, cancellation, AND
                                 // exception — EndTurn disposes the turn ticker (otherwise
                                 // it re-orphans and "Generating" returns) and shows Ready.
-                                options.ShowLlmThinking = previousThinking; // revert one-shot thinking
-                                _isTurnRunning = false; host.SetStreaming(false);
-                                inputBox.View.CanFocus = true;
-                                inputBox.SetActive(true);
-                                inputBox.View.SetFocus();
-                                callbacks.EndTurn();
+                                // The one-shot thinking revert runs first, before the box
+                                // re-enables, so the next prompt never inherits it.
+                                await EndBusyAsync(callbacks.EndTurn,
+                                    revert: () => options.ShowLlmThinking = previousThinking);
                             }
                             return;
                         }
@@ -1937,28 +1965,28 @@ namespace DevMind
                     // but keep backward compatibility by registering it explicitly.
                     // (The /new handler already does the full reset.)
 
-                    inputBox.View.CanFocus = true;
-                    inputBox.SetActive(true);
-                    inputBox.View.SetFocus();
-                    statusBar.SetReady();
-                    statusBar.ClearIteration();
+                    // Dispatch's await may have resumed this on a pool thread.
+                    await OnUiAsync(() =>
+                    {
+                        TuiTurnTeardown.RestoreInput(inputBox);
+                        ShowReady();
+                    });
                     return;
                 }
 
                 AutoAttachTypedImages(input);
 
                 // The box stays live during agentic processing: typing is a steer
-                // (SteerInputRouter), not a new prompt. Esc/Ctrl+C still cancel.
-                statusBar.SetBusy("Processing...");
-                _isTurnRunning = true;  host.SetStreaming(true);
-                callbacks.BeginTurn();
+                // (SteerInputRouter), not a new prompt. Esc/Ctrl+C still cancel. A /library
+                // question reaches here after an await, so the start is marshalled too.
+                await BeginTurnAsync();
 
                 try
                 {
                     // Run the agentic turn OFF the UI thread — synchronous tool I/O
                     // (FIND/READ/LIST/GREP) would otherwise block the main loop and freeze the
-                    // animated spinner. All UI writes marshal via app.Invoke; this await resumes
-                    // the finally back on the UI thread for the teardown.
+                    // animated spinner. This await resumes the finally on a POOL thread
+                    // (Terminal.Gui's plain SynchronizationContext), so the teardown is marshalled.
                     await Task.Run(() => RunTurnAsync(input, options, llmClient, host, driver, state,
                         callbacks, () => BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules, host.TaskScratchpad), cts, app,
                         historyStore, SessionId.Get(), SessionId.GetMachineName()));
@@ -1970,11 +1998,7 @@ namespace DevMind
                     // re-orphans it and "Generating" comes right back), syncs the
                     // context meter to server truth, publishes the turn's tok/s, and
                     // shows Ready.
-                    _isTurnRunning = false; host.SetStreaming(false);
-                    inputBox.View.CanFocus = true;
-                    inputBox.SetActive(true);
-                    inputBox.View.SetFocus();
-                    callbacks.EndTurn();
+                    await EndBusyAsync(callbacks.EndTurn);
                 }
             };
 
