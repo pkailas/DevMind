@@ -41,9 +41,10 @@ namespace DevMind
     {
         /// <summary>
         /// Render viewport (smaller × larger side, orientation-aware) the page is scaled
-        /// to fit. 1240×1754 is A4 at ~150 DPI — text stays legible to a vision encoder
-        /// while keeping the image-token cost of a page reasonable (~2K tokens on a
-        /// Qwen3-VL-class merger).
+        /// to fit. 1240×1754 is A4 at ~150 DPI — text stays legible to a vision encoder.
+        /// Measured on Strata: a page at this size costs ~1K prompt tokens (~990). Strata
+        /// caps image tokens, so a larger render (2480×3508 also ~990) costs no more; a
+        /// smaller one (620×877, ~515) costs less but loses legibility.
         /// </summary>
         public const int MaxRenderDimOne = 1240;
 

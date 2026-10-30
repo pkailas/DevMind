@@ -1,4 +1,4 @@
-// File: ImagePathScanner.cs  v1.1
+// File: ImagePathScanner.cs  v1.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Auto-attach detection for typed messages: finds file paths in user input that
@@ -10,8 +10,10 @@
 // extension, exist on disk, be within the size cap, AND sniff as a real image by
 // magic bytes — a text file renamed .png is never attached. Only an ACCEPTED
 // candidate consumes its text; a rejected quoted segment leaves its contents for
-// the later passes. PDFs are deliberately excluded: they need a rasterize/page
-// decision, which stays behind /image.
+// the later passes. Scan() finds images only; ScanAttachments() runs the same passes
+// and also returns PDFs (.pdf extension AND %PDF- magic bytes), so the host can ask
+// which pages to attach. One scan for both means the two can never disagree on which
+// substring is a path.
 
 using System;
 using System.Collections.Generic;
@@ -28,7 +30,23 @@ namespace DevMind
         public long SizeBytes { get; set; }
     }
 
-    /// <summary>Finds attachable image paths in free-form user input.</summary>
+    /// <summary>A validated on-disk PDF found in a typed message.</summary>
+    public sealed class DetectedPdf
+    {
+        public string FullPath { get; set; }
+        public long SizeBytes { get; set; }
+    }
+
+    /// <summary>What <see cref="ImagePathScanner.ScanAttachments"/> found: images and PDFs,
+    /// each unique and in order of first appearance.</summary>
+    public sealed class TypedAttachments
+    {
+        public List<DetectedImage> Images { get; } = new List<DetectedImage>();
+        public List<DetectedPdf> Pdfs { get; } = new List<DetectedPdf>();
+    }
+
+    /// <summary>Finds attachable image (and, via <see cref="ScanAttachments"/>, PDF) paths in
+    /// free-form user input.</summary>
     public static class ImagePathScanner
     {
         /// <summary>Same cap as /image (llama-server's own remote-image limit).</summary>
@@ -74,12 +92,25 @@ namespace DevMind
         /// candidates ending in an image extension; there is no directory listing.
         /// </summary>
         public static List<DetectedImage> Scan(string input, string workingDirectory)
+            => Run(input, workingDirectory, includePdfs: false).Images;
+
+        /// <summary>
+        /// <see cref="Scan"/>'s three passes, also accepting PDFs: a candidate ending in
+        /// <c>.pdf</c> (the extension is required in every pass, as image extensions are) that
+        /// exists, is non-empty and starts with <c>%PDF-</c> (<see cref="PdfPageAttachments.IsPdf"/>).
+        /// An accepted PDF consumes its text exactly as an accepted image does, so each
+        /// substring is at most one attachment of one kind.
+        /// </summary>
+        public static TypedAttachments ScanAttachments(string input, string workingDirectory)
+            => Run(input, workingDirectory, includePdfs: true);
+
+        private static TypedAttachments Run(string input, string workingDirectory, bool includePdfs)
         {
-            var results = new List<DetectedImage>();
+            var results = new TypedAttachments();
             if (string.IsNullOrWhiteSpace(input))
                 return results;
 
-            var state = new ScanState(input, workingDirectory);
+            var state = new ScanState(input, workingDirectory, includePdfs);
             ScanDoubleQuoted(state);
             ScanSingleQuoted(state);
             ScanTokens(state);
@@ -90,8 +121,12 @@ namespace DevMind
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var found in state.Found)
             {
-                if (seen.Add(found.Image.FullPath))
-                    results.Add(found.Image);
+                if (!seen.Add(found.Hit.FullPath))
+                    continue;
+                if (found.Hit.Image != null)
+                    results.Images.Add(found.Hit.Image);
+                else
+                    results.Pdfs.Add(found.Hit.Pdf);
             }
             return results;
         }
@@ -103,48 +138,60 @@ namespace DevMind
             return $"data:{image.MimeType};base64,{Convert.ToBase64String(bytes)}";
         }
 
-        /// <summary>Per-call scan state: accepted images, consumed text, validation cache.</summary>
+        /// <summary>An accepted candidate: exactly one of Image / Pdf is set.</summary>
+        private sealed class Hit
+        {
+            public DetectedImage Image;
+            public DetectedPdf Pdf;
+            public string FullPath => Image?.FullPath ?? Pdf.FullPath;
+        }
+
+        /// <summary>Per-call scan state: accepted candidates, consumed text, validation cache.</summary>
         private sealed class ScanState
         {
             public readonly string Input;
             public readonly string WorkingDirectory;
+            public readonly bool IncludePdfs;
             /// <summary>Input with accepted candidates blanked to spaces.</summary>
             public readonly char[] Masked;
             /// <summary>True where an accepted candidate (quotes included) consumed the text.</summary>
             public readonly bool[] Consumed;
-            public readonly List<(int Pos, DetectedImage Image)> Found = new List<(int, DetectedImage)>();
-            private readonly Dictionary<string, DetectedImage> _validated =
-                new Dictionary<string, DetectedImage>(StringComparer.OrdinalIgnoreCase);
+            public readonly List<(int Pos, Hit Hit)> Found = new List<(int, Hit)>();
+            /// <summary>Full path → accepted hit, or null when it failed validation.</summary>
+            private readonly Dictionary<string, Hit> _validated =
+                new Dictionary<string, Hit>(StringComparer.OrdinalIgnoreCase);
 
-            public ScanState(string input, string workingDirectory)
+            public ScanState(string input, string workingDirectory, bool includePdfs)
             {
                 Input = input;
                 WorkingDirectory = workingDirectory;
+                IncludePdfs = includePdfs;
                 Masked = input.ToCharArray();
                 Consumed = new bool[input.Length];
             }
 
             /// <summary>Extension check, then resolve + validate (cached per full path).</summary>
-            public bool TryAccept(string candidate, out DetectedImage image)
+            public bool TryAccept(string candidate, out Hit hit)
             {
-                image = null;
-                if (!HasImageExtension(candidate))
+                hit = null;
+                bool isImage = HasImageExtension(candidate);
+                if (!isImage && !(IncludePdfs && HasPdfExtension(candidate)))
                     return false;
                 string fullPath = Resolve(candidate, WorkingDirectory);
                 if (fullPath == null)
                     return false;
-                if (!_validated.TryGetValue(fullPath, out image))
+                if (!_validated.TryGetValue(fullPath, out hit))
                 {
-                    image = Validate(fullPath);
-                    _validated[fullPath] = image;
+                    hit = isImage ? ValidateImageHit(fullPath) : ValidatePdfHit(fullPath);
+                    _validated[fullPath] = hit;
                 }
-                return image != null;
+                return hit != null;
             }
 
-            /// <summary>Records an accepted image and blanks [start, endExclusive) for later passes.</summary>
-            public void Accept(int pos, DetectedImage image, int start, int endExclusive)
+            /// <summary>Records an accepted hit and blanks [start, endExclusive) for later passes.</summary>
+            public void Accept(int pos, Hit hit, int start, int endExclusive)
             {
-                Found.Add((pos, image));
+                Found.Add((pos, hit));
                 for (int i = start; i < endExclusive; i++)
                 {
                     Masked[i] = ' ';
@@ -168,8 +215,8 @@ namespace DevMind
                 int close = input.IndexOf('"', open + 1);
                 if (close < 0) break;
                 string quoted = input.Substring(open + 1, close - open - 1).Trim();
-                if (state.TryAccept(quoted, out DetectedImage image))
-                    state.Accept(open, image, open, close + 1);
+                if (state.TryAccept(quoted, out Hit hit))
+                    state.Accept(open, hit, open, close + 1);
                 pos = close + 1;
             }
         }
@@ -198,9 +245,9 @@ namespace DevMind
                 if (close < 0)
                     continue;
                 string quoted = text.Substring(open + 1, close - open - 1).Trim();
-                if (state.TryAccept(quoted, out DetectedImage image))
+                if (state.TryAccept(quoted, out Hit hit))
                 {
-                    state.Accept(open, image, open, close + 1);
+                    state.Accept(open, hit, open, close + 1);
                     open = close; // resume after the accepted segment
                 }
             }
@@ -273,7 +320,7 @@ namespace DevMind
                 int last = IsRootedStart(masked, start, tokens[k].End)
                     ? Math.Min(tokens.Count - 1, k + MaxPathTokens - 1)
                     : k;
-                DetectedImage best = null;
+                Hit best = null;
                 int bestIndex = -1;
                 for (int m = k; m <= last; m++)
                 {
@@ -281,9 +328,9 @@ namespace DevMind
                         break;
                     string candidate = state.Input.Substring(start, tokens[m].End - start)
                         .TrimEnd(TrailingPunctuation);
-                    if (state.TryAccept(candidate, out DetectedImage image))
+                    if (state.TryAccept(candidate, out Hit hit))
                     {
-                        best = image;
+                        best = hit;
                         bestIndex = m;
                     }
                 }
@@ -329,6 +376,9 @@ namespace DevMind
             return false;
         }
 
+        private static bool HasPdfExtension(string candidate)
+            => !string.IsNullOrEmpty(candidate) && candidate.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase);
+
         private static string Resolve(string candidate, string workingDirectory)
         {
             try
@@ -345,8 +395,25 @@ namespace DevMind
         }
 
         /// <summary>Null unless the file is within the cap and sniffs as a real image.</summary>
-        private static DetectedImage Validate(string fullPath)
-            => TryValidate(fullPath, out DetectedImage image, out _) ? image : null;
+        private static Hit ValidateImageHit(string fullPath)
+            => TryValidate(fullPath, out DetectedImage image, out _) ? new Hit { Image = image } : null;
+
+        /// <summary>Null unless the file is non-empty and starts with <c>%PDF-</c>. No size cap:
+        /// a PDF is rendered page by page, never sent whole. Unreadable files are skipped.</summary>
+        private static Hit ValidatePdfHit(string fullPath)
+        {
+            try
+            {
+                var info = new FileInfo(fullPath);
+                if (!info.Exists || info.Length == 0 || !PdfPageAttachments.IsPdf(fullPath))
+                    return null;
+                return new Hit { Pdf = new DetectedPdf { FullPath = fullPath, SizeBytes = info.Length } };
+            }
+            catch (Exception)
+            {
+                return null; // locked / no access — not attachable, same as an unreadable image
+            }
+        }
 
         /// <summary>
         /// The checks auto-attach applies (exists, non-empty, within <see cref="MaxImageBytes"/>,

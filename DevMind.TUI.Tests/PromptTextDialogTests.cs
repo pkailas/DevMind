@@ -348,5 +348,32 @@ namespace DevMind.TUI.Tests
                               $"(resume on UI thread: {r.resumeThread == ta.UiThreadId})");
             await WaitDialogClosedAsync(ta);
         }
+
+        // Program.cs's app-wide Esc handler runs BEFORE the dialog and marks Esc handled.
+        // Measured: with such a handler and no yield, Esc never reaches the prompt (the task
+        // stays pending). The handler yields when TuiTextPrompt.IsTopmost — mirrored here.
+        static void InstallAppEscHandler(TestApp ta) => ta.App.Keyboard.KeyDown += (s, k) =>
+        {
+            if (k.KeyCode != Key.Esc.KeyCode) return;
+            if (TuiTextPrompt.IsTopmost(ta.App)) return;
+            k.Handled = true;
+        };
+
+        [Fact]
+        public async Task Esc_ReachesThePrompt_PastAnAppWideEscHandler()
+        {
+            using var ta = TestApp.Start();
+            Assert.False(await OnUiAsync(ta, () => TuiTextPrompt.IsTopmost(ta.App)));
+            await OnUiAsync(ta, () => InstallAppEscHandler(ta));
+            var t = ta.Host.PromptTextAsync("Pages", "Range?", "1-14");
+            await WaitDialogOpenAsync(ta);
+            Assert.True(await OnUiAsync(ta, () => TuiTextPrompt.IsTopmost(ta.App)));
+
+            await Press(ta, Key.Esc);
+
+            Assert.Null(await AwaitAsync(t));
+            await WaitDialogClosedAsync(ta);
+            Assert.False(await OnUiAsync(ta, () => TuiTextPrompt.IsTopmost(ta.App)));
+        }
     }
 }

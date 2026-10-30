@@ -26,10 +26,11 @@ namespace DevMind.TUI.Tests
             try { Directory.Delete(_dir, recursive: true); } catch { /* best effort */ }
         }
 
-        private CommandContext Context() => new CommandContext
+        private CommandContext Context(Func<int, int?>? freeTokens = null) => new CommandContext
         {
             WorkingDirectory = _dir,
             StagePendingImage = (uri, label) => _staged.Add((uri, label)),
+            FreeContextTokens = freeTokens,
         };
 
         private string Write(string name, byte[] content)
@@ -104,6 +105,70 @@ namespace DevMind.TUI.Tests
             Assert.True(result.IsError);
             Assert.Equal("A page spec is only supported for PDF files.", result.Message);
             Assert.Empty(_staged);
+        }
+
+        // ── PDF fit check (replaces the old fixed 20-page cap) ─────────────────────
+
+        [Fact]
+        public async Task Image_PdfRangeOverFreeContext_IsRefused_WithTheRangeThatFits()
+        {
+            Write("doc.pdf", MinimalPdf(pages: 5));
+
+            var result = await SlashCommand.Dispatch("/image doc.pdf 1-3", Context(_ => 2 * 1024 + 500));
+
+            Assert.True(result.IsError);
+            Assert.Equal("That's 3 page(s) (~3,072 tokens); only ~2,548 free in the context. Attach at most 2 " +
+                         "(e.g. /image \"doc.pdf\" 1-2, or chunk through with p=2). The PDF has 5 page(s).", result.Message);
+            Assert.Empty(_staged);
+        }
+
+        [Fact]
+        public async Task Image_PdfRangeOverTheOld20PageCap_AttachesWhenItFits()
+        {
+            Write("long.pdf", MinimalPdf(pages: 21));
+
+            var result = await SlashCommand.Dispatch("/image long.pdf all", Context(_ => 100_000));
+
+            Assert.False(result.IsError, result.Message);
+            Assert.Equal(21, _staged.Count);
+        }
+
+        [Fact]
+        public async Task Image_PdfChunkOverFreeContext_IsRefused_AndTheCursorStays()
+        {
+            Write("chunk.pdf", MinimalPdf(pages: 4));
+
+            var refused = await SlashCommand.Dispatch("/image chunk.pdf p=3", Context(_ => 1024));
+            Assert.True(refused.IsError);
+            Assert.Contains("Attach at most 1", refused.Message);
+            Assert.Empty(_staged);
+
+            var ok = await SlashCommand.Dispatch("/image chunk.pdf p=1", Context(_ => 1024));
+            Assert.False(ok.IsError, ok.Message);
+            Assert.Equal("chunk.pdf p1", Assert.Single(_staged).Label); // started at page 1
+        }
+
+        [Fact]
+        public async Task Image_PdfWithNoRoomLeft_SaysSo()
+        {
+            Write("full.pdf", MinimalPdf(pages: 2));
+
+            var result = await SlashCommand.Dispatch("/image full.pdf 1", Context(_ => 300));
+
+            Assert.True(result.IsError);
+            Assert.Contains("no room for another page", result.Message);
+            Assert.Empty(_staged);
+        }
+
+        [Fact]
+        public async Task Image_PdfWithUnknownFreeContext_SkipsTheCheck()
+        {
+            Write("any.pdf", MinimalPdf(pages: 3));
+
+            var result = await SlashCommand.Dispatch("/image any.pdf 1-3", Context(_ => null));
+
+            Assert.False(result.IsError, result.Message);
+            Assert.Equal(3, _staged.Count);
         }
 
         /// <summary>A minimal valid PDF (blank pages) with a correct xref table.</summary>

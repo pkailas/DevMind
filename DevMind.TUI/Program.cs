@@ -1040,6 +1040,12 @@ namespace DevMind
                 // ── Esc ─────────────────────────────────────────────────────────
                 if (key.KeyCode == Key.Esc.KeyCode)
                 {
+                    // A text prompt (the PDF page-range dialog) owns Esc: this handler runs
+                    // before the dialog sees the key, so handling it here would make the
+                    // prompt impossible to dismiss.
+                    if (TuiTextPrompt.IsTopmost(app))
+                        return;
+
                     key.Handled = true;
 
                     // Slash-completion popup open: Esc closes the popup only —
@@ -1711,18 +1717,68 @@ namespace DevMind
                     }
                 }
 
-                // ── Auto-attach typed image paths ───────────────────────────────
+                // ── Auto-attach typed image and PDF paths ───────────────────────
                 // A message mentioning an existing image file (quoted or bare path,
                 // validated by magic bytes) stages it as multimodal content without
-                // an explicit /image. Echoes what it attached so nothing is silent;
-                // config autoAttachImages=false opts out. PDFs stay behind /image.
-                void AutoAttachTypedImages(string text)
+                // an explicit /image. A PDF path pauses the send for a page range per PDF
+                // (PdfAttachFlow): cost and free room shown, chosen pages rendered, saved and
+                // staged; Esc skips that PDF. PDFs are asked about BEFORE the typed images
+                // are staged, and the free figure counts those images explicitly. Echoes
+                // what it attached so nothing is silent; config autoAttachImages=false opts
+                // out of both. Returns false only when the send was cancelled while a
+                // prompt was open (the session token — F10/Ctrl+Q quit): nothing is staged
+                // and the caller does not send.
+                //
+                // Threading: past the first prompt's await this runs on a POOL thread. Every
+                // call made there is thread-safe: llmClient.StagePendingImage (locks its list),
+                // imageStore.Save (locks its gate), host.AppendOutputLocal, host.PromptTextAsync
+                // (marshals the dialog itself), PDF rendering, and EstimateFreeContextTokens
+                // (reads history; no turn is running yet, so nothing writes it). No view is
+                // touched directly, so no OnUiAsync is needed here.
+                async Task<bool> AutoAttachTypedAsync(string text)
                 {
                     if (!_config.AutoAttachImages)
-                        return;
+                        return true;
+                    TypedAttachments found;
                     try
                     {
-                        foreach (var img in ImagePathScanner.Scan(text, options.WorkingDirectory))
+                        found = ImagePathScanner.ScanAttachments(text, options.WorkingDirectory);
+                    }
+                    catch (Exception ex)
+                    {
+                        host.AppendOutputLocal($"[auto-attach skipped: {ex.Message}]\n", OutputColor.Dim);
+                        return true;
+                    }
+
+                    if (found.Pdfs.Count > 0)
+                    {
+                        var flow = new PdfAttachFlow
+                        {
+                            FreeTokens = extra => llmClient.EstimateFreeContextTokens(text, extra),
+                            Prompt = (title, message, validate, ct) =>
+                                host.PromptTextAsync(title, message, "", validate, ct),
+                            Save = (dataUri, label) => imageStore.Save(dataUri, label),
+                            Stage = (dataUri, savedPath) => llmClient.StagePendingImage(dataUri, savedPath),
+                            Echo = line => host.AppendOutputLocal(line + "\n", OutputColor.Dim),
+                        };
+                        try
+                        {
+                            if (!await flow.RunAsync(found.Pdfs.ConvertAll(p => p.FullPath), found.Images.Count, cts.Token))
+                            {
+                                host.AppendOutputLocal("[send cancelled]\n", OutputColor.Dim);
+                                return false;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            // Never let PDF attach kill the turn — the text still goes out.
+                            host.AppendOutputLocal($"[PDF attach skipped: {ex.Message}]\n", OutputColor.Dim);
+                        }
+                    }
+
+                    try
+                    {
+                        foreach (var img in found.Images)
                         {
                             string dataUri = ImagePathScanner.BuildDataUri(img);
                             llmClient.StagePendingImage(dataUri,
@@ -1737,6 +1793,7 @@ namespace DevMind
                         // Never let attach detection kill the turn — the text still goes out.
                         host.AppendOutputLocal($"[auto-attach skipped: {ex.Message}]\n", OutputColor.Dim);
                     }
+                    return true;
                 }
 
                 // ── Slash-command dispatch ──────────────────────────────────────
@@ -1832,6 +1889,8 @@ namespace DevMind
                         // travels with it into history (null if the save failed).
                         StagePendingImage = (dataUri, label) =>
                             llmClient.StagePendingImage(dataUri, imageStore.Save(dataUri, label)),
+                        // /image's PDF fit check: room left for the next message.
+                        FreeContextTokens = extra => llmClient.EstimateFreeContextTokens(null, extra),
                         // Behavioral rules.
                         BehavioralRules = _config.BehavioralRules,
                         SetBehavioralRules = (rules) =>
@@ -1939,7 +1998,16 @@ namespace DevMind
                         {
                             // Echo the actual message.
                             host.AppendOutputLocal($"\n> {message}\n", OutputColor.Input);
-                            AutoAttachTypedImages(message);
+                            if (!await AutoAttachTypedAsync(message))
+                            {
+                                // Cancelled at a PDF prompt: no turn, nothing staged.
+                                await OnUiAsync(() =>
+                                {
+                                    TuiTurnTeardown.RestoreInput(inputBox);
+                                    ShowReady();
+                                });
+                                return;
+                            }
 
                             // Enable thinking for this turn. Plain state, read by the turn worker;
                             // written before Task.Run, which publishes it to that thread.
@@ -1986,7 +2054,16 @@ namespace DevMind
                     return;
                 }
 
-                AutoAttachTypedImages(input);
+                if (!await AutoAttachTypedAsync(input))
+                {
+                    // Cancelled at a PDF prompt: no turn, nothing staged.
+                    await OnUiAsync(() =>
+                    {
+                        TuiTurnTeardown.RestoreInput(inputBox);
+                        ShowReady();
+                    });
+                    return;
+                }
 
                 // The box stays live during agentic processing: typing is a steer
                 // (SteerInputRouter), not a new prompt. Esc/Ctrl+C still cancel. A /library

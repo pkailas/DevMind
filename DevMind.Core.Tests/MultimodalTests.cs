@@ -600,7 +600,78 @@ namespace DevMind.Core.Tests
             Assert.Equal(2, server.RequestBodies.Count);
         }
 
+        // ── EstimateFreeContextTokens ─────────────────────────────────────────
+
+        // The pre-send guard's ceiling (ServerContextSize, else HistoryHardLimit) minus the
+        // prompt estimate, the pending text, staged + pending images at 1,024 each, and the
+        // reply reserve (ResponseHeadroomTokens, only against the raw server window).
+
+        private static int TextEstimate(string text) => text.Length / 4 + 4; // LlmClient.EstimateTokens
+
+        [Fact]
+        public void FreeContext_ServerWindow_NoServerCount_SubtractsTextImagesAndReserve()
+        {
+            using var server = new FakeSseServer();
+            var (client, _) = CreateConfiguredClient(server);
+            Assert.Equal(32_768, client.ServerContextSize);
+            Assert.Equal(0, client.LastContextUsed);
+            const string text = "summarize the attached pages please";
+            int expected = 32_768 - client.ResponseHeadroomTokens - client.EstimateHistoryTokens() - TextEstimate(text);
+
+            Assert.Equal(expected, client.EstimateFreeContextTokens(text, 0));
+            Assert.Equal(expected - 3 * 1024, client.EstimateFreeContextTokens(text, 3));
+
+            // Staged-but-unsent images are not in history; the method counts them itself.
+            client.StagePendingImage("data:image/png;base64,A");
+            client.StagePendingImage("data:image/png;base64,B");
+            Assert.Equal(expected - 2 * 1024, client.EstimateFreeContextTokens(text, 0));
+            Assert.Equal(expected - 5 * 1024, client.EstimateFreeContextTokens(text, 3));
+        }
+
+        [Fact]
+        public void FreeContext_NoServerWindow_UsesHistoryHardLimit_WithoutSecondReserve()
+        {
+            var client = new LlmClient(new FakeLlmOptions()); // not configured: no server window
+            Assert.Equal(0, client.ServerContextSize);
+            const string text = "hello";
+            // HistoryHardLimit = window - ResponseHeadroom: the reserve is already out.
+            int hardLimit = client.EffectiveContextWindow - client.ResponseHeadroomTokens;
+            Assert.Equal(client.MaxPromptTokens, hardLimit);
+            int expected = hardLimit - client.EstimateHistoryTokens() - TextEstimate(text);
+
+            Assert.Equal(expected, client.EstimateFreeContextTokens(text, 0));
+            Assert.Equal(expected - 1024, client.EstimateFreeContextTokens(text, 1));
+        }
+
+        [Fact]
+        public async Task FreeContext_AfterServerCount_StartsFromNPast()
+        {
+            using var server = new FakeSseServer();
+            server.SseQueue.Add(TextSseWithNPast(20_000));
+            var (client, _) = CreateConfiguredClient(server);
+            await SendAndAwaitAsync(client, "first turn, text only", imageBase64: null);
+            Assert.Equal(20_000, client.LastContextUsed);
+
+            const string text = "and now this";
+            int upper = 32_768 - client.ResponseHeadroomTokens - 20_000 - TextEstimate(text);
+            int? free = client.EstimateFreeContextTokens(text, 0);
+
+            // n_past plus only the messages added since it was captured (the short reply).
+            Assert.NotNull(free);
+            Assert.InRange(free!.Value, upper - 50, upper);
+            Assert.Equal(free - 2 * 1024, client.EstimateFreeContextTokens(text, 2));
+        }
+
+        [Fact]
+        public void FreeContext_NeverNegative()
+        {
+            using var server = new FakeSseServer();
+            var (client, _) = CreateConfiguredClient(server);
+            Assert.Equal(0, client.EstimateFreeContextTokens("x", 1000));
+        }
+
         // ── Helpers ───────────────────────────────────────────────────────────
+
 
         /// <summary>A text reply whose terminal chunk carries llama-server timings with n_past,
         /// so the client records LastContextUsed and anchors _lastServerCountIndex.</summary>

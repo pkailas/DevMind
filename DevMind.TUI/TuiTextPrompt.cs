@@ -36,6 +36,9 @@ namespace DevMind
         /// <summary>View.Id of the validation-error label under the field.</summary>
         internal const string ErrorId = "promptError";
 
+        /// <summary>View.Id of the prompt dialog itself (see <see cref="IsTopmost"/>).</summary>
+        internal const string DialogId = "promptDialog";
+
         internal const string HintText = "Enter = submit    Esc = cancel";
 
         private static readonly TgColor FgError = new TgColor(0xF4, 0x47, 0x47); // #F44747, TuiStatusBar's error red
@@ -68,6 +71,14 @@ namespace DevMind
             return tcs.Task;
         }
 
+        /// <summary>
+        /// True while a text prompt is the top runnable. The TUI's app-wide Esc handler runs
+        /// BEFORE the dialog sees the key and marks Esc handled, which would make the prompt
+        /// impossible to dismiss; it checks this first and leaves Esc to the prompt.
+        /// </summary>
+        internal static bool IsTopmost(IApplication app)
+            => app.TopRunnableView is Dialog d && d.Id == DialogId;
+
         private static void Build(
             IApplication app, View? restoreFocus, TaskCompletionSource<string?> tcs, string title,
             string message, string defaultText, Func<string, string?>? validate, CancellationToken ct)
@@ -96,7 +107,7 @@ namespace DevMind
             int fieldY = msgRows == 0 ? 0 : msgRows + 1;
             int bodyRows = fieldY + 3;
 
-            var dlg = new Dialog { Title = title ?? string.Empty, Width = dialogCols, Height = bodyRows };
+            var dlg = new Dialog { Id = DialogId, Title = title ?? string.Empty, Width = dialogCols, Height = bodyRows };
             var noHotKey = (System.Text.Rune)0xFFFF; // data, not mnemonics: draw every '_'
             if (msgRows > 0)
             {

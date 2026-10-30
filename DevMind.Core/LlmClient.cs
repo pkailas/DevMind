@@ -310,8 +310,11 @@ namespace DevMind
         /// tokens — 576 for a 768×768 image, more for larger inputs before server-side
         /// downscaling. 1,024 is a deliberate mid-range flat estimate: close enough for
         /// budget/eviction math without decoding the image, erring high to protect context.
+        /// Measured on Strata (Oct 2026): a 1240×1754 rendered PDF page costs ~990 prompt tokens;
+        /// Strata caps image tokens, so a larger render costs no more. Public so hosts can price
+        /// a PDF page range before attaching it.
         /// </summary>
-        internal const int ImageTokenEstimatePerPart = 1024;
+        public const int ImageTokenEstimatePerPart = 1024;
 
         private const int MaxConversationTurns = 4;
 
@@ -567,6 +570,33 @@ namespace DevMind
                     total += EstimateMessageTokens(msg);
             }
             return total;
+        }
+
+        /// <summary>
+        /// Prompt tokens still free for a message about to be sent: the pre-send guard's ceiling
+        /// (<see cref="ServerContextSize"/> when known, else the budget's <c>HistoryHardLimit</c>)
+        /// minus <see cref="EstimatePromptTotal"/>, the pending message's text, every image
+        /// already staged (<see cref="StagePendingImage(string)"/> — not in history yet, so
+        /// EstimatePromptTotal cannot see them) and <paramref name="pendingImageCount"/> images
+        /// not staged yet, at <see cref="ImageTokenEstimatePerPart"/> each, minus room for the
+        /// reply. The reply reserve is <see cref="ResponseHeadroomTokens"/> when the ceiling is
+        /// the raw server window; the HistoryHardLimit fallback already excludes that headroom,
+        /// so nothing more is taken. Never negative.
+        /// </summary>
+        /// <param name="pendingText">The text of the message about to be sent (may be null).</param>
+        /// <param name="pendingImageCount">Images that will join the message but are not staged yet.</param>
+        public int? EstimateFreeContextTokens(string pendingText, int pendingImageCount)
+        {
+            int staged;
+            lock (_pendingImages)
+                staged = _pendingImages.Count;
+
+            int ceiling = ServerContextSize > 0 ? ServerContextSize : _budget.HistoryHardLimit;
+            int reserve = ServerContextSize > 0 ? ResponseHeadroomTokens : 0;
+            long used = (long)EstimatePromptTotal() + EstimateTokens(pendingText)
+                        + (long)(staged + Math.Max(0, pendingImageCount)) * ImageTokenEstimatePerPart;
+            long free = ceiling - reserve - used;
+            return free < 0 ? 0 : (int)Math.Min(free, int.MaxValue);
         }
 
         /// <summary>

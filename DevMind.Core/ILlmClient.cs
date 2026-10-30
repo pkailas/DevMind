@@ -117,6 +117,12 @@ namespace DevMind
         /// implementations that keep history override it.</summary>
         int DropImagesFromHistory() => 0;
 
+        /// <summary>Estimated prompt tokens still free for a message about to be sent with
+        /// <paramref name="pendingText"/> and <paramref name="pendingImageCount"/> not-yet-staged
+        /// images, after already-staged images and a reply reserve. The default returns null
+        /// (unknown) — implementations that track context override it.</summary>
+        int? EstimateFreeContextTokens(string pendingText, int pendingImageCount) => null;
+
        /// <summary>Streams a message to the LLM endpoint, invoking callbacks as tokens arrive.</summary>
         /// <param name="imageBase64">Optional base64-encoded image data (data: URI format). When provided,
         /// the message is sent as multimodal content with both text and image parts.</param>

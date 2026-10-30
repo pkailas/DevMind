@@ -273,6 +273,12 @@ namespace DevMind
         /// host's saved copy of the image (the file name, or "&lt;pdf name&gt; p&lt;N&gt;").</summary>
         public Action<string, string> StagePendingImage { get; set; }
 
+        /// <summary>Estimated prompt tokens free for the next message, given N images that will
+        /// join it but are not staged yet (<c>LlmClient.EstimateFreeContextTokens</c>, no pending
+        /// text). /image refuses a PDF page range that does not fit. Null, or a null result,
+        /// means unknown and the fit check is skipped.</summary>
+        public Func<int, int?> FreeContextTokens { get; set; }
+
         // -- Context window size (/prompt) --------------------------------------
 
         /// <summary>Current RAW context window in tokens — <c>LlmClient.EffectiveContextWindow</c>:
@@ -1012,10 +1018,11 @@ namespace DevMind
         // (PdfPageAttachments), anything else must sniff as an image within the 10 MB cap
         // (ImagePathScanner.TryValidate), whose MIME type is the one sent.
 
-        /// <summary>Max PDF pages attached per /image call. Each rendered page costs
-        /// roughly 2K image tokens on a Qwen3-VL-class encoder, so 20 pages ≈ 40K prompt
-        /// tokens — a sane ceiling that still summarizes most manuals chapter-by-chapter.</summary>
-        const int MaxPdfPagesPerAttach = 20;
+        // No fixed page cap: a PDF range must fit the context room left
+        // (CommandContext.FreeContextTokens). A rendered page costs ~1K prompt tokens on Strata
+        // (measured ~990 at 1240×1754; Strata caps image tokens, so a larger render costs no
+        // more), priced at PdfAttachFlow.TokensPerPage. The fit check also bounds memory: the
+        // pages a context can hold are what gets rendered.
 
         /// <summary>
         /// Per-document reading cursor for /image's p=N chunk mode: full path → last page
@@ -1040,7 +1047,7 @@ namespace DevMind
                 return Task.FromResult(new CommandResult
                 {
                     Message = "Usage: /image <path> [page|first-last|all|p=N]  (PNG, JPG, JPEG, GIF, WEBP, BMP, or PDF — " +
-                              $"PDFs attach rasterized pages, default page 1, max {MaxPdfPagesPerAttach} per call; " +
+                              "PDFs attach rasterized pages, default page 1, as many as fit the context left; " +
                               "p=N attaches the next N unread pages each time you repeat the command)",
                     IsError = true,
                 });
@@ -1099,13 +1106,6 @@ namespace DevMind
                         // p=N: attach the next N unread pages, resuming from this
                         // session's cursor for the document.
                         chunkMode = true;
-                        if (chunkSize > MaxPdfPagesPerAttach)
-                            return Task.FromResult(new CommandResult
-                            {
-                                Message = $"Chunk size {chunkSize} exceeds the {MaxPdfPagesPerAttach}-page-per-message cap.",
-                                IsError = true,
-                            });
-
                         _pdfCursors.TryGetValue(path, out int lastAttached);
                         var chunk = PdfRasterizer.NextChunk(lastAttached, chunkSize, pageCount);
                         if (chunk == null)
@@ -1122,17 +1122,12 @@ namespace DevMind
                     else
                     {
                         (first, last) = PdfRasterizer.ParsePageSpec(pageSpec, pageCount);
-
-                        int requested = last - first + 1;
-                        if (requested > MaxPdfPagesPerAttach)
-                            return Task.FromResult(new CommandResult
-                            {
-                                Message = $"That's {requested} pages — attach at most {MaxPdfPagesPerAttach} per message " +
-                                          $"(e.g. /image \"{Path.GetFileName(path)}\" {first}-{first + MaxPdfPagesPerAttach - 1}, " +
-                                          $"or chunk through with p=5). The PDF has {pageCount} page(s).",
-                                IsError = true,
-                            });
                     }
+
+                    // Fit check before rendering: the cursor is not advanced on a refusal.
+                    string fitError = PdfFitError(ctx, Path.GetFileName(path), first, last, pageCount);
+                    if (fitError != null)
+                        return Task.FromResult(new CommandResult { Message = fitError, IsError = true });
 
                     render = PdfPageAttachments.Render(path, first, last);
                 }
@@ -1230,6 +1225,30 @@ namespace DevMind
             Message = $"Failed to rasterize PDF (corrupt or password-protected?): {message}",
             IsError = true,
         };
+
+        /// <summary>
+        /// /image's fit check: null when pages <paramref name="first"/>..<paramref name="last"/>
+        /// fit the context left (or the room is unknown), else the refusal, with the largest
+        /// range from <paramref name="first"/> that does fit.
+        /// </summary>
+        static string PdfFitError(CommandContext ctx, string name, int first, int last, int pageCount)
+        {
+            int? free = ctx.FreeContextTokens?.Invoke(0);
+            if (!free.HasValue)
+                return null;
+            int requested = last - first + 1;
+            int cost = requested * PdfAttachFlow.TokensPerPage;
+            if (cost <= free.Value)
+                return null;
+
+            int fit = free.Value / PdfAttachFlow.TokensPerPage;
+            var (costText, freeText) = PdfAttachFlow.FormatCostAndFree(cost, free.Value);
+            string head = $"That's {requested} page(s) (~{costText} tokens); only ~{freeText} free in the context.";
+            if (fit < 1)
+                return head + " There is no room for another page — start a new conversation (/new) first.";
+            return head + $" Attach at most {fit} (e.g. /image \"{name}\" {first}-{first + fit - 1}, " +
+                          $"or chunk through with p={fit}). The PDF has {pageCount} page(s).";
+        }
 
         /// <summary>True when the token could be a /image PDF page spec: a positive
         /// integer, an integer range "first-last", "all", or a chunk spec "p=N".</summary>
