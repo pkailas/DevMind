@@ -975,10 +975,9 @@ namespace DevMind
         // or a PDF page range — all attach to one message.
         // PDFs are rasterized (vision encoders consume raster images, and llama-server
         // has no PDF media type): page spec is a page number, "first-last", or "all".
-
-        /// <summary>Max raw image size accepted by /image. Matches llama-server's own
-        /// 10 MB cap on remote image downloads; base64 expands this ~1.33× on the wire.</summary>
-        const int MaxImageBytes = 10 * 1024 * 1024;
+        // The file's content decides its type, never its extension: %PDF- is a PDF
+        // (PdfPageAttachments), anything else must sniff as an image within the 10 MB cap
+        // (ImagePathScanner.TryValidate), whose MIME type is the one sent.
 
         /// <summary>Max PDF pages attached per /image call. Each rendered page costs
         /// roughly 2K image tokens on a Qwen3-VL-class encoder, so 20 pages ≈ 40K prompt
@@ -1038,12 +1037,24 @@ namespace DevMind
                     IsError = true,
                 });
 
-            string ext = Path.GetExtension(path).ToLowerInvariant();
+            bool isPdf;
+            try
+            {
+                isPdf = PdfPageAttachments.IsPdf(path);
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult(new CommandResult
+                {
+                    Message = $"Failed to read image: {ex.Message}",
+                    IsError = true,
+                });
+            }
 
             // ── PDF branch: rasterize the requested pages, stage each as an image ──
-            if (ext == ".pdf")
+            if (isPdf)
             {
-                System.Collections.Generic.List<PdfPageImage> pages;
+                PdfRenderResult render;
                 int first, last;
                 bool chunkMode = false;
                 try
@@ -1090,7 +1101,7 @@ namespace DevMind
                             });
                     }
 
-                    pages = PdfRasterizer.RenderPagesToPng(path, first, last);
+                    render = PdfPageAttachments.Render(path, first, last);
                 }
                 catch (InvalidOperationException ex)
                 {
@@ -1099,30 +1110,28 @@ namespace DevMind
                 }
                 catch (Exception ex)
                 {
-                    return Task.FromResult(new CommandResult
-                    {
-                        Message = $"Failed to rasterize PDF (corrupt or password-protected?): {ex.Message}",
-                        IsError = true,
-                    });
+                    return Task.FromResult(PdfRasterizeFailed(ex.Message));
                 }
 
-                long totalBytes = 0;
-                foreach (var page in pages)
+                switch (render.Failure)
                 {
-                    if (page.PngBytes.Length > MaxImageBytes)
+                    case PdfRenderFailure.OutOfRange:
+                        return Task.FromResult(new CommandResult { Message = render.Message, IsError = true });
+                    case PdfRenderFailure.Unreadable:
+                        return Task.FromResult(PdfRasterizeFailed(render.Message));
+                    case PdfRenderFailure.PageTooLarge:
                         return Task.FromResult(new CommandResult
                         {
-                            Message = $"A rasterized page is too large: {page.PngBytes.Length / (1024.0 * 1024.0):F1} MB (max 10 MB).",
+                            Message = $"A rasterized page is too large: {render.FailedPageBytes / (1024.0 * 1024.0):F1} MB (max 10 MB).",
                             IsError = true,
                         });
-                    totalBytes += page.PngBytes.Length;
                 }
 
-                // Pages come back in order first..last, so the index gives the page number.
-                for (int pi = 0; pi < pages.Count; pi++)
+                var pages = render.Pages;
+                foreach (RenderedPdfPage page in pages)
                     ctx.StagePendingImage(
-                        $"data:image/png;base64,{Convert.ToBase64String(pages[pi].PngBytes)}",
-                        $"{Path.GetFileName(path)} p{first + pi}");
+                        PdfPageAttachments.BuildPngDataUri(page.PngBytes),
+                        $"{Path.GetFileName(path)} p{page.PageNumber}");
 
                 // Every PDF attach advances the reading cursor, so explicit ranges and
                 // p=N chunks compose ("1-5" then "p=5" continues at page 6).
@@ -1139,7 +1148,7 @@ namespace DevMind
                 return Task.FromResult(new CommandResult
                 {
                     Message = $"PDF {pageLabel} of {pages[0].PageCount} rasterized and staged: {Path.GetFileName(path)} " +
-                              $"({pages.Count} image(s), {totalBytes / 1024.0:F0} KB total). " +
+                              $"({pages.Count} image(s), {render.TotalBytes / 1024.0:F0} KB total). " +
                               "All staged images attach to your next message." + chunkHint,
                 });
             }
@@ -1151,27 +1160,18 @@ namespace DevMind
                     IsError = true,
                 });
 
-            string mimeType = ext switch
-            {
-                ".png" => "image/png",
-                ".jpg" => "image/jpeg",
-                ".jpeg" => "image/jpeg",
-                ".gif" => "image/gif",
-                ".webp" => "image/webp",
-                ".bmp" => "image/bmp",
-                _ => null,
-            };
-            if (mimeType == null)
+            // Magic bytes give the MIME type; a text file renamed .png is refused here.
+            if (!ImagePathScanner.TryValidate(path, out DetectedImage image, out string why))
                 return Task.FromResult(new CommandResult
                 {
-                    Message = $"Unsupported image format '{Path.GetExtension(path)}'. Supported: PNG, JPG, JPEG, GIF, WEBP, BMP.",
+                    Message = $"Cannot attach {Path.GetFileName(path)}: {why}.",
                     IsError = true,
                 });
 
-            byte[] bytes;
+            string dataUri;
             try
             {
-                bytes = File.ReadAllBytes(path);
+                dataUri = ImagePathScanner.BuildDataUri(image);
             }
             catch (Exception ex)
             {
@@ -1182,22 +1182,21 @@ namespace DevMind
                 });
             }
 
-            if (bytes.Length > MaxImageBytes)
-                return Task.FromResult(new CommandResult
-                {
-                    Message = $"Image too large: {bytes.Length / (1024.0 * 1024.0):F1} MB (max 10 MB).",
-                    IsError = true,
-                });
-
-            string dataUri = $"data:{mimeType};base64,{Convert.ToBase64String(bytes)}";
             ctx.StagePendingImage(dataUri, Path.GetFileName(path));
 
             return Task.FromResult(new CommandResult
             {
-                Message = $"Image staged: {Path.GetFileName(path)} ({mimeType}, {bytes.Length / 1024.0:F0} KB). " +
+                Message = $"Image staged: {Path.GetFileName(path)} ({image.MimeType}, {image.SizeBytes / 1024.0:F0} KB). " +
                           "It will be attached to your next message. Requires a vision model with mmproj loaded.",
             });
         }
+
+        /// <summary>/image's message for a PDF PDFium cannot open or render.</summary>
+        static CommandResult PdfRasterizeFailed(string message) => new CommandResult
+        {
+            Message = $"Failed to rasterize PDF (corrupt or password-protected?): {message}",
+            IsError = true,
+        };
 
         /// <summary>True when the token could be a /image PDF page spec: a positive
         /// integer, an integer range "first-last", "all", or a chunk spec "p=N".</summary>

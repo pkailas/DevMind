@@ -1409,7 +1409,7 @@ namespace DevMind
                         text = "[VIEW_IMAGE ERROR] " + FilePathResolver.BuildFileNotFoundMessage("view_image", requested, res).TrimEnd()
                                + "\nNothing was attached.";
                     }
-                    else if (IsPdf(res.Path))
+                    else if (PdfPageAttachments.IsPdf(res.Path))
                     {
                         (text, logLine) = ViewPdf(FileReadTools.FileKey(res.Path), block.PageSpec, result);
                     }
@@ -1448,21 +1448,10 @@ namespace DevMind
             RecordCallResult(result, block, text);
         }
 
-        /// <summary>True when the file starts with the PDF magic bytes <c>%PDF-</c>.</summary>
-        private static bool IsPdf(string path)
-        {
-            var header = new byte[5];
-            int read;
-            using (var stream = System.IO.File.OpenRead(path))
-                read = stream.Read(header, 0, header.Length);
-            return read == 5 && header[0] == (byte)'%' && header[1] == (byte)'P' && header[2] == (byte)'D'
-                   && header[3] == (byte)'F' && header[4] == (byte)'-';
-        }
-
         /// <summary>
         /// view_image on a PDF. Without <paramref name="pageSpec"/> it only reports the page count.
         /// With it, the pages (<see cref="PdfRasterizer.ParsePageSpec"/> syntax) are rendered
-        /// (<see cref="PdfRasterizer.RenderPagesToPng"/>) and each is staged as a PNG whose
+        /// (<see cref="PdfPageAttachments.Render"/>) and each is staged as a PNG whose
         /// SavedPath is the PDF and whose Page is its number — nothing is written to disk; the
         /// placeholder tells the model to call view_image with that page again. All or nothing:
         /// a range past this request's remaining image allowance, a bad spec, an unreadable PDF or
@@ -1488,39 +1477,44 @@ namespace DevMind
                             $"{allowed} page(s) now and view the rest next. Nothing was attached.",
                             $"[VIEW_IMAGE ERROR] {pdfPath}: {requestedPages} page(s) requested, {allowed} allowed this request");
 
-                var pages = PdfRasterizer.RenderPagesToPng(pdfPath, first, last);
-                for (int i = 0; i < pages.Count; i++)
+                PdfRenderResult render = PdfPageAttachments.Render(pdfPath, first, last);
+                switch (render.Failure)
                 {
-                    if (pages[i].PngBytes.Length > ImagePathScanner.MaxImageBytes)
-                        return ($"[VIEW_IMAGE ERROR] {pdfPath}: page {first + i} rendered too large " +
-                                $"({pages[i].PngBytes.Length / (1024.0 * 1024.0):F1} MB; the limit is {ImagePathScanner.MaxImageBytes / 1024 / 1024} MB). Nothing was attached.",
-                                $"[VIEW_IMAGE ERROR] {pdfPath}: page {first + i} rendered too large");
+                    case PdfRenderFailure.OutOfRange: return ViewPdfBadRange(pdfPath, render.Message);
+                    case PdfRenderFailure.Unreadable: return ViewPdfUnreadable(pdfPath, render.Message);
+                    case PdfRenderFailure.PageTooLarge:
+                        return ($"[VIEW_IMAGE ERROR] {pdfPath}: page {render.FailedPage} rendered too large " +
+                                $"({render.FailedPageBytes / (1024.0 * 1024.0):F1} MB; the limit is {ImagePathScanner.MaxImageBytes / 1024 / 1024} MB). Nothing was attached.",
+                                $"[VIEW_IMAGE ERROR] {pdfPath}: page {render.FailedPage} rendered too large");
                 }
 
-                // Pages come back in order first..last, so the index gives the page number.
-                long totalBytes = 0;
-                for (int i = 0; i < pages.Count; i++)
-                {
-                    result.StagedImages.Add(($"data:image/png;base64,{Convert.ToBase64String(pages[i].PngBytes)}", pdfPath, first + i));
-                    totalBytes += pages[i].PngBytes.Length;
-                }
+                foreach (RenderedPdfPage page in render.Pages)
+                    result.StagedImages.Add((PdfPageAttachments.BuildPngDataUri(page.PngBytes), pdfPath, page.PageNumber));
 
                 string label = first == last ? $"page {first}" : $"pages {first}-{last}";
-                return ($"PDF {name} {label} of {pageCount} attached to your next request ({pages.Count} image(s)).",
-                        $"[VIEW_IMAGE] {pdfPath}: PDF {label} of {pageCount} ({pages.Count} image(s), {totalBytes / 1024.0:F0} KB) — attached to the next request");
+                return ($"PDF {name} {label} of {pageCount} attached to your next request ({render.Pages.Count} image(s)).",
+                        $"[VIEW_IMAGE] {pdfPath}: PDF {label} of {pageCount} ({render.Pages.Count} image(s), {render.TotalBytes / 1024.0:F0} KB) — attached to the next request");
             }
             catch (InvalidOperationException ex)
             {
                 // Bad page spec / out of range — PdfRasterizer's message is already presentable.
-                return ($"[VIEW_IMAGE ERROR] {pdfPath}: {ex.Message} Nothing was attached.",
-                        $"[VIEW_IMAGE ERROR] {pdfPath}: {ex.Message}");
+                return ViewPdfBadRange(pdfPath, ex.Message);
             }
             catch (Exception ex)
             {
-                return ($"[VIEW_IMAGE ERROR] {pdfPath}: the PDF could not be rendered (corrupt or password-protected?): {ex.Message}. Nothing was attached.",
-                        $"[VIEW_IMAGE ERROR] {pdfPath}: PDF could not be rendered: {ex.Message}");
+                return ViewPdfUnreadable(pdfPath, ex.Message);
             }
         }
+
+        /// <summary>view_image's result for a bad page spec or out-of-range pages.</summary>
+        private static (string Text, string LogLine) ViewPdfBadRange(string pdfPath, string message)
+            => ($"[VIEW_IMAGE ERROR] {pdfPath}: {message} Nothing was attached.",
+                $"[VIEW_IMAGE ERROR] {pdfPath}: {message}");
+
+        /// <summary>view_image's result for a PDF PDFium cannot open or render.</summary>
+        private static (string Text, string LogLine) ViewPdfUnreadable(string pdfPath, string message)
+            => ($"[VIEW_IMAGE ERROR] {pdfPath}: the PDF could not be rendered (corrupt or password-protected?): {message}. Nothing was attached.",
+                $"[VIEW_IMAGE ERROR] {pdfPath}: PDF could not be rendered: {message}");
 
         /// <summary>Files a read-side result under its call id as well (H-55), so two calls on
         /// the same file in one turn each get their own result.</summary>
