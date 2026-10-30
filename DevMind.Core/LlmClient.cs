@@ -1,4 +1,4 @@
-// File: LlmClient.cs  v7.33
+// File: LlmClient.cs  v7.34
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 
 using Newtonsoft.Json;
@@ -1908,6 +1908,46 @@ namespace DevMind
         /// stored messages themselves (e.g. <see cref="ChatMessage.ImagePaths"/>), which the
         /// request JSON does not show.</summary>
         internal IReadOnlyList<ChatMessage> HistorySnapshotForTests() => _conversationHistory.ToArray();
+
+        /// <summary>
+        /// Replaces every image part in history with a text placeholder naming the image's
+        /// saved copy (<see cref="ChatMessage.WithImagesReleased"/>), so images stop being
+        /// resent — and stop consuming context — on every later request. The TUI calls this
+        /// after each completed turn; the saved files keep the pixels.
+        /// <para>
+        /// Rewrites in place, as MicroCompact does, on the same single-sender discipline (no
+        /// lock: history is only touched by the one in-flight send or between sends). Called
+        /// between sends, so it taints the NEXT send's cache-reuse sample the way ClearHistory
+        /// does — the prefix changed from the first image message onward and the server
+        /// re-prefills from there once. LastContextUsed still counts the images until that
+        /// response arrives, so the pre-send estimate is overstated (more conservative) for
+        /// one request.
+        /// </para>
+        /// <para>
+        /// Structural harness messages (scratchpad, harness note) are skipped: they are built
+        /// text-only and rebuilt every send, so they never carry images, and rewriting one would
+        /// drop its marker flag.
+        /// </para>
+        /// </summary>
+        /// <returns>The number of image parts removed; 0 when history holds none (idempotent).</returns>
+        public int DropImagesFromHistory()
+        {
+            int removed = 0;
+            for (int i = 0; i < _conversationHistory.Count; i++)
+            {
+                var msg = _conversationHistory[i];
+                if (msg.ContentParts == null || msg.IsScratchpad || msg.IsHarnessNote)
+                    continue;
+                var released = msg.WithImagesReleased(out int count);
+                if (count == 0)
+                    continue;
+                _conversationHistory[i] = released;
+                removed += count;
+            }
+            if (removed > 0)
+                _historyMutatedBetweenSends = true;
+            return removed;
+        }
 
         /// <summary>Read-only access to the file content cache for host-layer operations.</summary>
         public FileContentCache FileCache => _fileCache;
@@ -5386,5 +5426,46 @@ namespace DevMind
         internal ChatMessage WithText(string newText)
             => new ChatMessage(Role, newText, Turn, ToolCalls, ToolCallId,
                 LlmClient.RebuildContentParts(ContentParts, newText), ImagePaths);
+
+        /// <summary>Placeholder line for a released image whose saved copy is at <c>{0}</c>.</summary>
+        internal const string ReleasedImageSavedFormat = "[image removed from context — saved at {0}]";
+
+        /// <summary>Placeholder line for a released image that has no saved copy.</summary>
+        internal const string ReleasedImageNotSaved = "[image removed from context — not saved]";
+
+        /// <summary>
+        /// A text-only copy of this message with each image part replaced by a placeholder
+        /// line, in order, appended to <see cref="Content"/>: the saved-copy path from
+        /// <see cref="ImagePaths"/> when known, else "not saved". Role, turn and tool fields are
+        /// carried over; ContentParts and ImagePaths become null (no images remain). The
+        /// scratchpad/harness-note flags are NOT carried — those messages are text-only by
+        /// construction, and <see cref="LlmClient.DropImagesFromHistory"/> skips them.
+        /// Returns this same instance (count 0) when there are no image parts.
+        /// </summary>
+        internal ChatMessage WithImagesReleased(out int imageCount)
+        {
+            imageCount = 0;
+            if (ContentParts == null)
+                return this;
+
+            var text = new System.Text.StringBuilder(Content ?? string.Empty);
+            foreach (var part in ContentParts)
+            {
+                if ((string)part["type"] != "image_url")
+                    continue;
+                string path = ImagePaths != null && imageCount < ImagePaths.Count
+                    ? ImagePaths[imageCount]
+                    : null;
+                if (text.Length > 0)
+                    text.Append('\n');
+                text.Append(path != null
+                    ? string.Format(System.Globalization.CultureInfo.InvariantCulture, ReleasedImageSavedFormat, path)
+                    : ReleasedImageNotSaved);
+                imageCount++;
+            }
+            if (imageCount == 0)
+                return this;
+            return new ChatMessage(Role, text.ToString(), Turn, ToolCalls, ToolCallId, null, null);
+        }
     }
 }

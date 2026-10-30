@@ -1,4 +1,4 @@
-﻿// File: TuiConfig.cs  v1.4
+﻿// File: TuiConfig.cs  v1.5
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Global TUI config persisted to %APPDATA%\devmind\devmind.json.
@@ -118,6 +118,12 @@ namespace DevMind
         [JsonPropertyName("autoAttachImages")]
         public bool AutoAttachImages { get; set; } = true;
 
+        /// <summary>When true (default), images in history are replaced with text placeholders
+        /// (naming each image's saved copy) after every completed TUI turn, so they are not
+        /// resent on later requests. False keeps images in context for the whole session.</summary>
+        [JsonPropertyName("releaseImagesAfterTurn")]
+        public bool ReleaseImagesAfterTurn { get; set; } = true;
+
         /// <summary>Default chat_template_kwargs.reasoning_effort when thinking is on
         /// (low|medium|high|xhigh). Null (absent) = "medium"; an unrecognised value also falls
         /// back to "medium" (see <see cref="DevMind.ReasoningEffort"/>). A per-job reasoning_effort on
@@ -230,6 +236,10 @@ namespace DevMind
                 if (root.TryGetProperty("autoAttachImages", out var aai)
                     && (aai.ValueKind == JsonValueKind.True || aai.ValueKind == JsonValueKind.False))
                     config.AutoAttachImages = aai.GetBoolean();
+
+                if (root.TryGetProperty("releaseImagesAfterTurn", out var riat)
+                    && (riat.ValueKind == JsonValueKind.True || riat.ValueKind == JsonValueKind.False))
+                    config.ReleaseImagesAfterTurn = riat.GetBoolean();
 
                 if (root.TryGetProperty("reasoningEffort", out var re) && re.ValueKind == JsonValueKind.String)
                     config.ReasoningEffort = re.GetString();

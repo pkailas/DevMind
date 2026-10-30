@@ -1,4 +1,4 @@
-﻿// File: Program.cs  v4.1
+﻿// File: Program.cs  v4.2
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // Terminal.Gui v2 TUI for DevMind.
@@ -2542,7 +2542,30 @@ namespace DevMind
                         $"[STEER] unconsumed — the turn ended before the next iteration boundary. {unconsumed.Message}\n",
                         OutputColor.Warning);
                 callbacks.ShowSteerQueued(null);
+
+                // Release this turn's images from context. Here, in RunTurnAsync's own finally,
+                // because both the normal and the /t turn converge on it, on every exit path
+                // (final answer, cancellation, error), and on the turn's own thread — so it
+                // cannot race the next send. Every iteration of the turn already saw the
+                // images; the saved copies on disk keep them.
+                string released = ReleaseTurnImages(llmClient, _config?.ReleaseImagesAfterTurn ?? true);
+                if (released != null)
+                    host.AppendOutputLocal(released, OutputColor.Dim);
             }
+        }
+
+        /// <summary>
+        /// End-of-turn image release: when <paramref name="enabled"/>, replaces every image in
+        /// <paramref name="client"/>'s history with a text placeholder
+        /// (<see cref="ILlmClient.DropImagesFromHistory"/>) and returns the dim echo line, or
+        /// null when nothing was removed or the feature is off (config releaseImagesAfterTurn).
+        /// </summary>
+        internal static string ReleaseTurnImages(ILlmClient client, bool enabled)
+        {
+            if (!enabled || client == null)
+                return null;
+            int removed = client.DropImagesFromHistory();
+            return removed > 0 ? $"[images released from context: {removed}]\n" : null;
         }
 
        // ── Copy selection to the Windows clipboard ───────────────────────────────

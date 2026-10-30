@@ -14,6 +14,8 @@
 //     StagePendingImage is consumed exactly once.
 //   * ChatMessage.ImagePaths: saved-image paths recorded 1:1 with image parts on send,
 //     null entries for path-less staging, and carried through micro-compact rewrites.
+//   * LlmClient.DropImagesFromHistory: image parts replaced by placeholder lines naming the
+//     saved copies, idempotent, and absent from the next request body.
 
 //
 // The fake server is a raw TcpListener (not HttpListener) so the tests run
@@ -302,6 +304,110 @@ namespace DevMind.Core.Tests
             Assert.Contains("[file content trimmed]", msg.Content, StringComparison.Ordinal); // it WAS rewritten
             Assert.Single(ImageUrls(msg));
             Assert.Equal(new[] { @"C:\imgs\001-pic.png" }, msg.ImagePaths);
+        }
+
+        // ── DropImagesFromHistory (end-of-turn image release) ──────────────────
+        //
+        // After a turn, image parts are replaced with placeholder lines naming each saved copy,
+        // so later requests stop resending the base64.
+
+        [Fact]
+        public async Task DropImagesFromHistory_ReplacesImagesWithPlaceholdersInOrder()
+        {
+            using var server = new FakeSseServer();
+            var (client, _) = CreateConfiguredClient(server);
+
+            await SendAndAwaitAsync(client, "text-only first", imageBase64: null);
+            client.StagePendingImage("data:image/png;base64,ONE", @"C:\imgs\001-one.png");
+            client.StagePendingImage("data:image/png;base64,TWO", null);           // save failed
+            client.StagePendingImage("data:image/png;base64,THREE", @"C:\imgs\003-three.png");
+            await SendAndAwaitAsync(client, "look at these", imageBase64: null);
+
+            var before = client.HistorySnapshotForTests();
+            var original = before.Single(m => m.ContentParts != null);
+            int index = before.ToList().IndexOf(original);
+            var textOnlyBefore = before.Where(m => m.ContentParts == null).ToList();
+
+            Assert.Equal(3, client.DropImagesFromHistory());
+
+            var after = client.HistorySnapshotForTests();
+            Assert.Equal(before.Count, after.Count);
+            var msg = after[index];
+            Assert.Null(msg.ContentParts);
+            Assert.Null(msg.ImagePaths);
+            Assert.Equal(original.Role, msg.Role);
+            Assert.Equal(original.Turn, msg.Turn);
+            Assert.Equal(
+                "look at these\n" +
+                "[image removed from context — saved at C:\\imgs\\001-one.png]\n" +
+                "[image removed from context — not saved]\n" +
+                "[image removed from context — saved at C:\\imgs\\003-three.png]",
+                msg.Content);
+
+            // Text-only messages are the same instances, untouched.
+            Assert.All(textOnlyBefore, m => Assert.Contains(m, after));
+            Assert.DoesNotContain(after, m => m.ContentParts != null);
+        }
+
+        [Fact]
+        public async Task DropImagesFromHistory_SecondCallReturnsZero_AndTextOnlyHistoryReturnsZero()
+        {
+            using var server = new FakeSseServer();
+            var (client, _) = CreateConfiguredClient(server);
+
+            await SendAndAwaitAsync(client, "no images here", imageBase64: null);
+            Assert.Equal(0, client.DropImagesFromHistory());
+
+            await SendAndAwaitAsync(client, "one image", imageBase64: "data:image/png;base64,ARG");
+            Assert.Equal(1, client.DropImagesFromHistory());
+            var once = client.HistorySnapshotForTests();
+
+            Assert.Equal(0, client.DropImagesFromHistory()); // idempotent
+            Assert.Equal(once, client.HistorySnapshotForTests());
+            Assert.Contains(once, m => m.Content == "one image\n[image removed from context — not saved]");
+        }
+
+        [Fact]
+        public async Task DropImagesFromHistory_NextRequestCarriesPlaceholderAndNoImageUrl()
+        {
+            using var server = new FakeSseServer();
+            var (client, _) = CreateConfiguredClient(server);
+
+            client.StagePendingImage("data:image/png;base64,PIC", @"C:\imgs\001-pic.png");
+            await SendAndAwaitAsync(client, "what is this?", imageBase64: null);
+            Assert.Contains("image_url", server.RequestBodies[0], StringComparison.Ordinal); // precondition
+
+            Assert.Equal(1, client.DropImagesFromHistory());
+            await SendAndAwaitAsync(client, "and now?", imageBase64: null);
+
+            var body = server.RequestBodies[1];
+            Assert.DoesNotContain("image_url", body, StringComparison.Ordinal);
+            Assert.DoesNotContain("base64,PIC", body, StringComparison.Ordinal);
+            var earlierUser = ((JArray)JObject.Parse(body)["messages"]!)
+                .First(m => (string?)m["role"] == "user");
+            Assert.Equal(JTokenType.String, earlierUser["content"]!.Type);
+            Assert.Equal("what is this?\n[image removed from context — saved at C:\\imgs\\001-pic.png]",
+                (string?)earlierUser["content"]);
+        }
+
+        [Fact]
+        public async Task DropImagesFromHistory_AfterGuardAbortedSend_ReleasesTheUnsentImages()
+        {
+            // The pre-send guard aborts before any POST but the image message stays in history;
+            // releasing it must still work (and leaves the history small enough to send).
+            using var server = new FakeSseServer();
+            var (client, _) = CreateConfiguredClient(server);
+            for (int i = 0; i < ImagesPastCeiling; i++)
+                client.StagePendingImage($"data:image/png;base64,PAGE{i}", $@"C:\imgs\{i:000}-p.png");
+            var (error, _) = await SendCapturingErrorAsync(client, "summarize these pages");
+            Assert.NotNull(error);
+            Assert.Empty(server.RequestBodies);
+
+            Assert.Equal(ImagesPastCeiling, client.DropImagesFromHistory());
+
+            var (retryError, _) = await SendCapturingErrorAsync(client, "try again");
+            Assert.Null(retryError);
+            Assert.DoesNotContain("image_url", server.RequestBodies.Single(), StringComparison.Ordinal);
         }
 
         private static List<string> ImageUrls(ChatMessage msg) =>

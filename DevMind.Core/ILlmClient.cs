@@ -98,6 +98,12 @@ namespace DevMind
         /// ignores the path — implementations that keep history override it.</summary>
         void StagePendingImage(string imageDataUri, string savedPath) => StagePendingImage(imageDataUri);
 
+        /// <summary>Replaces every image part in history with a text placeholder naming its
+        /// saved copy, so images are not resent on later requests. Returns the number of
+        /// images removed (0 when none remain). The default does nothing and returns 0 —
+        /// implementations that keep history override it.</summary>
+        int DropImagesFromHistory() => 0;
+
        /// <summary>Streams a message to the LLM endpoint, invoking callbacks as tokens arrive.</summary>
         /// <param name="imageBase64">Optional base64-encoded image data (data: URI format). When provided,
         /// the message is sent as multimodal content with both text and image parts.</param>
