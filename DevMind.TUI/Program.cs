@@ -1720,14 +1720,19 @@ namespace DevMind
                 // ── Auto-attach typed image and PDF paths ───────────────────────
                 // A message mentioning an existing image file (quoted or bare path,
                 // validated by magic bytes) stages it as multimodal content without
-                // an explicit /image. A PDF path pauses the send for a page range per PDF
-                // (PdfAttachFlow): cost and free room shown, chosen pages rendered, saved and
-                // staged; Esc skips that PDF. PDFs are asked about BEFORE the typed images
-                // are staged, and the free figure counts those images explicitly. Echoes
-                // what it attached so nothing is silent; config autoAttachImages=false opts
-                // out of both. Returns false only when the send was cancelled while a
-                // prompt was open (the session token — F10/Ctrl+Q quit): nothing is staged
-                // and the caller does not send.
+                // an explicit /image. A PDF path pauses the send for a choice per PDF
+                // (PdfAttachFlow): a PDF with a text layer defaults to text (Enter = nothing
+                // staged, a reading note naming the PDF is appended to the message so the model
+                // uses read_pdf); a page range is rendered, saved and staged as images; Esc
+                // skips that PDF. PDFs are asked about BEFORE the typed images are staged, and
+                // the free figure counts those images explicitly. Echoes what it attached so
+                // nothing is silent; config autoAttachImages=false opts out of both. Returns
+                // the message to send (the typed text plus any reading notes), or null only
+                // when the send was cancelled while a prompt was open (the session token —
+                // F10/Ctrl+Q quit): nothing is staged and the caller does not send. The note
+                // is part of the user message from here on: history, the saved session row,
+                // the training log and _originalTaskPrompt all carry it (intended — it is
+                // small, and the model needs the path on later turns too).
                 //
                 // Threading: past the first prompt's await this runs on a POOL thread. Every
                 // call made there is thread-safe: llmClient.StagePendingImage (locks its list),
@@ -1735,10 +1740,11 @@ namespace DevMind
                 // (marshals the dialog itself), PDF rendering, and EstimateFreeContextTokens
                 // (reads history; no turn is running yet, so nothing writes it). No view is
                 // touched directly, so no OnUiAsync is needed here.
-                async Task<bool> AutoAttachTypedAsync(string text)
+                async Task<string> AutoAttachTypedAsync(string text)
                 {
                     if (!_config.AutoAttachImages)
-                        return true;
+                        return text;
+                    string toSend = text;
                     TypedAttachments found;
                     try
                     {
@@ -1747,7 +1753,7 @@ namespace DevMind
                     catch (Exception ex)
                     {
                         host.AppendOutputLocal($"[auto-attach skipped: {ex.Message}]\n", OutputColor.Dim);
-                        return true;
+                        return text;
                     }
 
                     if (found.Pdfs.Count > 0)
@@ -1756,7 +1762,8 @@ namespace DevMind
                         {
                             FreeTokens = extra => llmClient.EstimateFreeContextTokens(text, extra),
                             Prompt = (title, message, validate, ct) =>
-                                host.PromptTextAsync(title, message, "", validate, ct),
+                                // No bottom hint: the message already says what Enter and Esc do.
+                                host.PromptTextAsync(title, message, "", validate, ct, hint: null),
                             Save = (dataUri, label) => imageStore.Save(dataUri, label),
                             Stage = (dataUri, savedPath, pdfPath, page) =>
                                 llmClient.StagePendingImage(dataUri, savedPath, transient: false, page: page, sourcePdf: pdfPath),
@@ -1764,11 +1771,13 @@ namespace DevMind
                         };
                         try
                         {
-                            if (!await flow.RunAsync(found.Pdfs.ConvertAll(p => p.FullPath), found.Images.Count, cts.Token))
+                            PdfAttachOutcome outcome = await flow.RunAsync(found.Pdfs.ConvertAll(p => p.FullPath), found.Images.Count, cts.Token);
+                            if (!outcome.Send)
                             {
                                 host.AppendOutputLocal("[send cancelled]\n", OutputColor.Dim);
-                                return false;
+                                return null;
                             }
+                            toSend = PdfAttachFlow.AppendNotes(text, outcome.ReadingNotes);
                         }
                         catch (Exception ex)
                         {
@@ -1794,7 +1803,7 @@ namespace DevMind
                         // Never let attach detection kill the turn — the text still goes out.
                         host.AppendOutputLocal($"[auto-attach skipped: {ex.Message}]\n", OutputColor.Dim);
                     }
-                    return true;
+                    return toSend;
                 }
 
                 // ── Slash-command dispatch ──────────────────────────────────────
@@ -2002,9 +2011,12 @@ namespace DevMind
                         string message = input.Substring(2).Trim();
                         if (!string.IsNullOrEmpty(message))
                         {
-                            // Echo the actual message.
+                            // Echo the actual message — as typed. A PDF reading note is not
+                            // echoed (same as the normal path, whose echo precedes the prompt):
+                            // the dim "[PDF for reading: …]" line already says what was added.
                             host.AppendOutputLocal($"\n> {message}\n", OutputColor.Input);
-                            if (!await AutoAttachTypedAsync(message))
+                            string toSend = await AutoAttachTypedAsync(message);
+                            if (toSend == null)
                             {
                                 // Cancelled at a PDF prompt: no turn, nothing staged.
                                 await OnUiAsync(() =>
@@ -2029,7 +2041,7 @@ namespace DevMind
                                 // can't block the main loop and freeze the spinner. This await
                                 // resumes the finally on a POOL thread (Terminal.Gui's plain
                                 // SynchronizationContext), so the teardown is marshalled.
-                                await Task.Run(() => RunTurnAsync(message, options, llmClient, host, driver, state,
+                                await Task.Run(() => RunTurnAsync(toSend, options, llmClient, host, driver, state,
                                     callbacks, () => BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules, host.TaskScratchpad), cts, app,
                                     historyStore, SessionId.Get(), SessionId.GetMachineName()));
                             }
@@ -2060,7 +2072,9 @@ namespace DevMind
                     return;
                 }
 
-                if (!await AutoAttachTypedAsync(input))
+                // The typed text plus any PDF reading notes; the "> input" echo above stays as typed.
+                string inputToSend = await AutoAttachTypedAsync(input);
+                if (inputToSend == null)
                 {
                     // Cancelled at a PDF prompt: no turn, nothing staged.
                     await OnUiAsync(() =>
@@ -2082,7 +2096,7 @@ namespace DevMind
                     // (FIND/READ/LIST/GREP) would otherwise block the main loop and freeze the
                     // animated spinner. This await resumes the finally on a POOL thread
                     // (Terminal.Gui's plain SynchronizationContext), so the teardown is marshalled.
-                    await Task.Run(() => RunTurnAsync(input, options, llmClient, host, driver, state,
+                    await Task.Run(() => RunTurnAsync(inputToSend, options, llmClient, host, driver, state,
                         callbacks, () => BuildCombinedSystemPrompt(options, devMindContext, _config.BehavioralRules, host.TaskScratchpad), cts, app,
                         historyStore, SessionId.Get(), SessionId.GetMachineName()));
                 }

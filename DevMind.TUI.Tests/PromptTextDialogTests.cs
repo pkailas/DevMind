@@ -349,6 +349,49 @@ namespace DevMind.TUI.Tests
             await WaitDialogClosedAsync(ta);
         }
 
+        [Fact]
+        public async Task DefaultHint_IsTheEnterEscLine()
+        {
+            using var ta = TestApp.Start();
+            var t = ta.Host.PromptTextAsync("Pages", "Range?", "1-14");
+            var dlg = await WaitDialogOpenAsync(ta);
+
+            string? hint = await OnUiAsync(ta, () => dlg.SubViews.SingleOrDefault(v => v.Id == TuiTextPrompt.HintId)?.Text);
+            Assert.Equal("Enter = submit    Esc = cancel", hint);
+
+            await Press(ta, Key.Esc);
+            Assert.Null(await AwaitAsync(t));
+            await WaitDialogClosedAsync(ta);
+        }
+
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        public async Task NoHint_DrawsNoHintLine_AndTheDialogIsOneRowShorter(string? noHint)
+        {
+            using var ta = TestApp.Start();
+
+            var withHint = ta.Host.PromptTextAsync("Pages", "Range?", "1-14");
+            var dlg1 = await WaitDialogOpenAsync(ta);
+            int heightWithHint = await OnUiAsync(ta, () => dlg1.Frame.Height);
+            await Press(ta, Key.Esc);
+            Assert.Null(await AwaitAsync(withHint));
+            await WaitDialogClosedAsync(ta);
+
+            var t = ta.Host.PromptTextAsync("Pages", "Range?", "1-14", hint: noHint);
+            var dlg = await WaitDialogOpenAsync(ta);
+
+            Assert.False(await OnUiAsync(ta, () => dlg.SubViews.Any(v => v.Id == TuiTextPrompt.HintId)), "a hint line was drawn");
+            Assert.False(await OnUiAsync(ta, () => dlg.SubViews.Any(v => v.Text == TuiTextPrompt.HintText)), "the default hint text is present");
+            Assert.Equal(heightWithHint - 1, await OnUiAsync(ta, () => dlg.Frame.Height));
+            // The error row is still reserved and validation still works.
+            Assert.NotNull(await OnUiAsync(ta, () => Error(dlg)));
+
+            await Press(ta, Key.Enter);
+            Assert.Equal("1-14", await AwaitAsync(t));
+            await WaitDialogClosedAsync(ta);
+        }
+
         // Program.cs's app-wide Esc handler runs BEFORE the dialog and marks Esc handled.
         // Measured: with such a handler and no yield, Esc never reaches the prompt (the task
         // stays pending). The handler yields when TuiTextPrompt.IsTopmost — mirrored here.

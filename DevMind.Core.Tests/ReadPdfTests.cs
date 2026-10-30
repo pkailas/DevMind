@@ -16,6 +16,10 @@ namespace DevMind.Core.Tests
 {
     public sealed class ReadPdfTests
     {
+        private readonly Xunit.Abstractions.ITestOutputHelper _output;
+
+        public ReadPdfTests(Xunit.Abstractions.ITestOutputHelper output) { _output = output; }
+
         private const string Page1 = "Invoice 4711\nVendor: Acme Widgets";
         private const string Page2 = "Line items follow on this page\nWidget A 10 x 3.50";
         private const string Page4 = "Totals and payment terms\nNet 30 days";
@@ -101,6 +105,34 @@ namespace DevMind.Core.Tests
                 var page = Assert.Single(PdfPageAttachments.ExtractText(pdf, 1, 1).Pages);
                 Assert.Equal("Page 3 of 10", page.Text);
                 Assert.False(page.HasText);
+            }
+            finally
+            {
+                File.Delete(pdf);
+            }
+        }
+
+        [Fact]
+        public void ExtractText_100Pages_IsCheapEnoughForThePromptToReadUpFront()
+        {
+            // The typed-PDF prompt reads every page's text layer before asking; a 100-page text
+            // PDF (~2,000 chars a page) must not make that pause noticeable. The bound is loose
+            // (CI noise); the measured figure is written to the test output.
+            string pageText = string.Join("\n", Enumerable.Range(1, 40).Select(i => $"Line {i} of a report page with some ordinary words"));
+            string pdf = PdfTestFiles.WriteTempTextPdf(Enumerable.Repeat<string?>(pageText, 100).ToArray());
+            try
+            {
+                PdfPageAttachments.ExtractText(pdf, 1, 1); // warm PDFium up: the first call loads the native library
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                PdfTextResult result = PdfPageAttachments.ExtractText(pdf, 1, 100);
+                sw.Stop();
+                _output.WriteLine(
+                    $"ExtractText 100 pages: {sw.ElapsedMilliseconds} ms, {result.Pages.Sum(p => p.CharCount):N0} chars");
+
+                Assert.True(result.Succeeded, result.Message);
+                Assert.Equal(100, result.Pages.Count);
+                Assert.All(result.Pages, p => Assert.True(p.HasText));
+                Assert.True(sw.Elapsed < TimeSpan.FromSeconds(5), $"ExtractText took {sw.ElapsedMilliseconds} ms for 100 pages");
             }
             finally
             {

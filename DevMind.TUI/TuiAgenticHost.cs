@@ -1445,13 +1445,16 @@ namespace DevMind
         /// <paramref name="validate"/> returns an error string, the dialog stays open showing it
         /// and keeps the text; it resolves only once validate returns null. TUI-only, so not on
         /// IAgenticHost. Safe to await from the UI thread's input handler or any other thread.
+        /// <paramref name="hint"/> is the bottom line (default "Enter = submit    Esc = cancel");
+        /// null or empty draws none, for a message that already says what Enter and Esc do.
         /// </summary>
         public Task<string?> PromptTextAsync(string title, string message, string defaultText = "",
-            Func<string, string?>? validate = null, CancellationToken ct = default)
+            Func<string, string?>? validate = null, CancellationToken ct = default,
+            string? hint = TuiTextPrompt.HintText)
         {
             IApplication? app = _outputView.App;
             if (app == null) return Task.FromResult<string?>(null); // pre-init / non-interactive — no prompt
-            return TuiTextPrompt.ShowAsync(app, FocusInputView, title, message, defaultText, validate, ct);
+            return TuiTextPrompt.ShowAsync(app, FocusInputView, title, message, defaultText, validate, ct, hint);
         }
 #nullable restore
 

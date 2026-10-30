@@ -157,7 +157,7 @@ namespace DevMind
             => Error(pdfPath, $"the PDF could not be read (corrupt or password-protected?): {message}");
 
         /// <summary>"1-3, 5, 7-8"; "none" for an empty list. Expects ascending page numbers.</summary>
-        internal static string Ranges(IReadOnlyList<int> pages)
+        public static string Ranges(IReadOnlyList<int> pages)
         {
             if (pages.Count == 0)
                 return "none";

@@ -2,7 +2,7 @@
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
 //
 // A single-line text prompt dialog for the TUI: title, a (wrapped) message, a TextField
-// prefilled with a default, an error row for validation, and an Enter/Esc hint.
+// prefilled with a default, an error row for validation, and an optional Enter/Esc hint.
 //
 // It follows TuiAgenticHost.ConfirmAsync's session model exactly: a NON-BLOCKING
 // app.Begin(dlg) resolved through a TaskCompletionSource, an exactly-once Close that owns
@@ -39,6 +39,9 @@ namespace DevMind
         /// <summary>View.Id of the prompt dialog itself (see <see cref="IsTopmost"/>).</summary>
         internal const string DialogId = "promptDialog";
 
+        /// <summary>View.Id of the bottom hint label (absent when the caller passes no hint).</summary>
+        internal const string HintId = "promptHint";
+
         internal const string HintText = "Enter = submit    Esc = cancel";
 
         private static readonly TgColor FgError = new TgColor(0xF4, 0x47, 0x47); // #F44747, TuiStatusBar's error red
@@ -50,11 +53,14 @@ namespace DevMind
         /// built on a later main-loop pass, never inline, and nothing here blocks.
         /// <paramref name="validate"/> runs on the UI thread; a non-null return is shown as
         /// the error and keeps the dialog open. If it throws, the dialog closes and the
-        /// returned task faults with that exception.
+        /// returned task faults with that exception. <paramref name="hint"/> is the bottom
+        /// line; null or empty draws none (for a caller whose message already says what Enter
+        /// and Esc do) and the dialog is one row shorter.
         /// </summary>
         internal static Task<string?> ShowAsync(
             IApplication app, View? restoreFocus, string title, string message,
-            string defaultText, Func<string, string?>? validate, CancellationToken ct)
+            string defaultText, Func<string, string?>? validate, CancellationToken ct,
+            string? hint = HintText)
         {
             if (ct.IsCancellationRequested) return Task.FromResult<string?>(null);
 
@@ -65,7 +71,7 @@ namespace DevMind
             // while the key that triggered it is still being dispatched.
             app.AddTimeout(TimeSpan.Zero, () =>
             {
-                Build(app, restoreFocus, tcs, title, message, defaultText ?? string.Empty, validate, ct);
+                Build(app, restoreFocus, tcs, title, message, defaultText ?? string.Empty, validate, ct, hint);
                 return false; // one-shot
             });
             return tcs.Task;
@@ -81,7 +87,8 @@ namespace DevMind
 
         private static void Build(
             IApplication app, View? restoreFocus, TaskCompletionSource<string?> tcs, string title,
-            string message, string defaultText, Func<string, string?>? validate, CancellationToken ct)
+            string message, string defaultText, Func<string, string?>? validate, CancellationToken ct,
+            string? hintText)
         {
             if (ct.IsCancellationRequested) { tcs.TrySetResult(null); return; }
 
@@ -103,9 +110,10 @@ namespace DevMind
             int msgRows = lines.Length;
 
             // Rows: message, a blank row, the field, the error row (reserved so a validation
-            // error never re-lays the dialog out), the hint.
+            // error never re-lays the dialog out), the hint when there is one.
+            bool hasHint = !string.IsNullOrEmpty(hintText);
             int fieldY = msgRows == 0 ? 0 : msgRows + 1;
-            int bodyRows = fieldY + 3;
+            int bodyRows = fieldY + (hasHint ? 3 : 2);
 
             var dlg = new Dialog { Id = DialogId, Title = title ?? string.Empty, Width = dialogCols, Height = bodyRows };
             var noHotKey = (System.Text.Rune)0xFFFF; // data, not mnemonics: draw every '_'
@@ -131,13 +139,17 @@ namespace DevMind
                 X = 1, Y = fieldY + 1, Width = bodyWidth, Height = 1,
                 HotKeySpecifier = noHotKey,
             };
-            var hint = new Label
+            dlg.Add(field, error);
+            if (hasHint)
             {
-                Text = HintText,
-                X = 1, Y = fieldY + 2, Width = bodyWidth, Height = 1,
-                HotKeySpecifier = noHotKey,
-            };
-            dlg.Add(field, error, hint);
+                dlg.Add(new Label
+                {
+                    Id = HintId,
+                    Text = hintText!,
+                    X = 1, Y = fieldY + 2, Width = bodyWidth, Height = 1,
+                    HotKeySpecifier = noHotKey,
+                });
+            }
             error.SetScheme(new TgScheme(dlg.GetScheme())
             {
                 Normal = new TgAttribute(FgError, dlg.GetScheme().Normal.Background),
