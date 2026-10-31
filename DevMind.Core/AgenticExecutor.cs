@@ -627,12 +627,30 @@ namespace DevMind
                         }
                         try
                         {
-                            string saveResult = await _host.SaveMemoryAsync(
-                                block.MemoryTopic, block.MemoryContent, block.MemoryDescription);
+                            // The host decides whether and where to save: the TUI asks the
+                            // operator (this folder / global / don't save); headless hosts
+                            // answer Repo, the long-standing behaviour.
+                            MemorySaveChoice choice = await _host.ConfirmMemorySaveAsync(
+                                block.MemoryTopic, block.MemoryDescription, block.MemoryContent?.Length ?? 0);
+                            string saveResult;
+                            if (choice == MemorySaveChoice.Declined)
+                            {
+                                saveResult = MemoryManager.SaveDeclinedResult;
+                                _host.AppendOutput($"[MEMORY] Not saved: [{block.MemoryTopic}] — declined\n", OutputColor.Dim);
+                            }
+                            else if (choice == MemorySaveChoice.Global)
+                                saveResult = await _host.SaveGlobalMemoryAsync(
+                                    block.MemoryTopic, block.MemoryContent, block.MemoryDescription);
+                            else
+                                saveResult = await _host.SaveMemoryAsync(
+                                    block.MemoryTopic, block.MemoryContent, block.MemoryDescription);
                             block.MemoryDescription = saveResult; // Reuse field for result message
                         }
                         catch (Exception ex)
                         {
+                            // Without this the tool result would be the model's own description,
+                            // which reads like a confirmation.
+                            block.MemoryDescription = MemoryManager.SaveFailedResult(block.MemoryTopic, ex.Message);
                             _host.AppendOutput($"[MEMORY ERROR] {ex.Message}\n", OutputColor.Error);
                         }
                         break;

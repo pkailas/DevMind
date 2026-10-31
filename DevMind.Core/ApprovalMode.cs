@@ -77,9 +77,11 @@ namespace DevMind
         Shell,
 
         /// <summary>
-        /// save_memory — writes .devmind/memory into the repo. Not gated in Auto or Manual
-        /// today (the executor dispatches it without a confirm), so those modes keep that
-        /// exact behaviour; only <see cref="ApprovalMode.Plan"/> refuses it.
+        /// save_memory — writes .devmind/memory into the repo. Not gated by the mode in Auto
+        /// or Manual; only <see cref="ApprovalMode.Plan"/> refuses it. Separately, in every
+        /// non-Plan mode the host is asked whether and where to save
+        /// (<see cref="IAgenticHost.ConfirmMemorySaveAsync"/>: the TUI asks the operator,
+        /// headless hosts answer "repo").
         /// </summary>
         Memory,
 

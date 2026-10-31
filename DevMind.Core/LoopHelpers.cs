@@ -537,7 +537,7 @@ namespace DevMind
             sb.Append("- Running tests: `run_tests`\n");
             sb.Append("- Interactive debugging (DAP via netcoredbg): `debug` — command launch|attach|break|clear_breaks|continue|step|stepin|stepout|inspect|stack|eval|detach|stop, with command-specific args (also the /debug slash command)\n");
             sb.Append("- Tracking state: `scratchpad`\n");
-            sb.Append("- Saving cross-session knowledge: `save_memory` / `recall_memory` / `list_memory_topics` / `search_memory` (grep across all topics)\n");
+            sb.Append("- Saving cross-session knowledge: `save_memory` / `recall_memory` / `list_memory_topics` / `search_memory` (grep across all topics). Save only when the user asks or agrees; in the TUI the user confirms each save and chooses this folder or global; never claim something was saved unless the tool result says so\n");
             sb.Append("- Reference lookup (RAG over ingested docs): `query_library` — framework/API questions (hooks rules, TS patterns) before guessing\n");
             sb.Append("- Code intelligence (semantic): `get_diagnostics` (errors without a build), `go_to_definition`, `find_references`, `hover`, `find_symbol` (symbol search across one solution — the session's, unless you pass a path inside another)\n");
             sb.Append("- Web: `web_search` (docs, APIs, error messages), `web_fetch` (read a URL as text, 8,000 chars per call; pass the footer's offset to read on)\n");

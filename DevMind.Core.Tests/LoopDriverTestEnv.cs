@@ -171,7 +171,29 @@ namespace DevMind.Core.Tests
         public Task<string> SaveMemoryAsync(string topic, string content, string description)
         {
             SaveMemoryCalls++;
-            return Task.FromResult("ok");
+            if (Memory == null) return Task.FromResult("ok");
+            Memory.SaveTopic(topic, content, description);
+            return Task.FromResult(MemoryManager.SavedResult(MemoryManager.SanitizeSlug(topic), "folder", Memory.TopicPath(topic)));
+        }
+
+        /// <summary>What <see cref="ConfirmMemorySaveAsync"/> answers (Repo = the interface default's answer).</summary>
+        public MemorySaveChoice MemorySaveAnswer { get; set; } = MemorySaveChoice.Repo;
+        /// <summary>Every save_memory confirmation the executor asked for (the topic).</summary>
+        public List<string> MemorySaveConfirms { get; } = new();
+        /// <summary>When set, SaveMemoryAsync / SaveGlobalMemoryAsync really write through it.</summary>
+        public MemoryManager? Memory { get; set; }
+        public int SaveGlobalMemoryCalls { get; set; }
+        public Task<MemorySaveChoice> ConfirmMemorySaveAsync(string topic, string description, int contentLength)
+        {
+            MemorySaveConfirms.Add(topic);
+            return Task.FromResult(MemorySaveAnswer);
+        }
+        public Task<string> SaveGlobalMemoryAsync(string topic, string content, string description)
+        {
+            SaveGlobalMemoryCalls++;
+            if (Memory == null) return Task.FromResult("ok");
+            Memory.SaveGlobalTopic(topic, content);
+            return Task.FromResult(MemoryManager.SavedResult(MemoryManager.SanitizeSlug(topic), "global", Memory.GlobalTopicPath(topic)));
         }
         public Task<string> ListMemoryTopicsAsync() => Task.FromResult("");
         public Task<string> SearchMemoryAsync(string pattern) => Task.FromResult("");

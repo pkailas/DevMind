@@ -24,6 +24,20 @@ namespace DevMind
     }
 
     /// <summary>
+    /// Where a <c>save_memory</c> call may write, as decided by
+    /// <see cref="IAgenticHost.ConfirmMemorySaveAsync"/>.
+    /// </summary>
+    public enum MemorySaveChoice
+    {
+        /// <summary>The working folder's .devmind\memory (+ MEMORY.md) — the long-standing behaviour.</summary>
+        Repo,
+        /// <summary>The machine-level layer (%APPDATA%\devmind\memory), seen from every folder.</summary>
+        Global,
+        /// <summary>The user declined: nothing is written.</summary>
+        Declined,
+    }
+
+    /// <summary>
     /// Abstracts all side effects away from the agentic decision logic.
     /// <see cref="AgenticExecutor"/> calls these methods;
     /// <see cref="DevMindToolWindowControl"/> implements them by delegating
@@ -192,6 +206,22 @@ namespace DevMind
         /// Returns a confirmation message.
         /// </summary>
         Task<string> SaveMemoryAsync(string topic, string content, string description);
+
+        /// <summary>
+        /// Asked before every save_memory write: whether to save, and to which layer.
+        /// Default: <see cref="MemorySaveChoice.Repo"/> without asking (headless hosts have
+        /// no one to ask — their behaviour is unchanged); the TUI asks the operator.
+        /// </summary>
+        Task<MemorySaveChoice> ConfirmMemorySaveAsync(string topic, string description, int contentLength)
+            => Task.FromResult(MemorySaveChoice.Repo);
+
+        /// <summary>
+        /// Saves a topic to the machine-level (global) memory layer. Only reached when
+        /// <see cref="ConfirmMemorySaveAsync"/> answered <see cref="MemorySaveChoice.Global"/>,
+        /// which the default never does. Returns the tool-result text for the model.
+        /// </summary>
+        Task<string> SaveGlobalMemoryAsync(string topic, string content, string description)
+            => Task.FromResult("Not saved — this host has no global memory layer. Do not say it was saved.");
 
         /// <summary>
         /// List all available memory topics with their descriptions.

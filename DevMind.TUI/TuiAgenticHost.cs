@@ -2190,10 +2190,62 @@ namespace DevMind
             if (_memoryManager == null)
                 return Task.FromResult("Memory not available: no working directory");
 
-            _memoryManager.SaveTopic(topic, content, description);
-            string desc = string.IsNullOrEmpty(description) ? topic : description;
-            AppendOutputLocal($"[MEMORY] Saved: [{topic}] {desc}\n", OutputColor.Success);
-            return Task.FromResult($"Memory saved: [{topic}] {desc}");
+            string slug = MemoryManager.SanitizeSlug(topic);
+            string path = _memoryManager.TopicPath(slug);
+            if (!_memoryManager.SaveTopic(slug, content, description))
+            {
+                AppendOutputLocal($"[MEMORY ERROR] Could not write {path}\n", OutputColor.Error);
+                return Task.FromResult(MemoryManager.SaveFailedResult(slug, $"could not write {path}"));
+            }
+            string desc = string.IsNullOrEmpty(description) ? slug : description;
+            AppendOutputLocal($"[MEMORY] Saved: [{slug}] {desc} → {path}\n", OutputColor.Success);
+            return Task.FromResult(MemoryManager.SavedResult(slug, "folder", path));
+        }
+
+        // ── IAgenticHost.SaveGlobalMemoryAsync ────────────────────────────────────
+
+        Task<string> IAgenticHost.SaveGlobalMemoryAsync(string topic, string content, string description)
+        {
+            if (_memoryManager == null)
+                return Task.FromResult("Memory not available: no working directory");
+
+            string slug = MemoryManager.SanitizeSlug(topic);
+            string path = _memoryManager.GlobalTopicPath(slug);
+            if (!_memoryManager.SaveGlobalTopic(slug, content))
+            {
+                AppendOutputLocal($"[MEMORY ERROR] Could not write global topic {slug} ({path})\n", OutputColor.Error);
+                return Task.FromResult(MemoryManager.SaveFailedResult(slug, $"could not write {path}"));
+            }
+            string desc = string.IsNullOrEmpty(description) ? slug : description;
+            AppendOutputLocal($"[MEMORY] Saved globally: [{MemoryManager.GlobalTopicPrefix}{slug}] {desc} → {path}\n", OutputColor.Success);
+            return Task.FromResult(MemoryManager.SavedResult(slug, "global", path));
+        }
+
+        // ── IAgenticHost.ConfirmMemorySaveAsync ───────────────────────────────────
+        // Every save_memory asks the operator, in every approval mode the executor lets it
+        // through (Plan refuses it before this point): the question is not only "may it
+        // write" but "where" — the working folder can be any directory the TUI was started in.
+
+        async Task<MemorySaveChoice> IAgenticHost.ConfirmMemorySaveAsync(string topic, string description, int contentLength)
+        {
+            if (_memoryManager == null || _outputView.App == null)
+                return MemorySaveChoice.Repo; // pre-init / non-interactive — today's behaviour, like ConfirmAsync
+
+            string slug = MemoryManager.SanitizeSlug(topic);
+            string answer = await PromptTextAsync(
+                MemorySavePrompt.Title,
+                MemorySavePrompt.BuildMessage(slug, description, contentLength, _memoryManager.TopicDirectory),
+                defaultText: "",
+                validate: MemorySavePrompt.Validate,
+                hint: null);
+            return MemorySavePrompt.ToChoice(answer);
+        }
+
+        /// <summary>Test seam: the memory manager (null when there is no working directory).</summary>
+        internal MemoryManager MemoryManagerForTests
+        {
+            get => _memoryManager;
+            set => _memoryManager = value;
         }
 
         // ── IAgenticHost.ListMemoryTopicsAsync ────────────────────────────────────

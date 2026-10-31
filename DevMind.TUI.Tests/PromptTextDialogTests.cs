@@ -418,5 +418,148 @@ namespace DevMind.TUI.Tests
             await WaitDialogClosedAsync(ta);
             Assert.False(await OnUiAsync(ta, () => TuiTextPrompt.IsTopmost(ta.App)));
         }
+
+        // ── save_memory: "Save memory?" (TuiAgenticHost.ConfirmMemorySaveAsync) ──────
+        // Driven the way a turn drives it: the executor on a worker thread reaches the host
+        // mid-tool-execution and awaits the prompt; the answer decides the layer.
+
+        sealed class TempMemory : IDisposable
+        {
+            public string Dir { get; } = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"devmind_tuimem_{Guid.NewGuid():N}");
+            public string GlobalDir => System.IO.Path.Combine(Dir, "_global", "memory");
+            public MemoryManager Manager { get; }
+            public TempMemory() { System.IO.Directory.CreateDirectory(Dir); Manager = new MemoryManager(Dir, GlobalDir); }
+            public void Dispose() { try { System.IO.Directory.Delete(Dir, recursive: true); } catch { } }
+        }
+
+        static List<ResponseBlock> SaveBlocks() => new()
+        {
+            new ResponseBlock
+            {
+                Type = BlockType.SaveMemory,
+                MemoryTopic = "sap-spec",
+                MemoryContent = "the spec",
+                MemoryDescription = "SAP spec notes",
+            },
+        };
+
+        /// <summary>Starts save_memory through the real executor on a worker thread.</summary>
+        static Task<string> StartSaveOnWorker(TestApp ta, List<ResponseBlock> blocks) => Task.Run(async () =>
+        {
+            var exec = new AgenticExecutor(ta.Host, new TuiOptions());
+            var result = await exec.ExecuteAsync(new AgenticAction { Type = ActionType.ApplyAndBuild }, new ResponseOutcome(blocks));
+            return LoopHelpers.BuildToolResultContent(new ToolCallResult { Name = "save_memory", Id = "call_1" }, result, blocks);
+        });
+
+        static async Task Answer(TestApp ta, string text)
+        {
+            foreach (char c in text) await Press(ta, new Key(c));
+            await Press(ta, Key.Enter);
+        }
+
+        [Fact]
+        public async Task MemorySave_PromptShowsTitleMessage_AndNoHint()
+        {
+            using var ta = TestApp.Start();
+            using var mem = new TempMemory();
+            ta.Host.MemoryManagerForTests = mem.Manager;
+
+            var run = StartSaveOnWorker(ta, SaveBlocks());
+            var dlg = await WaitDialogOpenAsync(ta);
+
+            Assert.Equal(MemorySavePrompt.Title, await OnUiAsync(ta, () => dlg.Title));
+            // The label holds the message word-wrapped to the dialog width: compare it unwrapped.
+            string body = await OnUiAsync(ta, () => string.Join(" ", dlg.SubViews.OfType<Label>().Select(l => l.Text)));
+            body = System.Text.RegularExpressions.Regex.Replace(body, @"\s+", " ");
+            Assert.Contains("\"sap-spec\" — SAP spec notes (8 chars)", body);
+            Assert.Contains("2 = global (all folders)", body);
+            Assert.Contains("Esc = don't save", body);
+            Assert.False(await OnUiAsync(ta, () => dlg.SubViews.Any(v => v.Id == TuiTextPrompt.HintId)), "a hint line was drawn");
+
+            await Press(ta, Key.Esc);
+            await run.WaitAsync(TimeSpan.FromSeconds(5));
+            await WaitDialogClosedAsync(ta);
+        }
+
+        [Fact]
+        public async Task MemorySave_Answer1_WritesThisFolder()
+        {
+            using var ta = TestApp.Start();
+            using var mem = new TempMemory();
+            ta.Host.MemoryManagerForTests = mem.Manager;
+
+            var run = StartSaveOnWorker(ta, SaveBlocks());
+            await WaitDialogOpenAsync(ta);
+            await Answer(ta, "1");
+            string toolResult = await run.WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.Equal("the spec", mem.Manager.LoadTopic("sap-spec"));
+            Assert.Empty(mem.Manager.ListGlobalTopics());
+            Assert.Equal(MemoryManager.SavedResult("sap-spec", "folder", mem.Manager.TopicPath("sap-spec")), toolResult);
+            await WaitDialogClosedAsync(ta);
+        }
+
+        [Fact]
+        public async Task MemorySave_Answer2_WritesGlobal_RecallableAsGlobalSlug()
+        {
+            using var ta = TestApp.Start();
+            using var mem = new TempMemory();
+            ta.Host.MemoryManagerForTests = mem.Manager;
+
+            var run = StartSaveOnWorker(ta, SaveBlocks());
+            await WaitDialogOpenAsync(ta);
+            await Answer(ta, "2");
+            string toolResult = await run.WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.Null(mem.Manager.LoadTopic("sap-spec"));
+            Assert.False(System.IO.File.Exists(System.IO.Path.Combine(mem.Dir, "MEMORY.md")), "a global save touched the folder index");
+            string globalPath = System.IO.Path.Combine(mem.GlobalDir, "sap-spec.md");
+            Assert.Equal(MemoryManager.SavedResult("sap-spec", "global", globalPath), toolResult);
+            Assert.Equal("the spec", await ((IAgenticHost)ta.Host).RecallMemoryAsync("global:sap-spec"));
+            Assert.Contains("global:sap-spec", await ((IAgenticHost)ta.Host).ListMemoryTopicsAsync());
+            await WaitDialogClosedAsync(ta);
+        }
+
+        [Fact]
+        public async Task MemorySave_EmptyEnter_ReAsks_ThenAccepts()
+        {
+            using var ta = TestApp.Start();
+            using var mem = new TempMemory();
+            ta.Host.MemoryManagerForTests = mem.Manager;
+
+            var run = StartSaveOnWorker(ta, SaveBlocks());
+            var dlg = await WaitDialogOpenAsync(ta);
+            await Press(ta, Key.Enter);
+            await Task.Delay(300); // > the 100 ms poll
+
+            Assert.False(run.IsCompleted, "an empty answer resolved the prompt");
+            Assert.Equal(MemorySavePrompt.ReAskMessage, await OnUiAsync(ta, () => Error(dlg).Text));
+            Assert.Empty(mem.Manager.ListTopics());
+
+            await Answer(ta, "1");
+            await run.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal("the spec", mem.Manager.LoadTopic("sap-spec"));
+            await WaitDialogClosedAsync(ta);
+        }
+
+        [Fact]
+        public async Task MemorySave_Esc_Declines_WritesNothing()
+        {
+            using var ta = TestApp.Start();
+            using var mem = new TempMemory();
+            ta.Host.MemoryManagerForTests = mem.Manager;
+            await OnUiAsync(ta, () => InstallAppEscHandler(ta)); // as in Program.cs
+
+            var run = StartSaveOnWorker(ta, SaveBlocks());
+            await WaitDialogOpenAsync(ta);
+            await Press(ta, Key.Esc);
+            string toolResult = await run.WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.Equal("Not saved — the user declined. Do not say it was saved.", toolResult);
+            Assert.Empty(mem.Manager.ListTopics());
+            Assert.Empty(mem.Manager.ListGlobalTopics());
+            Assert.False(System.IO.File.Exists(System.IO.Path.Combine(mem.Dir, "MEMORY.md")));
+            await WaitDialogClosedAsync(ta);
+        }
     }
 }

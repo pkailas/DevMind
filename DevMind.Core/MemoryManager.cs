@@ -16,8 +16,9 @@ namespace DevMind
     /// Layer 2: Repo topic files in .devmind/memory/ (loaded on demand via recall_memory).
     /// Layer 3 (machine-level): topic files in %APPDATA%\devmind\memory (see <see cref="DevMindPaths"/>).
     ///
-    /// Layer 3 is READ-ONLY at the tool surface (save_memory still writes repo-only) and
-    /// composes with Layer 2. Standing context is emitted global-first then repo, so the
+    /// Layer 3 is written only when the TUI operator picks "global" at the save_memory
+    /// prompt (<see cref="SaveGlobalTopic"/>; it has no index file) and composes with
+    /// Layer 2. Standing context is emitted global-first then repo, so the
     /// more specific repo rules sit last in the prompt and win on a genuine conflict —
     /// while nothing from either layer is silently dropped. A missing or unreadable global
     /// directory is a normal state (feature degrades to repo-only) and never throws.
@@ -41,6 +42,17 @@ namespace DevMind
 
         /// <summary>Prefix for explicitly recalling a machine-level (global) topic: "global:&lt;slug&gt;".</summary>
         public const string GlobalTopicPrefix = "global:";
+
+        /// <summary>The save_memory tool result when the user declined the save.</summary>
+        public const string SaveDeclinedResult = "Not saved — the user declined. Do not say it was saved.";
+
+        /// <summary>The save_memory tool result after a confirmed write ("folder" or "global" scope).</summary>
+        public static string SavedResult(string slug, string scope, string path)
+            => $"Saved \"{slug}\" to {scope} memory at {path}.";
+
+        /// <summary>The save_memory tool result when the write itself failed.</summary>
+        public static string SaveFailedResult(string slug, string reason)
+            => $"Not saved — writing \"{slug}\" failed ({reason}). Do not say it was saved.";
 
         private static readonly string IndexHeader =
             "# DevMind Memory Index\n" +
@@ -73,6 +85,12 @@ namespace DevMind
             _topicDir = Path.Combine(_solutionRoot, ".devmind", "memory");
             _globalTopicDir = globalMemoryDir ?? string.Empty;
         }
+
+        /// <summary>The repo topic directory (&lt;solution root&gt;\.devmind\memory).</summary>
+        public string TopicDirectory => _topicDir;
+
+        /// <summary>The machine-level (global) topic directory; empty when there is none.</summary>
+        public string GlobalTopicDirectory => _globalTopicDir;
 
         // ── Layer 1: MEMORY.md ──────────────────────────────────────────────
 
@@ -139,17 +157,45 @@ namespace DevMind
         /// <summary>
         /// Writes or overwrites a repo topic file and updates the index.
         /// Creates the .devmind/memory/ directory if needed.
-        /// NOTE: intentionally repo-only. The machine-level layer is read-only at the
-        /// tool surface — see <see cref="RecallTopic"/>.
+        /// Writes the repo layer only; the global layer is <see cref="SaveGlobalTopic"/>.
+        /// Returns false when the topic file could not be written.
         /// </summary>
-        public void SaveTopic(string topicSlug, string content, string description)
+        public bool SaveTopic(string topicSlug, string content, string description)
+        {
+            topicSlug = SanitizeSlug(topicSlug);
+            if (!WriteTopicIn(_topicDir, topicSlug, content))
+                return false;
+
+            // Update the index entry
+            AddIndexEntry(topicSlug, description ?? topicSlug);
+            return true;
+        }
+
+        /// <summary>
+        /// Writes or overwrites a machine-level (global) topic file — the same size cap as
+        /// <see cref="SaveTopic"/>, but no index: the global layer has none, and
+        /// list_memory_topics / recall_memory read its files directly ("global:&lt;slug&gt;").
+        /// Returns false when there is no global directory or the file could not be written.
+        /// </summary>
+        public bool SaveGlobalTopic(string topicSlug, string content)
+            => WriteTopicIn(_globalTopicDir, SanitizeSlug(topicSlug), content);
+
+        /// <summary>The path a repo topic of this slug is stored at.</summary>
+        public string TopicPath(string topicSlug) => Path.Combine(_topicDir, SanitizeSlug(topicSlug) + ".md");
+
+        /// <summary>The path a global topic of this slug is stored at (empty when there is no global directory).</summary>
+        public string GlobalTopicPath(string topicSlug)
+            => string.IsNullOrEmpty(_globalTopicDir) ? string.Empty : Path.Combine(_globalTopicDir, SanitizeSlug(topicSlug) + ".md");
+
+        private static bool WriteTopicIn(string topicDir, string topicSlug, string content)
         {
             try
             {
-                topicSlug = SanitizeSlug(topicSlug);
+                if (string.IsNullOrEmpty(topicDir))
+                    return false;
 
-                if (!Directory.Exists(_topicDir))
-                    Directory.CreateDirectory(_topicDir);
+                if (!Directory.Exists(topicDir))
+                    Directory.CreateDirectory(topicDir);
 
                 // Cap content size
                 if (content != null && Encoding.UTF8.GetByteCount(content) > MaxTopicSizeBytes)
@@ -160,19 +206,17 @@ namespace DevMind
                         content = content.Substring(0, charLimit) + "\n\n[TRUNCATED — exceeded 50 KB limit]";
                 }
 
-                string path = Path.Combine(_topicDir, topicSlug + ".md");
-                File.WriteAllText(path, content ?? "", Encoding.UTF8);
-
-                // Update the index entry
-                AddIndexEntry(topicSlug, description ?? topicSlug);
+                File.WriteAllText(Path.Combine(topicDir, topicSlug + ".md"), content ?? "", Encoding.UTF8);
+                return true;
             }
             catch
             {
                 // Never crash the extension on memory file errors
+                return false;
             }
         }
 
-        // ── Layer 3: Machine-level (global) Topic Files — READ-ONLY ─────────
+        // ── Layer 3: Machine-level (global) Topic Files ─────────────────────
 
         /// <summary>
         /// Returns the content of a machine-level (global) topic file, or null if it
@@ -449,8 +493,7 @@ namespace DevMind
         // ── Helpers ─────────────────────────────────────────────────────────
 
         /// <summary>
-        /// Deletes a topic file and removes its index entry. (Repo layer only — the
-        /// machine-level layer is read-only at the tool surface.)
+        /// Deletes a topic file and removes its index entry. (Repo layer only.)
         /// </summary>
         public void DeleteTopic(string topicSlug)
         {

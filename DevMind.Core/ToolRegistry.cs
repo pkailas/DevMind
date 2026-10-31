@@ -235,10 +235,12 @@ namespace DevMind
 
             // ── save_memory ──────────────────────────────────────────────────
             tools.Add(MakeTool("save_memory",
-                "Save project knowledge that should persist across sessions. Use this when you " +
-                "discover a project convention, resolve a tricky bug, learn a file's purpose, or " +
-                "identify a pattern that would be useful to remember. Topics are overwritten if " +
-                "they already exist — include all relevant content, not just additions.",
+                "Save knowledge that should persist across sessions. Only save when the user asks you " +
+                "to or agrees to it — never on your own initiative; if something seems worth keeping, " +
+                "ask the user first. In the TUI the user is asked to confirm each save and to choose " +
+                "this folder or global (all folders). Never claim something was saved unless this " +
+                "tool's result says it was saved. Topics are overwritten if they already exist — " +
+                "include all relevant content, not just additions.",
                 Required("topic", "string", "Slug for the topic (e.g., 'auth-system', 'build-quirks')"),
                 Required("content", "string", "The knowledge to save — conventions, insights, patterns"),
                 Optional("description", "string", "Short one-line description for the memory index")));
