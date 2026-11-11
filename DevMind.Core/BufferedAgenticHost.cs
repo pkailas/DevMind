@@ -1464,7 +1464,8 @@ namespace DevMind
 
         // ── IAgenticHost.ResolvePatchAsync ────────────────────────────────────────
 
-        async Task<(PatchResolveResult, string)> IAgenticHost.ResolvePatchAsync(string patchContent, bool fromToolCall)
+        async Task<(PatchResolveResult result, string failureReason)> IAgenticHost.ResolvePatchAsync(string patchContent, bool fromToolCall,
+            List<(string findText, string replaceText)> pairs)
         {
             // Staleness guard (headless): too many patches since the last read means the
             // model's view of the file has drifted — the precondition for overlapping-
@@ -1545,8 +1546,11 @@ namespace DevMind
                 CaptureFileSnapshot(fullPath);
 
                 var (content, encoding) = PatchEngine.ReadFilePreservingEncoding(fullPath);
-                var patchResult = PatchEngine.ResolvePatch(patchContent, fullPath, blockFileName, content, encoding,
-                    fromToolCall, AppendOutput);
+                // H-78: a tool call's pairs are resolved verbatim, never re-parsed from the text form.
+                var patchResult = pairs != null
+                    ? PatchEngine.ResolvePairs(pairs, fullPath, blockFileName, content, encoding, AppendOutput)
+                    : PatchEngine.ResolvePatch(patchContent, fullPath, blockFileName, content, encoding,
+                        fromToolCall, AppendOutput);
                 if (patchResult != null) return (patchResult, null);
 
                 // Name the likely cause when the model's source text is known to be stale: it either

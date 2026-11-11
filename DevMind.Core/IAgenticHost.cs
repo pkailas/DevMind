@@ -167,9 +167,13 @@ namespace DevMind
         /// <see cref="PatchResolveResult"/> with confidence and match data.
         /// On failure the result is null and <c>failureReason</c> carries a compact,
         /// cause-specific description the executor relays to the LLM.
+        /// <paramref name="pairs"/>, when given (a patch_file tool call), are resolved verbatim;
+        /// <paramref name="patchContent"/> then only supplies the "PATCH filename" header and its
+        /// FIND:/REPLACE: body is NOT parsed (H-78).
         /// </summary>
         Task<(PatchResolveResult result, string failureReason)> ResolvePatchAsync(
-            string patchContent, bool fromToolCall = false);
+            string patchContent, bool fromToolCall = false,
+            List<(string findText, string replaceText)> pairs = null);
 
         /// <summary>
         /// Applies a previously resolved PATCH. Returns the full path on success.

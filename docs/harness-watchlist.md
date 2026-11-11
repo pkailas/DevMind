@@ -1540,3 +1540,31 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
   AmbiguityGap_RunnerUpBelowThreshold_StillAmbiguous (runner-up at 83% still makes 87.5% ambiguous),
   Bounded_AgreesWithUnbounded_WithinBound (2,000 random pairs: exact within the bound, a lower bound above it).
 - **Status:** fixed, pending deploy.
+
+### H-78 - patch_file tool call corrupted by `replace:` inside the code
+- **First seen:** 2026-11-11, Parsely job-2804 (transcript %TEMP%\devmind\tasks\job-2804-20261111-080728.log, ~3024-3076).
+  A patch_file on src/Parsely.Web/src/pages/ExceptionsPage.tsx whose FIND ended with
+  `setSearchParams(next === 'review' ? {} : { tab: next }, { replace: true });` / `};`.
+- **Symptom:** the file was left with a stray `};`, a literal `REPLACE:` line and a fragment `}; replace: true });`, and
+  blocks moved. The patch reported success; the agent had to rewrite the whole file.
+- **Root cause:** ToolCallMapper turned the structured patch_file call (find/replace or edits) back into the text form
+  `PATCH file / FIND: / {find} / REPLACE: / {replace} / END_PATCH`, and PatchEngine.ParsePatchBlocks re-parsed it. Its
+  marker search is `IndexOf("REPLACE:", ..., OrdinalIgnoreCase)` - case-insensitive and not anchored to a line - so the
+  `replace:` in `{ replace: true }` ended the FIND. The cut-short FIND still matched, and the rest of the real FIND,
+  the real `REPLACE:` marker and the intended replacement became the replacement. `FIND:` (next-block search) and
+  `SHELL:` (a REPLACE line starting with it ends the block) collide the same way, and StripHallucinatedTerminators drops
+  any line that is just `---`, `END`, `END_PATCH`, etc. The earlier fix (2fdd9b1, 2026-07-17, "structured edits bypass
+  text parsing") moved only the MCP server's own patch_file to PatchEngine.ResolvePairs; the agent loop's path
+  (ToolCallMapper -> AgenticExecutor -> host ResolvePatchAsync -> ResolvePatch) still round-tripped through the text.
+- **Fix:** tool-call pairs never go through the text format. ToolCallMapper puts the verbatim pairs in
+  ResponseBlock.PatchPairs (Content keeps the text form for display/logging and the PATCH header);
+  IAgenticHost.ResolvePatchAsync takes them, and BufferedAgenticHost and TuiAgenticHost resolve them with ResolvePairs.
+  The text parser is unchanged and is now used only by the legacy text-block path (the CLI's typed PATCH blocks). Chose
+  this over line-anchored, exact-case markers because that would still break on a line that is exactly `REPLACE:` and
+  on the `---` / `END` stripping; the structured path has no markers to collide with.
+- **Tests:** PatchMarkerCollisionTests (real mapper -> executor -> BufferedAgenticHost, file compared byte for byte): a FIND
+  containing `{ replace: true }`, a REPLACE containing `find: x` / `FIND: y`, a FIND/REPLACE with lines that are exactly
+  `FIND:` / `REPLACE:` / `SHELL: ...` / `---` / `END`, an edits list of three pairs (one with `replace:`), a CRLF file
+  staying CRLF, and the mapper carrying the pairs. Mutation check: passing null pairs (the old text path) fails the
+  five behaviour tests.
+- **Status:** fixed, pending deploy.

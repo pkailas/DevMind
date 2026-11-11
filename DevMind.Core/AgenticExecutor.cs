@@ -1741,7 +1741,7 @@ namespace DevMind
                 var block = patchBlocks[i];
                 try
                 {
-                    var (resolveResult, failureReason) = await _host.ResolvePatchAsync(block.Content, block.FromToolCall);
+                    var (resolveResult, failureReason) = await _host.ResolvePatchAsync(block.Content, block.FromToolCall, block.PatchPairs);
                     if (resolveResult != null)
                     {
                         resolved.Add(resolveResult);

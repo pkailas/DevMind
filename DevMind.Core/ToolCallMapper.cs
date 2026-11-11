@@ -335,10 +335,14 @@ namespace DevMind
 
                 case "patch_file":
                     {
-                        // Reconstruct the PATCH text format expected by ApplyPatchAsync. One PATCH block
-                        // carries every find/replace pair; PatchEngine resolves/applies them atomically.
+                        // The pairs travel verbatim in PatchPairs and are resolved directly (H-78); the
+                        // text form below is for display/logging and the "PATCH filename" header only.
+                        // Re-parsing it split a FIND at the `replace:` inside `{ replace: true }`
+                        // (job-2804) - the text markers collide with code. One PATCH block carries every
+                        // pair; PatchEngine resolves/applies them atomically.
                         // Format: PATCH filename\n(FIND:\n{find}\nREPLACE:\n{replace}\n)+ END_PATCH
                         string filename = GetArg(tc, "filename");
+                        var pairs = new List<(string findText, string replaceText)>();
 
                         // Use explicit '\n' (not AppendLine, which emits CRLF on Windows and leaks a
                         // stray '\r' into the parsed replace text). Content's own newlines are preserved.
@@ -353,15 +357,18 @@ namespace DevMind
                         {
                             foreach (var item in JArray.Parse(editsJson))
                             {
-                                sb.Append("FIND:\n").Append(item["find"].ToString()).Append('\n');
-                                sb.Append("REPLACE:\n").Append(item["replace"].ToString()).Append('\n');
+                                string find = item["find"].ToString(), replace = item["replace"].ToString();
+                                pairs.Add((find, replace));
+                                sb.Append("FIND:\n").Append(find).Append('\n');
+                                sb.Append("REPLACE:\n").Append(replace).Append('\n');
                             }
                         }
                         else
                         {
                             // Single-edit form: top-level find/replace.
-                            sb.Append("FIND:\n").Append(GetArg(tc, "find")).Append('\n');
-                            sb.Append("REPLACE:\n").Append(GetArg(tc, "replace")).Append('\n');
+                            pairs.Add((GetArg(tc, "find"), GetArg(tc, "replace")));
+                            sb.Append("FIND:\n").Append(pairs[0].findText).Append('\n');
+                            sb.Append("REPLACE:\n").Append(pairs[0].replaceText).Append('\n');
                         }
 
                         sb.Append("END_PATCH");
@@ -371,6 +378,7 @@ namespace DevMind
                             Type = BlockType.Patch,
                             FileName = filename,
                             Content = sb.ToString(),
+                            PatchPairs = pairs,
                             ToolCallId = tc.ResultId,
                             FromToolCall = true
                         };

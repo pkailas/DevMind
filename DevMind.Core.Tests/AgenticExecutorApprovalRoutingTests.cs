@@ -77,7 +77,8 @@ namespace DevMind.Core.Tests
                 RunTestsCalls++;
                 return Task.FromResult("Passed! - Failed: 0, Passed: 3, Total: 3");
             }
-            public Task<(PatchResolveResult? result, string? failureReason)> ResolvePatchAsync(string patchContent, bool fromToolCall = false)
+            public Task<(PatchResolveResult? result, string? failureReason)> ResolvePatchAsync(string patchContent, bool fromToolCall = false,
+                List<(string findText, string replaceText)>? pairs = null)
                 => Task.FromResult<(PatchResolveResult?, string?)>((null, null));
             public Task<(string? fullPath, string? failureReason)> ApplyResolvedPatchAsync(PatchResolveResult resolved)
                 => Task.FromResult<(string?, string?)>((null, null));
@@ -150,7 +151,8 @@ namespace DevMind.Core.Tests
             public Task<string> GetFileDiffAsync(string filename) => Task.FromResult("");
             public Task<string> RunTestsAsync(string project, string filter, int? timeoutSeconds = null)
                 => Task.FromResult("");
-            public Task<(PatchResolveResult? result, string? failureReason)> ResolvePatchAsync(string patchContent, bool fromToolCall = false)
+            public Task<(PatchResolveResult? result, string? failureReason)> ResolvePatchAsync(string patchContent, bool fromToolCall = false,
+                List<(string findText, string replaceText)>? pairs = null)
                 => Task.FromResult<(PatchResolveResult?, string?)>((null, null));
             public Task<(string? fullPath, string? failureReason)> ApplyResolvedPatchAsync(PatchResolveResult resolved)
                 => Task.FromResult<(string?, string?)>((null, null));

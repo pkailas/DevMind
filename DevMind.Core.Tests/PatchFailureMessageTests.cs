@@ -216,7 +216,8 @@ namespace DevMind.Core.Tests
 
             public string Output { get; private set; } = "";
 
-            public Task<(PatchResolveResult? result, string? failureReason)> ResolvePatchAsync(string patchContent, bool fromToolCall = false)
+            public Task<(PatchResolveResult? result, string? failureReason)> ResolvePatchAsync(string patchContent, bool fromToolCall = false,
+                List<(string findText, string replaceText)>? pairs = null)
             {
                 if (ResolveThrows != null) throw ResolveThrows;
                 return Task.FromResult<(PatchResolveResult?, string?)>(

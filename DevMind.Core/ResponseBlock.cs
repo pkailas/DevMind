@@ -28,6 +28,10 @@ namespace DevMind
         public string MemoryContent { get; set; }     // for SaveMemory — content to save
         public string MemoryDescription { get; set; } // for SaveMemory — index description
         public bool FromToolCall { get; set; }        // true when block originated from a tool_call (skip fence stripping)
+        // for Patch from a patch_file tool call - the verbatim find/replace pairs. Resolved directly
+        // (PatchEngine.ResolvePairs), never re-parsed from Content: the text format's markers collide
+        // with literal code such as `{ replace: true }` (H-78). Content keeps the text form for display.
+        public List<(string findText, string replaceText)> PatchPairs { get; set; }
         public string ListFilesGlob { get; set; }     // for ListFiles — glob pattern (e.g. *.cs, Services/*.cs)
         public bool ListFilesRecursive { get; set; }  // for ListFiles — whether to recurse into subdirectories
         public int  LspLine      { get; set; }        // for GoToDefinition/FindReferences/Hover — 1-based line

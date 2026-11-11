@@ -138,7 +138,8 @@ namespace DevMind.Core.Tests
         /// </summary>
         public PatchResolveResult? ResolvedPatch { get; set; }
 
-        public Task<(PatchResolveResult? result, string? failureReason)> ResolvePatchAsync(string patchContent, bool fromToolCall = false) =>
+        public Task<(PatchResolveResult? result, string? failureReason)> ResolvePatchAsync(string patchContent, bool fromToolCall = false,
+                List<(string findText, string replaceText)>? pairs = null) =>
             ResolvedPatch != null
                 ? Task.FromResult<(PatchResolveResult?, string?)>((ResolvedPatch, null))
                 : throw new NotImplementedException("tests avoid patch blocks");

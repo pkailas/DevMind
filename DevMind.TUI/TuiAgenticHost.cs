@@ -2660,7 +2660,8 @@ namespace DevMind
 
         // ── IAgenticHost.ResolvePatchAsync ────────────────────────────────────────
 
-        async Task<(PatchResolveResult, string)> IAgenticHost.ResolvePatchAsync(string patchContent, bool fromToolCall)
+        async Task<(PatchResolveResult result, string failureReason)> IAgenticHost.ResolvePatchAsync(string patchContent, bool fromToolCall,
+            List<(string findText, string replaceText)> pairs)
         {
             try
             {
@@ -2712,8 +2713,12 @@ namespace DevMind
                 CaptureFileSnapshot(fullPath);
 
                 var (content, encoding) = PatchEngine.ReadFilePreservingEncoding(fullPath);
-                var patchResult = PatchEngine.ResolvePatch(patchContent, fullPath, blockFileName, content, encoding,
-                    fromToolCall, (text, color) => AppendOutputLocal(text, color));
+                // H-78: a tool call's pairs are resolved verbatim, never re-parsed from the text form.
+                Action<string, OutputColor> reporter = (text, color) => AppendOutputLocal(text, color);
+                var patchResult = pairs != null
+                    ? PatchEngine.ResolvePairs(pairs, fullPath, blockFileName, content, encoding, reporter)
+                    : PatchEngine.ResolvePatch(patchContent, fullPath, blockFileName, content, encoding,
+                        fromToolCall, reporter);
                 return (patchResult, patchResult == null
                     ? "FIND/REPLACE could not be resolved against the file (FIND text not matching, ambiguous, or no-op). The diagnostic above names the cause; act on it — do not retry the identical patch."
                     : null);
