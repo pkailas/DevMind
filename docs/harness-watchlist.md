@@ -1512,3 +1512,31 @@ Status values: **open**, **parked** (acknowledged, not scheduled), **fixed** (co
 - **Proposed fix:** look for a timing dependency in the test (shared log path, writer start order, read before the last
   flush) and make it deterministic.
 - **Status:** open.
+
+### H-77 - Fuzzy patch matcher hangs on a large FIND
+- **First seen:** 2026-11-10, job-2781. The model named the wrong file, so a ~310-line / ~12k-char FIND had no exact
+  match in DocumentsController.cs (~3,500 lines) and fell through to the fuzzy matcher.
+- **Symptom:** the job sat at "[AUTO-READ] Loading DocumentsController.cs before patch..." (BufferedAgenticHost.cs:1538)
+  indefinitely, GPU idle, one CPU core pegged.
+- **Root cause:** PatchEngine.FindFuzzyMatch slides an N-line window over the file and scores every window with
+  LevenshteinDistance, which allocated a full int[a+1, b+1] matrix: ~3,200 windows x 144M cells and a ~576 MB
+  allocation each.
+- **Fix:**
+  - Size gate: a FIND over 60 lines or 2,500 normalized chars is not fuzzy-matched (FuzzyRejectReason.TooLarge). The
+    patch fails like the other fuzzy refusals: "FIND is too large for fuzzy matching (... limit 60 lines / 2500
+    chars). Copy it verbatim from a fresh read_file, or split the edit into smaller patches." Picked 2,500 rather than
+    4,000 because cost grows with FIND^2: a 60-line, ~2,440-char FIND that is ~80% similar to every window of a
+    3,500-line file (the worst case, no early exit) takes ~5 s in Release, against ~13 s at ~3,800 chars.
+  - LevenshteinDistance uses two rows (O(min(a, b)) memory).
+  - New BoundedLevenshteinDistance: computes only the diagonal band of width +/-bound, stops once a row's minimum
+    exceeds the bound, and returns at once when the length difference alone exceeds it. The bound is
+    floor((1 - threshold + 0.05) * maxLen) + 1, not floor((1 - threshold) * maxLen): a runner-up between 80% and 85%
+    still decides AmbiguousMatch against a best of 85-90%, so it must be scored exactly; +1 is floating-point slack.
+    Windows that pass the bound are scored exactly, so best/runner-up decisions are unchanged. A window given up on
+    gets an upper-estimate similarity (below 80%), which only affects the "closest match N%" hint when nothing in the
+    file reaches 80%.
+- **Tests:** HugeFind_RefusedBySizeGate_Fast (300-line FIND vs 3,000-line file, under 2 s, message checked),
+  FindJustUnderGate_LargeFile_RejectsInBoundedTime, OversizedFind_ReturnsTooLarge_WithoutCandidate,
+  AmbiguityGap_RunnerUpBelowThreshold_StillAmbiguous (runner-up at 83% still makes 87.5% ambiguous),
+  Bounded_AgreesWithUnbounded_WithinBound (2,000 random pairs: exact within the bound, a lower bound above it).
+- **Status:** fixed, pending deploy.

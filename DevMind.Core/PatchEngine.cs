@@ -1,5 +1,8 @@
-// File: PatchEngine.cs  v1.2
+// File: PatchEngine.cs  v1.3
 // Copyright (c) iOnline Consulting LLC. All rights reserved.
+//
+// v1.3: H-77 (job-2781) — fuzzy matching refuses a FIND over 60 lines / 2,500 chars (TooLarge);
+// Levenshtein uses two rows, and windows are scored with a banded, early-exit bounded distance.
 //
 // v1.2: H-04 — ApplyPatch refuses a .cs patch that adds a syntax error (CSharpSyntaxGate), before
 // anything is written. H-67 — a fuzzy apply that would duplicate a line is refused with the
@@ -328,22 +331,81 @@ namespace DevMind
         // ── Matching algorithms ───────────────────────────────────────────────
 
         /// <summary>
-        /// Standard dynamic-programming Levenshtein edit distance.
+        /// Standard dynamic-programming Levenshtein edit distance, two rows of
+        /// O(min(a, b)) memory (the full matrix was ~576 MB per window for a
+        /// 12k-char FIND — job-2781).
         /// </summary>
         public static int LevenshteinDistance(string a, string b)
         {
-            if (a.Length == 0) return b.Length;
+            if (a.Length < b.Length) (a, b) = (b, a);   // b is the shorter: the row
             if (b.Length == 0) return a.Length;
-            var d = new int[a.Length + 1, b.Length + 1];
-            for (int i = 0; i <= a.Length; i++) d[i, 0] = i;
-            for (int j = 0; j <= b.Length; j++) d[0, j] = j;
+            var prev = new int[b.Length + 1];
+            var cur  = new int[b.Length + 1];
+            for (int j = 0; j <= b.Length; j++) prev[j] = j;
             for (int i = 1; i <= a.Length; i++)
+            {
+                cur[0] = i;
                 for (int j = 1; j <= b.Length; j++)
-                    d[i, j] = a[i - 1] == b[j - 1]
-                        ? d[i - 1, j - 1]
-                        : 1 + Math.Min(d[i - 1, j - 1], Math.Min(d[i - 1, j], d[i, j - 1]));
-            return d[a.Length, b.Length];
+                    cur[j] = a[i - 1] == b[j - 1]
+                        ? prev[j - 1]
+                        : 1 + Math.Min(prev[j - 1], Math.Min(prev[j], cur[j - 1]));
+                (prev, cur) = (cur, prev);
+            }
+            return prev[b.Length];
         }
+
+        /// <summary>
+        /// Levenshtein distance that gives up once it is known to exceed
+        /// <paramref name="maxDistance"/>. Returns the exact distance when it is
+        /// &lt;= maxDistance; otherwise a value &gt; maxDistance that is a lower bound
+        /// on the true distance. Only cells within maxDistance of the diagonal are
+        /// computed (any path outside that band already costs more), and it stops
+        /// as soon as a whole row's minimum exceeds the bound.
+        /// </summary>
+        public static int BoundedLevenshteinDistance(string a, string b, int maxDistance)
+        {
+            if (maxDistance < 0) maxDistance = 0;
+            if (a.Length < b.Length) (a, b) = (b, a);
+            int diff = a.Length - b.Length;
+            if (diff > maxDistance) return diff;
+            if (b.Length == 0) return a.Length;
+
+            int over = maxDistance + 1;   // "more than the bound" — stands in for infinity
+            var prev = new int[b.Length + 1];
+            var cur  = new int[b.Length + 1];
+            for (int j = 0; j <= b.Length; j++) prev[j] = Math.Min(j, over);
+            for (int i = 1; i <= a.Length; i++)
+            {
+                int lo = Math.Max(1, i - maxDistance), hi = Math.Min(b.Length, i + maxDistance);
+                cur[0] = Math.Min(i, over);
+                if (lo > 1) cur[lo - 1] = over;
+                int rowMin = lo == 1 ? cur[0] : over;
+                for (int j = lo; j <= hi; j++)
+                {
+                    int v = a[i - 1] == b[j - 1]
+                        ? prev[j - 1]
+                        : 1 + Math.Min(prev[j - 1], Math.Min(prev[j], cur[j - 1]));
+                    if (v > over) v = over;
+                    cur[j] = v;
+                    if (v < rowMin) rowMin = v;
+                }
+                if (hi < b.Length) cur[hi + 1] = over;
+                if (rowMin > maxDistance) return Math.Max(rowMin, diff);
+                (prev, cur) = (cur, prev);
+            }
+            return prev[b.Length];
+        }
+
+        /// <summary>
+        /// Fuzzy matching is skipped for a FIND larger than this — every window costs
+        /// O(FIND²) and the model's FIND that large is usually the wrong file anyway
+        /// (job-2781: a 310-line FIND against a 3,500-line file hung a core indefinitely).
+        /// </summary>
+        public const int FuzzyMaxFindLines = 60;
+        public const int FuzzyMaxFindChars = 2500;
+
+        /// <summary>Minimum similarity gap between the best and runner-up candidate.</summary>
+        private const double FuzzyAmbiguityGap = 0.05;
 
         /// <summary>
         /// Why FindFuzzyMatch refused to return a match. Carried out so the caller's
@@ -357,6 +419,9 @@ namespace DevMind
             BelowThreshold,
             /// <summary>Best candidate is within 0.05 of the runner-up — ambiguous.</summary>
             AmbiguousMatch,
+            /// <summary>FIND exceeds FuzzyMaxFindLines/FuzzyMaxFindChars; nothing was scored
+            /// (origStart is -1).</summary>
+            TooLarge,
         }
 
         /// <summary>
@@ -374,6 +439,15 @@ namespace DevMind
             string content, string findText, string normFind, double threshold = 0.85)
         {
             int windowSize = findText.Split('\n').Length;
+            if (windowSize > FuzzyMaxFindLines || normFind.Length > FuzzyMaxFindChars)
+                return (-1, -1, 0, -1, 0, FuzzyRejectReason.TooLarge);
+
+            // A window can only change the outcome if it could be the best (sim >= threshold)
+            // or close enough to the best to make it ambiguous (sim > best - gap). Anything
+            // below threshold - gap is scored with the bounded distance and given up on early;
+            // its similarity is then only an upper estimate, which still ranks it below every
+            // window that matters. The +1 is slack against floating-point rounding.
+            double cutoffDistFraction = 1.0 - threshold + FuzzyAmbiguityGap;
 
             var lines = new List<(int start, int end)>();
             int pos = 0;
@@ -398,7 +472,9 @@ namespace DevMind
 
                 int maxLen = Math.Max(normFind.Length, normWindow.Length);
                 if (maxLen == 0) continue;
-                double sim = 1.0 - (double)LevenshteinDistance(normFind, normWindow) / maxLen;
+                int bound = (int)Math.Floor(cutoffDistFraction * maxLen) + 1;
+                double sim = 1.0 - (double)Math.Min(maxLen,
+                    BoundedLevenshteinDistance(normFind, normWindow, bound)) / maxLen;
 
                 if (sim > bestSim)
                 {
@@ -423,7 +499,7 @@ namespace DevMind
                     FuzzyRejectReason.BelowThreshold);
             }
             // Require a meaningful gap over the runner-up to avoid ambiguous fuzzy matches.
-            if (bestSim - secondSim < 0.05)
+            if (bestSim - secondSim < FuzzyAmbiguityGap)
             {
                 return (bestStart, bestEnd, bestSim, secondStart, secondSim,
                     FuzzyRejectReason.AmbiguousMatch);
@@ -616,6 +692,17 @@ namespace DevMind
                     }
 
                     var fuzzy = FindFuzzyMatch(fileContent, findText, normFind);
+                    if (fuzzy?.reason == FuzzyRejectReason.TooLarge)
+                    {
+                        // job-2781: scoring a FIND this size against every window hung a core.
+                        reporter(
+                            $"[PATCH] Block {i + 1}: FIND text not found in {fileName} — no changes made.\n" +
+                            $"  Reason: FIND is too large for fuzzy matching ({findText.Split('\n').Length} lines, " +
+                            $"{normFind.Length} chars; limit {FuzzyMaxFindLines} lines / {FuzzyMaxFindChars} chars).\n" +
+                            "  Copy it verbatim from a fresh read_file, or split the edit into smaller patches.\n",
+                            OutputColor.Error);
+                        return null;
+                    }
                     if (fuzzy == null || fuzzy.Value.reason != null)
                     {
                         // Distinguish WHY the match was refused — the two cases need

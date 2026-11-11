@@ -147,6 +147,40 @@ public sealed class FindFuzzyMatchTests
         Assert.Equal(0.905, result.Value.similarity, 4);
     }
 
+    // ── Ambiguity gap: runner-up BELOW the threshold still counts ─────────────
+    // best sim=0.875 (dist=25), runner-up sim=0.830 (dist=34): gap 0.045 < 0.05 →
+    // ambiguous. The bounded scorer must not prune a sub-threshold window that is
+    // close enough to the best to make it ambiguous (job-2781 fix).
+    [Fact]
+    public void AmbiguityGap_RunnerUpBelowThreshold_StillAmbiguous()
+    {
+        string normFind = "a" + new string('b', 199);
+        string line1 = "a" + new string('c', 25) + new string('b', 174);
+        string line2 = "a" + new string('d', 34) + new string('b', 165);
+        string line3 = new string('z', 200);
+
+        var result = PatchEngine.FindFuzzyMatch(line1 + "\n" + line2 + "\n" + line3, normFind, normFind);
+
+        Assert.NotNull(result);
+        Assert.Equal(PatchEngine.FuzzyRejectReason.AmbiguousMatch, result.Value.reason);
+        Assert.Equal(0.875, result.Value.similarity, 4);
+        Assert.Equal(0.83, result.Value.secondSimilarity, 4);
+    }
+
+    // ── Size gate: FindFuzzyMatch itself refuses an oversized FIND ────────────
+    [Fact]
+    public void OversizedFind_ReturnsTooLarge_WithoutCandidate()
+    {
+        string findText = string.Join("\n", Enumerable.Range(0, PatchEngine.FuzzyMaxFindLines + 1).Select(n => $"line {n}"));
+        string normFind = findText.Replace('\n', ' ');
+
+        var result = PatchEngine.FindFuzzyMatch(findText + "\nmore", findText, normFind);
+
+        Assert.NotNull(result);
+        Assert.Equal(PatchEngine.FuzzyRejectReason.TooLarge, result.Value.reason);
+        Assert.Equal(-1, result.Value.origStart);
+    }
+
     // ── FindFuzzyMatch returns correct origStart/origEnd offsets ──────────────
     [Fact]
     public void MatchOffsets_PointToCorrectWindow()
@@ -1022,6 +1056,76 @@ public sealed class LevenshteinDistanceTests
     public void Deletion_DistanceOne()
     {
         Assert.Equal(1, PatchEngine.LevenshteinDistance("hallo", "hello"));
+    }
+
+    [Fact]
+    public void UnequalLengths_EitherOrder()
+    {
+        Assert.Equal(3, PatchEngine.LevenshteinDistance("kitten", "sitting"));
+        Assert.Equal(3, PatchEngine.LevenshteinDistance("sitting", "kitten"));
+    }
+
+    // job-2781: the bounded variant must agree with the plain one whenever the true
+    // distance is within the bound, and otherwise report something over the bound
+    // that is still a lower bound on the true distance.
+    [Fact]
+    public void Bounded_AgreesWithUnbounded_WithinBound()
+    {
+        var rng = new Random(2781);
+        const string alphabet = "ab c";   // small alphabet → many near-equal pairs
+        string Rand(int len)
+        {
+            var sb = new StringBuilder(len);
+            for (int k = 0; k < len; k++) sb.Append(alphabet[rng.Next(alphabet.Length)]);
+            return sb.ToString();
+        }
+        string Mutate(string s, int edits)
+        {
+            var sb = new StringBuilder(s);
+            for (int k = 0; k < edits; k++)
+            {
+                int op = rng.Next(3), at = rng.Next(sb.Length + 1);
+                if (op == 0) sb.Insert(at, alphabet[rng.Next(alphabet.Length)]);
+                else if (sb.Length > 0 && at < sb.Length)
+                {
+                    if (op == 1) sb.Remove(at, 1);
+                    else sb[at] = alphabet[rng.Next(alphabet.Length)];
+                }
+            }
+            return sb.ToString();
+        }
+
+        int within = 0, over = 0;
+        for (int trial = 0; trial < 2000; trial++)
+        {
+            string a = Rand(rng.Next(0, 60));
+            string b = rng.Next(2) == 0 ? Mutate(a, rng.Next(0, 15)) : Rand(rng.Next(0, 60));
+            int exact = PatchEngine.LevenshteinDistance(a, b);
+            int bound = rng.Next(0, 30);
+            int bounded = PatchEngine.BoundedLevenshteinDistance(a, b, bound);
+            if (exact <= bound)
+            {
+                Assert.Equal(exact, bounded);
+                within++;
+            }
+            else
+            {
+                Assert.True(bounded > bound, $"'{a}' vs '{b}', bound {bound}: got {bounded}, exact {exact}");
+                Assert.True(bounded <= exact, $"'{a}' vs '{b}', bound {bound}: {bounded} is not a lower bound of {exact}");
+                over++;
+            }
+        }
+        // Both branches were actually exercised.
+        Assert.True(within > 200 && over > 200, $"within={within}, over={over}");
+    }
+
+    [Fact]
+    public void Bounded_EmptyAndEqual()
+    {
+        Assert.Equal(0, PatchEngine.BoundedLevenshteinDistance("", "", 0));
+        Assert.Equal(0, PatchEngine.BoundedLevenshteinDistance("same", "same", 0));
+        Assert.Equal(3, PatchEngine.BoundedLevenshteinDistance("", "abc", 5));
+        Assert.True(PatchEngine.BoundedLevenshteinDistance("", "abcdef", 2) > 2);
     }
 }
 

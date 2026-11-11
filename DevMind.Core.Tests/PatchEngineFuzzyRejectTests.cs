@@ -115,6 +115,53 @@ public sealed class PatchEngineFuzzyRejectTests
         Assert.DoesNotContain("extend the FIND", all);
     }
 
+    // ── Size gate (job-2781) ──────────────────────────────────────────────────
+    // A ~300-line FIND with no exact match against a ~3,000-line file used to score
+    // every window with a full Levenshtein matrix and hang a core indefinitely. It
+    // must now be refused at once, telling the agent to copy verbatim or split.
+    [Fact]
+    public void HugeFind_RefusedBySizeGate_Fast()
+    {
+        var file = new StringBuilder();
+        for (int n = 0; n < 3000; n++)
+            file.Append("        var value").Append(n).Append(" = Compute(").Append(n).Append(", \"item\");\n");
+        var find = new StringBuilder();
+        for (int n = 0; n < 300; n++)
+            find.Append("        var other").Append(n).Append(" = Calculate(").Append(n).Append(", \"thing\");\n");
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var (messages, result) = RunPatch(find.ToString().TrimEnd('\n'), "x", file.ToString());
+        sw.Stop();
+
+        Assert.Null(result);
+        string all = Join(messages);
+        Assert.Contains("FIND text not found", all);
+        Assert.Contains("FIND is too large for fuzzy matching", all);
+        Assert.Contains("Copy it verbatim from a fresh read_file, or split the edit into smaller patches.", all);
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(2), $"size-gate refusal took {sw.Elapsed}");
+    }
+
+    // A FIND just under the gate still gets fuzzy scoring, and a miss against a large
+    // file must still come back in bounded time (the early exit does the work here).
+    [Fact]
+    public void FindJustUnderGate_LargeFile_RejectsInBoundedTime()
+    {
+        var file = new StringBuilder();
+        for (int n = 0; n < 1000; n++)
+            file.Append("        var value").Append(n).Append(" = Compute(").Append(n).Append(", \"item\");\n");
+        var find = new StringBuilder();
+        for (int n = 0; n < PatchEngine.FuzzyMaxFindLines; n++)
+            find.Append("    private int Field").Append(n).Append(" = Lookup(").Append(n).Append(");\n");
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var (messages, result) = RunPatch(find.ToString().TrimEnd('\n'), "x", file.ToString());
+        sw.Stop();
+
+        Assert.Null(result);
+        Assert.Contains("below the 85% threshold", Join(messages));
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(10), $"fuzzy rejection took {sw.Elapsed}");
+    }
+
     // ── Rejection message stays compact ───────────────────────────────────────
     // This lands in an agent's context on every failure — cap the context
     // window so a huge file can't bloat it.
