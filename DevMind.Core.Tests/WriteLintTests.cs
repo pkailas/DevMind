@@ -154,8 +154,12 @@ namespace DevMind.Core.Tests
 
             Assert.StartsWith("[File created: ", toolResult);
             Assert.Contains("\n[LINT] xUnit: Assert.Equal(..., \"count\") at line 8", toolResult);
-            // Advisory only: the write happened.
-            Assert.Equal(content, File.ReadAllText(Path.Combine(_dir, "FooTests.cs")));
+            // Advisory only: the write happened. A new file takes the repo's line ending (H-30) —
+            // _dir is empty, so NewFileLineEnding samples its parent (%TEMP%) and the ending varies
+            // by machine; the rule itself is pinned in NewFileLineEndingTests. Content must be
+            // intact, in one ending or the other.
+            string written = File.ReadAllText(Path.Combine(_dir, "FooTests.cs"));
+            Assert.Contains(written, new[] { content, content.Replace("\n", "\r\n") });
         }
 
         [Fact]
